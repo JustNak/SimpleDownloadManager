@@ -1,7 +1,12 @@
 use crate::download::schedule_downloads;
 use crate::ipc::gather_host_registration_diagnostics;
+use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{EnqueueResult, EnqueueStatus, SharedState};
-use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, Settings};
+use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, Settings};
+use crate::windows::{
+    close_download_prompt_window, focus_job_in_main_window, show_download_prompt_window,
+    show_progress_window, DOWNLOAD_PROMPT_WINDOW,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -48,6 +53,23 @@ pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
     if let Err(error) = app.emit(STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
     }
+}
+
+async fn complete_prompt_action(
+    app: &AppHandle,
+    prompts: PromptRegistry,
+    id: &str,
+    decision: PromptDecision,
+) -> Result<(), String> {
+    let next_prompt = prompts.resolve(id, decision).await?;
+    if let Some(prompt) = next_prompt {
+        show_download_prompt_window(app)?;
+        app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, prompt)
+            .map_err(|error| error.to_string())?;
+    } else {
+        close_download_prompt_window(app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -226,6 +248,69 @@ pub async fn browse_directory() -> Result<Option<String>, String> {
         .map_err(|error| format!("Could not open folder picker: {error}"))?;
 
     Ok(selected.map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn get_current_download_prompt(
+    prompts: State<'_, PromptRegistry>,
+) -> Result<Option<DownloadPrompt>, String> {
+    Ok(prompts.active_prompt().await)
+}
+
+#[tauri::command]
+pub async fn confirm_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+    directory_override: Option<String>,
+    allow_duplicate: bool,
+) -> Result<(), String> {
+    complete_prompt_action(
+        &app,
+        prompts.inner().clone(),
+        &id,
+        PromptDecision::Download {
+            directory_override,
+            allow_duplicate,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn show_existing_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    let active_prompt = prompts.active_prompt().await;
+    let existing_job_id = active_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.duplicate_job.as_ref())
+        .map(|job| job.id.clone());
+
+    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::ShowExisting)
+        .await?;
+
+    if let Some(job_id) = existing_job_id {
+        focus_job_in_main_window(&app, &job_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::Cancel).await
+}
+
+#[tauri::command]
+pub async fn open_progress_window(app: AppHandle, id: String) -> Result<(), String> {
+    show_progress_window(&app, &id)
 }
 
 #[tauri::command]

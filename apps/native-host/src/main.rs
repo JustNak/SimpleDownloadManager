@@ -6,9 +6,9 @@ mod protocol;
 
 use forwarder::{AppForwarder, ForwarderError};
 use protocol::{
-    app_enqueue_request, app_show_window_request, app_status_request, parse_enqueue_payload,
-    parse_open_app_payload, validate_protocol, AppResponseEnvelope, HostResponseEnvelope,
-    NativeRequestEnvelope,
+    app_enqueue_request, app_prompt_download_request, app_show_window_request, app_status_request,
+    parse_enqueue_payload, parse_open_app_payload, parse_prompt_download_payload, validate_protocol,
+    AppResponseEnvelope, HostResponseEnvelope, NativeRequestEnvelope,
 };
 use std::io;
 
@@ -64,6 +64,16 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
             }
             Err(response) => response,
         },
+        "prompt_download" => match parse_prompt_download_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_prompt_download_request(
+                request.request_id.clone(),
+                payload,
+            )) {
+                Ok(response) => map_app_response(response),
+                Err(error) => map_forwarder_error(request.request_id, error),
+            },
+            Err(response) => response,
+        },
         _ => HostResponseEnvelope::rejected(
             request.request_id,
             "invalid_payload",
@@ -106,7 +116,7 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
     if response.ok {
         if !matches!(
             response.message_type.as_str(),
-            "queued" | "duplicate_existing_job"
+            "queued" | "duplicate_existing_job" | "prompt_canceled"
         ) {
             return HostResponseEnvelope::rejected(
                 response.request_id,
@@ -120,8 +130,12 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
             .payload
             .as_ref()
             .and_then(|payload| payload.get("jobId"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("pending_job");
+            .and_then(|value| value.as_str());
+        let filename = response
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("filename"))
+            .and_then(|value| value.as_str());
         let status = response
             .payload
             .as_ref()
@@ -132,6 +146,7 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
         return HostResponseEnvelope::accepted_with_status(
             response.request_id,
             job_id,
+            filename,
             status,
             "running",
         );

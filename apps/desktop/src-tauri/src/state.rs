@@ -1,6 +1,6 @@
 use crate::storage::{
     load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
-    DownloadJob, DownloadSource, FailureCategory, HostRegistrationDiagnostics, JobState,
+    DownloadJob, DownloadPrompt, DownloadSource, FailureCategory, HostRegistrationDiagnostics, JobState,
     PersistedState, QueueSummary, ResumeSupport, Settings,
 };
 use std::collections::HashSet;
@@ -37,6 +37,26 @@ impl EnqueueStatus {
             Self::DuplicateExistingJob => "duplicate_existing_job",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicatePolicy {
+    ReturnExisting,
+    Allow,
+}
+
+impl Default for DuplicatePolicy {
+    fn default() -> Self {
+        Self::ReturnExisting
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EnqueueOptions {
+    pub source: Option<DownloadSource>,
+    pub directory_override: Option<String>,
+    pub filename_hint: Option<String>,
+    pub duplicate_policy: DuplicatePolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +193,16 @@ impl SharedState {
         state.settings.auto_retry_attempts.min(10)
     }
 
+    pub async fn speed_limit_bytes_per_second(&self) -> Option<u64> {
+        let state = self.inner.read().await;
+        let limit = state.settings.speed_limit_kib_per_second;
+        if limit == 0 {
+            None
+        } else {
+            Some((limit as u64).saturating_mul(1024))
+        }
+    }
+
     pub async fn diagnostics_snapshot(
         &self,
         host_registration: HostRegistrationDiagnostics,
@@ -211,69 +241,147 @@ impl SharedState {
         url: String,
         source: Option<DownloadSource>,
     ) -> Result<EnqueueResult, BackendError> {
-        let url = normalize_download_url(&url)?;
+        self.enqueue_download_with_options(
+            url,
+            EnqueueOptions {
+                source,
+                ..Default::default()
+            },
+        )
+        .await
+    }
 
+    pub async fn enqueue_download_with_options(
+        &self,
+        url: String,
+        options: EnqueueOptions,
+    ) -> Result<EnqueueResult, BackendError> {
         let (result, persisted) = {
             let mut state = self.inner.write().await;
-
-            if let Some(result) = state.duplicate_enqueue_result(&url) {
-                return Ok(result);
-            }
-
-            let download_dir = PathBuf::from(&state.settings.download_directory);
-            if state.settings.download_directory.trim().is_empty() {
-                return Err(BackendError {
-                    code: "DESTINATION_NOT_CONFIGURED",
-                    message: "Configure a download directory before adding downloads.".into(),
-                });
-            }
-
-            std::fs::create_dir_all(&download_dir).map_err(|error| BackendError {
-                code: "DESTINATION_INVALID",
-                message: format!("Could not create the download directory: {error}"),
-            })?;
-            verify_download_directory_writable(&download_dir)?;
-
-            let filename = derive_filename(&url);
-            let (target_path, temp_path) =
-                allocate_target_paths(&download_dir, &filename, &state.jobs);
-            let job_id = format!("job_{}", state.next_job_number);
-            state.next_job_number += 1;
-
-            state.jobs.push(DownloadJob {
-                id: job_id.clone(),
-                url: url.clone(),
-                filename: filename.clone(),
-                source,
-                state: JobState::Queued,
-                progress: 0.0,
-                total_bytes: 0,
-                downloaded_bytes: 0,
-                speed: 0,
-                eta: 0,
-                error: None,
-                failure_category: None,
-                resume_support: ResumeSupport::Unknown,
-                retry_attempts: 0,
-                target_path: target_path.display().to_string(),
-                temp_path: temp_path.display().to_string(),
-            });
-
-            (
-                EnqueueResult {
-                    snapshot: state.snapshot(),
-                    job_id,
-                    filename,
-                    status: EnqueueStatus::Queued,
-                },
-                state.persisted(),
-            )
+            let result = state.enqueue_download_in_memory(&url, options)?;
+            let persisted = state.persisted();
+            (result, persisted)
         };
 
-        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        if result.status == EnqueueStatus::Queued {
+            persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        }
+
         Ok(result)
     }
 
+    pub async fn prepare_download_prompt(
+        &self,
+        id: impl Into<String>,
+        url: &str,
+        source: Option<DownloadSource>,
+        filename_hint: Option<String>,
+        total_bytes: Option<u64>,
+    ) -> Result<DownloadPrompt, BackendError> {
+        let state = self.inner.read().await;
+        state.prepare_download_prompt(id, url, source, filename_hint, total_bytes)
+    }
+}
+
+impl RuntimeState {
+    fn enqueue_download_in_memory(
+        &mut self,
+        url: &str,
+        options: EnqueueOptions,
+    ) -> Result<EnqueueResult, BackendError> {
+        let url = normalize_download_url(&url)?;
+
+        if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
+            if let Some(result) = self.duplicate_enqueue_result(&url) {
+                return Ok(result);
+            }
+        }
+
+        let directory = options
+            .directory_override
+            .as_deref()
+            .unwrap_or(&self.settings.download_directory)
+            .trim();
+        if directory.is_empty() {
+            return Err(BackendError {
+                code: "DESTINATION_NOT_CONFIGURED",
+                message: "Configure a download directory before adding downloads.".into(),
+            });
+        }
+
+        let download_dir = PathBuf::from(directory);
+        std::fs::create_dir_all(&download_dir).map_err(|error| BackendError {
+            code: "DESTINATION_INVALID",
+            message: format!("Could not create the download directory: {error}"),
+        })?;
+        verify_download_directory_writable(&download_dir)?;
+
+        let filename = filename_from_hint(options.filename_hint.as_deref(), &url);
+        let (target_path, temp_path) = allocate_target_paths(&download_dir, &filename, &self.jobs);
+        let job_id = format!("job_{}", self.next_job_number);
+        self.next_job_number += 1;
+
+        self.jobs.push(DownloadJob {
+            id: job_id.clone(),
+            url: url.clone(),
+            filename: filename.clone(),
+            source: options.source,
+            state: JobState::Queued,
+            progress: 0.0,
+            total_bytes: 0,
+            downloaded_bytes: 0,
+            speed: 0,
+            eta: 0,
+            error: None,
+            failure_category: None,
+            resume_support: ResumeSupport::Unknown,
+            retry_attempts: 0,
+            target_path: target_path.display().to_string(),
+            temp_path: temp_path.display().to_string(),
+        });
+
+        Ok(EnqueueResult {
+            snapshot: self.snapshot(),
+            job_id,
+            filename,
+            status: EnqueueStatus::Queued,
+        })
+    }
+
+    fn prepare_download_prompt(
+        &self,
+        id: impl Into<String>,
+        url: &str,
+        source: Option<DownloadSource>,
+        filename_hint: Option<String>,
+        total_bytes: Option<u64>,
+    ) -> Result<DownloadPrompt, BackendError> {
+        let url = normalize_download_url(url)?;
+        let filename = filename_from_hint(filename_hint.as_deref(), &url);
+        let default_directory = self.settings.download_directory.clone();
+        let target_path = if default_directory.trim().is_empty() {
+            String::new()
+        } else {
+            let (target_path, _) =
+                allocate_target_paths(Path::new(&default_directory), &filename, &self.jobs);
+            target_path.display().to_string()
+        };
+        let duplicate_job = self.jobs.iter().find(|job| job.url == url).cloned();
+
+        Ok(DownloadPrompt {
+            id: id.into(),
+            url,
+            filename,
+            source,
+            total_bytes: total_bytes.filter(|bytes| *bytes > 0),
+            default_directory,
+            target_path,
+            duplicate_job,
+        })
+    }
+}
+
+impl SharedState {
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -1116,6 +1224,13 @@ fn derive_filename(raw_url: &str) -> String {
     sanitize_filename(candidate)
 }
 
+fn filename_from_hint(filename_hint: Option<&str>, raw_url: &str) -> String {
+    filename_hint
+        .map(sanitize_filename)
+        .filter(|filename| !filename.trim().is_empty())
+        .unwrap_or_else(|| derive_filename(raw_url))
+}
+
 fn sanitize_filename(input: &str) -> String {
     let sanitized: String = input
         .chars()
@@ -1262,6 +1377,86 @@ mod tests {
         assert_eq!(result.job_id, "job_9");
         assert_eq!(result.filename, "file.zip");
         assert_eq!(result.snapshot.jobs.len(), 1);
+    }
+
+    #[test]
+    fn enqueue_options_allow_duplicate_copy_with_unique_path() {
+        let download_dir = test_runtime_dir("duplicate-copy");
+        let mut existing_job =
+            download_job("job_9", JobState::Paused, ResumeSupport::Supported, 50);
+        existing_job.url = "https://example.com/file.zip".into();
+        existing_job.filename = "file.zip".into();
+        existing_job.target_path = download_dir.join("file.zip").display().to_string();
+        existing_job.temp_path = download_dir.join("file.zip.part").display().to_string();
+
+        let mut state = runtime_state_with_jobs(vec![existing_job]);
+        state.settings.download_directory = download_dir.display().to_string();
+
+        let result = state
+            .enqueue_download_in_memory(
+                "https://example.com/file.zip",
+                EnqueueOptions {
+                    duplicate_policy: DuplicatePolicy::Allow,
+                    ..Default::default()
+                },
+            )
+            .expect("duplicate copy should enqueue");
+
+        assert_eq!(result.status, EnqueueStatus::Queued);
+        assert_eq!(state.jobs.len(), 2);
+        assert_eq!(state.jobs[1].filename, "file.zip");
+        assert!(state.jobs[1].target_path.ends_with("file (1).zip"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_options_use_directory_override_without_saving_default() {
+        let default_dir = test_runtime_dir("default-dir");
+        let override_dir = test_runtime_dir("override-dir");
+        let mut state = runtime_state_with_jobs(Vec::new());
+        state.settings.download_directory = default_dir.display().to_string();
+
+        let result = state
+            .enqueue_download_in_memory(
+                "https://example.com/report.pdf",
+                EnqueueOptions {
+                    directory_override: Some(override_dir.display().to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("download should enqueue into override directory");
+
+        assert_eq!(result.status, EnqueueStatus::Queued);
+        assert!(state.jobs[0].target_path.starts_with(&override_dir.display().to_string()));
+        assert_eq!(state.settings.download_directory, default_dir.display().to_string());
+
+        let _ = std::fs::remove_dir_all(default_dir);
+        let _ = std::fs::remove_dir_all(override_dir);
+    }
+
+    #[test]
+    fn prepare_download_prompt_marks_duplicate_job() {
+        let mut existing_job =
+            download_job("job_12", JobState::Downloading, ResumeSupport::Supported, 20);
+        existing_job.url = "https://example.com/archive.zip".into();
+        existing_job.filename = "archive.zip".into();
+
+        let state = runtime_state_with_jobs(vec![existing_job]);
+        let prompt = state
+            .prepare_download_prompt(
+                "prompt_1",
+                "https://example.com/archive.zip",
+                None,
+                Some("archive.zip".into()),
+                Some(4096),
+            )
+            .expect("prompt should be prepared");
+
+        assert_eq!(prompt.id, "prompt_1");
+        assert_eq!(prompt.filename, "archive.zip");
+        assert_eq!(prompt.total_bytes, Some(4096));
+        assert_eq!(prompt.duplicate_job.as_ref().map(|job| job.id.as_str()), Some("job_12"));
     }
 
     #[test]

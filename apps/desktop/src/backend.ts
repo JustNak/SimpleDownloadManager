@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type Settings } from './types';
+import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -17,11 +17,14 @@ export interface AddJobResult {
 }
 
 const STATE_CHANGED_EVENT = 'app://state-changed';
+const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
+const SELECT_JOB_EVENT = 'app://select-job';
 
 const defaultSettings: Settings = {
   downloadDirectory: 'C:/Downloads',
   maxConcurrentDownloads: 3,
   autoRetryAttempts: 3,
+  speedLimitKibPerSecond: 0,
   notificationsEnabled: true,
   theme: 'system',
 };
@@ -409,6 +412,50 @@ export async function browseDirectory(): Promise<string | null> {
   return invokeCommand<string | null>('browse_directory');
 }
 
+export async function getCurrentDownloadPrompt(): Promise<DownloadPrompt | null> {
+  if (!isTauriRuntime()) {
+    return {
+      id: 'mock_prompt',
+      url: 'https://download.blender.org/release/Blender4.1/blender-4.1.1-windows-x64.msi',
+      filename: 'Blender 4.1.1 Setup.exe',
+      totalBytes: 884998144,
+      defaultDirectory: mockState.settings.downloadDirectory,
+      targetPath: `${mockState.settings.downloadDirectory}\\Blender 4.1.1 Setup.exe`,
+      source: {
+        entryPoint: 'browser_download',
+        browser: 'chrome',
+        extensionVersion: '0.1.0',
+      },
+      duplicateJob: undefined,
+    };
+  }
+  return invokeCommand<DownloadPrompt | null>('get_current_download_prompt');
+}
+
+export async function confirmDownloadPrompt(
+  id: string,
+  directoryOverride: string | null,
+  allowDuplicate: boolean,
+): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('confirm_download_prompt', { id, directoryOverride, allowDuplicate });
+}
+
+export async function showExistingDownloadPrompt(id: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('show_existing_download_prompt', { id });
+}
+
+export async function cancelDownloadPrompt(id: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('cancel_download_prompt', { id });
+}
+
+export async function openProgressWindow(id: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('open_progress_window', { id });
+}
+
 export async function openJobFile(id: string): Promise<void> {
   if (!isTauriRuntime()) return;
   await invokeCommand('open_job_file', { id });
@@ -443,4 +490,18 @@ export async function subscribeToStateChanged(
     return async () => mockListeners.delete(listener);
   }
   return listen<DesktopSnapshot>(STATE_CHANGED_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToDownloadPromptChanged(
+  listener: (prompt: DownloadPrompt) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<DownloadPrompt>(DOWNLOAD_PROMPT_CHANGED_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToSelectedJobRequested(
+  listener: (jobId: string) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<string>(SELECT_JOB_EVENT, (event) => listener(event.payload));
 }

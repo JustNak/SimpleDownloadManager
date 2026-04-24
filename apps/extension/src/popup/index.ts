@@ -58,6 +58,9 @@ function renderResult(response?: HostToExtensionResponse): string {
   if (!response) return '';
   if (isErrorResponse(response)) return '';
   if (response.type === 'accepted') {
+    if (response.payload.status === 'canceled') {
+      return 'Download canceled.';
+    }
     if (response.payload.status === 'duplicate_existing_job') {
       return `Already queued as ${response.payload.jobId}`;
     }

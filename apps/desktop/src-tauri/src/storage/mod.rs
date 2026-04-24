@@ -98,6 +98,20 @@ pub struct DownloadJob {
     pub temp_path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadPrompt {
+    pub id: String,
+    pub url: String,
+    pub filename: String,
+    #[serde(default)]
+    pub source: Option<DownloadSource>,
+    pub total_bytes: Option<u64>,
+    pub default_directory: String,
+    pub target_path: String,
+    pub duplicate_job: Option<DownloadJob>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -113,6 +127,8 @@ pub struct Settings {
     pub max_concurrent_downloads: u32,
     #[serde(default = "default_auto_retry_attempts")]
     pub auto_retry_attempts: u32,
+    #[serde(default)]
+    pub speed_limit_kib_per_second: u32,
     pub notifications_enabled: bool,
     pub theme: Theme,
 }
@@ -185,6 +201,7 @@ impl Default for Settings {
             download_directory: "C:/Downloads".into(),
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
+            speed_limit_kib_per_second: 0,
             notifications_enabled: true,
             theme: Theme::System,
         }
@@ -330,6 +347,7 @@ mod tests {
         .expect("old persisted state should still parse");
 
         assert_eq!(state.settings.auto_retry_attempts, 3);
+        assert_eq!(state.settings.speed_limit_kib_per_second, 0);
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
         assert_eq!(state.jobs[0].retry_attempts, 0);
@@ -340,5 +358,6 @@ mod tests {
         let settings = Settings::default();
 
         assert_eq!(settings.auto_retry_attempts, 3);
+        assert_eq!(settings.speed_limit_kib_per_second, 0);
     }
 }

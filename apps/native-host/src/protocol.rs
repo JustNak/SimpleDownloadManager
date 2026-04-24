@@ -37,6 +37,16 @@ pub struct EnqueueDownloadPayload {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PromptDownloadPayload {
+    pub url: String,
+    pub source: RequestSource,
+    #[serde(rename = "suggestedFilename")]
+    pub suggested_filename: Option<String>,
+    #[serde(rename = "totalBytes")]
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OpenAppPayload {
     pub reason: String,
 }
@@ -96,19 +106,26 @@ impl HostResponseEnvelope {
 
     pub fn accepted_with_status(
         request_id: String,
-        job_id: &str,
+        job_id: Option<&str>,
+        filename: Option<&str>,
         status: &str,
         app_state: &str,
     ) -> Self {
+        let mut payload = serde_json::Map::new();
+        payload.insert("status".into(), json!(status));
+        payload.insert("appState".into(), json!(app_state));
+        if let Some(job_id) = job_id {
+            payload.insert("jobId".into(), json!(job_id));
+        }
+        if let Some(filename) = filename {
+            payload.insert("filename".into(), json!(filename));
+        }
+
         Self {
             ok: true,
             request_id,
             message_type: "accepted".into(),
-            payload: Some(json!({
-                "status": status,
-                "jobId": job_id,
-                "appState": app_state,
-            })),
+            payload: Some(Value::Object(payload)),
             code: None,
             message: None,
         }
@@ -151,6 +168,23 @@ pub fn parse_enqueue_payload(
     request: &NativeRequestEnvelope,
 ) -> Result<EnqueueDownloadPayload, HostResponseEnvelope> {
     let payload = serde_json::from_value::<EnqueueDownloadPayload>(request.payload.clone())
+        .map_err(|error| {
+            HostResponseEnvelope::rejected(
+                request.request_id.clone(),
+                "invalid_payload",
+                "INVALID_PAYLOAD",
+                format!("Payload could not be parsed: {error}"),
+            )
+        })?;
+
+    validate_http_url(&request.request_id, &payload.url)?;
+    Ok(payload)
+}
+
+pub fn parse_prompt_download_payload(
+    request: &NativeRequestEnvelope,
+) -> Result<PromptDownloadPayload, HostResponseEnvelope> {
+    let payload = serde_json::from_value::<PromptDownloadPayload>(request.payload.clone())
         .map_err(|error| {
             HostResponseEnvelope::rejected(
                 request.request_id.clone(),
@@ -227,6 +261,18 @@ pub fn app_enqueue_request(
         protocol_version: PROTOCOL_VERSION,
         request_id,
         message_type: "enqueue_download".into(),
+        payload,
+    }
+}
+
+pub fn app_prompt_download_request(
+    request_id: String,
+    payload: PromptDownloadPayload,
+) -> AppRequestEnvelope<PromptDownloadPayload> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "prompt_download".into(),
         payload,
     }
 }

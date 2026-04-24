@@ -57,10 +57,22 @@ export interface DownloadJob {
   tempPath?: string;
 }
 
+export interface DownloadPrompt {
+  id: string;
+  url: string;
+  filename: string;
+  source?: DownloadSource;
+  totalBytes?: number;
+  defaultDirectory: string;
+  targetPath: string;
+  duplicateJob?: DownloadJob;
+}
+
 export interface Settings {
   downloadDirectory: string;
   maxConcurrentDownloads: number;
   autoRetryAttempts: number;
+  speedLimitKibPerSecond: number;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'system';
 }

@@ -21,7 +21,7 @@ const targets = [
       version: '0.1.0',
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
-      permissions: ['contextMenus', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
         service_worker: 'background.js',
         type: 'module'
@@ -39,7 +39,7 @@ const targets = [
       name: 'Simple Download Manager',
       version: '0.1.0',
       description: 'Send downloads to the Simple Download Manager desktop app.',
-      permissions: ['contextMenus', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
         scripts: ['background.js']
       },

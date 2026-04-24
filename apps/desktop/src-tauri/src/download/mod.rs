@@ -18,6 +18,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
+const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const REQUEST_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -227,6 +228,9 @@ async fn run_download_attempt(
 
     let mut stream = response.bytes_stream();
     let mut downloaded_bytes = existing_bytes;
+    let speed_limit = state.speed_limit_bytes_per_second().await;
+    let attempt_started = Instant::now();
+    let mut attempt_transferred_bytes = 0_u64;
     let mut sample_bytes = 0_u64;
     let mut sample_started = Instant::now();
     let mut last_emitted_bytes = existing_bytes;
@@ -250,12 +254,37 @@ async fn run_download_attempt(
         }
 
         let chunk = chunk_result.map_err(download_stream_error)?;
+        let chunk_len = chunk.len() as u64;
         file.write_all(&chunk)
             .await
             .map_err(|error| disk_error(format!("Could not write download chunk: {error}")))?;
 
-        downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-        sample_bytes = sample_bytes.saturating_add(chunk.len() as u64);
+        downloaded_bytes = downloaded_bytes.saturating_add(chunk_len);
+        attempt_transferred_bytes = attempt_transferred_bytes.saturating_add(chunk_len);
+        sample_bytes = sample_bytes.saturating_add(chunk_len);
+
+        if let Some(limit) = speed_limit {
+            match throttle_download(
+                state,
+                &task.id,
+                limit,
+                attempt_transferred_bytes,
+                attempt_started,
+            )
+            .await
+            {
+                WorkerControl::Paused => {
+                    file.flush().await.ok();
+                    return Ok(DownloadOutcome::Paused);
+                }
+                WorkerControl::Canceled | WorkerControl::Missing => {
+                    file.flush().await.ok();
+                    return Ok(DownloadOutcome::Canceled);
+                }
+                WorkerControl::Continue => {}
+            }
+        }
+
         let elapsed = sample_started.elapsed();
         let speed = if elapsed.as_secs_f64() > 0.0 {
             (sample_bytes as f64 / elapsed.as_secs_f64()) as u64
@@ -691,6 +720,45 @@ fn retry_delay_for_attempt(attempt: usize) -> Duration {
         .unwrap_or_else(|| *REQUEST_RETRY_DELAYS.last().unwrap())
 }
 
+fn throttle_delay_for_limit(
+    bytes_per_second: u64,
+    transferred_bytes: u64,
+    elapsed: Duration,
+) -> Option<Duration> {
+    if bytes_per_second == 0 || transferred_bytes == 0 {
+        return None;
+    }
+
+    let expected_elapsed =
+        Duration::from_secs_f64(transferred_bytes as f64 / bytes_per_second as f64);
+    let delay = expected_elapsed.checked_sub(elapsed)?;
+    if delay.is_zero() {
+        None
+    } else {
+        Some(delay)
+    }
+}
+
+async fn throttle_download(
+    state: &SharedState,
+    job_id: &str,
+    bytes_per_second: u64,
+    transferred_bytes: u64,
+    started: Instant,
+) -> WorkerControl {
+    while let Some(delay) =
+        throttle_delay_for_limit(bytes_per_second, transferred_bytes, started.elapsed())
+    {
+        tokio::time::sleep(std::cmp::min(delay, THROTTLE_CONTROL_INTERVAL)).await;
+        let control = state.worker_control(job_id).await;
+        if control != WorkerControl::Continue {
+            return control;
+        }
+    }
+
+    WorkerControl::Continue
+}
+
 async fn notify_download_completed(app: &AppHandle, state: &SharedState, final_path: &Path) {
     let file_name = final_path
         .file_name()
@@ -800,5 +868,21 @@ mod tests {
         assert_eq!(metadata.total_bytes, Some(4_096));
         assert_eq!(metadata.resume_support, ResumeSupport::Supported);
         assert_eq!(metadata.filename.as_deref(), Some("server-report.pdf"));
+    }
+
+    #[test]
+    fn speed_limit_throttle_calculates_remaining_delay() {
+        assert_eq!(
+            throttle_delay_for_limit(1024, 4096, Duration::from_secs(2)),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            throttle_delay_for_limit(1024, 4096, Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            throttle_delay_for_limit(0, 4096, Duration::from_secs(0)),
+            None
+        );
     }
 }

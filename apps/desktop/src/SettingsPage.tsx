@@ -50,10 +50,11 @@ export function SettingsPage({
   const handleChange = (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value, type } = event.target;
     const nextValue = type === 'checkbox' ? (event.target as HTMLInputElement).checked : value;
+    const numberValue = Number.parseInt(value, 10);
 
     setFormData((prev) => ({
       ...prev,
-      [name]: type === 'number' ? parseInt(value, 10) : nextValue,
+      [name]: type === 'number' ? (Number.isNaN(numberValue) ? 0 : numberValue) : nextValue,
     }));
   };
 
@@ -133,6 +134,22 @@ export function SettingsPage({
               max="10"
               className="h-10 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
+          </FieldRow>
+
+          <FieldRow label="Per-Download Speed Limit" description="Caps each active transfer. Set 0 to keep downloads unlimited.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                id="speedLimitKibPerSecond"
+                name="speedLimitKibPerSecond"
+                value={formData.speedLimitKibPerSecond}
+                onChange={handleChange}
+                min="0"
+                max="1048576"
+                className="h-10 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              />
+              <span className="text-sm text-muted-foreground">KB/s</span>
+            </div>
           </FieldRow>
         </SettingsPanel>
 

@@ -6,8 +6,8 @@ export const MAX_METADATA_LENGTH = 512;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:'] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
-export type ExtensionEntryPoint = 'context_menu' | 'popup';
-export type ExtensionRequestType = 'ping' | 'enqueue_download' | 'open_app' | 'get_status';
+export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
+export type ExtensionRequestType = 'ping' | 'enqueue_download' | 'prompt_download' | 'open_app' | 'get_status';
 export type HostResponseType =
   | 'pong'
   | 'accepted'
@@ -15,8 +15,14 @@ export type HostResponseType =
   | 'app_not_installed'
   | 'app_unreachable'
   | 'invalid_payload';
-export type AppRequestType = 'ping' | 'get_status' | 'enqueue_download' | 'show_window';
-export type AppResponseType = 'queued' | 'duplicate_existing_job' | 'invalid_url' | 'blocked_by_policy' | 'ready';
+export type AppRequestType = 'ping' | 'get_status' | 'enqueue_download' | 'prompt_download' | 'show_window';
+export type AppResponseType =
+  | 'queued'
+  | 'duplicate_existing_job'
+  | 'prompt_canceled'
+  | 'invalid_url'
+  | 'blocked_by_policy'
+  | 'ready';
 
 export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
 
@@ -55,6 +61,13 @@ export interface EnqueueDownloadPayload {
   source: RequestSource;
 }
 
+export interface PromptDownloadPayload {
+  url: string;
+  source: RequestSource;
+  suggestedFilename?: string;
+  totalBytes?: number;
+}
+
 export interface OpenAppPayload {
   reason: 'user_request' | 'reconnect';
 }
@@ -86,8 +99,8 @@ export interface ErrorResponse<TType extends HostResponseType = HostResponseType
 }
 
 export interface AcceptedPayload {
-  status: 'queued' | 'duplicate_existing_job';
-  jobId: string;
+  status: 'queued' | 'duplicate_existing_job' | 'canceled';
+  jobId?: string;
   filename?: string;
   appState: 'running' | 'launched';
 }
@@ -134,6 +147,7 @@ export interface AppErrorResponse {
 export type ExtensionToHostRequest =
   | RequestEnvelope<'ping', EmptyPayload>
   | RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
+  | RequestEnvelope<'prompt_download', PromptDownloadPayload>
   | RequestEnvelope<'open_app', OpenAppPayload>
   | RequestEnvelope<'get_status', EmptyPayload>;
 
@@ -146,6 +160,7 @@ export type AppRequest =
   | AppRequestEnvelope<'ping', EmptyPayload>
   | AppRequestEnvelope<'get_status', EmptyPayload>
   | AppRequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
+  | AppRequestEnvelope<'prompt_download', PromptDownloadPayload>
   | AppRequestEnvelope<'show_window', OpenAppPayload>;
 
 export type AppResponse =
@@ -155,6 +170,7 @@ export type AppResponse =
       'duplicate_existing_job',
       { jobId: string; filename?: string; status: 'duplicate_existing_job' }
     >
+  | AppSuccessResponse<'prompt_canceled', { status: 'canceled' }>
   | AppErrorResponse;
 
 export type ValidationResult<T> =
@@ -258,6 +274,38 @@ export function createEnqueueDownloadRequest(
       payload: {
         url: validatedUrl.value,
         source: sanitizeSource(source),
+      },
+    },
+  };
+}
+
+export function createPromptDownloadRequest(
+  url: string,
+  source: RequestSource,
+  metadata: { suggestedFilename?: string; totalBytes?: number } = {},
+  requestId = createRequestId(),
+): ValidationResult<RequestEnvelope<'prompt_download', PromptDownloadPayload>> {
+  const validatedUrl = validateHttpUrl(url);
+  if (!validatedUrl.ok) {
+    return validatedUrl;
+  }
+
+  const totalBytes =
+    typeof metadata.totalBytes === 'number' && Number.isFinite(metadata.totalBytes) && metadata.totalBytes > 0
+      ? Math.floor(metadata.totalBytes)
+      : undefined;
+
+  return {
+    ok: true,
+    value: {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      type: 'prompt_download',
+      payload: {
+        url: validatedUrl.value,
+        source: sanitizeSource(source),
+        suggestedFilename: trimMetadata(metadata.suggestedFilename),
+        totalBytes,
       },
     },
   };
