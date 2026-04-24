@@ -165,6 +165,7 @@ async fn run_download_attempt(
                 0,
                 response.content_length(),
                 ResumeSupport::Unsupported,
+                extract_filename(&response),
             )
             .await?;
         emit_snapshot(app, &snapshot);
@@ -173,9 +174,17 @@ async fn run_download_attempt(
 
     let total_bytes = derive_total_bytes(&response, existing_bytes);
     let resume_support = derive_resume_support(&response, existing_bytes);
+    let display_filename = extract_filename(&response)
+        .or_else(|| derive_filename_from_url(response.url().as_str()));
     let target_path = derive_target_path(&task.target_path, &response);
     let snapshot = state
-        .mark_job_downloading(&task.id, existing_bytes, total_bytes, resume_support)
+        .mark_job_downloading(
+            &task.id,
+            existing_bytes,
+            total_bytes,
+            resume_support,
+            display_filename,
+        )
         .await?;
     emit_snapshot(app, &snapshot);
 

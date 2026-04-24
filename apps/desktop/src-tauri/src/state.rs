@@ -211,7 +211,7 @@ impl SharedState {
         url: String,
         source: Option<DownloadSource>,
     ) -> Result<EnqueueResult, BackendError> {
-        validate_download_url(&url)?;
+        let url = normalize_download_url(&url)?;
 
         let (result, persisted) = {
             let mut state = self.inner.write().await;
@@ -567,6 +567,7 @@ impl SharedState {
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
         resume_support: ResumeSupport,
+        filename: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -575,6 +576,9 @@ impl SharedState {
             };
 
             job.state = JobState::Downloading;
+            if let Some(filename) = filename {
+                apply_download_filename(job, &filename);
+            }
             job.downloaded_bytes = downloaded_bytes;
             if let Some(total_bytes) = total_bytes {
                 job.total_bytes = total_bytes.max(downloaded_bytes);
@@ -917,14 +921,14 @@ fn default_download_directory(base_dir: &Path) -> String {
     base_dir.join("downloads").display().to_string()
 }
 
-fn validate_download_url(raw_url: &str) -> Result<(), BackendError> {
-    let parsed = Url::parse(raw_url).map_err(|_| BackendError {
+fn normalize_download_url(raw_url: &str) -> Result<String, BackendError> {
+    let parsed = Url::parse(raw_url.trim()).map_err(|_| BackendError {
         code: "INVALID_URL",
         message: "URL is not valid.".into(),
     })?;
 
     match parsed.scheme() {
-        "http" | "https" => Ok(()),
+        "http" | "https" => Ok(parsed.to_string()),
         _ => Err(BackendError {
             code: "UNSUPPORTED_SCHEME",
             message: "Only http and https URLs are supported.".into(),
@@ -1090,6 +1094,13 @@ fn reset_job_for_restart(job: &mut DownloadJob) {
     job.retry_attempts = 0;
 }
 
+fn apply_download_filename(job: &mut DownloadJob, filename: &str) {
+    let filename = filename.trim();
+    if !filename.is_empty() {
+        job.filename = filename.to_string();
+    }
+}
+
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1173,6 +1184,31 @@ mod tests {
         assert!(error.message.contains("not writable"));
 
         let _ = std::fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn download_filename_metadata_updates_display_name_without_moving_partial_file() {
+        let mut job = download_job("job_11", JobState::Downloading, ResumeSupport::Supported, 10);
+        job.filename = "download.bin".into();
+        job.target_path = "C:/Downloads/download.bin".into();
+        job.temp_path = "C:/Downloads/download.bin.part".into();
+
+        apply_download_filename(&mut job, "server-report.pdf");
+
+        assert_eq!(job.filename, "server-report.pdf");
+        assert_eq!(job.target_path, "C:/Downloads/download.bin");
+        assert_eq!(job.temp_path, "C:/Downloads/download.bin.part");
+    }
+
+    #[test]
+    fn normalize_download_url_trims_pasted_whitespace() {
+        let normalized =
+            normalize_download_url(" \n https://example.com/file.zip?from=clipboard \t ").unwrap();
+
+        assert_eq!(
+            normalized,
+            "https://example.com/file.zip?from=clipboard"
+        );
     }
 
     #[test]
