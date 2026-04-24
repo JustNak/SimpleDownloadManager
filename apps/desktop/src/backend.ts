@@ -13,6 +13,7 @@ const STATE_CHANGED_EVENT = 'app://state-changed';
 const defaultSettings: Settings = {
   downloadDirectory: 'C:/Downloads',
   maxConcurrentDownloads: 3,
+  autoRetryAttempts: 3,
   notificationsEnabled: true,
   theme: 'system',
 };
@@ -219,6 +220,31 @@ export async function retryJob(id: string): Promise<void> {
     return;
   }
   await invokeCommand('retry_job', { id });
+}
+
+export async function restartJob(id: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockState.jobs = mockState.jobs.map((job) =>
+      job.id === id
+        ? {
+            ...job,
+            state: JobState.Queued,
+            progress: 0,
+            totalBytes: 0,
+            downloadedBytes: 0,
+            speed: 0,
+            eta: 0,
+            error: undefined,
+            failureCategory: undefined,
+            resumeSupport: 'unknown',
+            retryAttempts: 0,
+          }
+        : job,
+    );
+    emitMockState();
+    return;
+  }
+  await invokeCommand('restart_job', { id });
 }
 
 export async function retryFailedJobs(): Promise<void> {

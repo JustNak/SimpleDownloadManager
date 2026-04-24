@@ -3,6 +3,7 @@ dist/
 target/
 release/
 test-runtime/
+.cargo-temp/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/resources/install/
 .DS_Store

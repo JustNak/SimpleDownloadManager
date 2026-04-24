@@ -17,6 +17,7 @@ import {
   HardDrive,
   Pause,
   Play,
+  RotateCcw,
   RotateCw,
   Trash2,
   X,
@@ -31,6 +32,7 @@ interface QueueViewProps {
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  onRestart: (id: string) => void;
   onRemove: (id: string) => void;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
@@ -45,6 +47,7 @@ export function QueueView({
   onResume,
   onCancel,
   onRetry,
+  onRestart,
   onRemove,
   onOpen,
   onReveal,
@@ -112,7 +115,7 @@ export function QueueView({
                     </div>
                   </div>
 
-                  <div className={`font-medium ${statusClass(job.state)}`}>{statusText(job.state)}</div>
+                  <div className={`font-medium ${statusClass(job.state)}`}>{statusText(job)}</div>
 
                   <div className="pr-6">
                     <div className="mb-2 text-[15px] font-medium text-foreground">{formatProgress(job)}</div>
@@ -136,6 +139,7 @@ export function QueueView({
                       onResume={onResume}
                       onCancel={onCancel}
                       onRetry={onRetry}
+                      onRestart={onRestart}
                       onRemove={onRemove}
                       onReveal={onReveal}
                     />
@@ -154,6 +158,7 @@ export function QueueView({
           onResume={onResume}
           onCancel={onCancel}
           onRetry={onRetry}
+          onRestart={onRestart}
           onRemove={onRemove}
           onOpen={onOpen}
           onReveal={onReveal}
@@ -169,6 +174,7 @@ function DownloadDetailsPane({
   onResume,
   onCancel,
   onRetry,
+  onRestart,
   onRemove,
   onOpen,
   onReveal,
@@ -178,6 +184,7 @@ function DownloadDetailsPane({
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  onRestart: (id: string) => void;
   onRemove: (id: string) => void;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
@@ -214,7 +221,24 @@ function DownloadDetailsPane({
             <DetailValue value={job.state === JobState.Downloading ? formatTime(job.eta) : '--'} />
 
             <DetailLabel icon={<Check size={16} />} label="Status:" />
-            <DetailValue value={statusText(job.state)} />
+            <DetailValue value={statusText(job)} />
+
+            <DetailLabel icon={<RotateCw size={16} />} label="Resume:" />
+            <DetailValue value={formatResumeSupport(job.resumeSupport)} />
+
+            {typeof job.retryAttempts === 'number' && job.retryAttempts > 0 ? (
+              <>
+                <DetailLabel icon={<RotateCw size={16} />} label="Retries:" />
+                <DetailValue value={`${job.retryAttempts} automatic ${job.retryAttempts === 1 ? 'retry' : 'retries'}`} />
+              </>
+            ) : null}
+
+            {job.failureCategory ? (
+              <>
+                <DetailLabel icon={<X size={16} />} label="Failure:" />
+                <DetailValue value={formatFailureCategory(job.failureCategory)} />
+              </>
+            ) : null}
 
             <DetailLabel icon={<Globe size={16} />} label="Source:" />
             <DetailValue value={sourceLabel} />
@@ -231,6 +255,7 @@ function RowActions({
   onResume,
   onCancel,
   onRetry,
+  onRestart,
   onRemove,
   onReveal,
 }: {
@@ -239,6 +264,7 @@ function RowActions({
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  onRestart: (id: string) => void;
   onRemove: (id: string) => void;
   onReveal: (id: string) => void;
 }) {
@@ -252,6 +278,9 @@ function RowActions({
       ) : null}
       {[JobState.Failed, JobState.Canceled].includes(job.state) ? (
         <IconButton title="Retry" onClick={() => onRetry(job.id)}><RotateCw size={17} /></IconButton>
+      ) : null}
+      {[JobState.Failed, JobState.Canceled].includes(job.state) ? (
+        <IconButton title="Restart download" onClick={() => onRestart(job.id)}><RotateCcw size={17} /></IconButton>
       ) : null}
       {job.targetPath ? (
         <IconButton title="Open folder" onClick={() => onReveal(job.id)}><FolderOpen size={17} /></IconButton>
@@ -352,8 +381,12 @@ function formatProgress(job: DownloadJob) {
   return `${job.progress.toFixed(0)}%`;
 }
 
-function statusText(state: JobState) {
-  switch (state) {
+function statusText(job: DownloadJob) {
+  if (job.state === JobState.Failed && job.failureCategory) {
+    return `${formatFailureCategory(job.failureCategory)} Error`;
+  }
+
+  switch (job.state) {
     case JobState.Downloading:
       return 'Downloading';
     case JobState.Paused:
@@ -369,7 +402,7 @@ function statusText(state: JobState) {
     case JobState.Queued:
       return 'Queued';
     default:
-      return state;
+      return job.state;
   }
 }
 
@@ -415,4 +448,34 @@ function formatTime(seconds: number) {
   if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
+}
+
+function formatFailureCategory(category: NonNullable<DownloadJob['failureCategory']>) {
+  switch (category) {
+    case 'network':
+      return 'Network';
+    case 'http':
+      return 'HTTP';
+    case 'server':
+      return 'Server';
+    case 'disk':
+      return 'Disk';
+    case 'permission':
+      return 'Permission';
+    case 'resume':
+      return 'Resume';
+    default:
+      return 'Internal';
+  }
+}
+
+function formatResumeSupport(resumeSupport: DownloadJob['resumeSupport']) {
+  switch (resumeSupport) {
+    case 'supported':
+      return 'Resumable';
+    case 'unsupported':
+      return 'Restart required';
+    default:
+      return 'Unknown';
+  }
 }

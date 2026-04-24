@@ -18,6 +18,7 @@ import {
   revealJobInFolder,
   removeJob,
   resumeJob,
+  restartJob,
   retryJob,
   runHostRegistrationFix,
   saveSettings,
@@ -53,6 +54,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>({
     downloadDirectory: 'C:/Downloads',
     maxConcurrentDownloads: 3,
+    autoRetryAttempts: 3,
     notificationsEnabled: true,
     theme: 'system',
   });
@@ -165,6 +167,15 @@ export default function App() {
       addToast({ type: 'info', title: 'Retrying Download', message: 'The download was added back to the queue.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleRestart(id: string) {
+    try {
+      await restartJob(id);
+      addToast({ type: 'info', title: 'Restarting Download', message: 'Partial progress was cleared and the download was queued again.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Restart Failed', message: getErrorMessage(error) });
     }
   }
 
@@ -365,6 +376,7 @@ export default function App() {
                 onResume={handleResume}
                 onCancel={handleCancel}
                 onRetry={handleRetry}
+                onRestart={handleRestart}
                 onRemove={handleRemove}
                 onOpen={handleOpenFile}
                 onReveal={handleReveal}

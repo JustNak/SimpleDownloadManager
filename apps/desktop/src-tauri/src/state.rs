@@ -1,7 +1,7 @@
 use crate::storage::{
-    load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DownloadJob,
-    DiagnosticsSnapshot, DownloadSource, HostRegistrationDiagnostics, JobState, PersistedState,
-    QueueSummary, Settings,
+    load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
+    DownloadJob, DownloadSource, FailureCategory, HostRegistrationDiagnostics, JobState,
+    PersistedState, QueueSummary, ResumeSupport, Settings,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -54,7 +54,11 @@ impl SharedState {
         let base_dir = data_dir_override
             .clone()
             .or_else(|| dirs::data_local_dir().map(|path| path.join("SimpleDownloadManager")))
-            .or_else(|| std::env::current_dir().ok().map(|path| path.join("SimpleDownloadManager")))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|path| path.join("SimpleDownloadManager"))
+            })
             .unwrap_or_else(|| std::env::temp_dir().join("SimpleDownloadManager"));
 
         std::fs::create_dir_all(&base_dir)
@@ -141,6 +145,11 @@ impl SharedState {
         state.settings.notifications_enabled
     }
 
+    pub async fn auto_retry_attempts(&self) -> u32 {
+        let state = self.inner.read().await;
+        state.settings.auto_retry_attempts.min(10)
+    }
+
     pub async fn diagnostics_snapshot(
         &self,
         host_registration: HostRegistrationDiagnostics,
@@ -205,7 +214,8 @@ impl SharedState {
             })?;
 
             let filename = derive_filename(&url);
-            let (target_path, temp_path) = allocate_target_paths(&download_dir, &filename, &state.jobs);
+            let (target_path, temp_path) =
+                allocate_target_paths(&download_dir, &filename, &state.jobs);
             let job_id = format!("job_{}", state.next_job_number);
             state.next_job_number += 1;
 
@@ -221,6 +231,9 @@ impl SharedState {
                 speed: 0,
                 eta: 0,
                 error: None,
+                failure_category: None,
+                resume_support: ResumeSupport::Unknown,
+                retry_attempts: 0,
                 target_path: target_path.display().to_string(),
                 temp_path: temp_path.display().to_string(),
             });
@@ -236,7 +249,10 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             let job = find_job_mut(&mut state.jobs, id)?;
-            if matches!(job.state, JobState::Queued | JobState::Starting | JobState::Downloading) {
+            if matches!(
+                job.state,
+                JobState::Queued | JobState::Starting | JobState::Downloading
+            ) {
                 job.state = JobState::Paused;
                 job.speed = 0;
                 job.eta = 0;
@@ -252,9 +268,14 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             let job = find_job_mut(&mut state.jobs, id)?;
-            if matches!(job.state, JobState::Paused | JobState::Failed | JobState::Canceled) {
+            if matches!(
+                job.state,
+                JobState::Paused | JobState::Failed | JobState::Canceled
+            ) {
                 job.state = JobState::Queued;
                 job.error = None;
+                job.failure_category = None;
+                job.retry_attempts = 0;
                 job.speed = 0;
                 job.eta = 0;
             }
@@ -298,6 +319,8 @@ impl SharedState {
             job.speed = 0;
             job.eta = 0;
             job.error = None;
+            job.failure_category = None;
+            job.retry_attempts = 0;
             (state.snapshot(), state.persisted())
         };
 
@@ -313,6 +336,28 @@ impl SharedState {
             job.speed = 0;
             job.eta = 0;
             job.error = None;
+            job.failure_category = None;
+            job.retry_attempts = 0;
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
+    pub async fn restart_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            if state.active_workers.contains(id) {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Pause or cancel the active transfer before restarting it.".into(),
+                });
+            }
+
+            let job = find_job_mut(&mut state.jobs, id)?;
+            remove_file_if_exists(Path::new(&job.temp_path)).map_err(internal_error)?;
+            reset_job_for_restart(job);
             (state.snapshot(), state.persisted())
         };
 
@@ -330,6 +375,8 @@ impl SharedState {
                     job.speed = 0;
                     job.eta = 0;
                     job.error = None;
+                    job.failure_category = None;
+                    job.retry_attempts = 0;
                 }
             }
 
@@ -343,7 +390,9 @@ impl SharedState {
     pub async fn clear_completed_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.jobs.retain(|job| !matches!(job.state, JobState::Completed | JobState::Canceled));
+            state
+                .jobs
+                .retain(|job| !matches!(job.state, JobState::Completed | JobState::Canceled));
             (state.snapshot(), state.persisted())
         };
 
@@ -387,14 +436,17 @@ impl SharedState {
         Ok(snapshot)
     }
 
-    pub async fn claim_schedulable_jobs(&self) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
+    pub async fn claim_schedulable_jobs(
+        &self,
+    ) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
         let (snapshot, persisted, tasks) = {
             let mut state = self.inner.write().await;
             let available_slots = state
                 .settings
                 .max_concurrent_downloads
                 .max(1)
-                .saturating_sub(state.active_workers.len() as u32) as usize;
+                .saturating_sub(state.active_workers.len() as u32)
+                as usize;
 
             if available_slots == 0 {
                 return Ok((state.snapshot(), Vec::new()));
@@ -455,7 +507,11 @@ impl SharedState {
         }
     }
 
-    pub async fn sync_downloaded_bytes(&self, id: &str, downloaded_bytes: u64) -> Result<DesktopSnapshot, String> {
+    pub async fn sync_downloaded_bytes(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+    ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -464,7 +520,8 @@ impl SharedState {
 
             job.downloaded_bytes = downloaded_bytes;
             if job.total_bytes > 0 {
-                job.progress = (downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0);
+                job.progress =
+                    (downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0);
             } else {
                 job.progress = 0.0;
             }
@@ -480,6 +537,7 @@ impl SharedState {
         id: &str,
         downloaded_bytes: u64,
         total_bytes: Option<u64>,
+        resume_support: ResumeSupport,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -498,6 +556,29 @@ impl SharedState {
                 (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
             };
             job.error = None;
+            job.failure_category = None;
+            job.resume_support = resume_support;
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    pub async fn record_retry_attempt(
+        &self,
+        id: &str,
+        retry_attempts: u32,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                return Err("Job not found.".into());
+            };
+
+            job.retry_attempts = retry_attempts;
+            job.speed = 0;
+            job.eta = 0;
             (state.snapshot(), state.persisted())
         };
 
@@ -527,9 +608,14 @@ impl SharedState {
             job.speed = speed;
 
             if job.total_bytes > 0 {
-                job.progress = (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0);
+                job.progress = (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0)
+                    .clamp(0.0, 100.0);
                 let remaining = job.total_bytes.saturating_sub(job.downloaded_bytes);
-                job.eta = if speed == 0 { 0 } else { ((remaining as f64) / (speed as f64)).ceil() as u64 };
+                job.eta = if speed == 0 {
+                    0
+                } else {
+                    ((remaining as f64) / (speed as f64)).ceil() as u64
+                };
             } else {
                 job.progress = 0.0;
                 job.eta = 0;
@@ -578,7 +664,12 @@ impl SharedState {
         Ok(snapshot)
     }
 
-    pub async fn fail_job(&self, id: &str, message: impl Into<String>) -> Result<DesktopSnapshot, String> {
+    pub async fn fail_job(
+        &self,
+        id: &str,
+        message: impl Into<String>,
+        failure_category: FailureCategory,
+    ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -589,6 +680,7 @@ impl SharedState {
             job.speed = 0;
             job.eta = 0;
             job.error = Some(message.into());
+            job.failure_category = Some(failure_category);
             state.active_workers.remove(id);
             (state.snapshot(), state.persisted())
         };
@@ -624,10 +716,14 @@ impl SharedState {
     pub async fn resolve_openable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
         let path = {
             let state = self.inner.read().await;
-            let job = state.jobs.iter().find(|job| job.id == id).ok_or_else(|| BackendError {
-                code: "INTERNAL_ERROR",
-                message: "Job not found.".into(),
-            })?;
+            let job = state
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Job not found.".into(),
+                })?;
 
             PathBuf::from(&job.target_path)
         };
@@ -645,12 +741,19 @@ impl SharedState {
     pub async fn resolve_revealable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
         let (target_path, temp_path) = {
             let state = self.inner.read().await;
-            let job = state.jobs.iter().find(|job| job.id == id).ok_or_else(|| BackendError {
-                code: "INTERNAL_ERROR",
-                message: "Job not found.".into(),
-            })?;
+            let job = state
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Job not found.".into(),
+                })?;
 
-            (PathBuf::from(&job.target_path), PathBuf::from(&job.temp_path))
+            (
+                PathBuf::from(&job.target_path),
+                PathBuf::from(&job.temp_path),
+            )
         };
 
         if target_path.exists() {
@@ -701,9 +804,21 @@ impl RuntimeState {
             active: self
                 .jobs
                 .iter()
-                .filter(|job| matches!(job.state, JobState::Queued | JobState::Starting | JobState::Downloading | JobState::Paused))
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        JobState::Queued
+                            | JobState::Starting
+                            | JobState::Downloading
+                            | JobState::Paused
+                    )
+                })
                 .count(),
-            queued: self.jobs.iter().filter(|job| job.state == JobState::Queued).count(),
+            queued: self
+                .jobs
+                .iter()
+                .filter(|job| job.state == JobState::Queued)
+                .count(),
             downloading: self
                 .jobs
                 .iter()
@@ -714,7 +829,11 @@ impl RuntimeState {
                 .iter()
                 .filter(|job| matches!(job.state, JobState::Completed | JobState::Canceled))
                 .count(),
-            failed: self.jobs.iter().filter(|job| job.state == JobState::Failed).count(),
+            failed: self
+                .jobs
+                .iter()
+                .filter(|job| job.state == JobState::Failed)
+                .count(),
         }
     }
 }
@@ -761,7 +880,11 @@ fn validate_download_url(raw_url: &str) -> Result<(), BackendError> {
     }
 }
 
-fn allocate_target_paths(download_dir: &Path, filename: &str, jobs: &[DownloadJob]) -> (PathBuf, PathBuf) {
+fn allocate_target_paths(
+    download_dir: &Path,
+    filename: &str,
+    jobs: &[DownloadJob],
+) -> (PathBuf, PathBuf) {
     let stem = Path::new(filename)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -776,7 +899,10 @@ fn allocate_target_paths(download_dir: &Path, filename: &str, jobs: &[DownloadJo
         .iter()
         .map(|job| job.target_path.clone())
         .collect::<HashSet<_>>();
-    let occupied_temps = jobs.iter().map(|job| job.temp_path.clone()).collect::<HashSet<_>>();
+    let occupied_temps = jobs
+        .iter()
+        .map(|job| job.temp_path.clone())
+        .collect::<HashSet<_>>();
 
     for index in 0..10_000 {
         let candidate = if index == 0 {
@@ -845,16 +971,82 @@ fn next_job_number(jobs: &[DownloadJob]) -> u64 {
         + 1
 }
 
-fn find_job_mut<'a>(jobs: &'a mut [DownloadJob], id: &str) -> Result<&'a mut DownloadJob, BackendError> {
-    jobs.iter_mut().find(|job| job.id == id).ok_or_else(|| BackendError {
-        code: "INTERNAL_ERROR",
-        message: "Job not found.".into(),
-    })
+fn find_job_mut<'a>(
+    jobs: &'a mut [DownloadJob],
+    id: &str,
+) -> Result<&'a mut DownloadJob, BackendError> {
+    jobs.iter_mut()
+        .find(|job| job.id == id)
+        .ok_or_else(|| BackendError {
+            code: "INTERNAL_ERROR",
+            message: "Job not found.".into(),
+        })
+}
+
+fn reset_job_for_restart(job: &mut DownloadJob) {
+    job.state = JobState::Queued;
+    job.progress = 0.0;
+    job.total_bytes = 0;
+    job.downloaded_bytes = 0;
+    job.speed = 0;
+    job.eta = 0;
+    job.error = None;
+    job.failure_category = None;
+    job.resume_support = ResumeSupport::Unknown;
+    job.retry_attempts = 0;
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove partial download file: {error}")),
+    }
 }
 
 fn internal_error(error: String) -> BackendError {
     BackendError {
         code: "INTERNAL_ERROR",
         message: error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_reset_clears_partial_progress_and_failure_metadata() {
+        let mut job = DownloadJob {
+            id: "job_1".into(),
+            url: "https://example.com/file.zip".into(),
+            filename: "file.zip".into(),
+            source: None,
+            state: JobState::Failed,
+            progress: 42.0,
+            total_bytes: 100,
+            downloaded_bytes: 42,
+            speed: 2048,
+            eta: 12,
+            error: Some("server closed the connection".into()),
+            failure_category: Some(FailureCategory::Network),
+            resume_support: ResumeSupport::Supported,
+            retry_attempts: 2,
+            target_path: "C:/Downloads/file.zip".into(),
+            temp_path: "C:/Downloads/file.zip.part".into(),
+        };
+
+        reset_job_for_restart(&mut job);
+
+        assert_eq!(job.state, JobState::Queued);
+        assert_eq!(job.progress, 0.0);
+        assert_eq!(job.total_bytes, 0);
+        assert_eq!(job.downloaded_bytes, 0);
+        assert_eq!(job.speed, 0);
+        assert_eq!(job.eta, 0);
+        assert_eq!(job.error, None);
+        assert_eq!(job.failure_category, None);
+        assert_eq!(job.resume_support, ResumeSupport::Unknown);
+        assert_eq!(job.retry_attempts, 0);
     }
 }

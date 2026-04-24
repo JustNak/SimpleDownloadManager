@@ -17,6 +17,17 @@ export enum JobState {
   Canceled = 'canceled',
 }
 
+export type FailureCategory =
+  | 'network'
+  | 'http'
+  | 'server'
+  | 'disk'
+  | 'permission'
+  | 'resume'
+  | 'internal';
+
+export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
+
 export interface DownloadSource {
   entryPoint: string;
   browser: string;
@@ -39,6 +50,9 @@ export interface DownloadJob {
   speed: number; // bytes per second
   eta: number; // seconds remaining
   error?: string;
+  failureCategory?: FailureCategory;
+  resumeSupport?: ResumeSupport;
+  retryAttempts?: number;
   targetPath?: string;
   tempPath?: string;
 }
@@ -46,6 +60,7 @@ export interface DownloadJob {
 export interface Settings {
   downloadDirectory: string;
   maxConcurrentDownloads: number;
+  autoRetryAttempts: number;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'system';
 }

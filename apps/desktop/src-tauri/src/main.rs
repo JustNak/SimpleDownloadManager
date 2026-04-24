@@ -1,11 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod commands;
-mod download;
-mod ipc;
-mod state;
-mod storage;
-
+use simple_download_manager_desktop_backend::{commands, download, ipc, state};
 use tauri::Manager;
 
 fn main() {
@@ -27,6 +22,7 @@ fn main() {
             commands::resume_job,
             commands::cancel_job,
             commands::retry_job,
+            commands::restart_job,
             commands::retry_failed_jobs,
             commands::remove_job,
             commands::clear_completed_jobs,

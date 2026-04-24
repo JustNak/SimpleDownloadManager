@@ -1,8 +1,9 @@
 use crate::commands::emit_snapshot;
 use crate::state::{SharedState, WorkerControl};
+use crate::storage::{FailureCategory, ResumeSupport};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
+use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -41,7 +42,10 @@ pub fn schedule_downloads(app: AppHandle, state: SharedState) {
 
 fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state::DownloadTask) {
     tauri::async_runtime::spawn(async move {
-        let cleanup_temp_on_exit = matches!(state.worker_control(&task.id).await, WorkerControl::Canceled);
+        let cleanup_temp_on_exit = matches!(
+            state.worker_control(&task.id).await,
+            WorkerControl::Canceled
+        );
 
         match run_download(&app, &state, &task).await {
             Ok(DownloadOutcome::Completed) => {}
@@ -51,15 +55,31 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                 }
 
                 if cleanup_temp_on_exit
-                    || matches!(state.worker_control(&task.id).await, WorkerControl::Canceled | WorkerControl::Missing)
+                    || matches!(
+                        state.worker_control(&task.id).await,
+                        WorkerControl::Canceled | WorkerControl::Missing
+                    )
                 {
                     let _ = fs::remove_file(&task.temp_path).await;
                 }
             }
             Err(error) => {
-                if let Ok(snapshot) = state.fail_job(&task.id, error).await {
+                if let Ok(snapshot) = state
+                    .fail_job(&task.id, error.message.clone(), error.category)
+                    .await
+                {
                     emit_snapshot(&app, &snapshot);
-                    notify_download_failure(&app, &state, &task, snapshot.jobs.iter().find(|job| job.id == task.id).and_then(|job| job.error.as_deref())).await;
+                    notify_download_failure(
+                        &app,
+                        &state,
+                        &task,
+                        snapshot
+                            .jobs
+                            .iter()
+                            .find(|job| job.id == task.id)
+                            .and_then(|job| job.error.as_deref()),
+                    )
+                    .await;
                 }
             }
         }
@@ -74,12 +94,55 @@ enum DownloadOutcome {
     Canceled,
 }
 
-async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state::DownloadTask) -> Result<DownloadOutcome, String> {
-    ensure_parent_directory(&task.target_path).await?;
+#[derive(Debug, Clone)]
+struct DownloadError {
+    category: FailureCategory,
+    message: String,
+    retryable: bool,
+}
+
+impl From<String> for DownloadError {
+    fn from(message: String) -> Self {
+        download_error(FailureCategory::Internal, message, false)
+    }
+}
+
+async fn run_download(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+) -> Result<DownloadOutcome, DownloadError> {
+    let max_retry_attempts = state.auto_retry_attempts().await;
+    let mut retry_attempts = 0;
+
+    loop {
+        match run_download_attempt(app, state, task).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if error.retryable && retry_attempts < max_retry_attempts => {
+                retry_attempts += 1;
+                let snapshot = state.record_retry_attempt(&task.id, retry_attempts).await?;
+                emit_snapshot(app, &snapshot);
+                tokio::time::sleep(retry_delay_for_attempt((retry_attempts - 1) as usize)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn run_download_attempt(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+) -> Result<DownloadOutcome, DownloadError> {
+    ensure_parent_directory(&task.target_path)
+        .await
+        .map_err(disk_error)?;
 
     let mut existing_bytes = metadata_len(&task.temp_path).await.unwrap_or(0);
     if existing_bytes > 0 {
-        let snapshot = state.sync_downloaded_bytes(&task.id, existing_bytes).await?;
+        let snapshot = state
+            .sync_downloaded_bytes(&task.id, existing_bytes)
+            .await?;
         emit_snapshot(app, &snapshot);
     }
 
@@ -94,17 +157,25 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
 
     if existing_bytes > 0 && !supports_resume {
-        truncate_file(&task.temp_path).await?;
+        truncate_file(&task.temp_path).await.map_err(disk_error)?;
         existing_bytes = 0;
-        let snapshot = state.mark_job_downloading(&task.id, 0, response.content_length()).await?;
+        let snapshot = state
+            .mark_job_downloading(
+                &task.id,
+                0,
+                response.content_length(),
+                ResumeSupport::Unsupported,
+            )
+            .await?;
         emit_snapshot(app, &snapshot);
         response = send_request(&client, &task.url, 0).await?;
     }
 
     let total_bytes = derive_total_bytes(&response, existing_bytes);
+    let resume_support = derive_resume_support(&response, existing_bytes);
     let target_path = derive_target_path(&task.target_path, &response);
     let snapshot = state
-        .mark_job_downloading(&task.id, existing_bytes, total_bytes)
+        .mark_job_downloading(&task.id, existing_bytes, total_bytes, resume_support)
         .await?;
     emit_snapshot(app, &snapshot);
 
@@ -114,7 +185,7 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
             .append(true)
             .open(&task.temp_path)
             .await
-            .map_err(|error| format!("Could not open partial download file: {error}"))?
+            .map_err(|error| disk_error(format!("Could not open partial download file: {error}")))?
     } else {
         OpenOptions::new()
             .create(true)
@@ -122,7 +193,7 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
             .truncate(true)
             .open(&task.temp_path)
             .await
-            .map_err(|error| format!("Could not create download file: {error}"))?
+            .map_err(|error| disk_error(format!("Could not create download file: {error}")))?
     };
 
     let mut stream = response.bytes_stream();
@@ -149,10 +220,10 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
             WorkerControl::Continue => {}
         }
 
-        let chunk = chunk_result.map_err(|error| format!("Download failed: {error}"))?;
+        let chunk = chunk_result.map_err(download_stream_error)?;
         file.write_all(&chunk)
             .await
-            .map_err(|error| format!("Could not write download chunk: {error}"))?;
+            .map_err(|error| disk_error(format!("Could not write download chunk: {error}")))?;
 
         downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
         sample_bytes = sample_bytes.saturating_add(chunk.len() as u64);
@@ -166,7 +237,13 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
         if elapsed >= PROGRESS_UPDATE_INTERVAL {
             let should_persist = last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
             let snapshot = state
-                .update_job_progress(&task.id, downloaded_bytes, total_bytes, speed, should_persist)
+                .update_job_progress(
+                    &task.id,
+                    downloaded_bytes,
+                    total_bytes,
+                    speed,
+                    should_persist,
+                )
                 .await?;
             emit_snapshot(app, &snapshot);
             last_emitted_bytes = downloaded_bytes;
@@ -180,15 +257,19 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
 
     file.flush()
         .await
-        .map_err(|error| format!("Could not flush download file: {error}"))?;
+        .map_err(|error| disk_error(format!("Could not flush download file: {error}")))?;
     file.sync_all()
         .await
-        .map_err(|error| format!("Could not sync download file: {error}"))?;
+        .map_err(|error| disk_error(format!("Could not sync download file: {error}")))?;
 
     if let Some(total_bytes) = total_bytes {
         if downloaded_bytes < total_bytes {
-            return Err(format!(
-                "Download ended early. Received {downloaded_bytes} of {total_bytes} bytes."
+            return Err(download_error(
+                FailureCategory::Network,
+                format!(
+                    "Download ended early. Received {downloaded_bytes} of {total_bytes} bytes."
+                ),
+                true,
             ));
         }
     }
@@ -201,7 +282,9 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
         emit_snapshot(app, &snapshot);
     }
 
-    let final_path = move_to_final_path(&task.temp_path, &target_path).await?;
+    let final_path = move_to_final_path(&task.temp_path, &target_path)
+        .await
+        .map_err(disk_error)?;
     let snapshot = state
         .complete_job(&task.id, downloaded_bytes, &final_path)
         .await?;
@@ -210,7 +293,11 @@ async fn run_download(app: &AppHandle, state: &SharedState, task: &crate::state:
     Ok(DownloadOutcome::Completed)
 }
 
-async fn send_request(client: &Client, url: &str, existing_bytes: u64) -> Result<reqwest::Response, String> {
+async fn send_request(
+    client: &Client,
+    url: &str,
+    existing_bytes: u64,
+) -> Result<reqwest::Response, DownloadError> {
     let mut next_retry = 0;
 
     loop {
@@ -222,7 +309,11 @@ async fn send_request(client: &Client, url: &str, existing_bytes: u64) -> Result
         match request.send().await {
             Ok(response) => {
                 if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                    return Err("The remote server rejected the resume request.".into());
+                    return Err(download_error(
+                        FailureCategory::Resume,
+                        "The remote server rejected the resume request.".into(),
+                        false,
+                    ));
                 }
 
                 if response.status().is_success() {
@@ -230,7 +321,6 @@ async fn send_request(client: &Client, url: &str, existing_bytes: u64) -> Result
                 }
 
                 let status = response.status();
-                let message = format!("Download request failed with HTTP {status}.");
 
                 if should_retry_status(status) && next_retry < REQUEST_RETRY_DELAYS.len() {
                     tokio::time::sleep(REQUEST_RETRY_DELAYS[next_retry]).await;
@@ -238,7 +328,7 @@ async fn send_request(client: &Client, url: &str, existing_bytes: u64) -> Result
                     continue;
                 }
 
-                return Err(message);
+                return Err(error_for_http_status(status));
             }
             Err(error) => {
                 if should_retry_error(&error) && next_retry < REQUEST_RETRY_DELAYS.len() {
@@ -247,7 +337,7 @@ async fn send_request(client: &Client, url: &str, existing_bytes: u64) -> Result
                     continue;
                 }
 
-                return Err(format!("Could not start download: {error}"));
+                return Err(request_error(error));
             }
         }
     }
@@ -270,6 +360,40 @@ fn derive_total_bytes(response: &reqwest::Response, existing_bytes: u64) -> Opti
     }
 
     response.content_length()
+}
+
+fn derive_resume_support(response: &reqwest::Response, existing_bytes: u64) -> ResumeSupport {
+    let accept_ranges = response
+        .headers()
+        .get(ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+
+    derive_resume_support_from_parts(response.status(), existing_bytes, accept_ranges.as_deref())
+}
+
+fn derive_resume_support_from_parts(
+    status: StatusCode,
+    existing_bytes: u64,
+    accept_ranges: Option<&str>,
+) -> ResumeSupport {
+    if status == StatusCode::PARTIAL_CONTENT {
+        return ResumeSupport::Supported;
+    }
+
+    if existing_bytes > 0 {
+        return ResumeSupport::Unsupported;
+    }
+
+    accept_ranges
+        .map(|value| {
+            if value.to_ascii_lowercase().contains("bytes") {
+                ResumeSupport::Supported
+            } else {
+                ResumeSupport::Unsupported
+            }
+        })
+        .unwrap_or(ResumeSupport::Unknown)
 }
 
 async fn ensure_parent_directory(path: &Path) -> Result<(), String> {
@@ -300,7 +424,10 @@ async fn metadata_len(path: &Path) -> Option<u64> {
     fs::metadata(path).await.ok().map(|metadata| metadata.len())
 }
 
-async fn move_to_final_path(temp_path: &Path, target_path: &Path) -> Result<std::path::PathBuf, String> {
+async fn move_to_final_path(
+    temp_path: &Path,
+    target_path: &Path,
+) -> Result<std::path::PathBuf, String> {
     let final_path = allocate_final_path(target_path).await?;
 
     fs::rename(temp_path, &final_path)
@@ -366,7 +493,10 @@ fn parse_content_disposition_filename(header_value: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn derive_target_path(current_target_path: &Path, response: &reqwest::Response) -> std::path::PathBuf {
+fn derive_target_path(
+    current_target_path: &Path,
+    response: &reqwest::Response,
+) -> std::path::PathBuf {
     let filename = extract_filename(response)
         .or_else(|| derive_filename_from_url(response.url().as_str()))
         .unwrap_or_else(|| fallback_filename(current_target_path));
@@ -429,6 +559,66 @@ fn should_retry_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
 }
 
+fn download_error(category: FailureCategory, message: String, retryable: bool) -> DownloadError {
+    DownloadError {
+        category,
+        message,
+        retryable,
+    }
+}
+
+fn error_for_http_status(status: StatusCode) -> DownloadError {
+    let retryable = should_retry_status(status);
+    let category = if retryable {
+        FailureCategory::Server
+    } else {
+        FailureCategory::Http
+    };
+
+    download_error(
+        category,
+        format!("Download request failed with HTTP {status}."),
+        retryable,
+    )
+}
+
+fn request_error(error: reqwest::Error) -> DownloadError {
+    let retryable = should_retry_error(&error);
+    let category = if retryable {
+        FailureCategory::Network
+    } else {
+        FailureCategory::Internal
+    };
+
+    download_error(
+        category,
+        format!("Could not start download: {error}"),
+        retryable,
+    )
+}
+
+fn download_stream_error(error: reqwest::Error) -> DownloadError {
+    let retryable = should_retry_error(&error);
+    let category = if retryable {
+        FailureCategory::Network
+    } else {
+        FailureCategory::Internal
+    };
+
+    download_error(category, format!("Download failed: {error}"), retryable)
+}
+
+fn disk_error(message: String) -> DownloadError {
+    download_error(FailureCategory::Disk, message, false)
+}
+
+fn retry_delay_for_attempt(attempt: usize) -> Duration {
+    REQUEST_RETRY_DELAYS
+        .get(attempt)
+        .copied()
+        .unwrap_or_else(|| *REQUEST_RETRY_DELAYS.last().unwrap())
+}
+
 async fn notify_download_completed(app: &AppHandle, state: &SharedState, final_path: &Path) {
     let file_name = final_path
         .file_name()
@@ -444,7 +634,12 @@ async fn notify_download_completed(app: &AppHandle, state: &SharedState, final_p
     .await;
 }
 
-async fn notify_download_failure(app: &AppHandle, state: &SharedState, task: &crate::state::DownloadTask, error: Option<&str>) {
+async fn notify_download_failure(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    error: Option<&str>,
+) {
     let fallback = task
         .target_path
         .file_name()
@@ -467,9 +662,57 @@ async fn notify(app: &AppHandle, state: &SharedState, title: &str, body: &str) {
         let _ = notification.request_permission();
     }
 
-    if !matches!(notification.permission_state(), Ok(PermissionState::Granted)) {
+    if !matches!(
+        notification.permission_state(),
+        Ok(PermissionState::Granted)
+    ) {
         return;
     }
 
     let _ = notification.builder().title(title).body(body).show();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_status_errors_are_classified_by_recoverability() {
+        let unavailable = error_for_http_status(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable.category, FailureCategory::Server);
+        assert!(unavailable.retryable);
+
+        let not_found = error_for_http_status(StatusCode::NOT_FOUND);
+        assert_eq!(not_found.category, FailureCategory::Http);
+        assert!(!not_found.retryable);
+    }
+
+    #[test]
+    fn retry_delay_caps_at_last_configured_delay() {
+        assert_eq!(retry_delay_for_attempt(0), REQUEST_RETRY_DELAYS[0]);
+        assert_eq!(
+            retry_delay_for_attempt(99),
+            *REQUEST_RETRY_DELAYS.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn resume_support_uses_partial_content_before_header_hints() {
+        assert_eq!(
+            derive_resume_support_from_parts(StatusCode::PARTIAL_CONTENT, 10, None),
+            ResumeSupport::Supported
+        );
+        assert_eq!(
+            derive_resume_support_from_parts(StatusCode::OK, 10, Some("bytes")),
+            ResumeSupport::Unsupported
+        );
+        assert_eq!(
+            derive_resume_support_from_parts(StatusCode::OK, 0, Some("bytes")),
+            ResumeSupport::Supported
+        );
+        assert_eq!(
+            derive_resume_support_from_parts(StatusCode::OK, 0, None),
+            ResumeSupport::Unknown
+        );
+    }
 }

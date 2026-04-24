@@ -121,6 +121,19 @@ export function SettingsPage({
               className="h-10 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
           </FieldRow>
+
+          <FieldRow label="Auto Retry Attempts" description="Retries transient network or server failures before marking a job failed.">
+            <input
+              type="number"
+              id="autoRetryAttempts"
+              name="autoRetryAttempts"
+              value={formData.autoRetryAttempts}
+              onChange={handleChange}
+              min="0"
+              max="10"
+              className="h-10 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+            />
+          </FieldRow>
         </SettingsPanel>
 
         <SettingsPanel icon={<Palette size={20} />} title="Appearance & Behavior">
