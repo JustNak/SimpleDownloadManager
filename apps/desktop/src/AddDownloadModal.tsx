@@ -1,12 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { addJob } from './backend';
+import type { AddJobResult } from './backend';
 import { X } from 'lucide-react';
 
 interface AddDownloadModalProps {
   onClose: () => void;
+  onAdded: (result: AddJobResult) => void;
 }
 
-export function AddDownloadModal({ onClose }: AddDownloadModalProps) {
+export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
   const [url, setUrl] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -23,7 +25,8 @@ export function AddDownloadModal({ onClose }: AddDownloadModalProps) {
     setIsSubmitting(true);
     setErrorMessage('');
     try {
-      await addJob(url);
+      const result = await addJob(url);
+      onAdded(result);
       onClose();
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Failed to add the download.');

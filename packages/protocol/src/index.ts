@@ -86,14 +86,16 @@ export interface ErrorResponse<TType extends HostResponseType = HostResponseType
 }
 
 export interface AcceptedPayload {
-  status: 'queued';
+  status: 'queued' | 'duplicate_existing_job';
   jobId: string;
+  filename?: string;
   appState: 'running' | 'launched';
 }
 
 export interface QueueSummary {
   total: number;
   active: number;
+  attention: number;
   queued: number;
   downloading: number;
   completed: number;
@@ -148,7 +150,11 @@ export type AppRequest =
 
 export type AppResponse =
   | AppSuccessResponse<'ready', { appState: 'running' | 'launched' }>
-  | AppSuccessResponse<'queued', { jobId: string; status: 'queued' }>
+  | AppSuccessResponse<'queued', { jobId: string; filename?: string; status: 'queued' }>
+  | AppSuccessResponse<
+      'duplicate_existing_job',
+      { jobId: string; filename?: string; status: 'duplicate_existing_job' }
+    >
   | AppErrorResponse;
 
 export type ValidationResult<T> =

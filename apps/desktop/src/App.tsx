@@ -24,7 +24,9 @@ import {
   saveSettings,
   subscribeToStateChanged,
 } from './backend';
+import type { AddJobResult } from './backend';
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock3,
   Download,
@@ -42,11 +44,11 @@ import {
 } from 'lucide-react';
 import type { DiagnosticsSnapshot } from './types';
 
-type ViewState = 'all' | 'active' | 'queued' | 'completed' | 'settings';
+type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings';
 type SortMode = 'status' | 'name' | 'progress' | 'size';
 
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
-const finishedStates = [JobState.Completed, JobState.Canceled, JobState.Failed];
+const finishedStates = [JobState.Completed, JobState.Canceled];
 
 export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Checking);
@@ -262,6 +264,27 @@ export default function App() {
     }
   }
 
+  function handleAddDownloadResult(result: AddJobResult) {
+    setSelectedJobId(result.jobId);
+
+    if (result.status === 'duplicate_existing_job') {
+      setView('all');
+      addToast({
+        type: 'info',
+        title: 'Already in Queue',
+        message: `${result.filename} is already in the download list.`,
+      });
+      return;
+    }
+
+    setView('queued');
+    addToast({
+      type: 'success',
+      title: 'Download Added',
+      message: `${result.filename} was added to the queue.`,
+    });
+  }
+
   async function handleBrowseDirectory(): Promise<string | null> {
     try {
       const selectedDirectory = await browseDirectory();
@@ -276,6 +299,7 @@ export default function App() {
     return {
       all: jobs.length,
       active: jobs.filter((job) => activeStates.includes(job.state)).length,
+      attention: jobs.filter(jobNeedsAttention).length,
       queued: jobs.filter((job) => job.state === JobState.Queued).length,
       completed: jobs.filter((job) => finishedStates.includes(job.state)).length,
     };
@@ -285,6 +309,7 @@ export default function App() {
     const query = searchQuery.trim().toLowerCase();
     const filtered = jobs.filter((job) => {
       if (view === 'settings') return false;
+      if (view === 'attention' && !jobNeedsAttention(job)) return false;
       if (view === 'active' && !activeStates.includes(job.state)) return false;
       if (view === 'queued' && job.state !== JobState.Queued) return false;
       if (view === 'completed' && !finishedStates.includes(job.state)) return false;
@@ -324,6 +349,7 @@ export default function App() {
         <aside className="download-sidebar flex w-[252px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-3 py-3">
           <nav className="flex flex-col gap-1">
             <NavItem icon={<Download size={21} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => setView('all')} />
+            <NavItem icon={<AlertTriangle size={21} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => setView('attention')} />
             <NavItem icon={<Gauge size={21} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => setView('active')} />
             <NavItem icon={<Clock3 size={21} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => setView('queued')} />
             <NavItem icon={<CheckCircle2 size={21} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => setView('completed')} />
@@ -395,7 +421,12 @@ export default function App() {
 
       <ToastArea toasts={toasts} onDismiss={removeToast} />
 
-      {isAddModalOpen && <AddDownloadModal onClose={() => setIsAddModalOpen(false)} />}
+      {isAddModalOpen && (
+        <AddDownloadModal
+          onClose={() => setIsAddModalOpen(false)}
+          onAdded={handleAddDownloadResult}
+        />
+      )}
     </div>
   );
 }
@@ -575,7 +606,8 @@ function StatusBar({
 }
 
 function nextFilterView(view: ViewState): ViewState {
-  if (view === 'all') return 'active';
+  if (view === 'all') return 'attention';
+  if (view === 'attention') return 'active';
   if (view === 'active') return 'queued';
   if (view === 'queued') return 'completed';
   return 'all';
@@ -618,6 +650,13 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected error.';
 }
 
+function jobNeedsAttention(job: DownloadJob): boolean {
+  if (job.state === JobState.Failed || job.failureCategory) return true;
+  const isUnfinished = ![JobState.Completed, JobState.Canceled].includes(job.state);
+  const hasPartialProgress = job.downloadedBytes > 0 || job.progress > 0;
+  return isUnfinished && hasPartialProgress && job.resumeSupport === 'unsupported';
+}
+
 function formatDiagnosticsReport(diagnostics: DiagnosticsSnapshot): string {
   const lines = [
     'Simple Download Manager Diagnostics',
@@ -625,6 +664,7 @@ function formatDiagnosticsReport(diagnostics: DiagnosticsSnapshot): string {
     `Last Host Contact: ${diagnostics.lastHostContactSecondsAgo ?? 'never'} seconds ago`,
     `Queue Total: ${diagnostics.queueSummary.total}`,
     `Queue Active: ${diagnostics.queueSummary.active}`,
+    `Queue Needs Attention: ${diagnostics.queueSummary.attention}`,
     `Queue Queued: ${diagnostics.queueSummary.queued}`,
     `Queue Downloading: ${diagnostics.queueSummary.downloading}`,
     `Queue Completed: ${diagnostics.queueSummary.completed}`,

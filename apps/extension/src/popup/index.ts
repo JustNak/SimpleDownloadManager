@@ -57,7 +57,13 @@ function renderState(state: PopupStateResponse) {
 function renderResult(response?: HostToExtensionResponse): string {
   if (!response) return '';
   if (isErrorResponse(response)) return '';
-  if (response.type === 'accepted') return `Queued as ${response.payload.jobId}`;
+  if (response.type === 'accepted') {
+    if (response.payload.status === 'duplicate_existing_job') {
+      return `Already queued as ${response.payload.jobId}`;
+    }
+
+    return `Queued as ${response.payload.jobId}`;
+  }
 
   const payload = response.payload as PongPayload | undefined;
   const summary = payload?.queueSummary;
@@ -65,7 +71,12 @@ function renderResult(response?: HostToExtensionResponse): string {
     return 'Desktop app is connected.';
   }
 
-  return `Connected. ${summary.active} active, ${summary.failed} failed, ${summary.completed} finished.`;
+  const attention = summary.attention ?? summary.failed;
+  if (attention > 0) {
+    return `Connected. ${summary.active} active, ${attention} need attention, ${summary.completed} finished.`;
+  }
+
+  return `Connected. ${summary.active} active, ${summary.completed} finished.`;
 }
 
 async function sendMessage<T>(message: PopupRequest): Promise<T> {

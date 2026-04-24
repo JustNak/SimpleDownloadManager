@@ -122,6 +122,7 @@ pub struct Settings {
 pub struct QueueSummary {
     pub total: usize,
     pub active: usize,
+    pub attention: usize,
     pub queued: usize,
     pub downloading: usize,
     pub completed: usize,

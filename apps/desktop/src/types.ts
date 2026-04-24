@@ -68,6 +68,7 @@ export interface Settings {
 export interface QueueSummary {
   total: number;
   active: number;
+  attention: number;
   queued: number;
   downloading: number;
   completed: number;

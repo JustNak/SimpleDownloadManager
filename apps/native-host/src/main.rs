@@ -104,7 +104,10 @@ fn map_status_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
 
 fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
     if response.ok {
-        if response.message_type != "queued" {
+        if !matches!(
+            response.message_type.as_str(),
+            "queued" | "duplicate_existing_job"
+        ) {
             return HostResponseEnvelope::rejected(
                 response.request_id,
                 "rejected",
@@ -119,8 +122,19 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
             .and_then(|payload| payload.get("jobId"))
             .and_then(|value| value.as_str())
             .unwrap_or("pending_job");
+        let status = response
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("status"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(response.message_type.as_str());
 
-        return HostResponseEnvelope::accepted(response.request_id, job_id, "running");
+        return HostResponseEnvelope::accepted_with_status(
+            response.request_id,
+            job_id,
+            status,
+            "running",
+        );
     }
 
     HostResponseEnvelope::rejected(

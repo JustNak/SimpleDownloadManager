@@ -33,6 +33,7 @@ Supported request types:
     "queueSummary": {
       "total": 8,
       "active": 3,
+      "attention": 1,
       "queued": 1,
       "downloading": 2,
       "completed": 3,
@@ -76,6 +77,9 @@ Success:
 }
 ```
 
+If the URL is already in the desktop queue, the host still returns `accepted` with
+`status: "duplicate_existing_job"` and the existing `jobId`.
+
 Error:
 
 ```json
@@ -109,6 +113,7 @@ Success types:
 
 - `ready`
 - `queued`
+- `duplicate_existing_job`
 
 Error codes:
 

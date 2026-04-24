@@ -1,8 +1,8 @@
 use crate::download::schedule_downloads;
 use crate::ipc::gather_host_registration_diagnostics;
-use crate::state::SharedState;
+use crate::state::{EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, Settings};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,6 +24,24 @@ const INSTALL_RESOURCE_DIR: &str = "resources\\install";
 #[serde(rename_all = "camelCase")]
 struct ReleaseMetadata {
     sidecar_binary_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddJobResult {
+    pub job_id: String,
+    pub filename: String,
+    pub status: String,
+}
+
+impl From<EnqueueResult> for AddJobResult {
+    fn from(result: EnqueueResult) -> Self {
+        Self {
+            job_id: result.job_id,
+            filename: result.filename,
+            status: result.status.as_protocol_value().into(),
+        }
+    }
 }
 
 pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
@@ -69,14 +87,17 @@ pub async fn export_diagnostics_report(state: State<'_, SharedState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn add_job(app: AppHandle, state: State<'_, SharedState>, url: String) -> Result<(), String> {
-    let (snapshot, _) = state
+pub async fn add_job(app: AppHandle, state: State<'_, SharedState>, url: String) -> Result<AddJobResult, String> {
+    let result = state
         .enqueue_download(url, None)
         .await
         .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    emit_snapshot(&app, &result.snapshot);
+    if result.status == EnqueueStatus::Queued {
+        schedule_downloads(app, state.inner().clone());
+    }
+
+    Ok(result.into())
 }
 
 #[tauri::command]

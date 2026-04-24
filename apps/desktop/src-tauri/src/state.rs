@@ -6,7 +6,7 @@ use crate::storage::{
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
 
@@ -22,6 +22,29 @@ pub struct DownloadTask {
     pub url: String,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueStatus {
+    Queued,
+    DuplicateExistingJob,
+}
+
+impl EnqueueStatus {
+    pub fn as_protocol_value(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::DuplicateExistingJob => "duplicate_existing_job",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnqueueResult {
+    pub snapshot: DesktopSnapshot,
+    pub job_id: String,
+    pub filename: String,
+    pub status: EnqueueStatus,
 }
 
 #[derive(Debug)]
@@ -187,17 +210,14 @@ impl SharedState {
         &self,
         url: String,
         source: Option<DownloadSource>,
-    ) -> Result<(DesktopSnapshot, String), BackendError> {
+    ) -> Result<EnqueueResult, BackendError> {
         validate_download_url(&url)?;
 
-        let (snapshot, persisted, job_id) = {
+        let (result, persisted) = {
             let mut state = self.inner.write().await;
 
-            if state.jobs.iter().any(|job| job.url == url) {
-                return Err(BackendError {
-                    code: "DUPLICATE_JOB",
-                    message: "This URL is already in the queue.".into(),
-                });
+            if let Some(result) = state.duplicate_enqueue_result(&url) {
+                return Ok(result);
             }
 
             let download_dir = PathBuf::from(&state.settings.download_directory);
@@ -212,6 +232,7 @@ impl SharedState {
                 code: "DESTINATION_INVALID",
                 message: format!("Could not create the download directory: {error}"),
             })?;
+            verify_download_directory_writable(&download_dir)?;
 
             let filename = derive_filename(&url);
             let (target_path, temp_path) =
@@ -222,7 +243,7 @@ impl SharedState {
             state.jobs.push(DownloadJob {
                 id: job_id.clone(),
                 url: url.clone(),
-                filename,
+                filename: filename.clone(),
                 source,
                 state: JobState::Queued,
                 progress: 0.0,
@@ -238,11 +259,19 @@ impl SharedState {
                 temp_path: temp_path.display().to_string(),
             });
 
-            (state.snapshot(), state.persisted(), job_id)
+            (
+                EnqueueResult {
+                    snapshot: state.snapshot(),
+                    job_id,
+                    filename,
+                    status: EnqueueStatus::Queued,
+                },
+                state.persisted(),
+            )
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
-        Ok((snapshot, job_id))
+        Ok(result)
     }
 
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
@@ -798,6 +827,18 @@ impl RuntimeState {
         }
     }
 
+    fn duplicate_enqueue_result(&self, url: &str) -> Option<EnqueueResult> {
+        let existing_index = self.jobs.iter().position(|job| job.url == url)?;
+        let existing_job = &self.jobs[existing_index];
+
+        Some(EnqueueResult {
+            snapshot: self.snapshot(),
+            job_id: existing_job.id.clone(),
+            filename: existing_job.filename.clone(),
+            status: EnqueueStatus::DuplicateExistingJob,
+        })
+    }
+
     fn queue_summary(&self) -> QueueSummary {
         QueueSummary {
             total: self.jobs.len(),
@@ -814,6 +855,7 @@ impl RuntimeState {
                     )
                 })
                 .count(),
+            attention: self.jobs.iter().filter(|job| job_needs_attention(job)).count(),
             queued: self
                 .jobs
                 .iter()
@@ -836,6 +878,16 @@ impl RuntimeState {
                 .count(),
         }
     }
+}
+
+fn job_needs_attention(job: &DownloadJob) -> bool {
+    if job.state == JobState::Failed || job.failure_category.is_some() {
+        return true;
+    }
+
+    let is_unfinished = !matches!(job.state, JobState::Completed | JobState::Canceled);
+    let has_partial_progress = job.downloaded_bytes > 0 || job.progress > 0.0;
+    is_unfinished && has_partial_progress && job.resume_support == ResumeSupport::Unsupported
 }
 
 fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
@@ -877,6 +929,48 @@ fn validate_download_url(raw_url: &str) -> Result<(), BackendError> {
             code: "UNSUPPORTED_SCHEME",
             message: "Only http and https URLs are supported.".into(),
         }),
+    }
+}
+
+fn verify_download_directory_writable(download_dir: &Path) -> Result<(), BackendError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let probe_name = format!(
+        ".simple-download-manager-write-test-{}-{timestamp}",
+        std::process::id()
+    );
+
+    verify_download_directory_writable_with_probe_name(download_dir, &probe_name)
+}
+
+fn verify_download_directory_writable_with_probe_name(
+    download_dir: &Path,
+    probe_name: &str,
+) -> Result<(), BackendError> {
+    let probe_path = download_dir.join(probe_name);
+    let probe_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe_path)
+        .map_err(destination_write_error)?;
+    drop(probe_file);
+
+    std::fs::remove_file(&probe_path).map_err(destination_write_error)?;
+    Ok(())
+}
+
+fn destination_write_error(error: std::io::Error) -> BackendError {
+    let code = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        "PERMISSION_DENIED"
+    } else {
+        "DESTINATION_INVALID"
+    };
+
+    BackendError {
+        code,
+        message: format!("Download directory is not writable: {error}"),
     }
 }
 
@@ -1016,6 +1110,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queue_summary_counts_attention_jobs() {
+        let state = RuntimeState {
+            connection_state: ConnectionState::Connected,
+            jobs: vec![
+                download_job("job_1", JobState::Failed, ResumeSupport::Supported, 25),
+                download_job("job_2", JobState::Paused, ResumeSupport::Unsupported, 40),
+                download_job("job_3", JobState::Downloading, ResumeSupport::Unsupported, 0),
+                download_job("job_4", JobState::Completed, ResumeSupport::Unsupported, 100),
+                download_job("job_5", JobState::Queued, ResumeSupport::Unknown, 0),
+            ],
+            settings: Settings::default(),
+            next_job_number: 6,
+            active_workers: HashSet::new(),
+            last_host_contact: None,
+        };
+
+        let summary = state.queue_summary();
+
+        assert_eq!(summary.attention, 2);
+    }
+
+    #[test]
+    fn duplicate_enqueue_result_includes_existing_job_details() {
+        let mut existing_job =
+            download_job("job_9", JobState::Paused, ResumeSupport::Supported, 50);
+        existing_job.url = "https://example.com/file.zip".into();
+        existing_job.filename = "file.zip".into();
+
+        let state = RuntimeState {
+            connection_state: ConnectionState::Connected,
+            jobs: vec![existing_job],
+            settings: Settings::default(),
+            next_job_number: 10,
+            active_workers: HashSet::new(),
+            last_host_contact: None,
+        };
+
+        let result = state
+            .duplicate_enqueue_result("https://example.com/file.zip")
+            .expect("duplicate result");
+
+        assert_eq!(result.status, EnqueueStatus::DuplicateExistingJob);
+        assert_eq!(result.job_id, "job_9");
+        assert_eq!(result.filename, "file.zip");
+        assert_eq!(result.snapshot.jobs.len(), 1);
+    }
+
+    #[test]
+    fn destination_write_probe_reports_blocked_probe_path() {
+        let test_dir = test_runtime_dir("destination-write-probe");
+        let probe_name = "blocked-probe";
+        std::fs::create_dir(test_dir.join(probe_name)).unwrap();
+
+        let error =
+            verify_download_directory_writable_with_probe_name(&test_dir, probe_name).unwrap_err();
+
+        assert!(matches!(
+            error.code,
+            "DESTINATION_INVALID" | "PERMISSION_DENIED"
+        ));
+        assert!(error.message.contains("not writable"));
+
+        let _ = std::fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
     fn restart_reset_clears_partial_progress_and_failure_metadata() {
         let mut job = DownloadJob {
             id: "job_1".into(),
@@ -1048,5 +1208,41 @@ mod tests {
         assert_eq!(job.failure_category, None);
         assert_eq!(job.resume_support, ResumeSupport::Unknown);
         assert_eq!(job.retry_attempts, 0);
+    }
+
+    fn download_job(
+        id: &str,
+        state: JobState,
+        resume_support: ResumeSupport,
+        downloaded_bytes: u64,
+    ) -> DownloadJob {
+        DownloadJob {
+            id: id.into(),
+            url: format!("https://example.com/{id}.zip"),
+            filename: format!("{id}.zip"),
+            source: None,
+            state,
+            progress: 0.0,
+            total_bytes: 100,
+            downloaded_bytes,
+            speed: 0,
+            eta: 0,
+            error: None,
+            failure_category: None,
+            resume_support,
+            retry_attempts: 0,
+            target_path: format!("C:/Downloads/{id}.zip"),
+            temp_path: format!("C:/Downloads/{id}.zip.part"),
+        }
+    }
+
+    fn test_runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

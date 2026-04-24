@@ -94,13 +94,18 @@ impl HostResponseEnvelope {
         }
     }
 
-    pub fn accepted(request_id: String, job_id: &str, app_state: &str) -> Self {
+    pub fn accepted_with_status(
+        request_id: String,
+        job_id: &str,
+        status: &str,
+        app_state: &str,
+    ) -> Self {
         Self {
             ok: true,
             request_id,
             message_type: "accepted".into(),
             payload: Some(json!({
-                "status": "queued",
+                "status": status,
                 "jobId": job_id,
                 "appState": app_state,
             })),

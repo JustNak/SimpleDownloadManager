@@ -1,6 +1,6 @@
 use crate::commands::emit_snapshot;
 use crate::download::schedule_downloads;
-use crate::state::{BackendError, SharedState};
+use crate::state::{BackendError, EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{
     ConnectionState, DownloadSource, HostRegistrationDiagnostics, HostRegistrationEntry,
     HostRegistrationStatus, QueueSummary,
@@ -108,12 +108,16 @@ impl HostResponse {
         }
     }
 
-    fn queued(request_id: String, job_id: String) -> Self {
+    fn enqueue_result(request_id: String, result: EnqueueResult) -> Self {
         Self {
             ok: true,
             request_id,
-            message_type: "queued".into(),
-            payload: Some(json!({ "jobId": job_id, "status": "queued" })),
+            message_type: result.status.as_protocol_value().into(),
+            payload: Some(json!({
+                "jobId": result.job_id,
+                "filename": result.filename,
+                "status": result.status.as_protocol_value(),
+            })),
             code: None,
             message: None,
         }
@@ -258,12 +262,14 @@ async fn handle_request(app: AppHandle, state: SharedState, request: HostRequest
                 .enqueue_download(payload.url, Some(payload.source.into()))
                 .await
             {
-                Ok((snapshot, job_id)) => {
+                Ok(result) => {
                     let host_snapshot = state.register_host_contact().await;
-                    emit_snapshot(&app, &snapshot);
+                    emit_snapshot(&app, &result.snapshot);
                     emit_snapshot(&app, &host_snapshot);
-                    schedule_downloads(app, state);
-                    HostResponse::queued(request.request_id, job_id)
+                    if result.status == EnqueueStatus::Queued {
+                        schedule_downloads(app, state);
+                    }
+                    HostResponse::enqueue_result(request.request_id, result)
                 }
                 Err(error) => map_backend_error(request.request_id, error),
             }

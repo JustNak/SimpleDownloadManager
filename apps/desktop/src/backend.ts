@@ -8,6 +8,14 @@ export interface DesktopSnapshot {
   settings: Settings;
 }
 
+export type AddJobStatus = 'queued' | 'duplicate_existing_job';
+
+export interface AddJobResult {
+  jobId: string;
+  filename: string;
+  status: AddJobStatus;
+}
+
 const STATE_CHANGED_EVENT = 'app://state-changed';
 
 const defaultSettings: Settings = {
@@ -103,6 +111,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 2241972928,
       speed: 0,
       eta: 135,
+      resumeSupport: 'unsupported',
       targetPath: 'C:\\Downloads\\Fedora-40-x86_64-DVD.iso',
     },
     {
@@ -116,6 +125,8 @@ let mockState: DesktopSnapshot = {
       speed: 0,
       eta: 0,
       error: 'The server closed the connection before the transfer completed.',
+      failureCategory: 'network',
+      retryAttempts: 3,
       targetPath: 'C:\\Downloads\\driver-installer.exe',
     }
   ],
@@ -139,6 +150,13 @@ function emitMockState() {
   }
 }
 
+function jobNeedsAttention(job: DownloadJob): boolean {
+  if (job.state === JobState.Failed || job.failureCategory) return true;
+  const isUnfinished = ![JobState.Completed, JobState.Canceled].includes(job.state);
+  const hasPartialProgress = job.downloadedBytes > 0 || job.progress > 0;
+  return isUnfinished && hasPartialProgress && job.resumeSupport === 'unsupported';
+}
+
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }
@@ -160,6 +178,7 @@ export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {
       queueSummary: {
         total: mockState.jobs.length,
         active: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting, JobState.Queued, JobState.Paused].includes(job.state)).length,
+        attention: mockState.jobs.filter(jobNeedsAttention).length,
         queued: mockState.jobs.filter((job) => job.state === JobState.Queued).length,
         downloading: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting].includes(job.state)).length,
         completed: mockState.jobs.filter((job) => [JobState.Completed, JobState.Canceled].includes(job.state)).length,
@@ -214,7 +233,19 @@ export async function cancelJob(id: string): Promise<void> {
 export async function retryJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
     mockState.jobs = mockState.jobs.map((job) =>
-      job.id === id ? { ...job, state: JobState.Queued, progress: 0, downloadedBytes: 0, speed: 0, eta: 0, error: undefined } : job
+      job.id === id
+        ? {
+            ...job,
+            state: JobState.Queued,
+            progress: 0,
+            downloadedBytes: 0,
+            speed: 0,
+            eta: 0,
+            error: undefined,
+            failureCategory: undefined,
+            retryAttempts: 0,
+          }
+        : job
     );
     emitMockState();
     return;
@@ -251,7 +282,17 @@ export async function retryFailedJobs(): Promise<void> {
   if (!isTauriRuntime()) {
     mockState.jobs = mockState.jobs.map((job) =>
       job.state === JobState.Failed
-        ? { ...job, state: JobState.Queued, progress: 0, downloadedBytes: 0, speed: 0, eta: 0, error: undefined }
+        ? {
+            ...job,
+            state: JobState.Queued,
+            progress: 0,
+            downloadedBytes: 0,
+            speed: 0,
+            eta: 0,
+            error: undefined,
+            failureCategory: undefined,
+            retryAttempts: 0,
+          }
         : job,
     );
     emitMockState();
@@ -278,12 +319,23 @@ export async function clearCompletedJobs(): Promise<void> {
   await invokeCommand('clear_completed_jobs');
 }
 
-export async function addJob(url: string): Promise<void> {
+export async function addJob(url: string): Promise<AddJobResult> {
   if (!isTauriRuntime()) {
+    const duplicateJob = mockState.jobs.find((job) => job.url === url);
+    if (duplicateJob) {
+      return {
+        jobId: duplicateJob.id,
+        filename: duplicateJob.filename,
+        status: 'duplicate_existing_job',
+      };
+    }
+
+    const jobId = crypto.randomUUID();
+    const filename = url.split('/').pop() || 'download';
     mockState.jobs.push({
-      id: crypto.randomUUID(),
+      id: jobId,
       url,
-      filename: url.split('/').pop() || 'download',
+      filename,
       state: JobState.Queued,
       progress: 0,
       totalBytes: 0,
@@ -292,9 +344,9 @@ export async function addJob(url: string): Promise<void> {
       eta: 0
     });
     emitMockState();
-    return;
+    return { jobId, filename, status: 'queued' };
   }
-  await invokeCommand('add_job', { url });
+  return invokeCommand<AddJobResult>('add_job', { url });
 }
 
 export async function saveSettings(settings: Settings): Promise<Settings> {

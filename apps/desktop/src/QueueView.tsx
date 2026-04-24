@@ -55,13 +55,15 @@ export function QueueView({
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
 
   if (jobs.length === 0) {
+    const emptyTitle = emptyStateTitle(view);
+
     return (
       <div className="flex min-h-0 flex-1 items-center justify-center bg-surface p-8">
         <div className="max-w-sm text-center">
           <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-md border border-border bg-card text-primary">
             <Download size={32} />
           </div>
-          <h2 className="mb-2 text-lg font-semibold text-foreground">No {view === 'all' ? '' : view} downloads</h2>
+          <h2 className="mb-2 text-lg font-semibold text-foreground">{emptyTitle}</h2>
           <p className="text-sm leading-6 text-muted-foreground">
             Downloads from the browser extension or the New Download command will appear in this list.
           </p>
@@ -379,6 +381,21 @@ function formatProgress(job: DownloadJob) {
   if (job.state === JobState.Queued) return '0%';
   if (job.state === JobState.Canceled) return '--';
   return `${job.progress.toFixed(0)}%`;
+}
+
+function emptyStateTitle(view: string) {
+  switch (view) {
+    case 'attention':
+      return 'No downloads need attention';
+    case 'active':
+      return 'No active downloads';
+    case 'queued':
+      return 'No queued downloads';
+    case 'completed':
+      return 'No completed downloads';
+    default:
+      return 'No downloads';
+  }
 }
 
 function statusText(job: DownloadJob) {
