@@ -15,6 +15,7 @@ use tokio::io::AsyncWriteExt;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const REQUEST_RETRY_DELAYS: [Duration; 3] = [
@@ -101,6 +102,13 @@ struct DownloadError {
     retryable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreflightMetadata {
+    total_bytes: Option<u64>,
+    resume_support: ResumeSupport,
+    filename: Option<String>,
+}
+
 impl From<String> for DownloadError {
     fn from(message: String) -> Self {
         download_error(FailureCategory::Internal, message, false)
@@ -152,6 +160,18 @@ async fn run_download_attempt(
         .user_agent("SimpleDownloadManager/0.1")
         .build()
         .map_err(|error| format!("Could not create download client: {error}"))?;
+
+    if let Some(metadata) = preflight_download(&client, &task.url).await {
+        let snapshot = state
+            .apply_preflight_metadata(
+                &task.id,
+                metadata.total_bytes,
+                metadata.resume_support,
+                metadata.filename,
+            )
+            .await?;
+        emit_snapshot(app, &snapshot);
+    }
 
     let mut response = send_request(&client, &task.url, existing_bytes).await?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
@@ -349,6 +369,49 @@ async fn send_request(
                 return Err(request_error(error));
             }
         }
+    }
+}
+
+async fn preflight_download(client: &Client, url: &str) -> Option<PreflightMetadata> {
+    let response = client
+        .head(url)
+        .timeout(PREFLIGHT_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let accept_ranges = response
+        .headers()
+        .get(ACCEPT_RANGES)
+        .and_then(|value| value.to_str().ok());
+    let content_disposition = response
+        .headers()
+        .get(CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok());
+
+    Some(derive_preflight_metadata_from_parts(
+        response.content_length(),
+        accept_ranges,
+        content_disposition,
+        response.url().as_str(),
+    ))
+}
+
+fn derive_preflight_metadata_from_parts(
+    total_bytes: Option<u64>,
+    accept_ranges: Option<&str>,
+    content_disposition: Option<&str>,
+    final_url: &str,
+) -> PreflightMetadata {
+    PreflightMetadata {
+        total_bytes,
+        resume_support: derive_resume_support_from_parts(StatusCode::OK, 0, accept_ranges),
+        filename: content_disposition
+            .and_then(parse_content_disposition_filename)
+            .or_else(|| derive_filename_from_url(final_url)),
     }
 }
 
@@ -723,5 +786,19 @@ mod tests {
             derive_resume_support_from_parts(StatusCode::OK, 0, None),
             ResumeSupport::Unknown
         );
+    }
+
+    #[test]
+    fn preflight_metadata_uses_head_headers() {
+        let metadata = derive_preflight_metadata_from_parts(
+            Some(4_096),
+            Some("bytes"),
+            Some("attachment; filename=\"server-report.pdf\""),
+            "https://example.com/download",
+        );
+
+        assert_eq!(metadata.total_bytes, Some(4_096));
+        assert_eq!(metadata.resume_support, ResumeSupport::Supported);
+        assert_eq!(metadata.filename.as_deref(), Some("server-report.pdf"));
     }
 }

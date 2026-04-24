@@ -598,6 +598,27 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn apply_preflight_metadata(
+        &self,
+        id: &str,
+        total_bytes: Option<u64>,
+        resume_support: ResumeSupport,
+        filename: Option<String>,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                return Err("Job not found.".into());
+            };
+
+            apply_preflight_metadata_to_job(job, total_bytes, resume_support, filename);
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn record_retry_attempt(
         &self,
         id: &str,
@@ -1101,6 +1122,30 @@ fn apply_download_filename(job: &mut DownloadJob, filename: &str) {
     }
 }
 
+fn apply_preflight_metadata_to_job(
+    job: &mut DownloadJob,
+    total_bytes: Option<u64>,
+    resume_support: ResumeSupport,
+    filename: Option<String>,
+) {
+    if let Some(filename) = filename {
+        apply_download_filename(job, &filename);
+    }
+
+    if let Some(total_bytes) = total_bytes {
+        job.total_bytes = total_bytes.max(job.downloaded_bytes);
+        job.progress = if job.total_bytes == 0 {
+            0.0
+        } else {
+            (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+        };
+    }
+
+    if resume_support != ResumeSupport::Unknown {
+        job.resume_support = resume_support;
+    }
+}
+
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1198,6 +1243,25 @@ mod tests {
         assert_eq!(job.filename, "server-report.pdf");
         assert_eq!(job.target_path, "C:/Downloads/download.bin");
         assert_eq!(job.temp_path, "C:/Downloads/download.bin.part");
+    }
+
+    #[test]
+    fn preflight_metadata_updates_job_size_resume_and_filename() {
+        let mut job = download_job("job_12", JobState::Starting, ResumeSupport::Unknown, 0);
+        job.filename = "download.bin".into();
+        job.total_bytes = 0;
+
+        apply_preflight_metadata_to_job(
+            &mut job,
+            Some(4_096),
+            ResumeSupport::Supported,
+            Some("server-report.pdf".into()),
+        );
+
+        assert_eq!(job.filename, "server-report.pdf");
+        assert_eq!(job.total_bytes, 4_096);
+        assert_eq!(job.resume_support, ResumeSupport::Supported);
+        assert_eq!(job.progress, 0.0);
     }
 
     #[test]
