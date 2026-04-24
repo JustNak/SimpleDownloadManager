@@ -1,0 +1,21 @@
+{
+  "name": "simple-download-manager",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/desktop",
+    "apps/extension",
+    "packages/protocol"
+  ],
+  "scripts": {
+    "build:extension": "npm run build --workspace @myapp/extension",
+    "build:desktop": "npm run build --workspace @myapp/desktop",
+    "prepare:release": "node ./scripts/prepare-release.mjs",
+    "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
+    "typecheck": "npm run typecheck --workspace @myapp/protocol && npm run typecheck --workspace @myapp/extension && npm run typecheck --workspace @myapp/desktop"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.4",
+    "typescript": "^5.8.3"
+  }
+}

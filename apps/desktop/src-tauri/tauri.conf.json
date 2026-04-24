@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Simple Download Manager",
+  "version": "0.1.0",
+  "identifier": "com.myapp.downloadmanager",
+  "build": {
+    "beforeDevCommand": "npm run dev --workspace @myapp/desktop",
+    "beforeBuildCommand": "npm run build --workspace @myapp/desktop",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Simple Download Manager",
+        "width": 1280,
+        "height": 860,
+        "resizable": true,
+        "decorations": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["binaries/simple-download-manager-native-host"],
+    "resources": [
+      "resources/install/install.md",
+      "resources/install/register-native-host.ps1",
+      "resources/install/unregister-native-host.ps1",
+      "resources/install/chromium.template.json",
+      "resources/install/edge.template.json",
+      "resources/install/firefox.template.json",
+      "resources/install/release.json"
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  }
+}

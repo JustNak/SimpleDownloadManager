@@ -1,0 +1,31 @@
+{
+  "name": "@myapp/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node ../../node_modules/vite/bin/vite.js build",
+    "dev": "node ../../node_modules/vite/bin/vite.js",
+    "tauri:build": "node ../../node_modules/@tauri-apps/cli/tauri.js build",
+    "tauri:dev": "node ../../node_modules/@tauri-apps/cli/tauri.js dev",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.4.0",
+    "lucide-react": "^1.8.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@tailwindcss/vite": "^4.2.2",
+    "@tauri-apps/cli": "^2.4.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.4.1",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.9",
+    "tailwindcss": "^4.2.2",
+    "vite": "^5.4.11"
+  }
+}

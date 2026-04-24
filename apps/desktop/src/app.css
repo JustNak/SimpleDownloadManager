@@ -1,0 +1,156 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: oklch(98.5% 0.003 247);
+  --color-foreground: oklch(20% 0.012 247);
+  --color-surface: oklch(96.8% 0.004 247);
+  --color-sidebar: oklch(98.9% 0.003 247);
+  --color-command: oklch(98.2% 0.003 247);
+  --color-header: oklch(96.2% 0.004 247);
+  --color-muted: oklch(93.5% 0.005 247);
+  --color-muted-foreground: oklch(48% 0.012 247);
+  --color-popover: oklch(100% 0 0);
+  --color-popover-foreground: oklch(20% 0.012 247);
+  --color-card: oklch(100% 0 0);
+  --color-card-foreground: oklch(20% 0.012 247);
+  --color-border: oklch(88.5% 0.007 247);
+  --color-input: oklch(86.8% 0.008 247);
+  --color-row-hover: oklch(97.2% 0.006 247);
+  --color-selected: oklch(93.4% 0.031 255);
+  --color-primary: oklch(58% 0.19 257);
+  --color-primary-soft: oklch(94.2% 0.04 257);
+  --color-primary-foreground: oklch(99% 0 0);
+  --color-secondary: oklch(94.5% 0.005 247);
+  --color-secondary-foreground: oklch(24% 0.012 247);
+  --color-accent: oklch(94.2% 0.04 257);
+  --color-accent-foreground: oklch(28% 0.11 257);
+  --color-destructive: oklch(57% 0.18 26);
+  --color-destructive-foreground: oklch(99% 0 0);
+  --color-success: oklch(55% 0.14 145);
+  --color-warning: oklch(65% 0.17 55);
+  --color-progress-track: oklch(91% 0.004 247);
+  --color-ring: oklch(58% 0.19 257);
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.5rem;
+  --radius-2xl: 0.5rem;
+}
+
+@layer base {
+  .dark {
+    --color-background: oklch(16% 0.008 247);
+    --color-foreground: oklch(94% 0.005 247);
+    --color-surface: oklch(13.5% 0.008 247);
+    --color-sidebar: oklch(15% 0.008 247);
+    --color-command: oklch(17% 0.008 247);
+    --color-header: oklch(20% 0.009 247);
+    --color-muted: oklch(24% 0.009 247);
+    --color-muted-foreground: oklch(66% 0.01 247);
+    --color-popover: oklch(18% 0.008 247);
+    --color-popover-foreground: oklch(94% 0.005 247);
+    --color-card: oklch(18% 0.008 247);
+    --color-card-foreground: oklch(94% 0.005 247);
+    --color-border: oklch(27% 0.009 247);
+    --color-input: oklch(31% 0.009 247);
+    --color-row-hover: oklch(21% 0.009 247);
+    --color-selected: oklch(27% 0.045 257);
+    --color-primary: oklch(66% 0.17 257);
+    --color-primary-soft: oklch(25% 0.05 257);
+    --color-primary-foreground: oklch(12% 0.01 247);
+    --color-secondary: oklch(23% 0.009 247);
+    --color-secondary-foreground: oklch(94% 0.005 247);
+    --color-accent: oklch(25% 0.05 257);
+    --color-accent-foreground: oklch(86% 0.08 257);
+    --color-destructive: oklch(62% 0.17 25);
+    --color-destructive-foreground: oklch(99% 0 0);
+    --color-success: oklch(67% 0.15 145);
+    --color-warning: oklch(75% 0.15 65);
+    --color-progress-track: oklch(28% 0.009 247);
+    --color-ring: oklch(66% 0.17 257);
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: 0;
+    overflow: hidden;
+  }
+
+  button,
+  input,
+  select {
+    font: inherit;
+    letter-spacing: 0;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline: 2px solid color-mix(in oklch, var(--color-primary) 70%, transparent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .app-window {
+    border-radius: 10px;
+  }
+
+  .download-sidebar,
+  .command-bar,
+  .status-bar,
+  .download-table,
+  .details-pane,
+  .settings-surface {
+    color: var(--color-foreground);
+  }
+
+  .file-badge {
+    box-shadow: 0 1px 1px color-mix(in oklch, var(--color-foreground) 8%, transparent);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--color-muted-foreground) 32%, transparent);
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklch, var(--color-muted-foreground) 52%, transparent);
+}

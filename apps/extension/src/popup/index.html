@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simple Download Manager</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      body {
+        margin: 0;
+        padding: 16px;
+        width: 350px;
+        background-color: var(--bg-color, #ffffff);
+        color: var(--text-color, #333333);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg-color: #1e1e1e;
+          --text-color: #f0f0f0;
+          --input-bg: #2d2d2d;
+          --border-color: #444;
+          --button-bg: #3a3a3a;
+          --button-hover: #4a4a4a;
+          --primary-bg: #0078d4;
+          --primary-hover: #106ebe;
+        }
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg-color: #ffffff;
+          --text-color: #333333;
+          --input-bg: #f9f9f9;
+          --border-color: #ccc;
+          --button-bg: #e1e1e1;
+          --button-hover: #d1d1d1;
+          --primary-bg: #0078d4;
+          --primary-hover: #005a9e;
+        }
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      .status-badge {
+        font-size: 11px;
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-weight: 500;
+        text-transform: uppercase;
+        background-color: #f2f2f2;
+        color: #666;
+      }
+
+      .status-badge.connected { background-color: #dff6dd; color: #107c10; }
+      .status-badge.error,
+      .status-badge.host_missing,
+      .status-badge.app_missing,
+      .status-badge.app_unreachable { background-color: #fde7e9; color: #a80000; }
+      .status-badge.checking { background-color: #fff4ce; color: #797775; }
+
+      form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      label {
+        font-size: 13px;
+        font-weight: 500;
+      }
+
+      input {
+        font: inherit;
+        padding: 8px 10px;
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        background-color: var(--input-bg);
+        color: var(--text-color);
+        outline: none;
+      }
+
+      input:focus {
+        border-color: var(--primary-bg);
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      button {
+        flex: 1;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        padding: 8px 12px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        background-color: var(--button-bg);
+        color: var(--text-color);
+        transition: background-color 0.2s;
+      }
+
+      button:hover {
+        background-color: var(--button-hover);
+      }
+
+      button.primary {
+        background-color: var(--primary-bg);
+        color: white;
+      }
+
+      button.primary:hover {
+        background-color: var(--primary-hover);
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .message-area {
+        margin-top: 12px;
+        font-size: 13px;
+        min-height: 20px;
+      }
+
+      .message-area.success { color: #107c10; }
+      .message-area.error { color: #a80000; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Simple Download Manager</h1>
+      <span id="connection-status" class="status-badge checking">Checking</span>
+    </header>
+
+    <form id="download-form">
+      <label for="url">File URL</label>
+      <input id="url" name="url" type="url" placeholder="https://example.com/file.zip" required />
+      
+      <div class="actions">
+        <button id="open-app-button" type="button">Open App</button>
+        <button id="submit-button" type="submit" class="primary" disabled>Send to Queue</button>
+      </div>
+    </form>
+
+    <div id="message-area" class="message-area" role="alert"></div>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

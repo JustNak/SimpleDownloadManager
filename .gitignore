@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+release/
+test-runtime/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/install/
+.DS_Store
+Thumbs.db

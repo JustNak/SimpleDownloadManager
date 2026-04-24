@@ -1,0 +1,17 @@
+{
+  "name": "@myapp/extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@myapp/protocol": "file:../../packages/protocol",
+    "webextension-polyfill": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^120.0.4"
+  }
+}

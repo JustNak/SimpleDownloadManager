@@ -1,0 +1,9 @@
+{
+  "name": "com.myapp.download_manager",
+  "description": "Simple Download Manager native messaging host",
+  "path": "__HOST_PATH__",
+  "type": "stdio",
+  "allowed_extensions": [
+    "__FIREFOX_EXTENSION_ID__"
+  ]
+}

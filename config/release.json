@@ -1,0 +1,6 @@
+{
+  "nativeHostName": "com.myapp.download_manager",
+  "firefoxExtensionId": "simple-download-manager@example.com",
+  "chromiumExtensionKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzoBY8EsvTWKv/VuXKWXmW7mpMUMTj8TZPBk49joFJGn1EuSkFhrmEVscKxz/aYBxl2Ud2jn7ix3f5YOczE8FFPJdre18fBOkZOL7mn5UgY502HPsHKjSkqI2uJlxCaVy1yPTgJylzUebaA2z4noEQtmI8cy4sTyLSCyn5d6CQXDoK4nJmV0P1W5yaX2AypFAaabMLG+zdoK6X+WrzyJfMnGSCZ9HyemZn33zFmJK2VX1lALQBEUngztFfAShPovJw2Fb/1/719b9sderX+7CtPCfwcaVE/pZUEDelR2hylO+OTYUWAlq/81xmL3cqvUzyNiDZ3o7faKgNfVkka06eQIDAQAB",
+  "chromiumExtensionId": "pkaojpfpjieklhinoibjibmjldohlmbb"
+}
