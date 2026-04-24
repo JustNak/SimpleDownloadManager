@@ -3,10 +3,13 @@ import {
   createEnqueueDownloadRequest,
   createOpenAppRequest,
   createPingRequest,
+  createPromptDownloadRequest,
+  createSaveExtensionSettingsRequest,
   toUserFacingMessage,
   type BrowserKind,
   type EnqueueDownloadPayload,
   type ErrorCode,
+  type ExtensionIntegrationSettings,
   type HostToExtensionResponse,
   type RequestSource,
 } from '@myapp/protocol';
@@ -116,6 +119,29 @@ export async function enqueueDownload(url: string, source: Omit<RequestSource, '
   }
 
   return sendNativeMessage(request.value);
+}
+
+export async function promptDownload(
+  url: string,
+  source: Omit<RequestSource, 'browser'>,
+  metadata: { suggestedFilename?: string; totalBytes?: number } = {},
+): Promise<HostToExtensionResponse> {
+  const request = createPromptDownloadRequest(url, { ...source, browser: detectBrowser() }, metadata);
+  if (!request.ok) {
+    return {
+      ok: false,
+      requestId: 'validation_error',
+      type: 'rejected',
+      code: request.code,
+      message: request.message,
+    };
+  }
+
+  return sendNativeMessage(request.value);
+}
+
+export async function saveExtensionSettings(settings: ExtensionIntegrationSettings): Promise<HostToExtensionResponse> {
+  return sendNativeMessage(createSaveExtensionSettingsRequest(settings));
 }
 
 export function buildContextMenuPayload(info: browser.contextMenus.OnClickData, tab?: browser.tabs.Tab): EnqueueDownloadPayload | null {

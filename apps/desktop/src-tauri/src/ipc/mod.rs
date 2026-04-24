@@ -1,13 +1,20 @@
 use crate::commands::emit_snapshot;
 use crate::download::schedule_downloads;
-use crate::state::{BackendError, EnqueueResult, EnqueueStatus, SharedState};
+use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
+use crate::state::{
+    BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
+};
 use crate::storage::{
-    ConnectionState, DownloadSource, HostRegistrationDiagnostics, HostRegistrationEntry,
-    HostRegistrationStatus, QueueSummary,
+    ConnectionState, DownloadSource, ExtensionIntegrationSettings, HostRegistrationDiagnostics,
+    HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
+};
+use crate::windows::{
+    focus_job_in_main_window, focus_main_window, show_download_prompt_window, show_progress_window,
+    DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
@@ -77,6 +84,15 @@ struct EnqueuePayload {
     source: EnqueueSource,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptDownloadPayload {
+    url: String,
+    source: EnqueueSource,
+    suggested_filename: Option<String>,
+    total_bytes: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostResponse {
@@ -93,7 +109,13 @@ struct HostResponse {
 }
 
 impl HostResponse {
-    fn ready(request_id: String, app_state: &str, connection_state: ConnectionState, queue_summary: QueueSummary) -> Self {
+    fn ready(
+        request_id: String,
+        app_state: &str,
+        connection_state: ConnectionState,
+        queue_summary: QueueSummary,
+        extension_settings: ExtensionIntegrationSettings,
+    ) -> Self {
         Self {
             ok: true,
             request_id,
@@ -102,6 +124,7 @@ impl HostResponse {
                 "appState": app_state,
                 "connectionState": connection_state,
                 "queueSummary": queue_summary,
+                "extensionSettings": extension_settings,
             })),
             code: None,
             message: None,
@@ -123,6 +146,34 @@ impl HostResponse {
         }
     }
 
+    fn existing_job(request_id: String, job_id: String, filename: String) -> Self {
+        Self {
+            ok: true,
+            request_id,
+            message_type: "duplicate_existing_job".into(),
+            payload: Some(json!({
+                "jobId": job_id,
+                "filename": filename,
+                "status": "duplicate_existing_job",
+            })),
+            code: None,
+            message: None,
+        }
+    }
+
+    fn prompt_canceled(request_id: String) -> Self {
+        Self {
+            ok: true,
+            request_id,
+            message_type: "prompt_canceled".into(),
+            payload: Some(json!({
+                "status": "canceled",
+            })),
+            code: None,
+            message: None,
+        }
+    }
+
     fn error(request_id: String, message_type: &str, code: &'static str, message: String) -> Self {
         Self {
             ok: false,
@@ -136,14 +187,21 @@ impl HostResponse {
 }
 
 #[cfg(windows)]
-pub fn start_named_pipe_listener(app: AppHandle, state: SharedState) {
+pub fn start_named_pipe_listener(app: AppHandle, state: SharedState, prompts: PromptRegistry) {
     let listener_app = app.clone();
     let listener_state = state.clone();
+    let listener_prompts = prompts.clone();
     tauri::async_runtime::spawn(async move {
         refresh_connection_diagnostics(&listener_app, &listener_state).await;
 
         loop {
-            if let Err(error) = accept_single_connection(listener_app.clone(), listener_state.clone()).await {
+            if let Err(error) = accept_single_connection(
+                listener_app.clone(),
+                listener_state.clone(),
+                listener_prompts.clone(),
+            )
+            .await
+            {
                 eprintln!("named pipe listener error: {error}");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
@@ -161,10 +219,14 @@ pub fn start_named_pipe_listener(app: AppHandle, state: SharedState) {
 }
 
 #[cfg(not(windows))]
-pub fn start_named_pipe_listener(_app: AppHandle, _state: SharedState) {}
+pub fn start_named_pipe_listener(_app: AppHandle, _state: SharedState, _prompts: PromptRegistry) {}
 
 #[cfg(windows)]
-async fn accept_single_connection(app: AppHandle, state: SharedState) -> Result<(), String> {
+async fn accept_single_connection(
+    app: AppHandle,
+    state: SharedState,
+    prompts: PromptRegistry,
+) -> Result<(), String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -194,7 +256,7 @@ async fn accept_single_connection(app: AppHandle, state: SharedState) -> Result<
             let request = serde_json::from_str::<HostRequest>(&request_line)
                 .map_err(|error| format!("Could not parse host request: {error}"))?;
 
-            let response = handle_request(app, state, request).await;
+            let response = handle_request(app, state, prompts, request).await;
             let response_json = serde_json::to_string(&response)
                 .map_err(|error| format!("Could not serialize host response: {error}"))?;
 
@@ -220,7 +282,12 @@ async fn accept_single_connection(app: AppHandle, state: SharedState) -> Result<
     Ok(())
 }
 
-async fn handle_request(app: AppHandle, state: SharedState, request: HostRequest) -> HostResponse {
+async fn handle_request(
+    app: AppHandle,
+    state: SharedState,
+    prompts: PromptRegistry,
+    request: HostRequest,
+) -> HostResponse {
     if request.protocol_version != PROTOCOL_VERSION {
         return HostResponse::error(
             request.request_id,
@@ -237,13 +304,155 @@ async fn handle_request(app: AppHandle, state: SharedState, request: HostRequest
         "ping" | "get_status" => {
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
-            HostResponse::ready(request.request_id, "running", connection_state, queue_summary)
+            let extension_settings = state.extension_integration_settings().await;
+            HostResponse::ready(
+                request.request_id,
+                "running",
+                connection_state,
+                queue_summary,
+                extension_settings,
+            )
         }
         "open_app" | "show_window" => {
             focus_main_window(&app);
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
-            HostResponse::ready(request.request_id, "launched", connection_state, queue_summary)
+            let extension_settings = state.extension_integration_settings().await;
+            HostResponse::ready(
+                request.request_id,
+                "launched",
+                connection_state,
+                queue_summary,
+                extension_settings,
+            )
+        }
+        "save_extension_settings" => {
+            let extension_settings = match serde_json::from_value::<ExtensionIntegrationSettings>(
+                request.payload,
+            ) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    return HostResponse::error(
+                        request.request_id,
+                        "invalid_payload",
+                        "INVALID_PAYLOAD",
+                        format!("Could not parse extension settings: {error}"),
+                    )
+                }
+            };
+
+            match state
+                .save_extension_integration_settings(extension_settings)
+                .await
+            {
+                Ok(snapshot) => {
+                    emit_snapshot(&app, &snapshot);
+                    let connection_state = register_host_contact(&app, &state).await;
+                    let queue_summary = state.queue_summary().await;
+                    let extension_settings = state.extension_integration_settings().await;
+                    HostResponse::ready(
+                        request.request_id,
+                        "running",
+                        connection_state,
+                        queue_summary,
+                        extension_settings,
+                    )
+                }
+                Err(message) => HostResponse::error(
+                    request.request_id,
+                    "blocked_by_policy",
+                    "INTERNAL_ERROR",
+                    message,
+                ),
+            }
+        }
+        "prompt_download" => {
+            let payload = match serde_json::from_value::<PromptDownloadPayload>(request.payload) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return HostResponse::error(
+                        request.request_id,
+                        "invalid_payload",
+                        "INVALID_PAYLOAD",
+                        format!("Could not parse prompt payload: {error}"),
+                    )
+                }
+            };
+
+            let prompt = match state
+                .prepare_download_prompt(
+                    request.request_id.clone(),
+                    &payload.url,
+                    Some(payload.source.into()),
+                    payload.suggested_filename,
+                    payload.total_bytes,
+                )
+                .await
+            {
+                Ok(prompt) => prompt,
+                Err(error) => return map_backend_error(request.request_id, error),
+            };
+
+            let receiver = prompts.enqueue(prompt.clone()).await;
+            if let Err(error) = show_download_prompt_window(&app) {
+                let _ = prompts.resolve(&prompt.id, PromptDecision::Cancel).await;
+                return HostResponse::error(
+                    request.request_id,
+                    "blocked_by_policy",
+                    "INTERNAL_ERROR",
+                    format!("Could not open download prompt: {error}"),
+                );
+            }
+            if let Some(active_prompt) = prompts.active_prompt().await {
+                let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
+            }
+
+            match receiver.await.unwrap_or(PromptDecision::Cancel) {
+                PromptDecision::Cancel => HostResponse::prompt_canceled(request.request_id),
+                PromptDecision::ShowExisting => {
+                    if let Some(job) = prompt.duplicate_job {
+                        focus_job_in_main_window(&app, &job.id);
+                        HostResponse::existing_job(request.request_id, job.id, job.filename)
+                    } else {
+                        HostResponse::prompt_canceled(request.request_id)
+                    }
+                }
+                PromptDecision::Download {
+                    directory_override,
+                    allow_duplicate,
+                } => {
+                    let result = state
+                        .enqueue_download_with_options(
+                            prompt.url,
+                            EnqueueOptions {
+                                source: prompt.source,
+                                directory_override,
+                                filename_hint: Some(prompt.filename),
+                                duplicate_policy: if allow_duplicate {
+                                    DuplicatePolicy::Allow
+                                } else {
+                                    DuplicatePolicy::ReturnExisting
+                                },
+                            },
+                        )
+                        .await;
+
+                    match result {
+                        Ok(result) => {
+                            let show_progress = state.show_progress_after_handoff().await;
+                            emit_snapshot(&app, &result.snapshot);
+                            if result.status == EnqueueStatus::Queued {
+                                if show_progress {
+                                    let _ = show_progress_window(&app, &result.job_id);
+                                }
+                                schedule_downloads(app, state);
+                            }
+                            HostResponse::enqueue_result(request.request_id, result)
+                        }
+                        Err(error) => map_backend_error(request.request_id, error),
+                    }
+                }
+            }
         }
         "enqueue_download" => {
             let payload = match serde_json::from_value::<EnqueuePayload>(request.payload) {
@@ -439,13 +648,6 @@ impl From<HostRegistrationStatus> for HostRegistration {
             HostRegistrationStatus::Missing => HostRegistration::Missing,
             HostRegistrationStatus::Broken => HostRegistration::Broken,
         }
-    }
-}
-
-fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
     }
 }
 

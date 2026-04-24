@@ -1,144 +1,130 @@
-import type { HostToExtensionResponse, PongPayload } from '@myapp/protocol';
-import { isErrorResponse, toUserFacingMessage } from '@myapp/protocol';
+import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import browser from 'webextension-polyfill';
-import { connectionForErrorCode } from '../background/nativeMessaging';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 
-const urlInput = document.querySelector<HTMLInputElement>('#url');
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
-const messageArea = document.querySelector<HTMLDivElement>('#message-area');
-const form = document.querySelector<HTMLFormElement>('#download-form');
-const submitButton = document.querySelector<HTMLButtonElement>('#submit-button');
-const openAppButton = document.querySelector<HTMLButtonElement>('#open-app-button');
+const silentDownloadToggle = document.querySelector<HTMLInputElement>('#silent-download-toggle');
+const silentDownloadHint = document.querySelector<HTMLDivElement>('#silent-download-hint');
+const extensionToggleButton = document.querySelector<HTMLButtonElement>('#extension-toggle-button');
+const advancedButton = document.querySelector<HTMLButtonElement>('#advanced-button');
 
-function setBusy(isBusy: boolean) {
-  if (submitButton) submitButton.disabled = isBusy;
-  if (openAppButton) openAppButton.disabled = isBusy;
-}
-
-function updateConnectionStatus(connection: string) {
-  if (!statusBadge) return;
-  
-  statusBadge.className = `status-badge ${connection}`;
-  switch (connection) {
-    case 'connected': statusBadge.textContent = 'Connected'; break;
-    case 'host_missing': statusBadge.textContent = 'Host Missing'; break;
-    case 'app_missing': statusBadge.textContent = 'App Missing'; break;
-    case 'app_unreachable': statusBadge.textContent = 'Unreachable'; break;
-    case 'error': statusBadge.textContent = 'Error'; break;
-    default: statusBadge.textContent = 'Checking'; break;
-  }
-
-  // Disable submit if not connected
-  if (submitButton) {
-    submitButton.disabled = connection !== 'connected';
-  }
-}
-
-function renderMessage(isError: boolean, message: string) {
-  if (!messageArea) return;
-  messageArea.className = `message-area ${isError ? 'error' : 'success'}`;
-  messageArea.textContent = message;
-}
-
-function renderState(state: PopupStateResponse) {
-  setBusy(state.isSubmitting);
-  updateConnectionStatus(state.connection);
-
-  if (state.lastError) {
-    renderMessage(true, toUserFacingMessage(state.lastError.code, state.lastError.message));
-  } else if (state.lastResult) {
-    renderMessage(false, renderResult(state.lastResult));
-  } else {
-    if (messageArea) messageArea.textContent = '';
-  }
-}
-
-function renderResult(response?: HostToExtensionResponse): string {
-  if (!response) return '';
-  if (isErrorResponse(response)) return '';
-  if (response.type === 'accepted') {
-    if (response.payload.status === 'duplicate_existing_job') {
-      return `Already queued as ${response.payload.jobId}`;
-    }
-
-    return `Queued as ${response.payload.jobId}`;
-  }
-
-  const payload = response.payload as PongPayload | undefined;
-  const summary = payload?.queueSummary;
-  if (!summary) {
-    return 'Desktop app is connected.';
-  }
-
-  const attention = summary.attention ?? summary.failed;
-  if (attention > 0) {
-    return `Connected. ${summary.active} active, ${attention} need attention, ${summary.completed} finished.`;
-  }
-
-  return `Connected. ${summary.active} active, ${summary.completed} finished.`;
-}
+let currentState: PopupStateResponse | null = null;
+let isUpdating = false;
 
 async function sendMessage<T>(message: PopupRequest): Promise<T> {
   return browser.runtime.sendMessage(message) as Promise<T>;
 }
 
-form?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (!urlInput || !urlInput.value) return;
+function renderState(state: PopupStateResponse) {
+  currentState = state;
+  const settings = state.extensionSettings;
 
-  setBusy(true);
-  const response = await sendMessage<HostToExtensionResponse>({ type: 'popup_enqueue', url: urlInput.value });
-  
-  if (isErrorResponse(response)) {
-    const connState = connectionForErrorCode(response.code);
-    renderState({
-      connection: connState,
-      isSubmitting: false,
-      lastError: { code: response.code, message: response.message },
-    });
-    return;
+  updateConnectionStatus(state.connection);
+
+  if (silentDownloadToggle) {
+    silentDownloadToggle.checked = settings?.downloadHandoffMode === 'auto';
+    silentDownloadToggle.disabled = isUpdating || settings?.enabled === false;
   }
 
-  renderState({ connection: 'connected', isSubmitting: false, lastResult: response });
-  urlInput.value = '';
-});
-
-openAppButton?.addEventListener('click', async () => {
-  setBusy(true);
-  const response = await sendMessage<HostToExtensionResponse>({ type: 'popup_open_app' });
-  
-  if (isErrorResponse(response)) {
-    const connState = connectionForErrorCode(response.code);
-    renderState({
-      connection: connState,
-      isSubmitting: false,
-      lastError: { code: response.code, message: response.message },
-    });
-    return;
+  if (silentDownloadHint) {
+    silentDownloadHint.textContent = settings?.downloadHandoffMode === 'auto'
+      ? 'Send downloads without a prompt.'
+      : 'Ask before sending downloads.';
   }
 
-  renderState({ connection: 'connected', isSubmitting: false, lastResult: response });
-});
+  if (extensionToggleButton) {
+    const isEnabled = settings?.enabled !== false;
+    extensionToggleButton.textContent = isEnabled ? 'Disable Extension' : 'Enable Extension';
+    extensionToggleButton.className = isEnabled ? 'danger' : 'primary';
+    extensionToggleButton.disabled = isUpdating;
+  }
 
-// Initial ping
-async function init() {
-  try {
-    const initialState = await sendMessage<HostToExtensionResponse>({ type: 'popup_ping' });
-    if (isErrorResponse(initialState)) {
-      const connState = connectionForErrorCode(initialState.code);
-      renderState({
-        connection: connState,
-        isSubmitting: false,
-        lastError: { code: initialState.code, message: initialState.message },
-      });
-    } else {
-      renderState({ connection: 'connected', isSubmitting: false, lastResult: initialState });
-    }
-  } catch (err) {
-    updateConnectionStatus('error');
-    renderMessage(true, 'Failed to connect to background script.');
+  if (advancedButton) {
+    advancedButton.disabled = isUpdating;
   }
 }
 
-init();
+function updateConnectionStatus(connection: PopupStateResponse['connection']) {
+  if (!statusBadge) return;
+
+  statusBadge.className = `status ${connection}`;
+  switch (connection) {
+    case 'connected':
+      statusBadge.textContent = 'Connected';
+      break;
+    case 'host_missing':
+      statusBadge.textContent = 'Host Missing';
+      break;
+    case 'app_missing':
+      statusBadge.textContent = 'App Missing';
+      break;
+    case 'app_unreachable':
+      statusBadge.textContent = 'Unreachable';
+      break;
+    case 'error':
+      statusBadge.textContent = 'Error';
+      break;
+    default:
+      statusBadge.textContent = 'Checking';
+      break;
+  }
+}
+
+function nextSettings(update: Partial<ExtensionIntegrationSettings>): ExtensionIntegrationSettings | null {
+  const settings = currentState?.extensionSettings;
+  if (!settings) return null;
+  return { ...settings, ...update };
+}
+
+async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
+  const settings = nextSettings(update);
+  if (!settings) return;
+
+  isUpdating = true;
+  if (currentState) renderState(currentState);
+  const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
+  isUpdating = false;
+  renderState(state);
+}
+
+silentDownloadToggle?.addEventListener('change', () => {
+  void updateSettings({
+    downloadHandoffMode: silentDownloadToggle.checked ? 'auto' : 'ask',
+  });
+});
+
+extensionToggleButton?.addEventListener('click', () => {
+  const isEnabled = currentState?.extensionSettings?.enabled !== false;
+  void updateSettings({ enabled: !isEnabled });
+});
+
+advancedButton?.addEventListener('click', async () => {
+  isUpdating = true;
+  if (currentState) renderState(currentState);
+  const state = await sendMessage<PopupStateResponse>({ type: 'popup_open_options' });
+  isUpdating = false;
+  renderState(state);
+});
+
+async function init() {
+  try {
+    await sendMessage({ type: 'popup_ping' });
+    const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
+    renderState(state);
+  } catch {
+    renderState({
+      connection: 'error',
+      isSubmitting: false,
+      extensionSettings: {
+        enabled: true,
+        downloadHandoffMode: 'ask',
+        contextMenuEnabled: true,
+        showProgressAfterHandoff: true,
+        showBadgeStatus: true,
+        excludedHosts: [],
+      },
+    });
+  }
+}
+
+void init();

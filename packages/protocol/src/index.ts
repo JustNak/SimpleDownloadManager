@@ -6,8 +6,14 @@ export const MAX_METADATA_LENGTH = 512;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:'] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
-export type ExtensionEntryPoint = 'context_menu' | 'popup';
-export type ExtensionRequestType = 'ping' | 'enqueue_download' | 'open_app' | 'get_status';
+export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
+export type ExtensionRequestType =
+  | 'ping'
+  | 'enqueue_download'
+  | 'prompt_download'
+  | 'open_app'
+  | 'get_status'
+  | 'save_extension_settings';
 export type HostResponseType =
   | 'pong'
   | 'accepted'
@@ -15,10 +21,23 @@ export type HostResponseType =
   | 'app_not_installed'
   | 'app_unreachable'
   | 'invalid_payload';
-export type AppRequestType = 'ping' | 'get_status' | 'enqueue_download' | 'show_window';
-export type AppResponseType = 'queued' | 'duplicate_existing_job' | 'invalid_url' | 'blocked_by_policy' | 'ready';
+export type AppRequestType =
+  | 'ping'
+  | 'get_status'
+  | 'enqueue_download'
+  | 'prompt_download'
+  | 'show_window'
+  | 'save_extension_settings';
+export type AppResponseType =
+  | 'queued'
+  | 'duplicate_existing_job'
+  | 'prompt_canceled'
+  | 'invalid_url'
+  | 'blocked_by_policy'
+  | 'ready';
 
 export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
+export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -55,6 +74,13 @@ export interface EnqueueDownloadPayload {
   source: RequestSource;
 }
 
+export interface PromptDownloadPayload {
+  url: string;
+  source: RequestSource;
+  suggestedFilename?: string;
+  totalBytes?: number;
+}
+
 export interface OpenAppPayload {
   reason: 'user_request' | 'reconnect';
 }
@@ -86,8 +112,8 @@ export interface ErrorResponse<TType extends HostResponseType = HostResponseType
 }
 
 export interface AcceptedPayload {
-  status: 'queued' | 'duplicate_existing_job';
-  jobId: string;
+  status: 'queued' | 'duplicate_existing_job' | 'canceled';
+  jobId?: string;
   filename?: string;
   appState: 'running' | 'launched';
 }
@@ -102,11 +128,21 @@ export interface QueueSummary {
   failed: number;
 }
 
+export interface ExtensionIntegrationSettings {
+  enabled: boolean;
+  downloadHandoffMode: DownloadHandoffMode;
+  contextMenuEnabled: boolean;
+  showProgressAfterHandoff: boolean;
+  showBadgeStatus: boolean;
+  excludedHosts: string[];
+}
+
 export interface PongPayload {
   appState: 'running' | 'launched';
   extensionVersion?: string;
   connectionState?: DesktopConnectionState;
   queueSummary?: QueueSummary;
+  extensionSettings?: ExtensionIntegrationSettings;
 }
 
 export interface AppRequestEnvelope<TType extends AppRequestType, TPayload> {
@@ -134,8 +170,10 @@ export interface AppErrorResponse {
 export type ExtensionToHostRequest =
   | RequestEnvelope<'ping', EmptyPayload>
   | RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
+  | RequestEnvelope<'prompt_download', PromptDownloadPayload>
   | RequestEnvelope<'open_app', OpenAppPayload>
-  | RequestEnvelope<'get_status', EmptyPayload>;
+  | RequestEnvelope<'get_status', EmptyPayload>
+  | RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
 export type HostToExtensionResponse =
   | SuccessResponse<'pong', PongPayload>
@@ -146,15 +184,26 @@ export type AppRequest =
   | AppRequestEnvelope<'ping', EmptyPayload>
   | AppRequestEnvelope<'get_status', EmptyPayload>
   | AppRequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
-  | AppRequestEnvelope<'show_window', OpenAppPayload>;
+  | AppRequestEnvelope<'prompt_download', PromptDownloadPayload>
+  | AppRequestEnvelope<'show_window', OpenAppPayload>
+  | AppRequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
 export type AppResponse =
-  | AppSuccessResponse<'ready', { appState: 'running' | 'launched' }>
+  | AppSuccessResponse<
+      'ready',
+      {
+        appState: 'running' | 'launched';
+        connectionState?: DesktopConnectionState;
+        queueSummary?: QueueSummary;
+        extensionSettings?: ExtensionIntegrationSettings;
+      }
+    >
   | AppSuccessResponse<'queued', { jobId: string; filename?: string; status: 'queued' }>
   | AppSuccessResponse<
       'duplicate_existing_job',
       { jobId: string; filename?: string; status: 'duplicate_existing_job' }
     >
+  | AppSuccessResponse<'prompt_canceled', { status: 'canceled' }>
   | AppErrorResponse;
 
 export type ValidationResult<T> =
@@ -260,6 +309,50 @@ export function createEnqueueDownloadRequest(
         source: sanitizeSource(source),
       },
     },
+  };
+}
+
+export function createPromptDownloadRequest(
+  url: string,
+  source: RequestSource,
+  metadata: { suggestedFilename?: string; totalBytes?: number } = {},
+  requestId = createRequestId(),
+): ValidationResult<RequestEnvelope<'prompt_download', PromptDownloadPayload>> {
+  const validatedUrl = validateHttpUrl(url);
+  if (!validatedUrl.ok) {
+    return validatedUrl;
+  }
+
+  const totalBytes =
+    typeof metadata.totalBytes === 'number' && Number.isFinite(metadata.totalBytes) && metadata.totalBytes > 0
+      ? Math.floor(metadata.totalBytes)
+      : undefined;
+
+  return {
+    ok: true,
+    value: {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      type: 'prompt_download',
+      payload: {
+        url: validatedUrl.value,
+        source: sanitizeSource(source),
+        suggestedFilename: trimMetadata(metadata.suggestedFilename),
+        totalBytes,
+      },
+    },
+  };
+}
+
+export function createSaveExtensionSettingsRequest(
+  settings: ExtensionIntegrationSettings,
+  requestId = createRequestId(),
+): RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'save_extension_settings',
+    payload: settings,
   };
 }
 

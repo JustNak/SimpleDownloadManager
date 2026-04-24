@@ -27,6 +27,7 @@ export type FailureCategory =
   | 'internal';
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
+export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 
 export interface DownloadSource {
   entryPoint: string;
@@ -57,12 +58,34 @@ export interface DownloadJob {
   tempPath?: string;
 }
 
+export interface DownloadPrompt {
+  id: string;
+  url: string;
+  filename: string;
+  source?: DownloadSource;
+  totalBytes?: number;
+  defaultDirectory: string;
+  targetPath: string;
+  duplicateJob?: DownloadJob;
+}
+
+export interface ExtensionIntegrationSettings {
+  enabled: boolean;
+  downloadHandoffMode: DownloadHandoffMode;
+  contextMenuEnabled: boolean;
+  showProgressAfterHandoff: boolean;
+  showBadgeStatus: boolean;
+  excludedHosts: string[];
+}
+
 export interface Settings {
   downloadDirectory: string;
   maxConcurrentDownloads: number;
   autoRetryAttempts: number;
+  speedLimitKibPerSecond: number;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'system';
+  extensionIntegration: ExtensionIntegrationSettings;
 }
 
 export interface QueueSummary {

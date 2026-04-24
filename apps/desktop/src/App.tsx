@@ -25,6 +25,8 @@ import {
   runHostRegistrationFix,
   saveSettings,
   subscribeToStateChanged,
+  subscribeToSelectedJobRequested,
+  testExtensionHandoff,
 } from './backend';
 import type { AddJobResult } from './backend';
 import {
@@ -33,14 +35,12 @@ import {
   Clock3,
   Download,
   Filter,
-  FolderOpen,
   Gauge,
   Pause,
   Play,
   Plus,
   Search,
   Settings as SettingsIcon,
-  Trash2,
   Wifi,
   WifiOff,
 } from 'lucide-react';
@@ -59,8 +59,17 @@ export default function App() {
     downloadDirectory: 'C:/Downloads',
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
+    speedLimitKibPerSecond: 0,
     notificationsEnabled: true,
     theme: 'system',
+    extensionIntegration: {
+      enabled: true,
+      downloadHandoffMode: 'ask',
+      contextMenuEnabled: true,
+      showProgressAfterHandoff: true,
+      showBadgeStatus: true,
+      excludedHosts: [],
+    },
   });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [view, setView] = useState<ViewState>('all');
@@ -106,6 +115,22 @@ export default function App() {
 
     return () => {
       isMounted = false;
+      void dispose?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let dispose: (() => void | Promise<void>) | undefined;
+
+    async function subscribe() {
+      dispose = await subscribeToSelectedJobRequested((jobId) => {
+        setView('all');
+        setSelectedJobId(jobId);
+      });
+    }
+
+    void subscribe();
+    return () => {
       void dispose?.();
     };
   }, []);
@@ -244,6 +269,15 @@ export default function App() {
     }
   }
 
+  async function handleTestExtensionHandoff() {
+    try {
+      await testExtensionHandoff();
+      addToast({ type: 'info', title: 'Test Handoff Started', message: 'A browser-style download prompt was opened.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Test Handoff Failed', message: getErrorMessage(error) });
+    }
+  }
+
   async function handleCopyDiagnostics() {
     if (!diagnostics) {
       addToast({ type: 'warning', title: 'Diagnostics Unavailable', message: 'Refresh diagnostics before copying the report.' });
@@ -356,7 +390,6 @@ export default function App() {
     }
   }, [displayedJobs, selectedJobId, view]);
 
-  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
   const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state));
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
   const totalDownloadSpeed = jobs
@@ -365,7 +398,22 @@ export default function App() {
 
   return (
     <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
-      <Titlebar />
+      <Titlebar>
+        {view !== 'settings' ? (
+          <CommandBar
+            searchQuery={searchQuery}
+            sortMode={sortMode}
+            onSearchChange={setSearchQuery}
+            onSortChange={setSortMode}
+            onAdd={() => setIsAddModalOpen(true)}
+            onResumeAll={() => void handleResumeAll()}
+            onPauseAll={() => void handlePauseAll()}
+            canResumeAll={canResumeAny}
+            canPauseAll={canPauseAny}
+            onCycleFilter={() => setView(nextFilterView(view))}
+          />
+        ) : null}
+      </Titlebar>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside className="download-sidebar flex w-[252px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-3 py-3">
@@ -395,30 +443,13 @@ export default function App() {
                 onRefreshDiagnostics={refreshDiagnostics}
                 onOpenInstallDocs={handleOpenInstallDocs}
                 onRunHostRegistrationFix={handleRunHostRegistrationFix}
+                onTestExtensionHandoff={handleTestExtensionHandoff}
                 onCopyDiagnostics={handleCopyDiagnostics}
                 onExportDiagnostics={handleExportDiagnostics}
               />
             </div>
           ) : (
             <>
-              <CommandBar
-                selectedJob={selectedJob}
-                searchQuery={searchQuery}
-                sortMode={sortMode}
-                onSearchChange={setSearchQuery}
-                onSortChange={setSortMode}
-                onAdd={() => setIsAddModalOpen(true)}
-                onResume={() => selectedJob && void handleResume(selectedJob.id)}
-                onPause={() => selectedJob && void handlePause(selectedJob.id)}
-                onResumeAll={() => void handleResumeAll()}
-                onPauseAll={() => void handlePauseAll()}
-                canResumeAll={canResumeAny}
-                canPauseAll={canPauseAny}
-                onRemove={() => selectedJob && void handleRemove(selectedJob.id)}
-                onReveal={() => selectedJob && void handleReveal(selectedJob.id)}
-                onCycleFilter={() => setView(nextFilterView(view))}
-              />
-
               <QueueView
                 jobs={displayedJobs}
                 view={view}
@@ -458,69 +489,51 @@ export default function App() {
 }
 
 function CommandBar({
-  selectedJob,
   searchQuery,
   sortMode,
   onSearchChange,
   onSortChange,
   onAdd,
-  onResume,
-  onPause,
   onResumeAll,
   onPauseAll,
   canResumeAll,
   canPauseAll,
-  onRemove,
-  onReveal,
   onCycleFilter,
 }: {
-  selectedJob: DownloadJob | null;
   searchQuery: string;
   sortMode: SortMode;
   onSearchChange: (value: string) => void;
   onSortChange: (value: SortMode) => void;
   onAdd: () => void;
-  onResume: () => void;
-  onPause: () => void;
   onResumeAll: () => void;
   onPauseAll: () => void;
   canResumeAll: boolean;
   canPauseAll: boolean;
-  onRemove: () => void;
-  onReveal: () => void;
   onCycleFilter: () => void;
 }) {
-  const canResume = selectedJob ? [JobState.Paused, JobState.Failed, JobState.Canceled].includes(selectedJob.state) : false;
-  const canPause = selectedJob ? [JobState.Queued, JobState.Starting, JobState.Downloading].includes(selectedJob.state) : false;
-  const hasSelection = Boolean(selectedJob);
-
   return (
-    <div className="command-bar flex h-20 shrink-0 items-center justify-between gap-4 border-b border-border bg-command px-6">
-      <div className="flex min-w-0 items-center gap-2">
-        <ToolbarButton icon={<Plus size={20} />} label="New Download" onClick={onAdd} strong />
-        <div className="mx-3 h-8 w-px bg-border" />
-        <ToolbarButton icon={<Play size={18} />} label="Resume" onClick={onResume} disabled={!canResume} />
-        <ToolbarButton icon={<Pause size={18} />} label="Pause" onClick={onPause} disabled={!canPause} />
+    <div className="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-4">
+      <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+        <ToolbarButton icon={<Plus size={19} />} label="New Download" onClick={onAdd} strong />
+        <div className="mx-2 h-6 w-px bg-border" />
         <ToolbarButton icon={<Play size={18} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
         <ToolbarButton icon={<Pause size={18} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
-        <ToolbarButton icon={<Trash2 size={18} />} label="Remove" onClick={onRemove} disabled={!hasSelection} />
-        <ToolbarButton icon={<FolderOpen size={18} />} label="Open Folder" onClick={onReveal} disabled={!selectedJob?.targetPath} />
       </div>
 
-      <div className="flex min-w-[440px] max-w-[560px] flex-1 items-center justify-end gap-3">
+      <div className="flex min-w-[320px] max-w-[620px] flex-1 items-center justify-end gap-2">
         <label className="relative min-w-0 flex-1">
-          <Search size={20} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search size={18} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             value={searchQuery}
             onChange={(event) => onSearchChange(event.target.value)}
-            className="h-11 w-full rounded-md border border-input bg-background pl-11 pr-4 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+            className="h-9 w-full rounded-md border border-input bg-background pl-10 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             placeholder="Search downloads..."
           />
         </label>
         <select
           value={sortMode}
           onChange={(event) => onSortChange(event.target.value as SortMode)}
-          className="h-11 rounded-md border border-input bg-background px-4 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
           aria-label="Sort downloads"
         >
           <option value="status">Sort by: Status</option>
@@ -530,11 +543,11 @@ function CommandBar({
         </select>
         <button
           onClick={onCycleFilter}
-          className="flex h-11 w-11 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
+          className="flex h-9 w-9 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
           title="Cycle filter"
           aria-label="Cycle filter"
         >
-          <Filter size={22} />
+          <Filter size={20} />
         </button>
       </div>
     </div>
@@ -558,7 +571,7 @@ function ToolbarButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium transition ${
+      className={`flex h-9 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-sm font-medium transition ${
         strong
           ? 'text-foreground hover:bg-muted'
           : 'text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground'
@@ -586,7 +599,7 @@ function NavItem({
   return (
     <button
       onClick={onClick}
-      className={`group relative flex h-14 w-full items-center gap-3 rounded-md px-4 text-left text-[15px] font-medium transition ${
+      className={`group relative flex h-12 w-full items-center gap-3 rounded-md px-3.5 text-left text-sm font-medium transition ${
         active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted'
       }`}
     >
@@ -615,27 +628,25 @@ function StatusBar({
   const isConnected = connectionState === ConnectionState.Connected;
 
   return (
-    <footer className="status-bar flex h-[68px] shrink-0 items-center justify-between border-t border-border bg-command px-10 text-sm text-muted-foreground">
-      <div className="flex items-center gap-5">
+    <footer className="status-bar flex h-10 shrink-0 items-center justify-between border-t border-border bg-command px-6 text-xs text-muted-foreground">
+      <div className="flex items-center gap-4">
         <span className="flex items-center gap-2">
-          <Gauge size={20} className="text-primary" />
+          <Gauge size={16} className="text-primary" />
           {activeCount} active downloads
         </span>
-        <span className="h-6 w-px bg-border" />
+        <span className="h-4 w-px bg-border" />
         <span className="flex items-center gap-2 text-foreground">
-          <Download size={20} className="text-primary" />
+          <Download size={16} className="text-primary" />
           {formatBytes(downloadSpeed)}/s
         </span>
-        <span className="text-muted-foreground">( down {formatBytes(downloadSpeed)}/s</span>
-        <span className="text-muted-foreground">up 0 B/s )</span>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         <span className={`flex items-center gap-2 ${isConnected ? 'text-foreground' : 'text-destructive'}`}>
-          {isConnected ? <Wifi size={20} /> : <WifiOff size={20} />}
+          {isConnected ? <Wifi size={16} /> : <WifiOff size={16} />}
           {formatConnectionState(connectionState)}
         </span>
-        <span className="text-muted-foreground">Connections: {connectionSlots}</span>
+        <span className="text-muted-foreground">Slots: {connectionSlots}</span>
       </div>
     </footer>
   );

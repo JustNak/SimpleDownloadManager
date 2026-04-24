@@ -7,165 +7,245 @@
     <style>
       :root {
         color-scheme: light dark;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      }
-
-      body {
-        margin: 0;
-        padding: 16px;
-        width: 350px;
-        background-color: var(--bg-color, #ffffff);
-        color: var(--text-color, #333333);
+        --bg: #f8fafc;
+        --panel: #ffffff;
+        --panel-strong: #f1f5f9;
+        --text: #172033;
+        --muted: #64748b;
+        --border: #d8e1ee;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --danger: #b91c1c;
+        --danger-soft: #fee2e2;
+        --success: #15803d;
+        --success-soft: #dcfce7;
+        --warning: #a16207;
+        --warning-soft: #fef3c7;
+        font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
       }
 
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg-color: #1e1e1e;
-          --text-color: #f0f0f0;
-          --input-bg: #2d2d2d;
-          --border-color: #444;
-          --button-bg: #3a3a3a;
-          --button-hover: #4a4a4a;
-          --primary-bg: #0078d4;
-          --primary-hover: #106ebe;
+          --bg: #090d12;
+          --panel: #11161d;
+          --panel-strong: #171d25;
+          --text: #f4f7fb;
+          --muted: #9aa8bb;
+          --border: #26313f;
+          --primary: #60a5fa;
+          --primary-hover: #3b82f6;
+          --danger: #f87171;
+          --danger-soft: #35191d;
+          --success: #6ee7a5;
+          --success-soft: #123322;
+          --warning: #facc15;
+          --warning-soft: #342b12;
         }
       }
 
-      @media (prefers-color-scheme: light) {
-        :root {
-          --bg-color: #ffffff;
-          --text-color: #333333;
-          --input-bg: #f9f9f9;
-          --border-color: #ccc;
-          --button-bg: #e1e1e1;
-          --button-hover: #d1d1d1;
-          --primary-bg: #0078d4;
-          --primary-hover: #005a9e;
-        }
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        width: 320px;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        letter-spacing: 0;
+      }
+
+      button,
+      input {
+        font: inherit;
+        letter-spacing: 0;
+      }
+
+      .shell {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding: 14px;
       }
 
       header {
         display: flex;
+        align-items: flex-start;
         justify-content: space-between;
-        align-items: center;
-        margin-bottom: 16px;
-        padding-bottom: 8px;
-        border-bottom: 1px solid var(--border-color);
+        gap: 12px;
       }
 
       h1 {
         margin: 0;
-        font-size: 16px;
-        font-weight: 600;
+        font-size: 15px;
+        font-weight: 750;
       }
 
-      .status-badge {
-        font-size: 11px;
+      .status {
+        border-radius: 999px;
         padding: 4px 8px;
-        border-radius: 12px;
-        font-weight: 500;
+        background: var(--warning-soft);
+        color: var(--warning);
+        font-size: 10px;
+        font-weight: 800;
         text-transform: uppercase;
-        background-color: #f2f2f2;
-        color: #666;
       }
 
-      .status-badge.connected { background-color: #dff6dd; color: #107c10; }
-      .status-badge.error,
-      .status-badge.host_missing,
-      .status-badge.app_missing,
-      .status-badge.app_unreachable { background-color: #fde7e9; color: #a80000; }
-      .status-badge.checking { background-color: #fff4ce; color: #797775; }
+      .status.connected {
+        background: var(--success-soft);
+        color: var(--success);
+      }
 
-      form {
+      .status.error,
+      .status.host_missing,
+      .status.app_missing,
+      .status.app_unreachable {
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+
+      .control {
         display: flex;
-        flex-direction: column;
-        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 58px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 12px;
       }
 
-      label {
-        font-size: 13px;
-        font-weight: 500;
+      .label {
+        font-size: 14px;
+        font-weight: 750;
       }
 
-      input {
-        font: inherit;
-        padding: 8px 10px;
-        border: 1px solid var(--border-color);
-        border-radius: 4px;
-        background-color: var(--input-bg);
-        color: var(--text-color);
-        outline: none;
+      .hint {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 15px;
       }
 
-      input:focus {
-        border-color: var(--primary-bg);
+      .switch {
+        position: relative;
+        display: inline-flex;
+        width: 48px;
+        height: 28px;
+        flex: 0 0 auto;
+        cursor: pointer;
+      }
+
+      .switch input {
+        position: absolute;
+        opacity: 0;
+      }
+
+      .track {
+        width: 100%;
+        border-radius: 999px;
+        background: var(--panel-strong);
+        border: 1px solid var(--border);
+        transition: background 140ms ease, border-color 140ms ease;
+      }
+
+      .thumb {
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--muted);
+        transition: transform 140ms ease, background 140ms ease;
+      }
+
+      .switch input:checked ~ .track {
+        background: color-mix(in srgb, var(--primary) 28%, var(--panel));
+        border-color: var(--primary);
+      }
+
+      .switch input:checked ~ .thumb {
+        transform: translateX(20px);
+        background: var(--primary);
+      }
+
+      .switch input:disabled ~ .track,
+      .switch input:disabled ~ .thumb {
+        opacity: 0.45;
       }
 
       .actions {
-        display: flex;
+        display: grid;
+        grid-template-columns: 1fr;
         gap: 8px;
-        margin-top: 8px;
       }
 
       button {
-        flex: 1;
-        font: inherit;
-        font-size: 13px;
-        font-weight: 500;
-        padding: 8px 12px;
-        border: none;
-        border-radius: 4px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 38px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--panel-strong);
+        color: var(--text);
         cursor: pointer;
-        background-color: var(--button-bg);
-        color: var(--text-color);
-        transition: background-color 0.2s;
-      }
-
-      button:hover {
-        background-color: var(--button-hover);
+        font-size: 13px;
+        font-weight: 800;
       }
 
       button.primary {
-        background-color: var(--primary-bg);
-        color: white;
+        border-color: transparent;
+        background: var(--primary);
+        color: #ffffff;
+      }
+
+      button.danger {
+        border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+
+      button:hover {
+        background: color-mix(in srgb, var(--panel-strong) 82%, var(--text));
       }
 
       button.primary:hover {
-        background-color: var(--primary-hover);
+        background: var(--primary-hover);
       }
 
       button:disabled {
-        opacity: 0.6;
         cursor: not-allowed;
+        opacity: 0.55;
       }
-
-      .message-area {
-        margin-top: 12px;
-        font-size: 13px;
-        min-height: 20px;
-      }
-
-      .message-area.success { color: #107c10; }
-      .message-area.error { color: #a80000; }
     </style>
   </head>
   <body>
-    <header>
-      <h1>Simple Download Manager</h1>
-      <span id="connection-status" class="status-badge checking">Checking</span>
-    </header>
+    <main class="shell">
+      <header>
+        <h1>Simple Download Manager</h1>
+        <span id="connection-status" class="status checking">Checking</span>
+      </header>
 
-    <form id="download-form">
-      <label for="url">File URL</label>
-      <input id="url" name="url" type="url" placeholder="https://example.com/file.zip" required />
-      
+      <section class="control">
+        <div>
+          <div class="label">Silent Download</div>
+          <div id="silent-download-hint" class="hint">Ask before sending downloads.</div>
+        </div>
+        <label class="switch" for="silent-download-toggle" aria-label="Silent Download">
+          <input id="silent-download-toggle" type="checkbox" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </section>
+
       <div class="actions">
-        <button id="open-app-button" type="button">Open App</button>
-        <button id="submit-button" type="submit" class="primary" disabled>Send to Queue</button>
+        <button id="extension-toggle-button" type="button" class="danger">Disable Extension</button>
+        <button id="advanced-button" type="button" class="primary">Advanced</button>
       </div>
-    </form>
-
-    <div id="message-area" class="message-area" role="alert"></div>
+    </main>
 
     <script type="module" src="./popup.js"></script>
   </body>

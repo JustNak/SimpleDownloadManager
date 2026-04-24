@@ -21,7 +21,7 @@ const targets = [
       version: '0.1.0',
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
-      permissions: ['contextMenus', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
         service_worker: 'background.js',
         type: 'module'
@@ -29,6 +29,10 @@ const targets = [
       action: {
         default_title: 'Simple Download Manager',
         default_popup: 'popup.html'
+      },
+      options_ui: {
+        page: 'options.html',
+        open_in_tab: true
       }
     }
   },
@@ -39,13 +43,17 @@ const targets = [
       name: 'Simple Download Manager',
       version: '0.1.0',
       description: 'Send downloads to the Simple Download Manager desktop app.',
-      permissions: ['contextMenus', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
         scripts: ['background.js']
       },
       browser_action: {
         default_title: 'Simple Download Manager',
         default_popup: 'popup.html'
+      },
+      options_ui: {
+        page: 'options.html',
+        open_in_tab: true
       },
       browser_specific_settings: {
         gecko: {
@@ -63,7 +71,8 @@ async function buildTarget(target) {
   await build({
     entryPoints: {
       background: path.join(appRoot, 'src', 'background', 'index.ts'),
-      popup: path.join(appRoot, 'src', 'popup', 'index.ts')
+      popup: path.join(appRoot, 'src', 'popup', 'index.ts'),
+      options: path.join(appRoot, 'src', 'options', 'index.ts')
     },
     bundle: true,
     format: 'esm',
@@ -75,6 +84,7 @@ async function buildTarget(target) {
   });
 
   await cp(path.join(appRoot, 'src', 'popup', 'index.html'), path.join(outdir, 'popup.html'));
+  await cp(path.join(appRoot, 'src', 'options', 'index.html'), path.join(outdir, 'options.html'));
   await writeFile(path.join(outdir, 'manifest.json'), JSON.stringify(target.manifest, null, 2));
 }
 

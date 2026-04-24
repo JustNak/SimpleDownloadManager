@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { X, Minus, Square, Copy } from 'lucide-react';
 import { AppIcon } from './AppIcon';
 
-export function Titlebar() {
+export function Titlebar({ children }: { children?: React.ReactNode }) {
   const [isMaximized, setIsMaximized] = useState(false);
   const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
@@ -51,41 +51,49 @@ export function Titlebar() {
   }, [appWindow]);
 
   return (
-    <div
-      data-tauri-drag-region 
-      className="h-16 shrink-0 bg-background border-b border-border flex items-center justify-between select-none z-50 w-full"
-    >
-      {/* Left: Branding */}
+    <div className="titlebar z-50 flex h-14 w-full shrink-0 select-none items-center justify-between border-b border-border bg-background">
       <div 
         data-tauri-drag-region
-        className="flex items-center gap-5 pl-7 h-full flex-1 cursor-grab active:cursor-grabbing"
+        className="flex h-full w-[252px] shrink-0 cursor-grab items-center gap-4 border-r border-border pl-6 active:cursor-grabbing"
         onPointerDown={handleDragPointerDown}
         onDoubleClick={handleDragDoubleClick}
       >
-        <AppIcon size={32} className="text-primary pointer-events-none" />
-        <span className="text-lg font-semibold text-foreground pointer-events-none">
+        <AppIcon size={28} className="pointer-events-none text-primary" />
+        <span className="pointer-events-none text-base font-semibold text-foreground">
           Download Manager
         </span>
       </div>
 
-      {/* Right: Window Controls */}
-      <div className="flex h-full items-center">
+      <div className="flex h-full min-w-0 flex-1 items-center px-5">
+        {children ? (
+          <div className="min-w-0 flex-1">{children}</div>
+        ) : (
+          <div
+            data-tauri-drag-region
+            className="h-full flex-1 cursor-grab active:cursor-grabbing"
+            onPointerDown={handleDragPointerDown}
+            onDoubleClick={handleDragDoubleClick}
+          />
+        )}
+      </div>
+
+      <div className="flex h-full shrink-0 items-center">
         <button
-          className="h-full w-16 flex items-center justify-center hover:bg-muted text-foreground transition-colors"
+          className="flex h-full w-12 items-center justify-center text-foreground transition-colors hover:bg-muted"
           onClick={() => void appWindow?.minimize()}
           title="Minimize"
         >
           <Minus size={16} />
         </button>
         <button
-          className="h-full w-16 flex items-center justify-center hover:bg-muted text-foreground transition-colors"
+          className="flex h-full w-12 items-center justify-center text-foreground transition-colors hover:bg-muted"
           onClick={() => void appWindow?.toggleMaximize()}
           title={isMaximized ? "Restore Down" : "Maximize"}
         >
           {isMaximized ? <Copy size={14} className="rotate-180" /> : <Square size={14} />}
         </button>
         <button
-          className="h-full w-16 flex items-center justify-center hover:bg-destructive hover:text-destructive-foreground text-foreground transition-colors"
+          className="flex h-full w-12 items-center justify-center text-foreground transition-colors hover:bg-destructive hover:text-destructive-foreground"
           onClick={() => void appWindow?.close()}
           title="Close"
         >

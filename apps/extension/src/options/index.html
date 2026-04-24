@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simple Download Manager Options</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f9fc;
+        --panel: #ffffff;
+        --panel-strong: #f1f5f9;
+        --text: #172033;
+        --muted: #64748b;
+        --border: #d8e1ee;
+        --input: #cbd5e1;
+        --primary: #2563eb;
+        --primary-hover: #1d4ed8;
+        --success: #15803d;
+        --success-soft: #dcfce7;
+        --warning: #a16207;
+        --warning-soft: #fef3c7;
+        --danger: #b91c1c;
+        --danger-soft: #fee2e2;
+        font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #090d12;
+          --panel: #11161d;
+          --panel-strong: #171d25;
+          --text: #f4f7fb;
+          --muted: #9aa8bb;
+          --border: #26313f;
+          --input: #334155;
+          --primary: #60a5fa;
+          --primary-hover: #3b82f6;
+          --success: #6ee7a5;
+          --success-soft: #123322;
+          --warning: #facc15;
+          --warning-soft: #342b12;
+          --danger: #f87171;
+          --danger-soft: #35191d;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+        letter-spacing: 0;
+      }
+
+      .page {
+        width: min(900px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0;
+      }
+
+      header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 20px;
+        margin-bottom: 22px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 760;
+      }
+
+      .subtitle {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status {
+        border-radius: 999px;
+        padding: 7px 11px;
+        background: var(--warning-soft);
+        color: var(--warning);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .status.connected {
+        background: var(--success-soft);
+        color: var(--success);
+      }
+
+      .status.error,
+      .status.host_missing,
+      .status.app_missing,
+      .status.app_unreachable {
+        background: var(--danger-soft);
+        color: var(--danger);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 300px;
+        gap: 16px;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .panel-header {
+        border-bottom: 1px solid var(--border);
+        padding: 14px 16px;
+        font-size: 15px;
+        font-weight: 760;
+      }
+
+      .panel-body {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 16px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: minmax(190px, 260px) minmax(0, 1fr);
+        align-items: center;
+        gap: 16px;
+      }
+
+      .label {
+        font-size: 14px;
+        font-weight: 720;
+      }
+
+      .description {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 18px;
+      }
+
+      select,
+      input[type="text"] {
+        width: 100%;
+        height: 38px;
+        border: 1px solid var(--input);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--text);
+        outline: none;
+        padding: 0 10px;
+        font-size: 13px;
+      }
+
+      select:focus,
+      input[type="text"]:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+      }
+
+      .switch {
+        position: relative;
+        display: inline-flex;
+        width: 48px;
+        height: 28px;
+        cursor: pointer;
+      }
+
+      .switch input {
+        position: absolute;
+        opacity: 0;
+      }
+
+      .track {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--panel-strong);
+      }
+
+      .thumb {
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--muted);
+        transition: transform 140ms ease, background 140ms ease;
+      }
+
+      .switch input:checked ~ .track {
+        border-color: var(--primary);
+        background: color-mix(in srgb, var(--primary) 28%, var(--panel));
+      }
+
+      .switch input:checked ~ .thumb {
+        transform: translateX(20px);
+        background: var(--primary);
+      }
+
+      .host-input {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+      }
+
+      button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 38px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--panel-strong);
+        color: var(--text);
+        cursor: pointer;
+        padding: 0 13px;
+        font-size: 13px;
+        font-weight: 760;
+      }
+
+      button.primary {
+        border-color: transparent;
+        background: var(--primary);
+        color: #ffffff;
+      }
+
+      button.primary:hover {
+        background: var(--primary-hover);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 30px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--panel-strong);
+        padding: 0 8px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .chip button {
+        width: 22px;
+        height: 22px;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        padding: 0;
+      }
+
+      .empty {
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        background: var(--panel-strong);
+        color: var(--muted);
+        padding: 10px;
+        font-size: 13px;
+      }
+
+      .summary {
+        display: grid;
+        gap: 10px;
+      }
+
+      .summary-item {
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--panel-strong);
+        padding: 11px;
+      }
+
+      .summary-label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 760;
+        text-transform: uppercase;
+      }
+
+      .summary-value {
+        margin-top: 5px;
+        font-size: 18px;
+        font-weight: 760;
+      }
+
+      .save-state {
+        min-height: 18px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      @media (max-width: 760px) {
+        .grid,
+        .row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header>
+        <div>
+          <h1>Simple Download Manager Extension</h1>
+          <div class="subtitle">Configure how browser downloads are handed to the desktop app.</div>
+        </div>
+        <span id="connection-status" class="status checking">Checking</span>
+      </header>
+
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-header">Advanced Configuration</div>
+          <div class="panel-body">
+            <div class="row">
+              <div>
+                <div class="label">Extension Enabled</div>
+                <div class="description">Allow this browser to hand downloads to Simple Download Manager.</div>
+              </div>
+              <label class="switch" for="enabled-toggle" aria-label="Extension Enabled">
+                <input id="enabled-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Silent Download</div>
+                <div class="description">Send browser downloads without opening the desktop confirmation prompt.</div>
+              </div>
+              <label class="switch" for="silent-toggle" aria-label="Silent Download">
+                <input id="silent-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Browser Downloads</div>
+                <div class="description">Choose how normal website downloads are handled.</div>
+              </div>
+              <select id="handoff-mode">
+                <option value="off">Off</option>
+                <option value="ask">Ask before sending</option>
+                <option value="auto">Silent download</option>
+              </select>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Right-click Menu</div>
+                <div class="description">Show Download with Simple Download Manager on links.</div>
+              </div>
+              <label class="switch" for="context-menu-toggle" aria-label="Right-click Menu">
+                <input id="context-menu-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Progress Window</div>
+                <div class="description">Open the small progress window after handoff.</div>
+              </div>
+              <label class="switch" for="progress-toggle" aria-label="Progress Window">
+                <input id="progress-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Badge Status</div>
+                <div class="description">Show active or attention counts on the extension icon.</div>
+              </div>
+              <label class="switch" for="badge-toggle" aria-label="Badge Status">
+                <input id="badge-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="row">
+              <div>
+                <div class="label">Excluded Sites</div>
+                <div class="description">Downloads from these hostnames stay in the browser.</div>
+              </div>
+              <div>
+                <div class="host-input">
+                  <input id="excluded-host-input" type="text" placeholder="example.com" />
+                  <button id="add-host-button" type="button">Add</button>
+                </div>
+                <div id="excluded-hosts" class="chips" style="margin-top: 10px"></div>
+              </div>
+            </div>
+
+            <div id="save-state" class="save-state">Loading settings...</div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="panel-header">Status</div>
+          <div class="panel-body summary">
+            <div class="summary-item">
+              <div class="summary-label">Active</div>
+              <div id="active-count" class="summary-value">0</div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">Queued</div>
+              <div id="queued-count" class="summary-value">0</div>
+            </div>
+            <div class="summary-item">
+              <div class="summary-label">Needs Attention</div>
+              <div id="attention-count" class="summary-value">0</div>
+            </div>
+            <button id="refresh-button" type="button" class="primary">Refresh Status</button>
+          </div>
+        </aside>
+      </div>
+    </main>
+
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>

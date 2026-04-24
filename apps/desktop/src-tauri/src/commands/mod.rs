@@ -1,7 +1,12 @@
 use crate::download::schedule_downloads;
 use crate::ipc::gather_host_registration_diagnostics;
+use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{EnqueueResult, EnqueueStatus, SharedState};
-use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, Settings};
+use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, Settings};
+use crate::windows::{
+    close_download_prompt_window, focus_job_in_main_window, show_download_prompt_window,
+    show_progress_window, DOWNLOAD_PROMPT_WINDOW,
+};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -48,6 +53,23 @@ pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
     if let Err(error) = app.emit(STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
     }
+}
+
+async fn complete_prompt_action(
+    app: &AppHandle,
+    prompts: PromptRegistry,
+    id: &str,
+    decision: PromptDecision,
+) -> Result<(), String> {
+    let next_prompt = prompts.resolve(id, decision).await?;
+    if let Some(prompt) = next_prompt {
+        show_download_prompt_window(app)?;
+        app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, prompt)
+            .map_err(|error| error.to_string())?;
+    } else {
+        close_download_prompt_window(app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -229,6 +251,69 @@ pub async fn browse_directory() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+pub async fn get_current_download_prompt(
+    prompts: State<'_, PromptRegistry>,
+) -> Result<Option<DownloadPrompt>, String> {
+    Ok(prompts.active_prompt().await)
+}
+
+#[tauri::command]
+pub async fn confirm_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+    directory_override: Option<String>,
+    allow_duplicate: bool,
+) -> Result<(), String> {
+    complete_prompt_action(
+        &app,
+        prompts.inner().clone(),
+        &id,
+        PromptDecision::Download {
+            directory_override,
+            allow_duplicate,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn show_existing_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    let active_prompt = prompts.active_prompt().await;
+    let existing_job_id = active_prompt
+        .as_ref()
+        .and_then(|prompt| prompt.duplicate_job.as_ref())
+        .map(|job| job.id.clone());
+
+    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::ShowExisting)
+        .await?;
+
+    if let Some(job_id) = existing_job_id {
+        focus_job_in_main_window(&app, &job_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::Cancel).await
+}
+
+#[tauri::command]
+pub async fn open_progress_window(app: AppHandle, id: String) -> Result<(), String> {
+    show_progress_window(&app, &id)
+}
+
+#[tauri::command]
 pub async fn open_job_file(state: State<'_, SharedState>, id: String) -> Result<(), String> {
     let path = state.resolve_openable_path(&id).await.map_err(|error| error.message)?;
 
@@ -274,6 +359,99 @@ pub async fn run_host_registration_fix() -> Result<(), String> {
         .map_err(|error| format!("Could not start host registration: {error}"))??;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn test_extension_handoff(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    prompts: State<'_, PromptRegistry>,
+) -> Result<(), String> {
+    let request_id = format!("test_handoff_{}", unix_timestamp_millis());
+    let prompt = state
+        .prepare_download_prompt(
+            request_id,
+            "https://example.com/simple-download-manager-test.bin",
+            Some(DownloadSource {
+                entry_point: "browser_download".into(),
+                browser: "chrome".into(),
+                extension_version: "settings-test".into(),
+                page_url: Some("https://example.com/downloads".into()),
+                page_title: Some("Simple Download Manager handoff test".into()),
+                referrer: Some("https://example.com/downloads".into()),
+                incognito: Some(false),
+            }),
+            Some("simple-download-manager-test.bin".into()),
+            Some(1_048_576),
+        )
+        .await
+        .map_err(|error| error.message)?;
+
+    let receiver = prompts.enqueue(prompt.clone()).await;
+    show_download_prompt_window(&app)?;
+    if let Some(active_prompt) = prompts.active_prompt().await {
+        app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt)
+            .map_err(|error| error.to_string())?;
+    }
+
+    let worker_app = app.clone();
+    let worker_state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        let decision = receiver.await.unwrap_or(PromptDecision::Cancel);
+        match decision {
+            PromptDecision::Cancel => {}
+            PromptDecision::ShowExisting => {
+                if let Some(job) = prompt.duplicate_job {
+                    focus_job_in_main_window(&worker_app, &job.id);
+                }
+            }
+            PromptDecision::Download {
+                directory_override,
+                allow_duplicate,
+            } => {
+                let result = worker_state
+                    .enqueue_download_with_options(
+                        prompt.url,
+                        crate::state::EnqueueOptions {
+                            source: prompt.source,
+                            directory_override,
+                            filename_hint: Some(prompt.filename),
+                            duplicate_policy: if allow_duplicate {
+                                crate::state::DuplicatePolicy::Allow
+                            } else {
+                                crate::state::DuplicatePolicy::ReturnExisting
+                            },
+                        },
+                    )
+                    .await;
+
+                match result {
+                    Ok(result) => {
+                        let show_progress = worker_state.show_progress_after_handoff().await;
+                        emit_snapshot(&worker_app, &result.snapshot);
+                        if result.status == EnqueueStatus::Queued {
+                            if show_progress {
+                                let _ = show_progress_window(&worker_app, &result.job_id);
+                            }
+                            schedule_downloads(worker_app, worker_state);
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("test extension handoff failed: {}", error.message);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn unix_timestamp_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
 }
 
 #[cfg(windows)]

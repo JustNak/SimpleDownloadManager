@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -15,6 +15,7 @@ import {
   FolderOpen,
   Globe,
   HardDrive,
+  MoreHorizontal,
   Pause,
   Play,
   RotateCcw,
@@ -53,6 +54,23 @@ export function QueueView({
   onReveal,
 }: QueueViewProps) {
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null;
+  const [openMenuJobId, setOpenMenuJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openMenuJobId) return;
+
+    const closeMenu = () => setOpenMenuJobId(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenMenuJobId(null);
+    };
+
+    document.addEventListener('click', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('click', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [openMenuJobId]);
 
   if (jobs.length === 0) {
     const emptyTitle = emptyStateTitle(view);
@@ -74,9 +92,9 @@ export function QueueView({
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface">
-      <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
-        <div className="download-table min-w-[960px] overflow-hidden rounded-sm border border-border bg-card">
-          <div className="grid grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_96px] border-b border-border bg-header px-5 py-3 text-sm text-muted-foreground">
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="download-table min-w-[960px] overflow-visible border-b border-t border-border bg-card">
+          <div className="grid grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-5 py-3 text-sm text-muted-foreground">
             <div>Name</div>
             <div>Status</div>
             <div>Progress</div>
@@ -92,7 +110,10 @@ export function QueueView({
               return (
                 <div
                   key={job.id}
-                  onClick={() => onSelect(job.id)}
+                  onClick={() => {
+                    onSelect(job.id);
+                    setOpenMenuJobId(null);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
@@ -101,7 +122,7 @@ export function QueueView({
                   }}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[74px] w-full grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_96px] items-center gap-0 px-5 py-3 text-left text-sm transition ${
+                  className={`grid min-h-[74px] w-full grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-5 py-3 text-left text-sm transition ${
                     selected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   }`}
                 >
@@ -134,9 +155,12 @@ export function QueueView({
                     {job.totalBytes > 0 ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}` : formatBytes(job.downloadedBytes)}
                   </div>
 
-                  <div className="flex items-center justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                  <div className="relative flex items-center justify-end gap-1" onClick={(event) => event.stopPropagation()}>
                     <RowActions
                       job={job}
+                      menuOpen={openMenuJobId === job.id}
+                      onToggleMenu={() => setOpenMenuJobId((current) => current === job.id ? null : job.id)}
+                      onCloseMenu={() => setOpenMenuJobId(null)}
                       onPause={onPause}
                       onResume={onResume}
                       onCancel={onCancel}
@@ -196,9 +220,9 @@ function DownloadDetailsPane({
     : 'Manual URL';
 
   return (
-    <aside className="details-pane min-h-[190px] shrink-0 border-t border-border bg-card">
-      <div className="flex min-w-0 gap-8 px-8 py-7">
-        <div className="flex w-28 shrink-0 justify-center">
+    <aside className="details-pane min-h-[164px] shrink-0 border-t border-border bg-card">
+      <div className="flex min-w-0 gap-7 px-6 py-5">
+        <div className="flex w-24 shrink-0 justify-center">
           <FileBadge filename={job.filename} large />
         </div>
 
@@ -219,7 +243,7 @@ function DownloadDetailsPane({
             <DetailLabel icon={<Download size={16} />} label="Downloaded:" />
             <DetailValue value={`${formatBytes(job.downloadedBytes)} (${job.downloadedBytes.toLocaleString()} bytes)`} />
 
-            <DetailLabel icon={<Clock3 size={16} />} label="Time Remaining:" />
+            <DetailLabel icon={<Clock3 size={16} />} label="Remaining" />
             <DetailValue value={job.state === JobState.Downloading ? formatTime(job.eta) : '--'} />
 
             <DetailLabel icon={<Check size={16} />} label="Status:" />
@@ -253,6 +277,9 @@ function DownloadDetailsPane({
 
 function RowActions({
   job,
+  menuOpen,
+  onToggleMenu,
+  onCloseMenu,
   onPause,
   onResume,
   onCancel,
@@ -262,6 +289,9 @@ function RowActions({
   onReveal,
 }: {
   job: DownloadJob;
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  onCloseMenu: () => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
@@ -270,27 +300,46 @@ function RowActions({
   onRemove: (id: string) => void;
   onReveal: (id: string) => void;
 }) {
+  const canPause = [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
+  const canResume = job.state === JobState.Paused;
+  const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state);
+  const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state);
+
+  const runMenuAction = (action: (id: string) => void) => {
+    onCloseMenu();
+    action(job.id);
+  };
+
   return (
     <>
-      {[JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state) ? (
+      {canPause ? (
         <IconButton title="Pause" onClick={() => onPause(job.id)}><Pause size={17} /></IconButton>
       ) : null}
-      {job.state === JobState.Paused ? (
+      {canResume ? (
         <IconButton title="Resume" onClick={() => onResume(job.id)}><Play size={17} /></IconButton>
       ) : null}
-      {[JobState.Failed, JobState.Canceled].includes(job.state) ? (
+      {canRetry ? (
         <IconButton title="Retry" onClick={() => onRetry(job.id)}><RotateCw size={17} /></IconButton>
       ) : null}
-      {[JobState.Failed, JobState.Canceled].includes(job.state) ? (
-        <IconButton title="Restart download" onClick={() => onRestart(job.id)}><RotateCcw size={17} /></IconButton>
+      <IconButton title="More actions" onClick={onToggleMenu}><MoreHorizontal size={18} /></IconButton>
+
+      {menuOpen ? (
+        <div
+          className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {job.targetPath ? (
+            <MenuItem icon={<FolderOpen size={16} />} label="Open folder" onClick={() => runMenuAction(onReveal)} />
+          ) : null}
+          {canRetry ? (
+            <MenuItem icon={<RotateCcw size={16} />} label="Restart" onClick={() => runMenuAction(onRestart)} />
+          ) : null}
+          {canCancel ? (
+            <MenuItem icon={<X size={16} />} label="Cancel" onClick={() => runMenuAction(onCancel)} />
+          ) : null}
+          <MenuItem icon={<Trash2 size={16} />} label="Remove" onClick={() => runMenuAction(onRemove)} destructive />
+        </div>
       ) : null}
-      {job.targetPath ? (
-        <IconButton title="Open folder" onClick={() => onReveal(job.id)}><FolderOpen size={17} /></IconButton>
-      ) : null}
-      {![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state) ? (
-        <IconButton title="Cancel" onClick={() => onCancel(job.id)}><X size={17} /></IconButton>
-      ) : null}
-      <IconButton title="Remove" onClick={() => onRemove(job.id)}><Trash2 size={17} /></IconButton>
     </>
   );
 }
@@ -373,6 +422,30 @@ function IconButton({ title, onClick, children }: { title: string; onClick: () =
       className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground"
     >
       {children}
+    </button>
+  );
+}
+
+function MenuItem({
+  icon,
+  label,
+  onClick,
+  destructive = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex h-9 w-full items-center gap-2 px-3 text-left text-sm transition hover:bg-muted ${
+        destructive ? 'text-destructive' : 'text-foreground'
+      }`}
+    >
+      <span className={destructive ? 'text-destructive' : 'text-muted-foreground'}>{icon}</span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
     </button>
   );
 }

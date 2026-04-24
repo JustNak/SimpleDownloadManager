@@ -3,6 +3,7 @@ dist/
 target/
 release/
 test-runtime/
+.tmp/
 .cargo-temp/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/resources/install/
