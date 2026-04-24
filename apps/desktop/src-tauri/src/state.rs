@@ -315,6 +315,28 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn pause_all_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.pause_all_jobs();
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
+    pub async fn resume_all_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.resume_all_jobs();
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
     pub async fn cancel_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let temp_to_remove = {
             let state = self.inner.read().await;
@@ -852,6 +874,35 @@ impl RuntimeState {
         }
     }
 
+    fn pause_all_jobs(&mut self) {
+        for job in &mut self.jobs {
+            if matches!(
+                job.state,
+                JobState::Queued | JobState::Starting | JobState::Downloading
+            ) {
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+            }
+        }
+    }
+
+    fn resume_all_jobs(&mut self) {
+        for job in &mut self.jobs {
+            if matches!(
+                job.state,
+                JobState::Paused | JobState::Failed | JobState::Canceled
+            ) {
+                job.state = JobState::Queued;
+                job.error = None;
+                job.failure_category = None;
+                job.retry_attempts = 0;
+                job.speed = 0;
+                job.eta = 0;
+            }
+        }
+    }
+
     fn duplicate_enqueue_result(&self, url: &str) -> Option<EnqueueResult> {
         let existing_index = self.jobs.iter().position(|job| job.url == url)?;
         let existing_job = &self.jobs[existing_index];
@@ -1265,6 +1316,54 @@ mod tests {
     }
 
     #[test]
+    fn pause_all_jobs_only_pauses_schedulable_jobs() {
+        let mut state = runtime_state_with_jobs(vec![
+            download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0),
+            download_job("job_2", JobState::Starting, ResumeSupport::Unknown, 0),
+            download_job("job_3", JobState::Downloading, ResumeSupport::Supported, 10),
+            download_job("job_4", JobState::Completed, ResumeSupport::Supported, 100),
+            download_job("job_5", JobState::Failed, ResumeSupport::Supported, 20),
+        ]);
+
+        state.pause_all_jobs();
+
+        assert_eq!(state.jobs[0].state, JobState::Paused);
+        assert_eq!(state.jobs[1].state, JobState::Paused);
+        assert_eq!(state.jobs[2].state, JobState::Paused);
+        assert_eq!(state.jobs[2].speed, 0);
+        assert_eq!(state.jobs[2].eta, 0);
+        assert_eq!(state.jobs[3].state, JobState::Completed);
+        assert_eq!(state.jobs[4].state, JobState::Failed);
+    }
+
+    #[test]
+    fn resume_all_jobs_requeues_interrupted_jobs_and_clears_failures() {
+        let mut failed_job = download_job("job_2", JobState::Failed, ResumeSupport::Supported, 20);
+        failed_job.error = Some("server closed the connection".into());
+        failed_job.failure_category = Some(FailureCategory::Network);
+        failed_job.retry_attempts = 2;
+
+        let mut state = runtime_state_with_jobs(vec![
+            download_job("job_1", JobState::Paused, ResumeSupport::Unknown, 0),
+            failed_job,
+            download_job("job_3", JobState::Canceled, ResumeSupport::Unknown, 0),
+            download_job("job_4", JobState::Completed, ResumeSupport::Supported, 100),
+            download_job("job_5", JobState::Downloading, ResumeSupport::Supported, 10),
+        ]);
+
+        state.resume_all_jobs();
+
+        assert_eq!(state.jobs[0].state, JobState::Queued);
+        assert_eq!(state.jobs[1].state, JobState::Queued);
+        assert_eq!(state.jobs[1].error, None);
+        assert_eq!(state.jobs[1].failure_category, None);
+        assert_eq!(state.jobs[1].retry_attempts, 0);
+        assert_eq!(state.jobs[2].state, JobState::Queued);
+        assert_eq!(state.jobs[3].state, JobState::Completed);
+        assert_eq!(state.jobs[4].state, JobState::Downloading);
+    }
+
+    #[test]
     fn normalize_download_url_trims_pasted_whitespace() {
         let normalized =
             normalize_download_url(" \n https://example.com/file.zip?from=clipboard \t ").unwrap();
@@ -1333,6 +1432,17 @@ mod tests {
             retry_attempts: 0,
             target_path: format!("C:/Downloads/{id}.zip"),
             temp_path: format!("C:/Downloads/{id}.zip.part"),
+        }
+    }
+
+    fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
+        RuntimeState {
+            connection_state: ConnectionState::Connected,
+            jobs,
+            settings: Settings::default(),
+            next_job_number: 99,
+            active_workers: HashSet::new(),
+            last_host_contact: None,
         }
     }
 

@@ -14,9 +14,11 @@ import {
   getAppSnapshot,
   openInstallDocs,
   openJobFile,
+  pauseAllJobs,
   pauseJob,
   revealJobInFolder,
   removeJob,
+  resumeAllJobs,
   resumeJob,
   restartJob,
   retryJob,
@@ -152,6 +154,24 @@ export default function App() {
       await resumeJob(id);
     } catch (error) {
       addToast({ type: 'error', title: 'Resume Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handlePauseAll() {
+    try {
+      await pauseAllJobs();
+      addToast({ type: 'info', title: 'Queue Paused', message: 'Active and queued downloads were paused.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Pause Queue Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleResumeAll() {
+    try {
+      await resumeAllJobs();
+      addToast({ type: 'info', title: 'Queue Resumed', message: 'Paused and interrupted downloads were queued again.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Resume Queue Failed', message: getErrorMessage(error) });
     }
   }
 
@@ -337,6 +357,8 @@ export default function App() {
   }, [displayedJobs, selectedJobId, view]);
 
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
+  const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state));
+  const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
   const totalDownloadSpeed = jobs
     .filter((job) => job.state === JobState.Downloading)
     .reduce((total, job) => total + job.speed, 0);
@@ -388,6 +410,10 @@ export default function App() {
                 onAdd={() => setIsAddModalOpen(true)}
                 onResume={() => selectedJob && void handleResume(selectedJob.id)}
                 onPause={() => selectedJob && void handlePause(selectedJob.id)}
+                onResumeAll={() => void handleResumeAll()}
+                onPauseAll={() => void handlePauseAll()}
+                canResumeAll={canResumeAny}
+                canPauseAll={canPauseAny}
                 onRemove={() => selectedJob && void handleRemove(selectedJob.id)}
                 onReveal={() => selectedJob && void handleReveal(selectedJob.id)}
                 onCycleFilter={() => setView(nextFilterView(view))}
@@ -440,6 +466,10 @@ function CommandBar({
   onAdd,
   onResume,
   onPause,
+  onResumeAll,
+  onPauseAll,
+  canResumeAll,
+  canPauseAll,
   onRemove,
   onReveal,
   onCycleFilter,
@@ -452,6 +482,10 @@ function CommandBar({
   onAdd: () => void;
   onResume: () => void;
   onPause: () => void;
+  onResumeAll: () => void;
+  onPauseAll: () => void;
+  canResumeAll: boolean;
+  canPauseAll: boolean;
   onRemove: () => void;
   onReveal: () => void;
   onCycleFilter: () => void;
@@ -467,6 +501,8 @@ function CommandBar({
         <div className="mx-3 h-8 w-px bg-border" />
         <ToolbarButton icon={<Play size={18} />} label="Resume" onClick={onResume} disabled={!canResume} />
         <ToolbarButton icon={<Pause size={18} />} label="Pause" onClick={onPause} disabled={!canPause} />
+        <ToolbarButton icon={<Play size={18} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
+        <ToolbarButton icon={<Pause size={18} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
         <ToolbarButton icon={<Trash2 size={18} />} label="Remove" onClick={onRemove} disabled={!hasSelection} />
         <ToolbarButton icon={<FolderOpen size={18} />} label="Open Folder" onClick={onReveal} disabled={!selectedJob?.targetPath} />
       </div>

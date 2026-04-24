@@ -125,6 +125,22 @@ pub async fn resume_job(
 }
 
 #[tauri::command]
+pub async fn pause_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+    let snapshot = state.pause_all_jobs().await.map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
+    schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+    let snapshot = state.resume_all_jobs().await.map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
+    schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cancel_job(
     app: AppHandle,
     state: State<'_, SharedState>,

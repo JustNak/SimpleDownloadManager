@@ -20,6 +20,8 @@ fn main() {
             commands::add_job,
             commands::pause_job,
             commands::resume_job,
+            commands::pause_all_jobs,
+            commands::resume_all_jobs,
             commands::cancel_job,
             commands::retry_job,
             commands::restart_job,

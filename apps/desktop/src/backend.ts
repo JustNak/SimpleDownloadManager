@@ -214,11 +214,57 @@ export async function pauseJob(id: string): Promise<void> {
 
 export async function resumeJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    mockState.jobs = mockState.jobs.map((job) => (job.id === id ? { ...job, state: JobState.Downloading } : job));
+    mockState.jobs = mockState.jobs.map((job) =>
+      job.id === id
+        ? {
+            ...job,
+            state: JobState.Queued,
+            speed: 0,
+            eta: 0,
+            error: undefined,
+            failureCategory: undefined,
+            retryAttempts: 0,
+          }
+        : job,
+    );
     emitMockState();
     return;
   }
   await invokeCommand('resume_job', { id });
+}
+
+export async function pauseAllJobs(): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockState.jobs = mockState.jobs.map((job) =>
+      [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state)
+        ? { ...job, state: JobState.Paused, speed: 0, eta: 0 }
+        : job,
+    );
+    emitMockState();
+    return;
+  }
+  await invokeCommand('pause_all_jobs');
+}
+
+export async function resumeAllJobs(): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockState.jobs = mockState.jobs.map((job) =>
+      [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state)
+        ? {
+            ...job,
+            state: JobState.Queued,
+            speed: 0,
+            eta: 0,
+            error: undefined,
+            failureCategory: undefined,
+            retryAttempts: 0,
+          }
+        : job,
+    );
+    emitMockState();
+    return;
+  }
+  await invokeCommand('resume_all_jobs');
 }
 
 export async function cancelJob(id: string): Promise<void> {
