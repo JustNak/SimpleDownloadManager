@@ -120,6 +120,25 @@ pub enum Theme {
     System,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadHandoffMode {
+    Off,
+    Ask,
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionIntegrationSettings {
+    pub enabled: bool,
+    pub download_handoff_mode: DownloadHandoffMode,
+    pub context_menu_enabled: bool,
+    pub show_progress_after_handoff: bool,
+    pub show_badge_status: bool,
+    pub excluded_hosts: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -131,6 +150,8 @@ pub struct Settings {
     pub speed_limit_kib_per_second: u32,
     pub notifications_enabled: bool,
     pub theme: Theme,
+    #[serde(default)]
+    pub extension_integration: ExtensionIntegrationSettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +225,20 @@ impl Default for Settings {
             speed_limit_kib_per_second: 0,
             notifications_enabled: true,
             theme: Theme::System,
+            extension_integration: ExtensionIntegrationSettings::default(),
+        }
+    }
+}
+
+impl Default for ExtensionIntegrationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            download_handoff_mode: DownloadHandoffMode::Ask,
+            context_menu_enabled: true,
+            show_progress_after_handoff: true,
+            show_badge_status: true,
+            excluded_hosts: Vec::new(),
         }
     }
 }
@@ -359,5 +394,48 @@ mod tests {
 
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.speed_limit_kib_per_second, 0);
+    }
+
+    #[test]
+    fn default_settings_enable_browser_handoff_prompt_controls() {
+        let settings = Settings::default();
+
+        assert!(settings.extension_integration.enabled);
+        assert_eq!(
+            settings.extension_integration.download_handoff_mode,
+            DownloadHandoffMode::Ask
+        );
+        assert!(settings.extension_integration.context_menu_enabled);
+        assert!(settings.extension_integration.show_progress_after_handoff);
+        assert!(settings.extension_integration.show_badge_status);
+        assert!(settings.extension_integration.excluded_hosts.is_empty());
+    }
+
+    #[test]
+    fn persisted_state_defaults_extension_settings_for_existing_files() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "autoRetryAttempts": 3,
+                "speedLimitKibPerSecond": 0,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("old persisted state should still parse");
+
+        assert!(state.settings.extension_integration.enabled);
+        assert_eq!(
+            state.settings.extension_integration.download_handoff_mode,
+            DownloadHandoffMode::Ask
+        );
+        assert!(state.settings.extension_integration.context_menu_enabled);
+        assert!(state.settings.extension_integration.show_progress_after_handoff);
+        assert!(state.settings.extension_integration.show_badge_status);
+        assert!(state.settings.extension_integration.excluded_hosts.is_empty());
     }
 }

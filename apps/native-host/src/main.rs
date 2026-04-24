@@ -6,9 +6,10 @@ mod protocol;
 
 use forwarder::{AppForwarder, ForwarderError};
 use protocol::{
-    app_enqueue_request, app_prompt_download_request, app_show_window_request, app_status_request,
-    parse_enqueue_payload, parse_open_app_payload, parse_prompt_download_payload, validate_protocol,
-    AppResponseEnvelope, HostResponseEnvelope, NativeRequestEnvelope,
+    app_enqueue_request, app_prompt_download_request, app_save_extension_settings_request,
+    app_show_window_request, app_status_request, parse_enqueue_payload, parse_open_app_payload,
+    parse_prompt_download_payload, validate_protocol, AppResponseEnvelope, HostResponseEnvelope,
+    NativeRequestEnvelope,
 };
 use std::io;
 
@@ -73,6 +74,13 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
                 Err(error) => map_forwarder_error(request.request_id, error),
             },
             Err(response) => response,
+        },
+        "save_extension_settings" => match forwarder.send(&app_save_extension_settings_request(
+            request.request_id.clone(),
+            request.payload,
+        )) {
+            Ok(response) => map_status_response(response),
+            Err(error) => map_forwarder_error(request.request_id, error),
         },
         _ => HostResponseEnvelope::rejected(
             request.request_id,

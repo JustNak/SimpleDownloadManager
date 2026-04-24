@@ -5,8 +5,8 @@ use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
 use crate::storage::{
-    ConnectionState, DownloadSource, HostRegistrationDiagnostics, HostRegistrationEntry,
-    HostRegistrationStatus, QueueSummary,
+    ConnectionState, DownloadSource, ExtensionIntegrationSettings, HostRegistrationDiagnostics,
+    HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
     focus_job_in_main_window, focus_main_window, show_download_prompt_window, show_progress_window,
@@ -109,7 +109,13 @@ struct HostResponse {
 }
 
 impl HostResponse {
-    fn ready(request_id: String, app_state: &str, connection_state: ConnectionState, queue_summary: QueueSummary) -> Self {
+    fn ready(
+        request_id: String,
+        app_state: &str,
+        connection_state: ConnectionState,
+        queue_summary: QueueSummary,
+        extension_settings: ExtensionIntegrationSettings,
+    ) -> Self {
         Self {
             ok: true,
             request_id,
@@ -118,6 +124,7 @@ impl HostResponse {
                 "appState": app_state,
                 "connectionState": connection_state,
                 "queueSummary": queue_summary,
+                "extensionSettings": extension_settings,
             })),
             code: None,
             message: None,
@@ -297,13 +304,67 @@ async fn handle_request(
         "ping" | "get_status" => {
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
-            HostResponse::ready(request.request_id, "running", connection_state, queue_summary)
+            let extension_settings = state.extension_integration_settings().await;
+            HostResponse::ready(
+                request.request_id,
+                "running",
+                connection_state,
+                queue_summary,
+                extension_settings,
+            )
         }
         "open_app" | "show_window" => {
             focus_main_window(&app);
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
-            HostResponse::ready(request.request_id, "launched", connection_state, queue_summary)
+            let extension_settings = state.extension_integration_settings().await;
+            HostResponse::ready(
+                request.request_id,
+                "launched",
+                connection_state,
+                queue_summary,
+                extension_settings,
+            )
+        }
+        "save_extension_settings" => {
+            let extension_settings = match serde_json::from_value::<ExtensionIntegrationSettings>(
+                request.payload,
+            ) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    return HostResponse::error(
+                        request.request_id,
+                        "invalid_payload",
+                        "INVALID_PAYLOAD",
+                        format!("Could not parse extension settings: {error}"),
+                    )
+                }
+            };
+
+            match state
+                .save_extension_integration_settings(extension_settings)
+                .await
+            {
+                Ok(snapshot) => {
+                    emit_snapshot(&app, &snapshot);
+                    let connection_state = register_host_contact(&app, &state).await;
+                    let queue_summary = state.queue_summary().await;
+                    let extension_settings = state.extension_integration_settings().await;
+                    HostResponse::ready(
+                        request.request_id,
+                        "running",
+                        connection_state,
+                        queue_summary,
+                        extension_settings,
+                    )
+                }
+                Err(message) => HostResponse::error(
+                    request.request_id,
+                    "blocked_by_policy",
+                    "INTERNAL_ERROR",
+                    message,
+                ),
+            }
         }
         "prompt_download" => {
             let payload = match serde_json::from_value::<PromptDownloadPayload>(request.payload) {
@@ -378,9 +439,12 @@ async fn handle_request(
 
                     match result {
                         Ok(result) => {
+                            let show_progress = state.show_progress_after_handoff().await;
                             emit_snapshot(&app, &result.snapshot);
                             if result.status == EnqueueStatus::Queued {
-                                let _ = show_progress_window(&app, &result.job_id);
+                                if show_progress {
+                                    let _ = show_progress_window(&app, &result.job_id);
+                                }
                                 schedule_downloads(app, state);
                             }
                             HostResponse::enqueue_result(request.request_id, result)

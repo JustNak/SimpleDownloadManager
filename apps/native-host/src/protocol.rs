@@ -276,3 +276,15 @@ pub fn app_prompt_download_request(
         payload,
     }
 }
+
+pub fn app_save_extension_settings_request(
+    request_id: String,
+    payload: Value,
+) -> AppRequestEnvelope<Value> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "save_extension_settings".into(),
+        payload,
+    }
+}

@@ -27,6 +27,14 @@ const defaultSettings: Settings = {
   speedLimitKibPerSecond: 0,
   notificationsEnabled: true,
   theme: 'system',
+  extensionIntegration: {
+    enabled: true,
+    downloadHandoffMode: 'ask',
+    contextMenuEnabled: true,
+    showProgressAfterHandoff: true,
+    showBadgeStatus: true,
+    excludedHosts: [],
+  },
 };
 
 let mockState: DesktopSnapshot = {
@@ -474,6 +482,11 @@ export async function openInstallDocs(): Promise<void> {
 export async function runHostRegistrationFix(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invokeCommand('run_host_registration_fix');
+}
+
+export async function testExtensionHandoff(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('test_extension_handoff');
 }
 
 export async function exportDiagnosticsReport(): Promise<string | null> {

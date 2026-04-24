@@ -4,10 +4,12 @@ import {
   createOpenAppRequest,
   createPingRequest,
   createPromptDownloadRequest,
+  createSaveExtensionSettingsRequest,
   toUserFacingMessage,
   type BrowserKind,
   type EnqueueDownloadPayload,
   type ErrorCode,
+  type ExtensionIntegrationSettings,
   type HostToExtensionResponse,
   type RequestSource,
 } from '@myapp/protocol';
@@ -136,6 +138,10 @@ export async function promptDownload(
   }
 
   return sendNativeMessage(request.value);
+}
+
+export async function saveExtensionSettings(settings: ExtensionIntegrationSettings): Promise<HostToExtensionResponse> {
+  return sendNativeMessage(createSaveExtensionSettingsRequest(settings));
 }
 
 export function buildContextMenuPayload(info: browser.contextMenus.OnClickData, tab?: browser.tabs.Tab): EnqueueDownloadPayload | null {

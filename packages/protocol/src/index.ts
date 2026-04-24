@@ -7,7 +7,13 @@ export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:'] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
 export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
-export type ExtensionRequestType = 'ping' | 'enqueue_download' | 'prompt_download' | 'open_app' | 'get_status';
+export type ExtensionRequestType =
+  | 'ping'
+  | 'enqueue_download'
+  | 'prompt_download'
+  | 'open_app'
+  | 'get_status'
+  | 'save_extension_settings';
 export type HostResponseType =
   | 'pong'
   | 'accepted'
@@ -15,7 +21,13 @@ export type HostResponseType =
   | 'app_not_installed'
   | 'app_unreachable'
   | 'invalid_payload';
-export type AppRequestType = 'ping' | 'get_status' | 'enqueue_download' | 'prompt_download' | 'show_window';
+export type AppRequestType =
+  | 'ping'
+  | 'get_status'
+  | 'enqueue_download'
+  | 'prompt_download'
+  | 'show_window'
+  | 'save_extension_settings';
 export type AppResponseType =
   | 'queued'
   | 'duplicate_existing_job'
@@ -25,6 +37,7 @@ export type AppResponseType =
   | 'ready';
 
 export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
+export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -115,11 +128,21 @@ export interface QueueSummary {
   failed: number;
 }
 
+export interface ExtensionIntegrationSettings {
+  enabled: boolean;
+  downloadHandoffMode: DownloadHandoffMode;
+  contextMenuEnabled: boolean;
+  showProgressAfterHandoff: boolean;
+  showBadgeStatus: boolean;
+  excludedHosts: string[];
+}
+
 export interface PongPayload {
   appState: 'running' | 'launched';
   extensionVersion?: string;
   connectionState?: DesktopConnectionState;
   queueSummary?: QueueSummary;
+  extensionSettings?: ExtensionIntegrationSettings;
 }
 
 export interface AppRequestEnvelope<TType extends AppRequestType, TPayload> {
@@ -149,7 +172,8 @@ export type ExtensionToHostRequest =
   | RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | RequestEnvelope<'prompt_download', PromptDownloadPayload>
   | RequestEnvelope<'open_app', OpenAppPayload>
-  | RequestEnvelope<'get_status', EmptyPayload>;
+  | RequestEnvelope<'get_status', EmptyPayload>
+  | RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
 export type HostToExtensionResponse =
   | SuccessResponse<'pong', PongPayload>
@@ -161,10 +185,19 @@ export type AppRequest =
   | AppRequestEnvelope<'get_status', EmptyPayload>
   | AppRequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | AppRequestEnvelope<'prompt_download', PromptDownloadPayload>
-  | AppRequestEnvelope<'show_window', OpenAppPayload>;
+  | AppRequestEnvelope<'show_window', OpenAppPayload>
+  | AppRequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
 export type AppResponse =
-  | AppSuccessResponse<'ready', { appState: 'running' | 'launched' }>
+  | AppSuccessResponse<
+      'ready',
+      {
+        appState: 'running' | 'launched';
+        connectionState?: DesktopConnectionState;
+        queueSummary?: QueueSummary;
+        extensionSettings?: ExtensionIntegrationSettings;
+      }
+    >
   | AppSuccessResponse<'queued', { jobId: string; filename?: string; status: 'queued' }>
   | AppSuccessResponse<
       'duplicate_existing_job',
@@ -308,6 +341,18 @@ export function createPromptDownloadRequest(
         totalBytes,
       },
     },
+  };
+}
+
+export function createSaveExtensionSettingsRequest(
+  settings: ExtensionIntegrationSettings,
+  requestId = createRequestId(),
+): RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'save_extension_settings',
+    payload: settings,
   };
 }
 

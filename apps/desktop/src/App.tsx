@@ -26,6 +26,7 @@ import {
   saveSettings,
   subscribeToStateChanged,
   subscribeToSelectedJobRequested,
+  testExtensionHandoff,
 } from './backend';
 import type { AddJobResult } from './backend';
 import {
@@ -61,6 +62,14 @@ export default function App() {
     speedLimitKibPerSecond: 0,
     notificationsEnabled: true,
     theme: 'system',
+    extensionIntegration: {
+      enabled: true,
+      downloadHandoffMode: 'ask',
+      contextMenuEnabled: true,
+      showProgressAfterHandoff: true,
+      showBadgeStatus: true,
+      excludedHosts: [],
+    },
   });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [view, setView] = useState<ViewState>('all');
@@ -260,6 +269,15 @@ export default function App() {
     }
   }
 
+  async function handleTestExtensionHandoff() {
+    try {
+      await testExtensionHandoff();
+      addToast({ type: 'info', title: 'Test Handoff Started', message: 'A browser-style download prompt was opened.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Test Handoff Failed', message: getErrorMessage(error) });
+    }
+  }
+
   async function handleCopyDiagnostics() {
     if (!diagnostics) {
       addToast({ type: 'warning', title: 'Diagnostics Unavailable', message: 'Refresh diagnostics before copying the report.' });
@@ -425,6 +443,7 @@ export default function App() {
                 onRefreshDiagnostics={refreshDiagnostics}
                 onOpenInstallDocs={handleOpenInstallDocs}
                 onRunHostRegistrationFix={handleRunHostRegistrationFix}
+                onTestExtensionHandoff={handleTestExtensionHandoff}
                 onCopyDiagnostics={handleCopyDiagnostics}
                 onExportDiagnostics={handleExportDiagnostics}
               />

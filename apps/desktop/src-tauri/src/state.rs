@@ -1,7 +1,7 @@
 use crate::storage::{
     load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
-    DownloadJob, DownloadPrompt, DownloadSource, FailureCategory, HostRegistrationDiagnostics, JobState,
-    PersistedState, QueueSummary, ResumeSupport, Settings,
+    DownloadJob, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory,
+    HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary, ResumeSupport, Settings,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -203,6 +203,19 @@ impl SharedState {
         }
     }
 
+    pub async fn extension_integration_settings(&self) -> ExtensionIntegrationSettings {
+        let state = self.inner.read().await;
+        state.settings.extension_integration.clone()
+    }
+
+    pub async fn show_progress_after_handoff(&self) -> bool {
+        let state = self.inner.read().await;
+        state
+            .settings
+            .extension_integration
+            .show_progress_after_handoff
+    }
+
     pub async fn diagnostics_snapshot(
         &self,
         host_registration: HostRegistrationDiagnostics,
@@ -218,10 +231,12 @@ impl SharedState {
         }
     }
 
-    pub async fn save_settings(&self, settings: Settings) -> Result<DesktopSnapshot, String> {
+    pub async fn save_settings(&self, mut settings: Settings) -> Result<DesktopSnapshot, String> {
         if settings.download_directory.trim().is_empty() {
             return Err("Download directory cannot be empty.".into());
         }
+
+        normalize_extension_settings(&mut settings.extension_integration);
 
         std::fs::create_dir_all(&settings.download_directory)
             .map_err(|error| format!("Could not create download directory: {error}"))?;
@@ -229,6 +244,22 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.settings = settings;
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    pub async fn save_extension_integration_settings(
+        &self,
+        mut extension_settings: ExtensionIntegrationSettings,
+    ) -> Result<DesktopSnapshot, String> {
+        normalize_extension_settings(&mut extension_settings);
+
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.settings.extension_integration = extension_settings;
             (state.snapshot(), state.persisted())
         };
 
@@ -1095,6 +1126,34 @@ fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
     }
 
     job
+}
+
+fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
+    let mut normalized_hosts = Vec::new();
+    let mut seen_hosts = HashSet::new();
+
+    for host in &settings.excluded_hosts {
+        let mut host = host.trim().to_ascii_lowercase();
+        if let Some(stripped) = host.strip_prefix("http://") {
+            host = stripped.to_string();
+        } else if let Some(stripped) = host.strip_prefix("https://") {
+            host = stripped.to_string();
+        }
+        let host = host
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .trim_matches('/')
+            .to_string();
+
+        if host.is_empty() || !seen_hosts.insert(host.clone()) {
+            continue;
+        }
+
+        normalized_hosts.push(host);
+    }
+
+    settings.excluded_hosts = normalized_hosts;
 }
 
 fn default_download_directory(base_dir: &Path) -> String {

@@ -45,6 +45,7 @@ fn main() {
             commands::reveal_job_in_folder,
             commands::open_install_docs,
             commands::run_host_registration_fix,
+            commands::test_extension_handoff,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri app");

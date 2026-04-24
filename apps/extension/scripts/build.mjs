@@ -29,6 +29,10 @@ const targets = [
       action: {
         default_title: 'Simple Download Manager',
         default_popup: 'popup.html'
+      },
+      options_ui: {
+        page: 'options.html',
+        open_in_tab: true
       }
     }
   },
@@ -47,6 +51,10 @@ const targets = [
         default_title: 'Simple Download Manager',
         default_popup: 'popup.html'
       },
+      options_ui: {
+        page: 'options.html',
+        open_in_tab: true
+      },
       browser_specific_settings: {
         gecko: {
           id: releaseConfig.firefoxExtensionId
@@ -63,7 +71,8 @@ async function buildTarget(target) {
   await build({
     entryPoints: {
       background: path.join(appRoot, 'src', 'background', 'index.ts'),
-      popup: path.join(appRoot, 'src', 'popup', 'index.ts')
+      popup: path.join(appRoot, 'src', 'popup', 'index.ts'),
+      options: path.join(appRoot, 'src', 'options', 'index.ts')
     },
     bundle: true,
     format: 'esm',
@@ -75,6 +84,7 @@ async function buildTarget(target) {
   });
 
   await cp(path.join(appRoot, 'src', 'popup', 'index.html'), path.join(outdir, 'popup.html'));
+  await cp(path.join(appRoot, 'src', 'options', 'index.html'), path.join(outdir, 'options.html'));
   await writeFile(path.join(outdir, 'manifest.json'), JSON.stringify(target.manifest, null, 2));
 }
 

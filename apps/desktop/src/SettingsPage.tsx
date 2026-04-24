@@ -2,17 +2,24 @@ import React, { useEffect, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
 import {
   Activity,
+  Ban,
   Copy,
   Download,
   ExternalLink,
   FolderOpen,
+  Globe,
+  MousePointerClick,
   Palette,
+  PlugZap,
+  Plus,
   RefreshCw,
   Save,
   Settings2,
   ShieldAlert,
   ShieldCheck,
   ShieldX,
+  TestTube2,
+  Trash2,
   Wrench,
 } from 'lucide-react';
 
@@ -25,6 +32,7 @@ interface SettingsPageProps {
   onRefreshDiagnostics: () => void;
   onOpenInstallDocs: () => void;
   onRunHostRegistrationFix: () => void;
+  onTestExtensionHandoff: () => void;
   onCopyDiagnostics: () => void;
   onExportDiagnostics: () => void;
 }
@@ -38,13 +46,16 @@ export function SettingsPage({
   onRefreshDiagnostics,
   onOpenInstallDocs,
   onRunHostRegistrationFix,
+  onTestExtensionHandoff,
   onCopyDiagnostics,
   onExportDiagnostics,
 }: SettingsPageProps) {
   const [formData, setFormData] = useState<Settings>(settings);
+  const [excludedHostInput, setExcludedHostInput] = useState('');
 
   useEffect(() => {
     setFormData(settings);
+    setExcludedHostInput('');
   }, [settings]);
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -67,6 +78,46 @@ export function SettingsPage({
     const selectedDirectory = await onBrowseDirectory();
     if (!selectedDirectory) return;
     setFormData((prev) => ({ ...prev, downloadDirectory: selectedDirectory }));
+  };
+
+  const updateExtensionIntegration = (update: Partial<Settings['extensionIntegration']>) => {
+    setFormData((prev) => ({
+      ...prev,
+      extensionIntegration: {
+        ...prev.extensionIntegration,
+        ...update,
+      },
+    }));
+  };
+
+  const handleAddExcludedHost = () => {
+    const normalizedHost = normalizeHostInput(excludedHostInput);
+    if (!normalizedHost) return;
+
+    setFormData((prev) => {
+      if (prev.extensionIntegration.excludedHosts.includes(normalizedHost)) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        extensionIntegration: {
+          ...prev.extensionIntegration,
+          excludedHosts: [...prev.extensionIntegration.excludedHosts, normalizedHost],
+        },
+      };
+    });
+    setExcludedHostInput('');
+  };
+
+  const handleRemoveExcludedHost = (host: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      extensionIntegration: {
+        ...prev.extensionIntegration,
+        excludedHosts: prev.extensionIntegration.excludedHosts.filter((candidate) => candidate !== host),
+      },
+    }));
   };
 
   return (
@@ -184,6 +235,157 @@ export function SettingsPage({
           </FieldRow>
         </SettingsPanel>
 
+        <SettingsPanel icon={<PlugZap size={20} />} title="Web Extension">
+          <FieldRow label="Extension Integration" description="Allow browsers to hand downloads to this app.">
+            <ToggleSwitch
+              id="extensionIntegrationEnabled"
+              checked={formData.extensionIntegration.enabled}
+              onChange={(checked) => updateExtensionIntegration({ enabled: checked })}
+            />
+          </FieldRow>
+
+          <FieldRow label="Browser Downloads" description="Controls what happens when a website starts a download.">
+            <select
+              id="downloadHandoffMode"
+              value={formData.extensionIntegration.downloadHandoffMode}
+              onChange={(event) => updateExtensionIntegration({ downloadHandoffMode: event.target.value as Settings['extensionIntegration']['downloadHandoffMode'] })}
+              disabled={!formData.extensionIntegration.enabled}
+              className="h-10 w-60 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="off">Off</option>
+              <option value="ask">Ask before sending</option>
+              <option value="auto">Send automatically</option>
+            </select>
+          </FieldRow>
+
+          <div className="flex items-start justify-between gap-4 rounded-md border border-border bg-surface px-4 py-3">
+            <div className="flex min-w-0 items-start gap-3">
+              {renderRegistrationIcon(diagnostics?.hostRegistration.status)}
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-foreground">Native host status</div>
+                <div className="mt-1 text-sm leading-5 text-muted-foreground">
+                  {renderRegistrationMessage(diagnostics?.hostRegistration.status)}
+                </div>
+              </div>
+            </div>
+            <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${registrationBadgeClass(diagnostics?.hostRegistration.status)}`}>
+              {registrationStatusLabel(diagnostics?.hostRegistration.status)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <CompactSetting
+              icon={<MousePointerClick size={17} />}
+              title="Right-click handoff"
+              description="Show the browser context menu command."
+              control={
+                <ToggleSwitch
+                  id="contextMenuEnabled"
+                  checked={formData.extensionIntegration.contextMenuEnabled}
+                  onChange={(checked) => updateExtensionIntegration({ contextMenuEnabled: checked })}
+                  disabled={!formData.extensionIntegration.enabled}
+                />
+              }
+            />
+            <CompactSetting
+              icon={<Download size={17} />}
+              title="Progress window"
+              description="Open progress after a browser handoff."
+              control={
+                <ToggleSwitch
+                  id="showProgressAfterHandoff"
+                  checked={formData.extensionIntegration.showProgressAfterHandoff}
+                  onChange={(checked) => updateExtensionIntegration({ showProgressAfterHandoff: checked })}
+                  disabled={!formData.extensionIntegration.enabled}
+                />
+              }
+            />
+            <CompactSetting
+              icon={<Globe size={17} />}
+              title="Badge status"
+              description="Show connection and queue status in the popup."
+              control={
+                <ToggleSwitch
+                  id="showBadgeStatus"
+                  checked={formData.extensionIntegration.showBadgeStatus}
+                  onChange={(checked) => updateExtensionIntegration({ showBadgeStatus: checked })}
+                  disabled={!formData.extensionIntegration.enabled}
+                />
+              }
+            />
+            <CompactSetting
+              icon={<TestTube2 size={17} />}
+              title="Test handoff"
+              description="Open a browser-style confirmation prompt."
+              control={
+                <button
+                  type="button"
+                  onClick={onTestExtensionHandoff}
+                  disabled={!formData.extensionIntegration.enabled}
+                  className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <TestTube2 size={15} />
+                  Test
+                </button>
+              }
+            />
+          </div>
+
+          <FieldRow label="Excluded Sites" description="Downloads from these hostnames stay in the browser.">
+            <div className="space-y-3">
+              <div className="flex min-w-0 gap-2">
+                <input
+                  type="text"
+                  value={excludedHostInput}
+                  onChange={(event) => setExcludedHostInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      handleAddExcludedHost();
+                    }
+                  }}
+                  placeholder="example.com"
+                  disabled={!formData.extensionIntegration.enabled}
+                  className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddExcludedHost}
+                  disabled={!formData.extensionIntegration.enabled || !normalizeHostInput(excludedHostInput)}
+                  className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Plus size={16} />
+                  Add
+                </button>
+              </div>
+
+              {formData.extensionIntegration.excludedHosts.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {formData.extensionIntegration.excludedHosts.map((host) => (
+                    <span key={host} className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-surface px-2.5 text-sm text-foreground">
+                      <Ban size={14} className="text-muted-foreground" />
+                      {host}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveExcludedHost(host)}
+                        className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-destructive"
+                        title={`Remove ${host}`}
+                        aria-label={`Remove ${host}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-border bg-surface px-3 py-2 text-sm text-muted-foreground">
+                  No excluded sites.
+                </div>
+              )}
+            </div>
+          </FieldRow>
+        </SettingsPanel>
+
         <SettingsPanel
           icon={<Activity size={20} />}
           title="Native Host Registration"
@@ -293,6 +495,58 @@ function FieldRow({
   );
 }
 
+function ToggleSwitch({
+  id,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label htmlFor={id} className={`relative inline-flex items-center ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+      <input
+        type="checkbox"
+        id={id}
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        disabled={disabled}
+        className="peer sr-only"
+      />
+      <span className="h-6 w-11 rounded-full bg-muted transition peer-checked:bg-primary" />
+      <span className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full border border-border bg-white transition peer-checked:translate-x-5" />
+    </label>
+  );
+}
+
+function CompactSetting({
+  icon,
+  title,
+  description,
+  control,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  control: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-20 items-center justify-between gap-3 rounded-md border border-border bg-surface px-4 py-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="mt-0.5 text-primary">{icon}</span>
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-foreground">{title}</div>
+          <div className="mt-1 text-sm leading-5 text-muted-foreground">{description}</div>
+        </div>
+      </div>
+      <div className="shrink-0">{control}</div>
+    </div>
+  );
+}
+
 function UtilityButton({
   icon,
   label,
@@ -351,4 +605,38 @@ function renderRegistrationMessage(status?: DiagnosticsSnapshot['hostRegistratio
     default:
       return 'Diagnostics are still loading.';
   }
+}
+
+function registrationStatusLabel(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
+  switch (status) {
+    case 'configured':
+      return 'Ready';
+    case 'broken':
+      return 'Repair';
+    case 'missing':
+      return 'Missing';
+    default:
+      return 'Checking';
+  }
+}
+
+function registrationBadgeClass(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
+  switch (status) {
+    case 'configured':
+      return 'bg-success/10 text-success';
+    case 'broken':
+      return 'bg-warning/10 text-warning';
+    case 'missing':
+      return 'bg-destructive/10 text-destructive';
+    default:
+      return 'bg-muted text-muted-foreground';
+  }
+}
+
+function normalizeHostInput(value: string): string {
+  return value
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .toLowerCase();
 }

@@ -17,8 +17,10 @@ Supported request types:
 
 - `ping`
 - `enqueue_download`
+- `prompt_download`
 - `open_app`
 - `get_status`
+- `save_extension_settings`
 
 `ping` and `get_status` return the current desktop connection and queue summary:
 
@@ -38,6 +40,14 @@ Supported request types:
       "downloading": 2,
       "completed": 3,
       "failed": 1
+    },
+    "extensionSettings": {
+      "enabled": true,
+      "downloadHandoffMode": "ask",
+      "contextMenuEnabled": true,
+      "showProgressAfterHandoff": true,
+      "showBadgeStatus": true,
+      "excludedHosts": []
     }
   }
 }
@@ -57,6 +67,19 @@ Supported request types:
     "referrer": "https://example.com/page",
     "incognito": false
   }
+}
+```
+
+`save_extension_settings` payload:
+
+```json
+{
+  "enabled": true,
+  "downloadHandoffMode": "auto",
+  "contextMenuEnabled": true,
+  "showProgressAfterHandoff": true,
+  "showBadgeStatus": true,
+  "excludedHosts": ["example.com"]
 }
 ```
 
@@ -105,7 +128,9 @@ Supported request types:
 - `ping`
 - `get_status`
 - `enqueue_download`
+- `prompt_download`
 - `show_window`
+- `save_extension_settings`
 
 ## App -> Host
 
@@ -114,6 +139,7 @@ Success types:
 - `ready`
 - `queued`
 - `duplicate_existing_job`
+- `prompt_canceled`
 
 Error codes:
 
