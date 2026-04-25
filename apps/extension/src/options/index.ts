@@ -5,6 +5,7 @@ import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
 const enabledToggle = document.querySelector<HTMLInputElement>('#enabled-toggle');
 const handoffMode = document.querySelector<HTMLSelectElement>('#handoff-mode');
+const listenPortInput = document.querySelector<HTMLInputElement>('#listen-port-input');
 const contextMenuToggle = document.querySelector<HTMLInputElement>('#context-menu-toggle');
 const progressToggle = document.querySelector<HTMLInputElement>('#progress-toggle');
 const badgeToggle = document.querySelector<HTMLInputElement>('#badge-toggle');
@@ -15,9 +16,6 @@ const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-ho
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
 const saveState = document.querySelector<HTMLDivElement>('#save-state');
-const activeCount = document.querySelector<HTMLDivElement>('#active-count');
-const queuedCount = document.querySelector<HTMLDivElement>('#queued-count');
-const attentionCount = document.querySelector<HTMLDivElement>('#attention-count');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh-button');
 
 let currentState: PopupStateResponse | null = null;
@@ -31,12 +29,12 @@ function renderState(state: PopupStateResponse) {
   currentState = state;
   const settings = state.extensionSettings;
   updateConnectionStatus(state.connection);
-  renderSummary(state);
 
   if (!settings) return;
 
   if (enabledToggle) enabledToggle.checked = settings.enabled;
   if (handoffMode) handoffMode.value = settings.downloadHandoffMode;
+  if (listenPortInput) listenPortInput.value = String(settings.listenPort ?? 1420);
   if (contextMenuToggle) contextMenuToggle.checked = settings.contextMenuEnabled;
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
@@ -75,13 +73,6 @@ function updateConnectionStatus(connection: PopupStateResponse['connection']) {
       statusBadge.textContent = 'Checking';
       break;
   }
-}
-
-function renderSummary(state: PopupStateResponse) {
-  const summary = state.queueSummary;
-  if (activeCount) activeCount.textContent = String(summary?.active ?? 0);
-  if (queuedCount) queuedCount.textContent = String(summary?.queued ?? 0);
-  if (attentionCount) attentionCount.textContent = String(summary?.attention ?? summary?.failed ?? 0);
 }
 
 function renderIgnoredExtensions(extensions: string[]) {
@@ -153,6 +144,7 @@ function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
 
   const extensionControls = [
     handoffMode,
+    listenPortInput,
     contextMenuToggle,
     progressToggle,
     badgeToggle,
@@ -198,6 +190,17 @@ enabledToggle?.addEventListener('change', () => {
 
 handoffMode?.addEventListener('change', () => {
   void updateSettings({ downloadHandoffMode: handoffMode.value as DownloadHandoffMode });
+});
+
+listenPortInput?.addEventListener('change', () => {
+  void updateSettings({ listenPort: normalizeListenPort(listenPortInput.value) });
+});
+
+listenPortInput?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    listenPortInput.blur();
+  }
 });
 
 contextMenuToggle?.addEventListener('change', () => {
@@ -296,6 +299,11 @@ function normalizeHost(value: string): string {
     .toLowerCase();
 }
 
+function normalizeListenPort(value: string): number {
+  const port = Number.parseInt(value, 10);
+  return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+}
+
 async function refreshState() {
   isSaving = true;
   const extensionEnabled = currentState?.extensionSettings?.enabled ?? true;
@@ -345,6 +353,7 @@ function fallbackErrorState(message: string): PopupStateResponse {
     extensionSettings: {
       enabled: true,
       downloadHandoffMode: 'ask',
+      listenPort: 1420,
       contextMenuEnabled: true,
       showProgressAfterHandoff: true,
       showBadgeStatus: true,

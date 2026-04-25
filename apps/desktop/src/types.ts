@@ -56,6 +56,10 @@ export interface DownloadJob {
   retryAttempts?: number;
   targetPath?: string;
   tempPath?: string;
+  bulkArchive?: {
+    id: string;
+    name: string;
+  };
 }
 
 export interface DownloadPrompt {
@@ -72,6 +76,7 @@ export interface DownloadPrompt {
 export interface ExtensionIntegrationSettings {
   enabled: boolean;
   downloadHandoffMode: DownloadHandoffMode;
+  listenPort: number;
   contextMenuEnabled: boolean;
   showProgressAfterHandoff: boolean;
   showBadgeStatus: boolean;
@@ -85,7 +90,8 @@ export interface Settings {
   autoRetryAttempts: number;
   speedLimitKibPerSecond: number;
   notificationsEnabled: boolean;
-  theme: 'light' | 'dark' | 'system';
+  theme: 'light' | 'dark' | 'oled_dark' | 'system';
+  accentColor: string;
   extensionIntegration: ExtensionIntegrationSettings;
 }
 

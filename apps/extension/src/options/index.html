@@ -9,7 +9,6 @@
         color-scheme: dark;
         --bg: #090d12;
         --surface: #0d1218;
-        --sidebar: #0b1015;
         --panel: #111820;
         --panel-strong: #151d26;
         --row: #0f151c;
@@ -58,84 +57,13 @@
       }
 
       .app-shell {
-        display: grid;
-        grid-template-columns: 246px minmax(0, 1fr);
         min-height: 100vh;
-        background: var(--bg);
-      }
-
-      .sidebar {
-        position: sticky;
-        top: 0;
-        display: flex;
-        height: 100vh;
-        flex-direction: column;
-        justify-content: space-between;
-        border-right: 1px solid var(--border);
-        background: var(--sidebar);
-        padding: 18px 12px;
-      }
-
-      .brand {
-        display: flex;
-        align-items: center;
-        gap: 11px;
-        padding: 0 8px 18px;
-        font-weight: 760;
-      }
-
-      .brand-mark {
-        display: inline-grid;
-        width: 28px;
-        height: 28px;
-        place-items: center;
-        border: 1px solid color-mix(in srgb, var(--primary) 62%, var(--border));
-        border-radius: 7px;
-        color: var(--primary);
-        font-size: 16px;
-        line-height: 1;
-      }
-
-      .nav {
-        display: grid;
-        gap: 5px;
-      }
-
-      .nav a {
-        display: flex;
-        min-height: 42px;
-        align-items: center;
-        gap: 10px;
-        border-radius: 7px;
-        color: var(--muted);
-        padding: 0 12px;
-        text-decoration: none;
-        transition: background 140ms ease, color 140ms ease;
-      }
-
-      .nav a:hover,
-      .nav a:focus-visible {
-        background: var(--panel-strong);
-        color: var(--text);
-        outline: none;
-      }
-
-      .nav a:first-child {
-        background: var(--primary-soft);
-        color: #8ec5ff;
-        box-shadow: inset 3px 0 0 var(--primary);
-      }
-
-      .sidebar-footer {
-        border-top: 1px solid var(--border);
-        color: var(--muted);
-        padding: 14px 8px 0;
-        font-size: 12px;
-        line-height: 18px;
+        background: var(--surface);
       }
 
       .page {
         min-width: 0;
+        min-height: 100vh;
         background: var(--surface);
       }
 
@@ -144,7 +72,7 @@
         top: 0;
         z-index: 2;
         display: flex;
-        min-height: 72px;
+        min-height: 78px;
         align-items: center;
         justify-content: space-between;
         gap: 18px;
@@ -171,9 +99,15 @@
         font-size: 13px;
       }
 
+      .title-block {
+        min-width: 0;
+      }
+
       .header-actions {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
+        justify-content: flex-end;
         gap: 10px;
       }
 
@@ -202,42 +136,9 @@
       }
 
       .content {
-        width: min(1040px, calc(100vw - 310px));
+        width: min(1040px, calc(100vw - 32px));
         margin: 0 auto;
         padding: 26px 0 42px;
-      }
-
-      .overview {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        overflow: hidden;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--panel);
-        margin-bottom: 16px;
-      }
-
-      .metric {
-        min-height: 78px;
-        padding: 16px 18px;
-      }
-
-      .metric + .metric {
-        border-left: 1px solid var(--border);
-      }
-
-      .metric-label {
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 720;
-        text-transform: uppercase;
-      }
-
-      .metric-value {
-        margin-top: 8px;
-        color: var(--text);
-        font-size: 28px;
-        font-weight: 760;
       }
 
       .sections {
@@ -302,7 +203,8 @@
       }
 
       select,
-      input[type="text"] {
+      input[type="text"],
+      input[type="number"] {
         width: 100%;
         height: 38px;
         border: 1px solid var(--input);
@@ -315,7 +217,8 @@
       }
 
       select:focus,
-      input[type="text"]:focus {
+      input[type="text"]:focus,
+      input[type="number"]:focus {
         border-color: var(--primary);
         box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
       }
@@ -461,24 +364,10 @@
         min-height: 18px;
         color: var(--muted);
         font-size: 12px;
+        line-height: 18px;
       }
 
       @media (max-width: 840px) {
-        .app-shell {
-          grid-template-columns: 1fr;
-        }
-
-        .sidebar {
-          position: static;
-          height: auto;
-          border-right: 0;
-          border-bottom: 1px solid var(--border);
-        }
-
-        .nav {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
         .content {
           width: min(100% - 24px, 760px);
         }
@@ -490,45 +379,20 @@
           padding: 18px;
         }
 
-        .overview,
         .setting-row {
           grid-template-columns: 1fr;
-        }
-
-        .metric + .metric {
-          border-left: 0;
-          border-top: 1px solid var(--border);
         }
       }
     </style>
   </head>
   <body>
     <div class="app-shell">
-      <aside class="sidebar">
-        <div>
-          <div class="brand">
-            <span class="brand-mark" aria-hidden="true">D</span>
-            <span>Download Manager</span>
-          </div>
-
-          <nav class="nav" aria-label="Settings sections">
-            <a href="#capture">Capture Mode</a>
-            <a href="#filters">Filters</a>
-            <a href="#behavior">Behavior</a>
-            <a href="#status">Status</a>
-          </nav>
-        </div>
-
-        <div class="sidebar-footer">
-          <div id="save-state" class="save-state">Loading settings...</div>
-        </div>
-      </aside>
-
       <main class="page">
         <header class="topbar">
-          <div>
+          <div class="title-block">
             <h1>Web Extension Settings</h1>
             <p class="subtitle">Control how browser downloads are captured and handed to the desktop app.</p>
+            <div id="save-state" class="save-state">Loading settings...</div>
           </div>
           <div class="header-actions">
             <span id="connection-status" class="status checking">Checking</span>
@@ -537,21 +401,6 @@
         </header>
 
         <div class="content">
-          <section id="status" class="overview" aria-label="Queue summary">
-            <div class="metric">
-              <div class="metric-label">Active</div>
-              <div id="active-count" class="metric-value">0</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Queued</div>
-              <div id="queued-count" class="metric-value">0</div>
-            </div>
-            <div class="metric">
-              <div class="metric-label">Needs Attention</div>
-              <div id="attention-count" class="metric-value">0</div>
-            </div>
-          </section>
-
           <div class="sections">
             <section id="capture" class="panel">
               <div class="panel-header">
@@ -581,6 +430,14 @@
                   <option value="ask">Ask before sending</option>
                   <option value="auto">Silent download</option>
                 </select>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="label">Listen Port</div>
+                  <div class="description">Local desktop listener port used by extension-side configuration.</div>
+                </div>
+                <input id="listen-port-input" type="number" min="1" max="65535" step="1" inputmode="numeric" aria-label="Extension listen port" />
               </div>
             </section>
 

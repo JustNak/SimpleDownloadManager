@@ -143,6 +143,7 @@ function fallbackErrorState(message: string): PopupStateResponse {
     extensionSettings: {
       enabled: true,
       downloadHandoffMode: 'ask',
+      listenPort: 1420,
       contextMenuEnabled: true,
       showProgressAfterHandoff: true,
       showBadgeStatus: true,
@@ -164,6 +165,7 @@ async function init() {
       extensionSettings: {
         enabled: true,
         downloadHandoffMode: 'ask',
+        listenPort: 1420,
         contextMenuEnabled: true,
         showProgressAfterHandoff: true,
         showBadgeStatus: true,

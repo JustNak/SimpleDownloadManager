@@ -96,6 +96,15 @@ pub struct DownloadJob {
     pub target_path: String,
     #[serde(default)]
     pub temp_path: String,
+    #[serde(default)]
+    pub bulk_archive: Option<BulkArchiveInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkArchiveInfo {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +126,7 @@ pub struct DownloadPrompt {
 pub enum Theme {
     Light,
     Dark,
+    OledDark,
     System,
 }
 
@@ -133,6 +143,8 @@ pub enum DownloadHandoffMode {
 pub struct ExtensionIntegrationSettings {
     pub enabled: bool,
     pub download_handoff_mode: DownloadHandoffMode,
+    #[serde(default = "default_extension_listen_port")]
+    pub listen_port: u32,
     pub context_menu_enabled: bool,
     pub show_progress_after_handoff: bool,
     pub show_badge_status: bool,
@@ -152,6 +164,8 @@ pub struct Settings {
     pub speed_limit_kib_per_second: u32,
     pub notifications_enabled: bool,
     pub theme: Theme,
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
     #[serde(default)]
     pub extension_integration: ExtensionIntegrationSettings,
 }
@@ -227,6 +241,7 @@ impl Default for Settings {
             speed_limit_kib_per_second: 0,
             notifications_enabled: true,
             theme: Theme::System,
+            accent_color: default_accent_color(),
             extension_integration: ExtensionIntegrationSettings::default(),
         }
     }
@@ -237,6 +252,7 @@ impl Default for ExtensionIntegrationSettings {
         Self {
             enabled: true,
             download_handoff_mode: DownloadHandoffMode::Ask,
+            listen_port: default_extension_listen_port(),
             context_menu_enabled: true,
             show_progress_after_handoff: true,
             show_badge_status: true,
@@ -257,6 +273,14 @@ impl Default for PersistedState {
 
 fn default_auto_retry_attempts() -> u32 {
     3
+}
+
+fn default_accent_color() -> String {
+    "#3b82f6".into()
+}
+
+pub fn default_extension_listen_port() -> u32 {
+    1420
 }
 
 pub fn load_persisted_state(path: &Path) -> Result<PersistedState, String> {
@@ -386,6 +410,7 @@ mod tests {
 
         assert_eq!(state.settings.auto_retry_attempts, 3);
         assert_eq!(state.settings.speed_limit_kib_per_second, 0);
+        assert_eq!(state.settings.accent_color, "#3b82f6");
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
         assert_eq!(state.jobs[0].retry_attempts, 0);
@@ -397,6 +422,7 @@ mod tests {
 
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.speed_limit_kib_per_second, 0);
+        assert_eq!(settings.accent_color, "#3b82f6");
     }
 
     #[test]
@@ -411,6 +437,7 @@ mod tests {
         assert!(settings.extension_integration.context_menu_enabled);
         assert!(settings.extension_integration.show_progress_after_handoff);
         assert!(settings.extension_integration.show_badge_status);
+        assert_eq!(settings.extension_integration.listen_port, 1420);
         assert!(settings.extension_integration.excluded_hosts.is_empty());
         assert!(settings
             .extension_integration
@@ -443,6 +470,7 @@ mod tests {
         assert!(state.settings.extension_integration.context_menu_enabled);
         assert!(state.settings.extension_integration.show_progress_after_handoff);
         assert!(state.settings.extension_integration.show_badge_status);
+        assert_eq!(state.settings.extension_integration.listen_port, 1420);
         assert!(state.settings.extension_integration.excluded_hosts.is_empty());
         assert!(state
             .settings

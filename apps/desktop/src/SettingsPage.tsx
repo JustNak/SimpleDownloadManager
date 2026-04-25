@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
 import {
   Activity,
   Ban,
+  Check,
   Copy,
   Download,
   ExternalLink,
@@ -23,12 +24,23 @@ import {
   Wrench,
 } from 'lucide-react';
 
+const ACCENT_COLOR_PRESETS = [
+  { name: 'Blue', value: '#3b82f6' },
+  { name: 'Cyan', value: '#06b6d4' },
+  { name: 'Green', value: '#22c55e' },
+  { name: 'Amber', value: '#f59e0b' },
+  { name: 'Rose', value: '#f43f5e' },
+  { name: 'Violet', value: '#8b5cf6' },
+];
+
 interface SettingsPageProps {
   settings: Settings;
   diagnostics: DiagnosticsSnapshot | null;
-  onSave: (settings: Settings) => void;
+  onSave: (settings: Settings) => void | Promise<void | boolean>;
   onBrowseDirectory: () => Promise<string | null | void>;
   onCancel: () => void;
+  onDirtyChange?: (isDirty: boolean) => void;
+  onDraftChange?: (settings: Settings) => void;
   onRefreshDiagnostics: () => void;
   onOpenInstallDocs: () => void;
   onRunHostRegistrationFix: () => void;
@@ -43,6 +55,8 @@ export function SettingsPage({
   onSave,
   onBrowseDirectory,
   onCancel,
+  onDirtyChange,
+  onDraftChange,
   onRefreshDiagnostics,
   onOpenInstallDocs,
   onRunHostRegistrationFix,
@@ -52,11 +66,25 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [formData, setFormData] = useState<Settings>(settings);
   const [excludedHostInput, setExcludedHostInput] = useState('');
+  const [accentColorInput, setAccentColorInput] = useState(normalizeAccentColor(settings.accentColor));
 
   useEffect(() => {
     setFormData(settings);
     setExcludedHostInput('');
+    setAccentColorInput(normalizeAccentColor(settings.accentColor));
   }, [settings]);
+
+  const isDirty = useMemo(() => {
+    return JSON.stringify(formData) !== JSON.stringify(settings);
+  }, [formData, settings]);
+
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
+
+  useEffect(() => {
+    onDraftChange?.(formData);
+  }, [formData, onDraftChange]);
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value, type } = event.target;
@@ -71,7 +99,7 @@ export function SettingsPage({
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
-    onSave(formData);
+    void onSave(formData);
   };
 
   const handleBrowseDirectory = async () => {
@@ -88,6 +116,22 @@ export function SettingsPage({
         ...update,
       },
     }));
+  };
+
+  const updateAccentColor = (accentColor: string) => {
+    const normalizedAccentColor = normalizeAccentColor(accentColor);
+    setAccentColorInput(normalizedAccentColor);
+    setFormData((prev) => ({
+      ...prev,
+      accentColor: normalizedAccentColor,
+    }));
+  };
+
+  const handleAccentTextChange = (value: string) => {
+    setAccentColorInput(value);
+    if (/^#[0-9a-f]{6}$/i.test(value.trim())) {
+      updateAccentColor(value);
+    }
   };
 
   const handleAddExcludedHost = () => {
@@ -140,7 +184,7 @@ export function SettingsPage({
 
       <div className="space-y-5">
         <SettingsPanel icon={<Settings2 size={20} />} title="General">
-          <FieldRow label="Download Directory" description="Files are saved here by default.">
+          <FieldRow label="Download Directory" description="Default save path." tooltip="Files are saved here by default.">
             <div className="flex min-w-0 gap-2">
               <input
                 type="text"
@@ -161,7 +205,7 @@ export function SettingsPage({
             </div>
           </FieldRow>
 
-          <FieldRow label="Max Concurrent Downloads" description="Limits how many jobs may run at once.">
+          <FieldRow label="Max Concurrent Downloads" description="Active job limit." tooltip="Limits how many jobs may run at once.">
             <input
               type="number"
               id="maxConcurrentDownloads"
@@ -174,7 +218,7 @@ export function SettingsPage({
             />
           </FieldRow>
 
-          <FieldRow label="Auto Retry Attempts" description="Retries transient network or server failures before marking a job failed.">
+          <FieldRow label="Auto Retry Attempts" description="Failure retries." tooltip="Retries transient network or server failures before marking a job failed.">
             <input
               type="number"
               id="autoRetryAttempts"
@@ -187,7 +231,7 @@ export function SettingsPage({
             />
           </FieldRow>
 
-          <FieldRow label="Per-Download Speed Limit" description="Caps each active transfer. Set 0 to keep downloads unlimited.">
+          <FieldRow label="Per-Download Speed Limit" description="Transfer cap." tooltip="Caps each active transfer. Set 0 to keep downloads unlimited.">
             <div className="flex items-center gap-2">
               <input
                 type="number"
@@ -205,7 +249,7 @@ export function SettingsPage({
         </SettingsPanel>
 
         <SettingsPanel icon={<Palette size={20} />} title="Appearance & Behavior">
-          <FieldRow label="Desktop Notifications" description="Show a native notification when downloads finish or fail.">
+          <FieldRow label="Desktop Notifications" description="Native alerts." tooltip="Show a native notification when downloads finish or fail.">
             <label className="relative inline-flex cursor-pointer items-center">
               <input
                 type="checkbox"
@@ -220,7 +264,7 @@ export function SettingsPage({
             </label>
           </FieldRow>
 
-          <FieldRow label="App Theme" description="Theme switching stays in Settings and applies to the entire shell.">
+          <FieldRow label="App Theme" description="Shell theme." tooltip="Theme switching stays in Settings and applies to the entire shell.">
             <select
               id="theme"
               name="theme"
@@ -230,13 +274,63 @@ export function SettingsPage({
             >
               <option value="light">Light Mode</option>
               <option value="dark">Dark Mode</option>
+              <option value="oled_dark">OLED Dark</option>
               <option value="system">System Default</option>
             </select>
+          </FieldRow>
+
+          <FieldRow label="Color Accent" description="Accent color." tooltip="Choose a preset or use the color picker for a custom accent.">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Accent color presets">
+                {ACCENT_COLOR_PRESETS.map((preset) => (
+                  <button
+                    key={preset.value}
+                    type="button"
+                    onClick={() => updateAccentColor(preset.value)}
+                    className={`relative flex h-9 w-9 items-center justify-center rounded-md border transition ${
+                      normalizeAccentColor(formData.accentColor) === preset.value
+                        ? 'border-primary ring-2 ring-primary/30'
+                        : 'border-border hover:border-input'
+                    }`}
+                    style={{ backgroundColor: preset.value }}
+                    title={preset.name}
+                    aria-label={`${preset.name} accent`}
+                    aria-checked={normalizeAccentColor(formData.accentColor) === preset.value}
+                    role="radio"
+                  >
+                    {normalizeAccentColor(formData.accentColor) === preset.value ? (
+                      <Check size={16} className="text-white drop-shadow" />
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+
+              <label className="flex h-10 items-center gap-3 rounded-md border border-input bg-background px-3 text-sm text-foreground">
+                <span className="text-muted-foreground">Custom</span>
+                <input
+                  type="color"
+                  value={normalizeAccentColor(formData.accentColor)}
+                  onChange={(event) => updateAccentColor(event.target.value)}
+                  onInput={(event) => updateAccentColor(event.currentTarget.value)}
+                  className="h-6 w-9 cursor-pointer rounded border-0 bg-transparent p-0"
+                  aria-label="Custom accent color"
+                />
+                <input
+                  type="text"
+                  value={accentColorInput}
+                  onChange={(event) => handleAccentTextChange(event.target.value)}
+                  onBlur={() => setAccentColorInput(normalizeAccentColor(formData.accentColor))}
+                  aria-label="Accent color hex"
+                  spellCheck={false}
+                  className="h-7 w-24 rounded border border-transparent bg-transparent px-1 font-mono text-xs text-muted-foreground outline-none transition focus:border-primary focus:text-foreground"
+                />
+              </label>
+            </div>
           </FieldRow>
         </SettingsPanel>
 
         <SettingsPanel icon={<PlugZap size={20} />} title="Web Extension">
-          <FieldRow label="Extension Integration" description="Allow browsers to hand downloads to this app.">
+          <FieldRow label="Extension Integration" description="Browser handoff." tooltip="Allow browsers to hand downloads to this app.">
             <ToggleSwitch
               id="extensionIntegrationEnabled"
               checked={formData.extensionIntegration.enabled}
@@ -244,7 +338,7 @@ export function SettingsPage({
             />
           </FieldRow>
 
-          <FieldRow label="Browser Downloads" description="Controls what happens when a website starts a download.">
+          <FieldRow label="Browser Downloads" description="Capture behavior." tooltip="Controls what happens when a website starts a download.">
             <select
               id="downloadHandoffMode"
               value={formData.extensionIntegration.downloadHandoffMode}
@@ -256,6 +350,25 @@ export function SettingsPage({
               <option value="ask">Ask before sending</option>
               <option value="auto">Send automatically</option>
             </select>
+          </FieldRow>
+
+          <FieldRow label="Listen Port" description="Extension port." tooltip="Local port used by web-extension listener settings.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                id="extensionListenPort"
+                value={formData.extensionIntegration.listenPort}
+                onChange={(event) => updateExtensionIntegration({ listenPort: normalizeListenPort(event.target.value) })}
+                min="1"
+                max="65535"
+                step="1"
+                inputMode="numeric"
+                aria-label="Extension listen port"
+                disabled={!formData.extensionIntegration.enabled}
+                className="h-10 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className="text-sm text-muted-foreground">port</span>
+            </div>
           </FieldRow>
 
           <div className="flex items-start justify-between gap-4 rounded-md border border-border bg-surface px-4 py-3">
@@ -277,7 +390,8 @@ export function SettingsPage({
             <CompactSetting
               icon={<MousePointerClick size={17} />}
               title="Right-click handoff"
-              description="Show the browser context menu command."
+              description="Context command."
+              tooltip="Show the browser context menu command."
               control={
                 <ToggleSwitch
                   id="contextMenuEnabled"
@@ -290,7 +404,8 @@ export function SettingsPage({
             <CompactSetting
               icon={<Download size={17} />}
               title="Progress window"
-              description="Open progress after a browser handoff."
+              description="Handoff progress."
+              tooltip="Open progress after a browser handoff."
               control={
                 <ToggleSwitch
                   id="showProgressAfterHandoff"
@@ -303,7 +418,8 @@ export function SettingsPage({
             <CompactSetting
               icon={<Globe size={17} />}
               title="Badge status"
-              description="Show connection and queue status in the popup."
+              description="Popup status."
+              tooltip="Show connection and queue status in the popup."
               control={
                 <ToggleSwitch
                   id="showBadgeStatus"
@@ -316,7 +432,8 @@ export function SettingsPage({
             <CompactSetting
               icon={<TestTube2 size={17} />}
               title="Test handoff"
-              description="Open a browser-style confirmation prompt."
+              description="Prompt test."
+              tooltip="Open a browser-style confirmation prompt."
               control={
                 <button
                   type="button"
@@ -331,7 +448,7 @@ export function SettingsPage({
             />
           </div>
 
-          <FieldRow label="Excluded Sites" description="Downloads from these hostnames stay in the browser.">
+          <FieldRow label="Excluded Sites" description="Browser-only hosts." tooltip="Downloads from these hostnames stay in the browser.">
             <div className="space-y-3">
               <div className="flex min-w-0 gap-2">
                 <input
@@ -478,17 +595,21 @@ function SettingsPanel({
 function FieldRow({
   label,
   description,
+  tooltip,
   children,
 }: {
   label: string;
   description: string;
+  tooltip?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="grid grid-cols-[minmax(180px,260px)_minmax(0,1fr)] items-center gap-5">
       <div>
         <label className="text-sm font-semibold text-foreground">{label}</label>
-        <p className="mt-1 text-sm leading-5 text-muted-foreground">{description}</p>
+        <p className="mt-1 text-sm leading-5 text-muted-foreground" title={tooltip ?? description}>
+          {description}
+        </p>
       </div>
       <div className="min-w-0">{children}</div>
     </div>
@@ -526,11 +647,13 @@ function CompactSetting({
   icon,
   title,
   description,
+  tooltip,
   control,
 }: {
   icon: React.ReactNode;
   title: string;
   description: string;
+  tooltip?: string;
   control: React.ReactNode;
 }) {
   return (
@@ -539,7 +662,9 @@ function CompactSetting({
         <span className="mt-0.5 text-primary">{icon}</span>
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{title}</div>
-          <div className="mt-1 text-sm leading-5 text-muted-foreground">{description}</div>
+          <div className="mt-1 text-sm leading-5 text-muted-foreground" title={tooltip ?? description}>
+            {description}
+          </div>
         </div>
       </div>
       <div className="shrink-0">{control}</div>
@@ -639,4 +764,14 @@ function normalizeHostInput(value: string): string {
     .replace(/^https?:\/\//i, '')
     .replace(/\/.*$/, '')
     .toLowerCase();
+}
+
+function normalizeAccentColor(value: string | undefined): string {
+  const color = value?.trim() ?? '';
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : '#3b82f6';
+}
+
+function normalizeListenPort(value: string): number {
+  const port = Number.parseInt(value, 10);
+  return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
 }

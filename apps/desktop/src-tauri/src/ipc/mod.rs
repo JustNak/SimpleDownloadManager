@@ -433,6 +433,7 @@ async fn handle_request(
                                 } else {
                                     DuplicatePolicy::ReturnExisting
                                 },
+                                ..Default::default()
                             },
                         )
                         .await;

@@ -16,6 +16,12 @@ export interface AddJobResult {
   status: AddJobStatus;
 }
 
+export interface AddJobsResult {
+  results: AddJobResult[];
+  queuedCount: number;
+  duplicateCount: number;
+}
+
 const STATE_CHANGED_EVENT = 'app://state-changed';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
@@ -27,9 +33,11 @@ const defaultSettings: Settings = {
   speedLimitKibPerSecond: 0,
   notificationsEnabled: true,
   theme: 'system',
+  accentColor: '#3b82f6',
   extensionIntegration: {
     enabled: true,
     downloadHandoffMode: 'ask',
+    listenPort: 1420,
     contextMenuEnabled: true,
     showProgressAfterHandoff: true,
     showBadgeStatus: true,
@@ -175,6 +183,13 @@ function isTauriRuntime(): boolean {
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(command, args);
+}
+
+function replacePathFilename(path: string | undefined, filename: string): string {
+  if (!path) return filename;
+  const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  if (lastSlash < 0) return filename;
+  return `${path.slice(0, lastSlash + 1)}${filename}`;
 }
 
 export async function getAppSnapshot(): Promise<DesktopSnapshot> {
@@ -368,6 +383,33 @@ export async function removeJob(id: string): Promise<void> {
   await invokeCommand('remove_job', { id });
 }
 
+export async function deleteJob(id: string, deleteFromDisk: boolean): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockState.jobs = mockState.jobs.filter((job) => job.id !== id);
+    emitMockState();
+    return;
+  }
+  await invokeCommand('delete_job', { id, deleteFromDisk });
+}
+
+export async function renameJob(id: string, filename: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    mockState.jobs = mockState.jobs.map((job) => {
+      if (job.id !== id) return job;
+      const targetPath = replacePathFilename(job.targetPath, filename);
+      return {
+        ...job,
+        filename,
+        targetPath,
+        tempPath: job.tempPath ? replacePathFilename(job.tempPath, `${filename}.part`) : undefined,
+      };
+    });
+    emitMockState();
+    return;
+  }
+  await invokeCommand('rename_job', { id, filename });
+}
+
 export async function clearCompletedJobs(): Promise<void> {
   if (!isTauriRuntime()) {
     mockState.jobs = mockState.jobs.filter((job) => ![JobState.Completed, JobState.Canceled].includes(job.state));
@@ -405,6 +447,60 @@ export async function addJob(url: string): Promise<AddJobResult> {
     return { jobId, filename, status: 'queued' };
   }
   return invokeCommand<AddJobResult>('add_job', { url });
+}
+
+export async function addJobs(urls: string[], bulkArchiveName?: string): Promise<AddJobsResult> {
+  const normalizedUrls = urls.map((url) => url.trim()).filter(Boolean);
+  if (normalizedUrls.length === 0) {
+    throw new Error('Add at least one download URL.');
+  }
+
+  if (!isTauriRuntime()) {
+    const results: AddJobResult[] = [];
+    const bulkArchive = bulkArchiveName && normalizedUrls.length > 1
+      ? { id: crypto.randomUUID(), name: bulkArchiveName }
+      : undefined;
+    for (const url of normalizedUrls) {
+      const duplicateJob = mockState.jobs.find((job) => job.url === url);
+      if (duplicateJob) {
+        results.push({
+          jobId: duplicateJob.id,
+          filename: duplicateJob.filename,
+          status: 'duplicate_existing_job',
+        });
+        continue;
+      }
+
+      const jobId = crypto.randomUUID();
+      const filename = url.split('/').pop() || 'download';
+      mockState.jobs.push({
+        id: jobId,
+        url,
+        filename,
+        state: JobState.Queued,
+        progress: 0,
+        totalBytes: 0,
+        downloadedBytes: 0,
+        speed: 0,
+        eta: 0,
+        targetPath: replacePathFilename(`${mockState.settings.downloadDirectory}\\download`, filename),
+        bulkArchive,
+      });
+      results.push({ jobId, filename, status: 'queued' });
+    }
+    emitMockState();
+    const queuedCount = results.filter((result) => result.status === 'queued').length;
+    return {
+      results,
+      queuedCount,
+      duplicateCount: results.length - queuedCount,
+    };
+  }
+
+  return invokeCommand<AddJobsResult>('add_jobs', {
+    urls: normalizedUrls,
+    bulkArchiveName: bulkArchiveName?.trim() || undefined,
+  });
 }
 
 export async function saveSettings(settings: Settings): Promise<Settings> {

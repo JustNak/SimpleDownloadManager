@@ -69,6 +69,28 @@
     --color-progress-track: oklch(28% 0.009 247);
     --color-ring: oklch(66% 0.17 257);
   }
+
+  .oled-dark {
+    --color-background: #000000;
+    --color-foreground: oklch(96% 0.004 247);
+    --color-surface: #000000;
+    --color-sidebar: #020202;
+    --color-command: #030303;
+    --color-header: #060606;
+    --color-muted: #101010;
+    --color-muted-foreground: oklch(68% 0.01 247);
+    --color-popover: #050505;
+    --color-popover-foreground: oklch(96% 0.004 247);
+    --color-card: #050505;
+    --color-card-foreground: oklch(96% 0.004 247);
+    --color-border: #1b1b1b;
+    --color-input: #242424;
+    --color-row-hover: #080808;
+    --color-selected: color-mix(in oklch, var(--color-primary) 24%, #000000);
+    --color-secondary: #0d0d0d;
+    --color-secondary-foreground: oklch(96% 0.004 247);
+    --color-progress-track: #202020;
+  }
 }
 
 @layer base {
@@ -89,7 +111,8 @@
     color-scheme: light;
   }
 
-  html.dark {
+  html.dark,
+  html.oled-dark {
     color-scheme: dark;
   }
 

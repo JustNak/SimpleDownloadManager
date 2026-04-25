@@ -1,12 +1,13 @@
 use crate::commands::emit_snapshot;
-use crate::state::{SharedState, WorkerControl};
+use crate::state::{BulkArchiveReady, SharedState, WorkerControl};
 use crate::storage::{FailureCategory, ResumeSupport};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::plugin::PermissionState;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
@@ -347,6 +348,12 @@ async fn run_download_attempt(
         .complete_job(&task.id, downloaded_bytes, &final_path)
         .await?;
     emit_snapshot(app, &snapshot);
+    if let Some(archive) = state.bulk_archive_ready_for_job(&task.id).await? {
+        match create_bulk_archive(archive).await {
+            Ok(path) => notify_bulk_archive_completed(app, state, &path).await,
+            Err(error) => eprintln!("failed to create bulk archive: {error}"),
+        }
+    }
     notify_download_completed(app, state, &final_path).await;
     Ok(DownloadOutcome::Completed)
 }
@@ -772,6 +779,90 @@ async fn notify_download_completed(app: &AppHandle, state: &SharedState, final_p
         &format!("{file_name} is ready."),
     )
     .await;
+}
+
+async fn notify_bulk_archive_completed(app: &AppHandle, state: &SharedState, final_path: &Path) {
+    let file_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Bulk archive");
+
+    notify(
+        app,
+        state,
+        "Bulk archive created",
+        &format!("{file_name} is ready."),
+    )
+    .await;
+}
+
+async fn create_bulk_archive(archive: BulkArchiveReady) -> Result<PathBuf, String> {
+    tauri::async_runtime::spawn_blocking(move || create_bulk_archive_sync(archive))
+        .await
+        .map_err(|error| format!("Could not create bulk archive task: {error}"))?
+}
+
+fn create_bulk_archive_sync(archive: BulkArchiveReady) -> Result<PathBuf, String> {
+    if archive.output_path.exists() {
+        return Ok(archive.output_path);
+    }
+
+    let staging_dir = archive
+        .output_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".sdm-bulk-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+
+    std::fs::create_dir_all(&staging_dir)
+        .map_err(|error| format!("Could not create archive staging directory: {error}"))?;
+
+    let mut staged_paths = Vec::with_capacity(archive.entries.len());
+    for entry in &archive.entries {
+        let staged_path = staging_dir.join(&entry.archive_name);
+        std::fs::copy(&entry.source_path, &staged_path).map_err(|error| {
+            format!(
+                "Could not stage {} for archiving: {error}",
+                entry.source_path.display()
+            )
+        })?;
+        staged_paths.push(staged_path);
+    }
+
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$destination = $args[0]
+$paths = @()
+for ($index = 1; $index -lt $args.Length; $index++) { $paths += $args[$index] }
+Compress-Archive -LiteralPath $paths -DestinationPath $destination -Force
+"#;
+
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .arg(&archive.output_path)
+        .args(&staged_paths)
+        .status()
+        .map_err(|error| format!("Could not run Compress-Archive: {error}"))?;
+
+    let _ = std::fs::remove_dir_all(&staging_dir);
+
+    if !status.success() {
+        return Err(format!("Compress-Archive failed with status {status}."));
+    }
+
+    Ok(archive.output_path)
 }
 
 async fn notify_download_failure(

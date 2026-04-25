@@ -49,6 +49,14 @@ impl From<EnqueueResult> for AddJobResult {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddJobsResult {
+    pub results: Vec<AddJobResult>,
+    pub queued_count: usize,
+    pub duplicate_count: usize,
+}
+
 pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
     if let Err(error) = app.emit(STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
@@ -120,6 +128,42 @@ pub async fn add_job(app: AppHandle, state: State<'_, SharedState>, url: String)
     }
 
     Ok(result.into())
+}
+
+#[tauri::command]
+pub async fn add_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    urls: Vec<String>,
+    bulk_archive_name: Option<String>,
+) -> Result<AddJobsResult, String> {
+    let results = state
+        .enqueue_downloads(urls, None, bulk_archive_name)
+        .await
+        .map_err(|error| error.message)?;
+
+    if let Some(result) = results.last() {
+        emit_snapshot(&app, &result.snapshot);
+    }
+
+    if results
+        .iter()
+        .any(|result| result.status == EnqueueStatus::Queued)
+    {
+        schedule_downloads(app, state.inner().clone());
+    }
+
+    let queued_count = results
+        .iter()
+        .filter(|result| result.status == EnqueueStatus::Queued)
+        .count();
+    let duplicate_count = results.len().saturating_sub(queued_count);
+
+    Ok(AddJobsResult {
+        results: results.into_iter().map(Into::into).collect(),
+        queued_count,
+        duplicate_count,
+    })
 }
 
 #[tauri::command]
@@ -213,6 +257,38 @@ pub async fn remove_job(
     id: String,
 ) -> Result<(), String> {
     let snapshot = state.remove_job(&id).await.map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
+    schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_job(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    id: String,
+    delete_from_disk: bool,
+) -> Result<(), String> {
+    let snapshot = state
+        .delete_job(&id, delete_from_disk)
+        .await
+        .map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
+    schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rename_job(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    id: String,
+    filename: String,
+) -> Result<(), String> {
+    let snapshot = state
+        .rename_job(&id, &filename)
+        .await
+        .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
@@ -421,6 +497,7 @@ pub async fn test_extension_handoff(
                             } else {
                                 crate::state::DuplicatePolicy::ReturnExisting
                             },
+                            ..Default::default()
                         },
                     )
                     .await;

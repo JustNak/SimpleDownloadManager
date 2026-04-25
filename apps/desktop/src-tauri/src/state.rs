@@ -1,7 +1,9 @@
 use crate::storage::{
+    default_extension_listen_port,
     load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
-    DownloadJob, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory,
-    HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary, ResumeSupport, Settings,
+    BulkArchiveInfo, DownloadJob, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
+    FailureCategory, HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary,
+    ResumeSupport, Settings,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,18 @@ pub struct DownloadTask {
     pub url: String,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct BulkArchiveReady {
+    pub output_path: PathBuf,
+    pub entries: Vec<BulkArchiveEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BulkArchiveEntry {
+    pub source_path: PathBuf,
+    pub archive_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +71,7 @@ pub struct EnqueueOptions {
     pub directory_override: Option<String>,
     pub filename_hint: Option<String>,
     pub duplicate_policy: DuplicatePolicy,
+    pub bulk_archive: Option<BulkArchiveInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +131,9 @@ impl SharedState {
         {
             persisted.settings.download_directory = default_download_directory(&base_dir);
         }
+
+        normalize_accent_color(&mut persisted.settings);
+        normalize_extension_settings(&mut persisted.settings.extension_integration);
 
         let jobs = persisted
             .jobs
@@ -236,6 +254,7 @@ impl SharedState {
             return Err("Download directory cannot be empty.".into());
         }
 
+        normalize_accent_color(&mut settings);
         normalize_extension_settings(&mut settings.extension_integration);
 
         std::fs::create_dir_all(&settings.download_directory)
@@ -280,6 +299,55 @@ impl SharedState {
             },
         )
         .await
+    }
+
+    pub async fn enqueue_downloads(
+        &self,
+        urls: Vec<String>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        if urls.is_empty() {
+            return Err(BackendError {
+                code: "INVALID_URL",
+                message: "Add at least one download URL.".into(),
+            });
+        }
+
+        let normalized_urls = urls
+            .iter()
+            .map(|url| normalize_download_url(url))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bulk_archive = bulk_archive_name
+            .filter(|_| normalized_urls.len() > 1)
+            .map(|name| BulkArchiveInfo {
+                id: format!(
+                    "bulk_{}_{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|duration| duration.as_millis())
+                        .unwrap_or_default(),
+                    normalized_urls.len()
+                ),
+                name: normalize_archive_filename(&name),
+            });
+
+        let mut results = Vec::with_capacity(normalized_urls.len());
+        for url in normalized_urls {
+            results.push(
+                self.enqueue_download_with_options(
+                    url,
+                    EnqueueOptions {
+                        source: source.clone(),
+                        bulk_archive: bulk_archive.clone(),
+                        ..Default::default()
+                    },
+                )
+                .await?,
+            );
+        }
+
+        Ok(results)
     }
 
     pub async fn enqueue_download_with_options(
@@ -369,6 +437,7 @@ impl RuntimeState {
             retry_attempts: 0,
             target_path: target_path.display().to_string(),
             temp_path: temp_path.display().to_string(),
+            bulk_archive: options.bulk_archive,
         });
 
         Ok(EnqueueResult {
@@ -626,6 +695,124 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn delete_job(
+        &self,
+        id: &str,
+        delete_from_disk: bool,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        if delete_from_disk {
+            let (target_path, temp_path) = {
+                let state = self.inner.read().await;
+                let job = state
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == id)
+                    .ok_or_else(|| BackendError {
+                        code: "INTERNAL_ERROR",
+                        message: "Job not found.".into(),
+                    })?;
+
+                if state.active_workers.contains(id)
+                    || matches!(job.state, JobState::Starting | JobState::Downloading)
+                {
+                    return Err(BackendError {
+                        code: "INTERNAL_ERROR",
+                        message: "Pause or cancel the active transfer before deleting files from disk.".into(),
+                    });
+                }
+
+                (PathBuf::from(&job.target_path), PathBuf::from(&job.temp_path))
+            };
+
+            remove_file_if_exists(&target_path).map_err(internal_error)?;
+            if temp_path != target_path {
+                remove_file_if_exists(&temp_path).map_err(internal_error)?;
+            }
+        }
+
+        self.remove_job(id).await
+    }
+
+    pub async fn rename_job(
+        &self,
+        id: &str,
+        filename: &str,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let filename = sanitize_filename(filename);
+        if filename.trim().is_empty() {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Filename cannot be empty.".into(),
+            });
+        }
+
+        let (current_target_path, current_temp_path, next_target_path, next_temp_path) = {
+            let state = self.inner.read().await;
+            let job = state
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Job not found.".into(),
+                })?;
+
+            if state.active_workers.contains(id)
+                || matches!(job.state, JobState::Starting | JobState::Downloading)
+            {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Pause or cancel the active transfer before renaming it.".into(),
+                });
+            }
+
+            let current_target_path = PathBuf::from(&job.target_path);
+            let current_temp_path = PathBuf::from(&job.temp_path);
+            let default_directory = state.settings.download_directory.clone();
+            let parent = current_target_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(default_directory));
+            let next_target_path = parent.join(&filename);
+            let next_temp_path = PathBuf::from(format!("{}.part", next_target_path.display()));
+
+            if next_target_path != current_target_path && next_target_path.exists() {
+                return Err(BackendError {
+                    code: "DESTINATION_INVALID",
+                    message: format!("A file already exists at {}.", next_target_path.display()),
+                });
+            }
+
+            (current_target_path, current_temp_path, next_target_path, next_temp_path)
+        };
+
+        if current_target_path.is_file() && current_target_path != next_target_path {
+            std::fs::rename(&current_target_path, &next_target_path)
+                .map_err(|error| internal_error(format!("Could not rename downloaded file: {error}")))?;
+        } else if current_temp_path.is_file() && current_temp_path != next_temp_path {
+            std::fs::rename(&current_temp_path, &next_temp_path)
+                .map_err(|error| internal_error(format!("Could not rename partial download file: {error}")))?;
+        }
+
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Job not found.".into(),
+                });
+            };
+
+            job.filename = filename;
+            job.target_path = next_target_path.display().to_string();
+            job.temp_path = next_temp_path.display().to_string();
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
     pub async fn claim_schedulable_jobs(
         &self,
     ) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
@@ -877,6 +1064,60 @@ impl SharedState {
 
         persist_state(&self.storage_path, &persisted)?;
         Ok(snapshot)
+    }
+
+    pub async fn bulk_archive_ready_for_job(
+        &self,
+        id: &str,
+    ) -> Result<Option<BulkArchiveReady>, String> {
+        let state = self.inner.read().await;
+        let Some(job) = state.jobs.iter().find(|job| job.id == id) else {
+            return Ok(None);
+        };
+        let Some(archive) = &job.bulk_archive else {
+            return Ok(None);
+        };
+
+        let members = state
+            .jobs
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .bulk_archive
+                    .as_ref()
+                    .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
+            })
+            .collect::<Vec<_>>();
+
+        if members.len() < 2 || members.iter().any(|member| member.state != JobState::Completed) {
+            return Ok(None);
+        }
+
+        let output_dir = PathBuf::from(&state.settings.download_directory);
+        let output_path = output_dir.join(&archive.name);
+        if output_path.exists() {
+            return Ok(None);
+        }
+
+        let mut used_names = HashSet::new();
+        let mut entries = Vec::with_capacity(members.len());
+        for member in members {
+            let source_path = PathBuf::from(&member.target_path);
+            if !source_path.is_file() {
+                return Ok(None);
+            }
+
+            let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
+            entries.push(BulkArchiveEntry {
+                source_path,
+                archive_name,
+            });
+        }
+
+        Ok(Some(BulkArchiveReady {
+            output_path,
+            entries,
+        }))
     }
 
     pub async fn fail_job(
@@ -1146,6 +1387,10 @@ fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
 }
 
 fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
+    if settings.listen_port == 0 || settings.listen_port > u16::MAX as u32 {
+        settings.listen_port = default_extension_listen_port();
+    }
+
     let mut normalized_hosts = Vec::new();
     let mut seen_hosts = HashSet::new();
 
@@ -1187,6 +1432,22 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
     }
 
     settings.ignored_file_extensions = normalized_extensions;
+}
+
+fn normalize_accent_color(settings: &mut Settings) {
+    let accent_color = settings.accent_color.trim();
+    let is_hex_color = accent_color.len() == 7
+        && accent_color.starts_with('#')
+        && accent_color
+            .chars()
+            .skip(1)
+            .all(|character| character.is_ascii_hexdigit());
+
+    if is_hex_color {
+        settings.accent_color = accent_color.to_ascii_lowercase();
+    } else {
+        settings.accent_color = "#3b82f6".into();
+    }
 }
 
 fn normalize_file_extension(value: &str) -> String {
@@ -1350,6 +1611,40 @@ fn sanitize_filename(input: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn normalize_archive_filename(input: &str) -> String {
+    let mut filename = sanitize_filename(input);
+    if !filename.to_ascii_lowercase().ends_with(".zip") {
+        filename.push_str(".zip");
+    }
+    filename
+}
+
+fn unique_archive_entry_name(filename: &str, used_names: &mut HashSet<String>) -> String {
+    let sanitized = sanitize_filename(filename);
+    if used_names.insert(sanitized.clone()) {
+        return sanitized;
+    }
+
+    let stem = Path::new(&sanitized)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    let extension = Path::new(&sanitized)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+
+    for index in 1..10_000 {
+        let candidate = format!("{stem} ({index}){extension}");
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    sanitized
 }
 
 fn next_job_number(jobs: &[DownloadJob]) -> u64 {
@@ -1759,10 +2054,23 @@ mod tests {
 
         normalize_extension_settings(&mut settings);
 
+        assert_eq!(settings.listen_port, 1420);
         assert_eq!(
             settings.ignored_file_extensions,
             vec!["zip", "tar.gz", "exe"]
         );
+    }
+
+    #[test]
+    fn normalize_extension_settings_defaults_invalid_listen_port() {
+        let mut settings = ExtensionIntegrationSettings {
+            listen_port: 70_000,
+            ..ExtensionIntegrationSettings::default()
+        };
+
+        normalize_extension_settings(&mut settings);
+
+        assert_eq!(settings.listen_port, 1420);
     }
 
     #[test]
@@ -1784,6 +2092,7 @@ mod tests {
             retry_attempts: 2,
             target_path: "C:/Downloads/file.zip".into(),
             temp_path: "C:/Downloads/file.zip.part".into(),
+            bulk_archive: None,
         };
 
         reset_job_for_restart(&mut job);
@@ -1823,6 +2132,7 @@ mod tests {
             retry_attempts: 0,
             target_path: format!("C:/Downloads/{id}.zip"),
             temp_path: format!("C:/Downloads/{id}.zip.part"),
+            bulk_archive: None,
         }
     }
 

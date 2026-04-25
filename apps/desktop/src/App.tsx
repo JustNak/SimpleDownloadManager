@@ -10,6 +10,7 @@ import { getErrorMessage } from './errors';
 import {
   browseDirectory,
   cancelJob,
+  deleteJob,
   exportDiagnosticsReport,
   getDiagnostics,
   getAppSnapshot,
@@ -19,6 +20,7 @@ import {
   pauseJob,
   revealJobInFolder,
   removeJob,
+  renameJob,
   resumeAllJobs,
   resumeJob,
   restartJob,
@@ -50,6 +52,7 @@ import type { DiagnosticsSnapshot } from './types';
 type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings';
 type SortMode = 'status' | 'name' | 'progress' | 'size';
 
+const DEFAULT_ACCENT_COLOR = '#3b82f6';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
 const finishedStates = [JobState.Completed, JobState.Canceled];
 
@@ -63,9 +66,11 @@ export default function App() {
     speedLimitKibPerSecond: 0,
     notificationsEnabled: true,
     theme: 'system',
+    accentColor: DEFAULT_ACCENT_COLOR,
     extensionIntegration: {
       enabled: true,
       downloadHandoffMode: 'ask',
+      listenPort: 1420,
       contextMenuEnabled: true,
       showProgressAfterHandoff: true,
       showBadgeStatus: true,
@@ -80,6 +85,11 @@ export default function App() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [pendingSettingsView, setPendingSettingsView] = useState<ViewState | null>(null);
+  const [isUnsavedSettingsPromptOpen, setIsUnsavedSettingsPromptOpen] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -139,18 +149,34 @@ export default function App() {
 
   useEffect(() => {
     function applyTheme() {
+      const shouldUseOled = settings.theme === 'oled_dark';
       const shouldUseDark =
+        shouldUseOled ||
         settings.theme === 'dark' ||
         (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
 
       document.documentElement.classList.toggle('dark', shouldUseDark);
+      document.documentElement.classList.toggle('oled-dark', shouldUseOled);
+      applyAccentColor(settings.accentColor);
     }
 
     applyTheme();
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
-  }, [settings.theme]);
+  }, [settings.accentColor, settings.theme]);
+
+  function requestViewChange(nextView: ViewState) {
+    if (nextView === view) return;
+
+    if (view === 'settings' && settingsDirty) {
+      setPendingSettingsView(nextView);
+      setIsUnsavedSettingsPromptOpen(true);
+      return;
+    }
+
+    setView(nextView);
+  }
 
   function addToast(toast: Omit<ToastMessage, 'id'>) {
     setToasts((prev) => [...prev, { ...toast, id: crypto.randomUUID() }]);
@@ -237,6 +263,29 @@ export default function App() {
     }
   }
 
+  async function handleDelete(id: string, deleteFromDisk: boolean) {
+    try {
+      await deleteJob(id, deleteFromDisk);
+      if (selectedJobId === id) setSelectedJobId(null);
+      addToast({
+        type: 'success',
+        title: 'Download Deleted',
+        message: deleteFromDisk ? 'Removed from the list and deleted from disk.' : 'Removed from the download list.',
+      });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Delete Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleRename(id: string, filename: string) {
+    try {
+      await renameJob(id, filename);
+      addToast({ type: 'success', title: 'Download Renamed', message: `Renamed to ${filename}.` });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Rename Failed', message: getErrorMessage(error) });
+    }
+  }
+
   async function handleOpenFile(id: string) {
     try {
       await openJobFile(id);
@@ -308,16 +357,40 @@ export default function App() {
     }
   }
 
-  async function handleSaveSettings(newSettings: Settings) {
+  async function handleSaveSettings(newSettings: Settings, nextView: ViewState = 'all'): Promise<boolean> {
+    setIsSavingSettings(true);
     try {
       const savedSettings = await saveSettings(newSettings);
       setSettings(savedSettings);
+      setSettingsDraft(null);
+      setSettingsDirty(false);
+      setPendingSettingsView(null);
+      setIsUnsavedSettingsPromptOpen(false);
       await refreshDiagnostics();
-      setView('all');
+      setView(nextView);
       addToast({ type: 'success', title: 'Settings Saved', message: 'Preferences updated successfully.' });
+      return true;
     } catch (error) {
       addToast({ type: 'error', title: 'Save Failed', message: getErrorMessage(error) });
+      return false;
+    } finally {
+      setIsSavingSettings(false);
     }
+  }
+
+  function discardSettingsChanges() {
+    const nextView = pendingSettingsView ?? 'all';
+    setSettingsDraft(null);
+    setSettingsDirty(false);
+    setPendingSettingsView(null);
+    setIsUnsavedSettingsPromptOpen(false);
+    setView(nextView);
+  }
+
+  async function saveSettingsAndLeave() {
+    const nextSettings = settingsDraft ?? settings;
+    const nextView = pendingSettingsView ?? 'all';
+    await handleSaveSettings(nextSettings, nextView);
   }
 
   function handleAddDownloadResult(result: AddJobResult) {
@@ -387,8 +460,8 @@ export default function App() {
       setSelectedJobId(null);
       return;
     }
-    if (!selectedJobId || !displayedJobs.some((job) => job.id === selectedJobId)) {
-      setSelectedJobId(displayedJobs[0].id);
+    if (selectedJobId && !displayedJobs.some((job) => job.id === selectedJobId)) {
+      setSelectedJobId(null);
     }
   }, [displayedJobs, selectedJobId, view]);
 
@@ -412,7 +485,7 @@ export default function App() {
             onPauseAll={() => void handlePauseAll()}
             canResumeAll={canResumeAny}
             canPauseAll={canPauseAny}
-            onCycleFilter={() => setView(nextFilterView(view))}
+            onCycleFilter={() => requestViewChange(nextFilterView(view))}
           />
         ) : null}
       </Titlebar>
@@ -420,16 +493,16 @@ export default function App() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside className="download-sidebar flex w-[252px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-3 py-3">
           <nav className="flex flex-col gap-1">
-            <NavItem icon={<Download size={21} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => setView('all')} />
-            <NavItem icon={<AlertTriangle size={21} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => setView('attention')} />
-            <NavItem icon={<Gauge size={21} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => setView('active')} />
-            <NavItem icon={<Clock3 size={21} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => setView('queued')} />
-            <NavItem icon={<CheckCircle2 size={21} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => setView('completed')} />
+            <NavItem icon={<Download size={21} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
+            <NavItem icon={<AlertTriangle size={21} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
+            <NavItem icon={<Gauge size={21} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
+            <NavItem icon={<Clock3 size={21} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
+            <NavItem icon={<CheckCircle2 size={21} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
           </nav>
 
           <div className="space-y-3">
             <div className="h-px bg-border" />
-            <NavItem icon={<SettingsIcon size={21} />} label="Settings" active={view === 'settings'} onClick={() => setView('settings')} />
+            <NavItem icon={<SettingsIcon size={21} />} label="Settings" active={view === 'settings'} onClick={() => requestViewChange('settings')} />
           </div>
         </aside>
 
@@ -439,9 +512,11 @@ export default function App() {
               <SettingsPage
                 settings={settings}
                 diagnostics={diagnostics}
-                onSave={handleSaveSettings}
+                onSave={(newSettings) => handleSaveSettings(newSettings, 'all')}
                 onBrowseDirectory={handleBrowseDirectory}
-                onCancel={() => setView('all')}
+                onCancel={() => requestViewChange('all')}
+                onDirtyChange={setSettingsDirty}
+                onDraftChange={setSettingsDraft}
                 onRefreshDiagnostics={refreshDiagnostics}
                 onOpenInstallDocs={handleOpenInstallDocs}
                 onRunHostRegistrationFix={handleRunHostRegistrationFix}
@@ -457,12 +532,15 @@ export default function App() {
                 view={view}
                 selectedJobId={selectedJobId}
                 onSelect={setSelectedJobId}
+                onClearSelection={() => setSelectedJobId(null)}
                 onPause={handlePause}
                 onResume={handleResume}
                 onCancel={handleCancel}
                 onRetry={handleRetry}
                 onRestart={handleRestart}
                 onRemove={handleRemove}
+                onDelete={handleDelete}
+                onRename={handleRename}
                 onOpen={handleOpenFile}
                 onReveal={handleReveal}
               />
@@ -486,6 +564,62 @@ export default function App() {
           onAdded={handleAddDownloadResult}
         />
       )}
+
+      {isUnsavedSettingsPromptOpen && (
+        <UnsavedSettingsPrompt
+          isSaving={isSavingSettings}
+          onDiscard={discardSettingsChanges}
+          onSave={() => void saveSettingsAndLeave()}
+        />
+      )}
+    </div>
+  );
+}
+
+function UnsavedSettingsPrompt({
+  isSaving,
+  onDiscard,
+  onSave,
+}: {
+  isSaving: boolean;
+  onDiscard: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-settings-title"
+        className="w-full max-w-md rounded-md border border-border bg-card shadow-2xl"
+      >
+        <div className="border-b border-border bg-header px-5 py-4">
+          <h2 id="unsaved-settings-title" className="text-base font-semibold text-foreground">
+            Unsaved Settings
+          </h2>
+          <p className="mt-1 text-sm leading-5 text-muted-foreground">
+            You changed application settings. Save them before leaving, or discard the draft.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-4">
+          <button
+            type="button"
+            onClick={onDiscard}
+            disabled={isSaving}
+            className="h-10 rounded-md border border-input bg-background px-4 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Discard Changes
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={isSaving}
+            className="h-10 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isSaving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -514,28 +648,28 @@ function CommandBar({
   onCycleFilter: () => void;
 }) {
   return (
-    <div className="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-4">
+    <div className="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-3">
       <div className="flex min-w-0 shrink-0 items-center gap-1.5">
-        <ToolbarButton icon={<Plus size={19} />} label="New Download" onClick={onAdd} strong />
-        <div className="mx-2 h-6 w-px bg-border" />
-        <ToolbarButton icon={<Play size={18} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
-        <ToolbarButton icon={<Pause size={18} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
+        <ToolbarButton icon={<Plus size={17} />} label="New Download" onClick={onAdd} strong />
+        <div className="mx-1.5 h-5 w-px bg-border" />
+        <ToolbarButton icon={<Play size={16} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
+        <ToolbarButton icon={<Pause size={16} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
       </div>
 
       <div className="flex min-w-[320px] max-w-[620px] flex-1 items-center justify-end gap-2">
         <label className="relative min-w-0 flex-1">
-          <Search size={18} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+          <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             value={searchQuery}
             onChange={(event) => onSearchChange(event.target.value)}
-            className="h-9 w-full rounded-md border border-input bg-background pl-10 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+            className="h-8 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             placeholder="Search downloads..."
           />
         </label>
         <select
           value={sortMode}
           onChange={(event) => onSortChange(event.target.value as SortMode)}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+          className="h-8 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
           aria-label="Sort downloads"
         >
           <option value="status">Sort by: Status</option>
@@ -545,11 +679,11 @@ function CommandBar({
         </select>
         <button
           onClick={onCycleFilter}
-          className="flex h-9 w-9 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
+          className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
           title="Cycle filter"
           aria-label="Cycle filter"
         >
-          <Filter size={20} />
+          <Filter size={18} />
         </button>
       </div>
     </div>
@@ -573,7 +707,7 @@ function ToolbarButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-9 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-sm font-medium transition ${
+      className={`flex h-8 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-sm font-medium transition ${
         strong
           ? 'text-foreground hover:bg-muted'
           : 'text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground'
@@ -681,6 +815,33 @@ function statusRank(state: JobState) {
     default:
       return 7;
   }
+}
+
+function applyAccentColor(rawColor: string | undefined) {
+  const accent = normalizeAccentColor(rawColor);
+  const foreground = readableForegroundForHex(accent);
+  const root = document.documentElement;
+
+  root.style.setProperty('--color-primary', accent);
+  root.style.setProperty('--color-ring', accent);
+  root.style.setProperty('--color-primary-foreground', foreground);
+  root.style.setProperty('--color-primary-soft', `color-mix(in oklch, ${accent} 20%, var(--color-background))`);
+  root.style.setProperty('--color-accent', `color-mix(in oklch, ${accent} 20%, var(--color-background))`);
+  root.style.setProperty('--color-accent-foreground', accent);
+  root.style.setProperty('--color-selected', `color-mix(in oklch, ${accent} 24%, var(--color-background))`);
+}
+
+function normalizeAccentColor(rawColor: string | undefined) {
+  const color = rawColor?.trim() ?? '';
+  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_ACCENT_COLOR;
+}
+
+function readableForegroundForHex(hex: string) {
+  const red = Number.parseInt(hex.slice(1, 3), 16);
+  const green = Number.parseInt(hex.slice(3, 5), 16);
+  const blue = Number.parseInt(hex.slice(5, 7), 16);
+  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
+  return luminance > 0.58 ? '#0a0f14' : '#ffffff';
 }
 
 function formatBytes(bytes: number, decimals = 1) {

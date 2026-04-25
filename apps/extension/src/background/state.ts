@@ -13,6 +13,7 @@ const EXTENSION_SETTINGS_KEY = 'extension-settings';
 export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   enabled: true,
   downloadHandoffMode: 'ask',
+  listenPort: 1420,
   contextMenuEnabled: true,
   showProgressAfterHandoff: true,
   showBadgeStatus: true,
@@ -83,6 +84,7 @@ function normalizeExtensionSettings(settings?: Partial<ExtensionIntegrationSetti
   return {
     ...defaultExtensionSettings,
     ...settings,
+    listenPort: normalizeListenPort(settings?.listenPort),
     excludedHosts: Array.from(
       new Set(
         (settings?.excludedHosts ?? defaultExtensionSettings.excludedHosts)
@@ -94,6 +96,18 @@ function normalizeExtensionSettings(settings?: Partial<ExtensionIntegrationSetti
       settings?.ignoredFileExtensions ?? defaultExtensionSettings.ignoredFileExtensions,
     ),
   };
+}
+
+function normalizeListenPort(value: unknown): number {
+  const port = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(port)) return defaultExtensionSettings.listenPort;
+
+  const normalizedPort = Math.floor(port);
+  if (normalizedPort < 1 || normalizedPort > 65535) {
+    return defaultExtensionSettings.listenPort;
+  }
+
+  return normalizedPort;
 }
 
 function normalizeHost(host: string): string {

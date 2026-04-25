@@ -16,6 +16,8 @@
         "title": "Simple Download Manager",
         "width": 1280,
         "height": 860,
+        "minWidth": 1180,
+        "minHeight": 640,
         "resizable": true,
         "decorations": false
       }

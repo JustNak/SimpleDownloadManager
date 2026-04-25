@@ -44,6 +44,7 @@ Supported request types:
     "extensionSettings": {
       "enabled": true,
       "downloadHandoffMode": "ask",
+      "listenPort": 1420,
       "contextMenuEnabled": true,
       "showProgressAfterHandoff": true,
       "showBadgeStatus": true,
@@ -77,6 +78,7 @@ Supported request types:
 {
   "enabled": true,
   "downloadHandoffMode": "auto",
+  "listenPort": 1420,
   "contextMenuEnabled": true,
   "showProgressAfterHandoff": true,
   "showBadgeStatus": true,
@@ -87,6 +89,7 @@ Supported request types:
 
 `ignoredFileExtensions` applies only to automatic browser download capture.
 Manual sends, popup sends, and context-menu sends are still allowed.
+`listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
 
 ## Host -> Extension
 
