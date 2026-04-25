@@ -29,6 +29,8 @@ export type FailureCategory =
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type StartupLaunchMode = 'open' | 'tray';
+export type BulkArchiveStatus = 'pending' | 'compressing' | 'completed' | 'failed';
+export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 
 export interface DownloadSource {
   entryPoint: string;
@@ -46,6 +48,7 @@ export interface DownloadJob {
   filename: string;
   source?: DownloadSource;
   state: JobState;
+  createdAt?: number;
   progress: number; // 0-100
   totalBytes: number;
   downloadedBytes: number;
@@ -57,9 +60,13 @@ export interface DownloadJob {
   retryAttempts?: number;
   targetPath?: string;
   tempPath?: string;
+  artifactExists?: boolean;
   bulkArchive?: {
     id: string;
     name: string;
+    archiveStatus?: BulkArchiveStatus;
+    outputPath?: string;
+    error?: string;
   };
 }
 
@@ -90,6 +97,7 @@ export interface Settings {
   maxConcurrentDownloads: number;
   autoRetryAttempts: number;
   speedLimitKibPerSecond: number;
+  downloadPerformanceMode: DownloadPerformanceMode;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;

@@ -70,6 +70,8 @@ pub struct DownloadJob {
     #[serde(default)]
     pub source: Option<DownloadSource>,
     pub state: JobState,
+    #[serde(default)]
+    pub created_at: u64,
     pub progress: f64,
     #[serde(default)]
     pub total_bytes: u64,
@@ -91,6 +93,8 @@ pub struct DownloadJob {
     pub target_path: String,
     #[serde(default)]
     pub temp_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_exists: Option<bool>,
     #[serde(default)]
     pub bulk_archive: Option<BulkArchiveInfo>,
 }
@@ -100,6 +104,26 @@ pub struct DownloadJob {
 pub struct BulkArchiveInfo {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_bulk_archive_pending")]
+    pub archive_status: BulkArchiveStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkArchiveStatus {
+    #[default]
+    Pending,
+    Compressing,
+    Completed,
+    Failed,
+}
+
+fn is_bulk_archive_pending(status: &BulkArchiveStatus) -> bool {
+    *status == BulkArchiveStatus::Pending
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +165,15 @@ pub enum StartupLaunchMode {
     Tray,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadPerformanceMode {
+    Stable,
+    #[default]
+    Balanced,
+    Fast,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionIntegrationSettings {
@@ -165,6 +198,8 @@ pub struct Settings {
     pub auto_retry_attempts: u32,
     #[serde(default)]
     pub speed_limit_kib_per_second: u32,
+    #[serde(default)]
+    pub download_performance_mode: DownloadPerformanceMode,
     pub notifications_enabled: bool,
     pub theme: Theme,
     #[serde(default = "default_accent_color")]
@@ -258,6 +293,7 @@ impl Default for Settings {
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
+            download_performance_mode: DownloadPerformanceMode::Balanced,
             notifications_enabled: true,
             theme: Theme::System,
             accent_color: default_accent_color(),
@@ -443,6 +479,10 @@ mod tests {
 
         assert_eq!(state.settings.auto_retry_attempts, 3);
         assert_eq!(state.settings.speed_limit_kib_per_second, 0);
+        assert_eq!(
+            state.settings.download_performance_mode,
+            DownloadPerformanceMode::Balanced
+        );
         assert_eq!(state.settings.accent_color, "#3b82f6");
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
@@ -456,6 +496,10 @@ mod tests {
         assert!(settings.download_directory.ends_with("Downloads"));
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.speed_limit_kib_per_second, 0);
+        assert_eq!(
+            settings.download_performance_mode,
+            DownloadPerformanceMode::Balanced
+        );
         assert_eq!(settings.accent_color, "#3b82f6");
         assert!(!settings.start_on_startup);
         assert_eq!(settings.startup_launch_mode, StartupLaunchMode::Open);
@@ -471,6 +515,7 @@ mod tests {
 
         assert_eq!(value["startOnStartup"], true);
         assert_eq!(value["startupLaunchMode"], "tray");
+        assert_eq!(value["downloadPerformanceMode"], "balanced");
     }
 
     #[test]

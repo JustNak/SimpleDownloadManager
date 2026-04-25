@@ -6,13 +6,16 @@ import {
   browseDirectory,
   cancelDownloadPrompt,
   confirmDownloadPrompt,
+  getAppSnapshot,
   getCurrentDownloadPrompt,
   showExistingDownloadPrompt,
   subscribeToDownloadPromptChanged,
+  subscribeToStateChanged,
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, getHost, joinDisplayPath } from './popupShared';
 import { getErrorMessage } from './errors';
+import { applyAppearance } from './appearance';
 
 export function DownloadPromptWindow() {
   const [prompt, setPrompt] = useState<DownloadPrompt | null>(null);
@@ -22,22 +25,40 @@ export function DownloadPromptWindow() {
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
   useEffect(() => {
-    document.documentElement.classList.add('dark');
-    let dispose: (() => void | Promise<void>) | undefined;
+    let promptDispose: (() => void | Promise<void>) | undefined;
+    let stateDispose: (() => void | Promise<void>) | undefined;
+    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
+
+    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+      latestSettings = snapshot.settings;
+      applyAppearance(snapshot.settings);
+    };
+
+    const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    const handleSystemThemeChange = () => {
+      if (latestSettings) applyAppearance(latestSettings);
+    };
+    media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
+      applySnapshotAppearance(await getAppSnapshot());
       setPrompt(await getCurrentDownloadPrompt());
-      dispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
+      promptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
         setDirectoryOverride(null);
         setErrorMessage('');
         setIsBusy(false);
         setPrompt(nextPrompt);
       });
+      stateDispose = await subscribeToStateChanged((nextSnapshot) => {
+        applySnapshotAppearance(nextSnapshot);
+      });
     }
 
     void initialize();
     return () => {
-      void dispose?.();
+      media?.removeEventListener('change', handleSystemThemeChange);
+      void promptDispose?.();
+      void stateDispose?.();
     };
   }, []);
 

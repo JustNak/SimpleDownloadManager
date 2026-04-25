@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
+import type { ProgressBatchContext } from './batchProgress';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -25,13 +26,16 @@ export interface AddJobsResult {
 const STATE_CHANGED_EVENT = 'app://state-changed';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
+const PROGRESS_BATCH_STORAGE_PREFIX = 'sdm.progressBatch.';
 const mockDownloadDirectory = 'C:\\Users\\You\\Downloads';
+const mockNow = Date.now();
 
 const defaultSettings: Settings = {
   downloadDirectory: mockDownloadDirectory,
   maxConcurrentDownloads: 3,
   autoRetryAttempts: 3,
   speedLimitKibPerSecond: 0,
+  downloadPerformanceMode: 'balanced',
   notificationsEnabled: true,
   theme: 'system',
   accentColor: '#3b82f6',
@@ -57,6 +61,7 @@ let mockState: DesktopSnapshot = {
       url: 'https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso',
       filename: 'Ubuntu 24.04 LTS Desktop (iso)',
       state: JobState.Downloading,
+      createdAt: mockNow - 1000 * 60 * 48,
       progress: 68,
       totalBytes: 4105302224,
       downloadedBytes: 2792853504,
@@ -69,6 +74,7 @@ let mockState: DesktopSnapshot = {
       url: 'https://cdn.example.com/The.Wild.Robot.2024.1080p.mkv',
       filename: 'The.Wild.Robot.2024.1080p.mkv',
       state: JobState.Downloading,
+      createdAt: mockNow - 1000 * 60 * 36,
       progress: 35,
       totalBytes: 4187593113,
       downloadedBytes: 1503238554,
@@ -81,6 +87,7 @@ let mockState: DesktopSnapshot = {
       url: 'https://download.blender.org/release/Blender4.1/blender-4.1.1-windows-x64.msi',
       filename: 'Blender 4.1.1 Setup.exe',
       state: JobState.Downloading,
+      createdAt: mockNow - 1000 * 60 * 18,
       progress: 12,
       totalBytes: 884998144,
       downloadedBytes: 106199777,
@@ -93,6 +100,7 @@ let mockState: DesktopSnapshot = {
       url: 'https://files.example.com/project-assets-2024.zip',
       filename: 'Project_Assets_2024.zip',
       state: JobState.Queued,
+      createdAt: mockNow - 1000 * 60 * 12,
       progress: 0,
       totalBytes: 1288490188,
       downloadedBytes: 0,
@@ -105,30 +113,35 @@ let mockState: DesktopSnapshot = {
       url: 'https://docs.example.com/getting-started.pdf',
       filename: 'Getting_Started_Guide.pdf',
       state: JobState.Completed,
+      createdAt: mockNow - 1000 * 60 * 90,
       progress: 100,
       totalBytes: 13002342,
       downloadedBytes: 13002342,
       speed: 0,
       eta: 0,
       targetPath: `${mockDownloadDirectory}\\Getting_Started_Guide.pdf`,
+      artifactExists: true,
     },
     {
       id: '6',
       url: 'https://mirror.example.com/music-collection-flac.zip',
       filename: 'Music_Collection_FLAC.zip',
       state: JobState.Completed,
+      createdAt: mockNow - 1000 * 60 * 120,
       progress: 100,
       totalBytes: 2254857830,
       downloadedBytes: 2254857830,
       speed: 0,
       eta: 0,
       targetPath: `${mockDownloadDirectory}\\Music_Collection_FLAC.zip`,
+      artifactExists: false,
     },
     {
       id: '7',
       url: 'https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/iso/Fedora-40-x86_64-DVD.iso',
       filename: 'Fedora-40-x86_64-DVD.iso',
       state: JobState.Paused,
+      createdAt: mockNow - 1000 * 60 * 72,
       progress: 58,
       totalBytes: 3865470566,
       downloadedBytes: 2241972928,
@@ -142,6 +155,7 @@ let mockState: DesktopSnapshot = {
       url: 'https://example.com/broken-driver.exe',
       filename: 'driver-installer.exe',
       state: JobState.Failed,
+      createdAt: mockNow - 1000 * 60 * 24,
       progress: 22,
       totalBytes: 219152384,
       downloadedBytes: 48213524,
@@ -157,6 +171,7 @@ let mockState: DesktopSnapshot = {
 };
 
 const mockListeners = new Set<(snapshot: DesktopSnapshot) => void>();
+const mockProgressBatchContexts = new Map<string, ProgressBatchContext>();
 
 function cloneSnapshot(snapshot: DesktopSnapshot): DesktopSnapshot {
   return {
@@ -207,6 +222,39 @@ function filenameFromUrl(url: string): string {
     } catch {
       return segment;
     }
+  }
+}
+
+function createBatchId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return `batch_${crypto.randomUUID()}`;
+  }
+  return `batch_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function popupUrl(path: string) {
+  if (typeof window === 'undefined') return path;
+  return `${window.location.origin}${window.location.pathname}${path}`;
+}
+
+function storeMockProgressBatchContext(context: ProgressBatchContext) {
+  if (!context.batchId) return;
+  mockProgressBatchContexts.set(context.batchId, context);
+  try {
+    localStorage.setItem(`${PROGRESS_BATCH_STORAGE_PREFIX}${context.batchId}`, JSON.stringify(context));
+  } catch {
+    // Local storage is best-effort in browser preview mode.
+  }
+}
+
+function readMockProgressBatchContext(batchId: string): ProgressBatchContext | null {
+  const inMemory = mockProgressBatchContexts.get(batchId);
+  if (inMemory) return inMemory;
+  try {
+    const stored = localStorage.getItem(`${PROGRESS_BATCH_STORAGE_PREFIX}${batchId}`);
+    return stored ? JSON.parse(stored) as ProgressBatchContext : null;
+  } catch {
+    return null;
   }
 }
 
@@ -410,6 +458,22 @@ export async function deleteJob(id: string, deleteFromDisk: boolean): Promise<vo
   await invokeCommand('delete_job', { id, deleteFromDisk });
 }
 
+export async function deleteJobs(ids: string[], deleteFromDisk: boolean): Promise<void> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return;
+
+  if (!isTauriRuntime()) {
+    const selectedIds = new Set(uniqueIds);
+    mockState.jobs = mockState.jobs.filter((job) => !selectedIds.has(job.id));
+    emitMockState();
+    return;
+  }
+
+  for (const id of uniqueIds) {
+    await invokeCommand('delete_job', { id, deleteFromDisk });
+  }
+}
+
 export async function renameJob(id: string, filename: string): Promise<void> {
   if (!isTauriRuntime()) {
     mockState.jobs = mockState.jobs.map((job) => {
@@ -455,6 +519,7 @@ export async function addJob(url: string): Promise<AddJobResult> {
       url,
       filename,
       state: JobState.Queued,
+      createdAt: Date.now(),
       progress: 0,
       totalBytes: 0,
       downloadedBytes: 0,
@@ -476,7 +541,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
   if (!isTauriRuntime()) {
     const results: AddJobResult[] = [];
     const bulkArchive = bulkArchiveName && normalizedUrls.length > 1
-      ? { id: crypto.randomUUID(), name: bulkArchiveName }
+      ? { id: crypto.randomUUID(), name: bulkArchiveName, archiveStatus: 'pending' as const }
       : undefined;
     for (const url of normalizedUrls) {
       const duplicateJob = mockState.jobs.find((job) => job.url === url);
@@ -496,6 +561,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
         url,
         filename,
         state: JobState.Queued,
+        createdAt: Date.now(),
         progress: 0,
         totalBytes: 0,
         downloadedBytes: 0,
@@ -575,8 +641,34 @@ export async function cancelDownloadPrompt(id: string): Promise<void> {
 }
 
 export async function openProgressWindow(id: string): Promise<void> {
-  if (!isTauriRuntime()) return;
+  if (!isTauriRuntime()) {
+    window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=500,height=360');
+    return;
+  }
   await invokeCommand('open_progress_window', { id });
+}
+
+export async function openBatchProgressWindow(context: ProgressBatchContext): Promise<string> {
+  const batchId = context.batchId ?? createBatchId();
+  const storedContext = { ...context, batchId };
+  storeMockProgressBatchContext(storedContext);
+
+  if (!isTauriRuntime()) {
+    window.open(
+      popupUrl(`?window=batch-progress&batchId=${encodeURIComponent(batchId)}`),
+      `batch-progress-${batchId}`,
+      'width=560,height=430',
+    );
+    return batchId;
+  }
+
+  await invokeCommand('open_batch_progress_window', { context: storedContext });
+  return batchId;
+}
+
+export async function getProgressBatchContext(batchId: string): Promise<ProgressBatchContext | null> {
+  if (!isTauriRuntime()) return readMockProgressBatchContext(batchId);
+  return invokeCommand<ProgressBatchContext | null>('get_progress_batch_context', { batchId });
 }
 
 export async function openJobFile(id: string): Promise<void> {

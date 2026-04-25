@@ -15,6 +15,7 @@ import {
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, formatTime, getHost } from './popupShared';
 import { getErrorMessage } from './errors';
+import { applyAppearance } from './appearance';
 
 export function DownloadProgressWindow() {
   const [job, setJob] = useState<DownloadJob | null>(null);
@@ -25,19 +26,33 @@ export function DownloadProgressWindow() {
   const jobId = useMemo(() => new URLSearchParams(window.location.search).get('jobId') || '', []);
 
   useEffect(() => {
-    document.documentElement.classList.add('dark');
     let dispose: (() => void | Promise<void>) | undefined;
+    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
+
+    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+      latestSettings = snapshot.settings;
+      applyAppearance(snapshot.settings);
+    };
+
+    const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    const handleSystemThemeChange = () => {
+      if (latestSettings) applyAppearance(latestSettings);
+    };
+    media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
       const snapshot = await getAppSnapshot();
+      applySnapshotAppearance(snapshot);
       setJob(snapshot.jobs.find((candidate) => candidate.id === jobId) ?? null);
       dispose = await subscribeToStateChanged((nextSnapshot) => {
+        applySnapshotAppearance(nextSnapshot);
         setJob(nextSnapshot.jobs.find((candidate) => candidate.id === jobId) ?? null);
       });
     }
 
     void initialize();
     return () => {
+      media?.removeEventListener('change', handleSystemThemeChange);
       void dispose?.();
     };
   }, [jobId]);

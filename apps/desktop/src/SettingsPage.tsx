@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
+import { normalizeAccentColor } from './appearance';
 import {
   Activity,
   Ban,
@@ -245,6 +246,20 @@ export function SettingsPage({
               />
               <span className="text-sm text-muted-foreground">KB/s</span>
             </div>
+          </FieldRow>
+
+          <FieldRow label="Download Performance" description="Connection strategy." tooltip="Balanced uses safe segmented transfers for large range-capable files. Stable keeps one stream. Fast uses more segments when supported.">
+            <select
+              id="downloadPerformanceMode"
+              name="downloadPerformanceMode"
+              value={formData.downloadPerformanceMode}
+              onChange={handleChange}
+              className="h-10 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+            >
+              <option value="stable">Stable</option>
+              <option value="balanced">Balanced</option>
+              <option value="fast">Fast</option>
+            </select>
           </FieldRow>
         </SettingsPanel>
 
@@ -786,11 +801,6 @@ function normalizeHostInput(value: string): string {
     .replace(/^https?:\/\//i, '')
     .replace(/\/.*$/, '')
     .toLowerCase();
-}
-
-function normalizeAccentColor(value: string | undefined): string {
-  const color = value?.trim() ?? '';
-  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : '#3b82f6';
 }
 
 function normalizeListenPort(value: string): number {

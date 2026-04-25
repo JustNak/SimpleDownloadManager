@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { shouldStartWindowDrag } from '../src/windowDrag';
+import { shouldStartWindowDrag } from '../src/windowDrag.ts';
 
 function makeTarget(matchesInteractive: boolean): EventTarget {
   return {

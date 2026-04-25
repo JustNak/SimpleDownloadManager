@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-native-host"
-version = "0.2.4-a"
+version = "0.2.8-a"
 edition = "2021"
 
 [dependencies]

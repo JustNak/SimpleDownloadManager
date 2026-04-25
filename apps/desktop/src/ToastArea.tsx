@@ -33,7 +33,7 @@ function ToastItem({ toast, onDismiss }: { toast: ToastMessage, onDismiss: () =>
     success: { icon: <CheckCircle size={20} className="text-green-500" />, border: 'border-green-500/20' },
     error: { icon: <AlertCircle size={20} className="text-red-500" />, border: 'border-red-500/20' },
     warning: { icon: <AlertTriangle size={20} className="text-yellow-500" />, border: 'border-yellow-500/20' },
-    info: { icon: <Info size={20} className="text-blue-500" />, border: 'border-blue-500/20' },
+    info: { icon: <Info size={20} className="text-primary" />, border: 'border-primary/20' },
   };
 
   const config = typeConfig[toast.type as keyof typeof typeConfig] || typeConfig.info;

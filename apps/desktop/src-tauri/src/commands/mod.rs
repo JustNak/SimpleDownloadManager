@@ -8,12 +8,14 @@ use crate::storage::{
     Settings,
 };
 use crate::windows::{
-    close_download_prompt_window, focus_job_in_main_window, show_download_prompt_window,
-    show_progress_window, DOWNLOAD_PROMPT_WINDOW,
+    close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
+    show_download_prompt_window, show_progress_window, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use tauri::{AppHandle, Emitter, State};
 
 #[cfg(windows)]
@@ -94,6 +96,44 @@ pub struct AddJobsResult {
     pub results: Vec<AddJobResult>,
     pub queued_count: usize,
     pub duplicate_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressBatchKind {
+    Multi,
+    Bulk,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressBatchContext {
+    pub batch_id: String,
+    pub kind: ProgressBatchKind,
+    pub job_ids: Vec<String>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_name: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ProgressBatchRegistry {
+    contexts: RwLock<HashMap<String, ProgressBatchContext>>,
+}
+
+impl ProgressBatchRegistry {
+    pub fn store(&self, context: ProgressBatchContext) {
+        if let Ok(mut contexts) = self.contexts.write() {
+            contexts.insert(context.batch_id.clone(), context);
+        }
+    }
+
+    pub fn get(&self, batch_id: &str) -> Option<ProgressBatchContext> {
+        self.contexts
+            .read()
+            .ok()
+            .and_then(|contexts| contexts.get(batch_id).cloned())
+    }
 }
 
 pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
@@ -458,6 +498,25 @@ pub async fn cancel_download_prompt(
 #[tauri::command]
 pub async fn open_progress_window(app: AppHandle, id: String) -> Result<(), String> {
     show_progress_window(&app, &id)
+}
+
+#[tauri::command]
+pub async fn open_batch_progress_window(
+    app: AppHandle,
+    registry: State<'_, ProgressBatchRegistry>,
+    context: ProgressBatchContext,
+) -> Result<(), String> {
+    let batch_id = context.batch_id.clone();
+    registry.store(context);
+    show_batch_progress_window(&app, &batch_id)
+}
+
+#[tauri::command]
+pub async fn get_progress_batch_context(
+    registry: State<'_, ProgressBatchRegistry>,
+    batch_id: String,
+) -> Result<Option<ProgressBatchContext>, String> {
+    Ok(registry.get(&batch_id))
 }
 
 #[tauri::command]
@@ -880,6 +939,23 @@ mod tests {
         ));
         assert!(should_register_native_host(HostRegistrationStatus::Missing));
         assert!(should_register_native_host(HostRegistrationStatus::Broken));
+    }
+
+    #[test]
+    fn progress_batch_registry_stores_and_retrieves_context_by_batch_id() {
+        let registry = super::ProgressBatchRegistry::default();
+        let context = super::ProgressBatchContext {
+            batch_id: "batch_123".into(),
+            kind: super::ProgressBatchKind::Multi,
+            job_ids: vec!["job_1".into(), "job_2".into()],
+            title: "Multi-download progress".into(),
+            archive_name: None,
+        };
+
+        registry.store(context.clone());
+
+        assert_eq!(registry.get("batch_123"), Some(context));
+        assert_eq!(registry.get("missing"), None);
     }
 
     #[cfg(windows)]

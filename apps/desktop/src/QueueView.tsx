@@ -1,5 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { shouldRevealJobDirectoryOnDoubleClick } from './queueInteractions';
+import {
+  isJobArtifactMissing,
+  selectJobRange,
+  shouldBlurJobIdentity,
+  shouldRevealJobDirectoryOnDoubleClick,
+} from './queueInteractions';
+import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -47,6 +53,7 @@ interface QueueViewProps {
   onRestart: (id: string) => void;
   onRemove: (id: string) => void;
   onDelete: (id: string, deleteFromDisk: boolean) => void;
+  onDeleteMany: (ids: string[], deleteFromDisk: boolean) => void;
   onRename: (id: string, filename: string) => void;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
@@ -65,6 +72,7 @@ export function QueueView({
   onRestart,
   onRemove,
   onDelete,
+  onDeleteMany,
   onRename,
   onOpen,
   onReveal,
@@ -75,14 +83,142 @@ export function QueueView({
   const [renamePromptJob, setRenamePromptJob] = useState<DownloadJob | null>(null);
   const [renameBaseName, setRenameBaseName] = useState('');
   const [renameExtension, setRenameExtension] = useState('');
-  const [deletePromptJob, setDeletePromptJob] = useState<DownloadJob | null>(null);
+  const [deletePromptJobs, setDeletePromptJobs] = useState<DownloadJob[]>([]);
   const [deleteFromDisk, setDeleteFromDisk] = useState(false);
   const [detailsHeight, setDetailsHeight] = useState(DETAILS_DEFAULT_HEIGHT);
   const [isResizingDetails, setIsResizingDetails] = useState(false);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(() => new Set());
+  const [isSelectingByDrag, setIsSelectingByDrag] = useState(false);
   const queueRootRef = useRef<HTMLElement | null>(null);
   const resizeStart = useRef<{ y: number; height: number; containerHeight: number; proposedHeight: number } | null>(null);
+  const selectedJobIdsRef = useRef(selectedJobIds);
+  const visibleJobIdsRef = useRef<string[]>([]);
+  const selectionDragRef = useRef<{ anchorId: string; selected: boolean; baseSelection: Set<string> } | null>(null);
 
   const contextMenuJob = contextMenu ? jobs.find((job) => job.id === contextMenu.jobId) ?? null : null;
+  const contextMenuSelectionJobs = contextMenuJob
+    ? selectedJobIds.has(contextMenuJob.id) && selectedJobIds.size > 1
+      ? jobs.filter((job) => selectedJobIds.has(job.id))
+      : [contextMenuJob]
+    : [];
+  const visibleJobIds = jobs.map((job) => job.id);
+  const allVisibleSelected = jobs.length > 0 && jobs.every((job) => selectedJobIds.has(job.id));
+  const hasVisibleSelection = jobs.some((job) => selectedJobIds.has(job.id));
+
+  function selectSingleJob(jobId: string) {
+    const next = new Set([jobId]);
+    selectedJobIdsRef.current = next;
+    setSelectedJobIds(next);
+    onSelect(jobId);
+  }
+
+  function setJobSelection(jobId: string, selected: boolean) {
+    const next = new Set(selectedJobIdsRef.current);
+    if (selected) {
+      next.add(jobId);
+    } else {
+      next.delete(jobId);
+    }
+
+    selectedJobIdsRef.current = next;
+    setSelectedJobIds(next);
+    if (next.size === 0) {
+      onClearSelection();
+      return;
+    }
+
+    if (selected || selectedJobId === jobId) {
+      onSelect(selected ? jobId : Array.from(next)[0]);
+    }
+  }
+
+  function setAllVisibleSelected(selected: boolean) {
+    const next = selected ? new Set(visibleJobIds) : new Set<string>();
+    selectedJobIdsRef.current = next;
+    setSelectedJobIds(next);
+    const firstSelected = Array.from(next)[0];
+    if (firstSelected) {
+      onSelect(firstSelected);
+    } else {
+      onClearSelection();
+    }
+  }
+
+  function applySelectionRange(anchorId: string, currentId: string, selected: boolean, baseSelection = selectedJobIdsRef.current) {
+    const range = selectJobRange(visibleJobIds.length > 0 ? visibleJobIds : visibleJobIdsRef.current, anchorId, currentId);
+    if (range.length === 0) return;
+
+    const next = new Set(baseSelection);
+    for (const jobId of range) {
+      if (selected) {
+        next.add(jobId);
+      } else {
+        next.delete(jobId);
+      }
+    }
+
+    selectedJobIdsRef.current = next;
+    setSelectedJobIds(next);
+    if (selected) {
+      onSelect(currentId);
+    } else if (next.size === 0) {
+      onClearSelection();
+    }
+  }
+
+  function startSelectionDrag(jobId: string, event: React.PointerEvent<HTMLInputElement>) {
+    if (event.button !== 0) return;
+
+    event.stopPropagation();
+    const selected = !selectedJobIdsRef.current.has(jobId);
+    selectionDragRef.current = { anchorId: jobId, selected, baseSelection: new Set(selectedJobIdsRef.current) };
+    setIsSelectingByDrag(true);
+  }
+
+  function openDeletePromptForJobs(promptJobs: DownloadJob[]) {
+    if (promptJobs.length === 0) return;
+    setDeletePromptJobs(promptJobs);
+    setDeleteFromDisk(false);
+  }
+
+  function continueSelectionDrag(jobId: string) {
+    const drag = selectionDragRef.current;
+    if (!drag) return;
+    applySelectionRange(drag.anchorId, jobId, drag.selected, drag.baseSelection);
+  }
+
+  useEffect(() => {
+    selectedJobIdsRef.current = selectedJobIds;
+  }, [selectedJobIds]);
+
+  useEffect(() => {
+    visibleJobIdsRef.current = visibleJobIds;
+
+    const visibleIds = new Set(visibleJobIds);
+    setSelectedJobIds((current) => {
+      const next = new Set([...current].filter((jobId) => visibleIds.has(jobId)));
+      if (selectedJobId && visibleIds.has(selectedJobId)) {
+        next.add(selectedJobId);
+      }
+      return setsEqual(current, next) ? current : next;
+    });
+  }, [jobs, selectedJobId]);
+
+  useEffect(() => {
+    if (!isSelectingByDrag) return;
+
+    const stopSelectionDrag = () => {
+      selectionDragRef.current = null;
+      setIsSelectingByDrag(false);
+    };
+
+    window.addEventListener('pointerup', stopSelectionDrag);
+    window.addEventListener('pointercancel', stopSelectionDrag);
+    return () => {
+      window.removeEventListener('pointerup', stopSelectionDrag);
+      window.removeEventListener('pointercancel', stopSelectionDrag);
+    };
+  }, [isSelectingByDrag]);
 
   function startDetailsResize(clientY: number) {
     if (resizeStart.current) return;
@@ -203,10 +339,18 @@ export function QueueView({
   return (
     <section ref={queueRootRef} className="flex min-h-0 flex-1 flex-col bg-surface">
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="download-table min-w-[960px] overflow-visible border-b border-t border-border bg-card">
-          <div className="grid grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-5 py-2 text-xs font-medium text-muted-foreground">
-            <div>Name</div>
-            <div>Status</div>
+        <div className="download-table min-w-[1120px] overflow-visible border-b border-t border-border bg-card">
+          <div className="grid grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-5 py-2 text-xs font-medium text-muted-foreground">
+            <div className="flex items-center gap-3">
+              <SelectionCheckbox
+                checked={allVisibleSelected}
+                indeterminate={!allVisibleSelected && hasVisibleSelection}
+                title={allVisibleSelected ? 'Clear selection' : 'Select all downloads'}
+                onChange={setAllVisibleSelected}
+              />
+              <span>Name</span>
+            </div>
+            <div>Date</div>
             <div>Progress</div>
             <div>Speed</div>
             <div>ETA</div>
@@ -217,56 +361,81 @@ export function QueueView({
           <div className="divide-y divide-border/70">
             {jobs.map((job) => {
               const selected = job.id === selectedJob?.id;
+              const multiSelected = selectedJobIds.has(job.id);
+              const rowSelected = selected || multiSelected;
+              const artifactMissing = isJobArtifactMissing(job);
+              const blurIdentity = shouldBlurJobIdentity(job);
               return (
                 <div
                   key={job.id}
                   onClick={() => {
-                    onSelect(job.id);
+                    selectSingleJob(job.id);
                     setOpenMenuJobId(null);
                     setContextMenu(null);
                   }}
                   onDoubleClick={(event) => {
                     if (!shouldRevealJobDirectoryOnDoubleClick(job, event.button)) return;
                     event.preventDefault();
-                    onSelect(job.id);
+                    selectSingleJob(job.id);
                     setOpenMenuJobId(null);
                     setContextMenu(null);
                     onReveal(job.id);
                   }}
                   onContextMenu={(event) => {
                     event.preventDefault();
-                    onSelect(job.id);
+                    const isSelectedMultiContext = selectedJobIdsRef.current.size > 1 && selectedJobIdsRef.current.has(job.id);
+                    if (!isSelectedMultiContext) {
+                      selectSingleJob(job.id);
+                    }
                     setOpenMenuJobId(null);
                     setContextMenu(getContextMenuPosition(job.id, event.clientX, event.clientY));
                   }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
-                      onSelect(job.id);
+                      selectSingleJob(job.id);
                     }
                   }}
+                  onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[58px] w-full grid-cols-[minmax(280px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-5 py-2 text-left text-sm transition ${
-                    selected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
-                  }`}
+                  className={`grid min-h-[58px] w-full grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-5 py-2 text-left text-sm transition ${
+                    rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
+                  } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
                 >
                   <div className="flex min-w-0 items-center gap-3 pr-4">
-                    <FileBadge filename={job.filename} />
+                    <FileBadge
+                      filename={job.filename}
+                      selected={multiSelected}
+                      selectionTitle={multiSelected ? `Deselect ${job.filename}` : `Select ${job.filename}`}
+                      onSelectionChange={(checked) => setJobSelection(job.id, checked)}
+                      onSelectionPointerDown={(event) => startSelectionDrag(job.id, event)}
+                      muted={artifactMissing}
+                      blurred={blurIdentity}
+                    />
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-foreground" title={job.filename}>
+                      <div
+                        className={`truncate text-sm font-semibold text-foreground ${artifactMissing ? 'text-muted-foreground' : ''} ${
+                          blurIdentity ? 'opacity-70 blur-[0.7px]' : ''
+                        }`}
+                        title={job.filename}
+                      >
                         {job.filename}
                       </div>
-                      <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.url}>
+                      <div
+                        className={`mt-0.5 truncate text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}
+                        title={job.url}
+                      >
                         {getHost(job.url)}
                       </div>
                     </div>
                   </div>
 
-                  <div className={`font-medium ${statusClass(job.state)}`}>{statusText(job)}</div>
+                  <div className="truncate pr-4 text-muted-foreground tabular-nums" title={formatFullJobDate(job.createdAt)}>
+                    {formatJobDate(job.createdAt)}
+                  </div>
 
                   <div className="pr-6">
-                    <div className="mb-1.5 text-sm font-medium text-foreground">{formatProgress(job)}</div>
                     <ProgressBar job={job} />
                   </div>
 
@@ -309,6 +478,7 @@ export function QueueView({
       {contextMenu && contextMenuJob ? (
         <FileContextMenu
           job={contextMenuJob}
+          deleteCount={contextMenuSelectionJobs.length}
           x={contextMenu.x}
           y={contextMenu.y}
           onOpen={(id) => {
@@ -326,10 +496,9 @@ export function QueueView({
             setRenameBaseName(parsedName.baseName);
             setRenameExtension(parsedName.extension);
           }}
-          onDelete={(job) => {
+          onDelete={() => {
             setContextMenu(null);
-            setDeletePromptJob(job);
-            setDeleteFromDisk(false);
+            openDeletePromptForJobs(contextMenuSelectionJobs);
           }}
         />
       ) : null}
@@ -381,15 +550,23 @@ export function QueueView({
         />
       ) : null}
 
-      {deletePromptJob ? (
+      {deletePromptJobs.length > 0 ? (
         <DeletePrompt
-          job={deletePromptJob}
+          jobs={deletePromptJobs}
           deleteFromDisk={deleteFromDisk}
           onDeleteFromDiskChange={setDeleteFromDisk}
-          onCancel={() => setDeletePromptJob(null)}
+          onCancel={() => setDeletePromptJobs([])}
           onDelete={() => {
-            onDelete(deletePromptJob.id, deleteFromDisk);
-            setDeletePromptJob(null);
+            const ids = deletePromptJobs.map((job) => job.id);
+            if (ids.length === 1) {
+              onDelete(ids[0], deleteFromDisk);
+            } else {
+              onDeleteMany(ids, deleteFromDisk);
+              selectedJobIdsRef.current = new Set();
+              setSelectedJobIds(new Set());
+              onClearSelection();
+            }
+            setDeletePromptJobs([]);
           }}
         />
       ) : null}
@@ -399,6 +576,7 @@ export function QueueView({
 
 function FileContextMenu({
   job,
+  deleteCount,
   x,
   y,
   onOpen,
@@ -407,12 +585,13 @@ function FileContextMenu({
   onDelete,
 }: {
   job: DownloadJob;
+  deleteCount: number;
   x: number;
   y: number;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
   onRename: (job: DownloadJob) => void;
-  onDelete: (job: DownloadJob) => void;
+  onDelete: () => void;
 }) {
   return (
     <div
@@ -425,7 +604,7 @@ function FileContextMenu({
       <MenuItem icon={<FileText size={16} />} label="Open File" onClick={() => onOpen(job.id)} />
       <MenuItem icon={<FolderOpen size={16} />} label="Open Folder" onClick={() => onReveal(job.id)} />
       <MenuItem icon={<Pencil size={16} />} label="Rename" onClick={() => onRename(job)} />
-      <MenuItem icon={<Trash2 size={16} />} label="Delete" onClick={() => onDelete(job)} destructive />
+      <MenuItem icon={<Trash2 size={16} />} label={getDeleteContextMenuLabel(deleteCount)} onClick={onDelete} destructive />
     </div>
   );
 }
@@ -514,31 +693,53 @@ function RenamePrompt({
 }
 
 function DeletePrompt({
-  job,
+  jobs,
   deleteFromDisk,
   onDeleteFromDiskChange,
   onCancel,
   onDelete,
 }: {
-  job: DownloadJob;
+  jobs: DownloadJob[];
   deleteFromDisk: boolean;
   onDeleteFromDiskChange: (value: boolean) => void;
   onCancel: () => void;
   onDelete: () => void;
 }) {
+  const content = getDeletePromptContent(jobs.length);
+  const primaryJob = jobs[0];
+  const multiDelete = jobs.length > 1;
+
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4">
       <div className="w-full max-w-md rounded-md border border-border bg-card shadow-2xl">
         <div className="border-b border-border px-5 py-4">
-          <h2 className="text-base font-semibold text-foreground">Delete Download</h2>
+          <h2 className="text-base font-semibold text-foreground">{content.title}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Remove this download from the list. Disk deletion requires explicit confirmation below.
+            {content.description}
           </p>
         </div>
         <div className="space-y-4 px-5 py-4">
-          <div className="truncate text-sm font-medium text-foreground" title={job.filename}>
-            {job.filename}
-          </div>
+          {multiDelete ? (
+            <>
+              <div className="text-sm font-medium text-foreground">{content.selectedSummary}</div>
+              <div className="max-h-40 overflow-y-auto rounded-md border border-border bg-background/60">
+                {jobs.map((job) => (
+                  <div key={job.id} className="border-b border-border/60 px-3 py-2 last:border-b-0">
+                    <div className="truncate text-sm font-medium text-foreground" title={job.filename}>
+                      {job.filename}
+                    </div>
+                    <div className="mt-0.5 break-all text-xs text-muted-foreground">
+                      {job.targetPath || content.missingPathLabel}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="truncate text-sm font-medium text-foreground" title={primaryJob.filename}>
+              {primaryJob.filename}
+            </div>
+          )}
           <label className="flex cursor-pointer items-start gap-3 py-1 text-sm">
             <input
               type="checkbox"
@@ -547,10 +748,16 @@ function DeletePrompt({
               className="mt-0.5 h-4 w-4 accent-primary"
             />
             <span>
-              <span className="block font-medium text-foreground">Delete file from disk</span>
-              <span className="mt-1 block break-all text-muted-foreground">
-                {job.targetPath || 'No file path is recorded for this download.'}
-              </span>
+              <span className="block font-medium text-foreground">{content.checkboxLabel}</span>
+              {multiDelete ? (
+                <span className="mt-1 block text-muted-foreground">
+                  Applies to recorded target paths for the selected downloads.
+                </span>
+              ) : (
+                <span className="mt-1 block break-all text-muted-foreground">
+                  {primaryJob.targetPath || content.missingPathLabel}
+                </span>
+              )}
             </span>
           </label>
         </div>
@@ -563,7 +770,7 @@ function DeletePrompt({
             onClick={onDelete}
             className="h-9 rounded-md bg-destructive px-4 text-sm font-semibold text-destructive-foreground transition hover:opacity-90"
           >
-            Delete
+            {content.confirmLabel}
           </button>
         </div>
       </div>
@@ -774,18 +981,94 @@ function RowActions({
   );
 }
 
-function FileBadge({ filename, large = false }: { filename: string; large?: boolean }) {
+function FileBadge({
+  filename,
+  large = false,
+  selected = false,
+  selectionTitle,
+  onSelectionChange,
+  onSelectionPointerDown,
+  muted = false,
+  blurred = false,
+}: {
+  filename: string;
+  large?: boolean;
+  selected?: boolean;
+  selectionTitle?: string;
+  onSelectionChange?: (checked: boolean) => void;
+  onSelectionPointerDown?: (event: React.PointerEvent<HTMLInputElement>) => void;
+  muted?: boolean;
+  blurred?: boolean;
+}) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const iconSize = large ? 28 : 20;
   const icon = getFileIcon(ext, iconSize);
   const label = ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
+  const selectable = !large && onSelectionChange;
 
   return (
     <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-10 w-9'}`}>
-      <div className="absolute right-0 top-0 h-2.5 w-2.5 border-b border-l border-border bg-surface" />
-      <div className="text-primary">{icon}</div>
+      <div className={`absolute right-0 top-0 h-2.5 w-2.5 border-b border-l border-border bg-surface ${selectable ? 'opacity-0' : ''}`} />
+      {selectable ? (
+        <SelectionCheckbox
+          checked={selected}
+          title={selectionTitle ?? 'Select download'}
+          onChange={onSelectionChange}
+          onPointerDown={onSelectionPointerDown}
+          className="absolute -right-1 -top-1 z-20 h-3.5 w-3.5 rounded-[2px]"
+        />
+      ) : null}
+      <div className={`${muted ? 'text-muted-foreground' : 'text-primary'} ${blurred ? 'opacity-70 blur-[0.7px]' : ''}`}>{icon}</div>
       {large ? <div className="absolute bottom-1.5 text-[10px] font-semibold text-muted-foreground">{label}</div> : null}
     </div>
+  );
+}
+
+function SelectionCheckbox({
+  checked,
+  indeterminate = false,
+  title,
+  onChange,
+  onPointerDown,
+  className = '',
+}: {
+  checked: boolean;
+  indeterminate?: boolean;
+  title: string;
+  onChange: (checked: boolean) => void;
+  onPointerDown?: (event: React.PointerEvent<HTMLInputElement>) => void;
+  className?: string;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.indeterminate = indeterminate;
+    }
+  }, [indeterminate]);
+
+  return (
+    <input
+      ref={inputRef}
+      type="checkbox"
+      checked={checked}
+      title={title}
+      aria-label={title}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => {
+        if (onPointerDown) {
+          onPointerDown(event);
+          return;
+        }
+        event.stopPropagation();
+      }}
+      onChange={(event) => {
+        event.stopPropagation();
+        onChange(event.currentTarget.checked);
+      }}
+      className={`shrink-0 cursor-pointer accent-primary ${className || 'h-3.5 w-3.5'}`}
+    />
   );
 }
 
@@ -880,12 +1163,6 @@ function MenuItem({
   );
 }
 
-function formatProgress(job: DownloadJob) {
-  if (job.state === JobState.Queued) return '0%';
-  if (job.state === JobState.Canceled) return '--';
-  return `${job.progress.toFixed(0)}%`;
-}
-
 function emptyStateTitle(view: string) {
   switch (view) {
     case 'attention':
@@ -926,30 +1203,40 @@ function statusText(job: DownloadJob) {
   }
 }
 
-function statusClass(state: JobState) {
-  switch (state) {
-    case JobState.Downloading:
-    case JobState.Starting:
-      return 'text-primary';
-    case JobState.Completed:
-      return 'text-success';
-    case JobState.Failed:
-      return 'text-destructive';
-    case JobState.Queued:
-      return 'text-warning';
-    case JobState.Paused:
-      return 'text-muted-foreground';
-    default:
-      return 'text-muted-foreground';
-  }
-}
-
 function getHost(rawUrl: string) {
   try {
     return new URL(rawUrl).host;
   } catch {
     return rawUrl;
   }
+}
+
+function formatJobDate(timestamp: number | undefined) {
+  if (!isValidTimestamp(timestamp)) return '--';
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
+}
+
+function formatFullJobDate(timestamp: number | undefined) {
+  if (!isValidTimestamp(timestamp)) return 'No date recorded';
+
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(timestamp));
+}
+
+function isValidTimestamp(timestamp: number | undefined): timestamp is number {
+  return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0;
 }
 
 function formatBytes(bytes: number, decimals = 1) {
@@ -972,6 +1259,14 @@ function formatTime(seconds: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function setsEqual<T>(left: Set<T>, right: Set<T>) {
+  if (left.size !== right.size) return false;
+  for (const value of left) {
+    if (!right.has(value)) return false;
+  }
+  return true;
 }
 
 function getContextMenuPosition(jobId: string, x: number, y: number) {

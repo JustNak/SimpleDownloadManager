@@ -1,14 +1,30 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { addJob, addJobs } from './backend';
-import type { AddJobResult } from './backend';
+import type { AddJobResult, AddJobsResult } from './backend';
+import { progressPopupIntentForSubmission, type ProgressPopupIntent } from './batchProgress';
+import {
+  batchUrlTextAreaClassName,
+  batchUrlTextAreaWrap,
+  downloadSubmitLabel,
+  ensureTrailingEditableLine,
+  parseDownloadUrlLines,
+  type DownloadMode,
+} from './downloadInput';
 import { Archive, Link2, ListPlus, PackagePlus, X } from 'lucide-react';
 import { getErrorMessage } from './errors';
 
-type DownloadMode = 'single' | 'multi' | 'bulk';
+export type { DownloadMode } from './downloadInput';
+
+export interface AddDownloadOutcome {
+  mode: DownloadMode;
+  intent: ProgressPopupIntent | null;
+  primaryResult?: AddJobResult;
+  result: AddJobResult | AddJobsResult;
+}
 
 interface AddDownloadModalProps {
   onClose: () => void;
-  onAdded: (result: AddJobResult) => void;
+  onAdded: (outcome: AddDownloadOutcome) => void;
 }
 
 export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
@@ -24,7 +40,7 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
 
   const activeUrls = useMemo(() => {
     if (mode === 'single') return singleUrl.trim() ? [singleUrl.trim()] : [];
-    return parseUrlLines(mode === 'multi' ? multiUrls : bulkUrls);
+    return parseDownloadUrlLines(mode === 'multi' ? multiUrls : bulkUrls);
   }, [bulkUrls, mode, multiUrls, singleUrl]);
 
   useEffect(() => {
@@ -41,10 +57,21 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
     try {
       if (mode === 'single') {
         const result = await addJob(activeUrls[0]);
-        onAdded(result);
+        onAdded({
+          mode,
+          intent: progressPopupIntentForSubmission(mode, result),
+          primaryResult: result,
+          result,
+        });
       } else {
-        const result = await addJobs(activeUrls, mode === 'bulk' && combineBulk ? archiveName : undefined);
-        if (result.results[0]) onAdded(result.results[0]);
+        const bulkArchiveName = mode === 'bulk' && combineBulk ? archiveName : undefined;
+        const result = await addJobs(activeUrls, bulkArchiveName);
+        onAdded({
+          mode,
+          intent: progressPopupIntentForSubmission(mode, result, bulkArchiveName),
+          primaryResult: result.results.find((item) => item.status === 'queued') ?? result.results[0],
+          result,
+        });
       }
 
       onClose();
@@ -55,13 +82,7 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
     }
   };
 
-  const submitLabel = mode === 'single'
-    ? 'Start Download'
-    : mode === 'multi'
-      ? `Queue ${activeUrls.length || ''} Downloads`.trim()
-      : combineBulk
-        ? `Queue ${activeUrls.length || ''} and Combine`.trim()
-        : `Queue ${activeUrls.length || ''} Downloads`.trim();
+  const submitLabel = downloadSubmitLabel(mode, activeUrls.length, combineBulk);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-[1px]">
@@ -110,10 +131,11 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
                 <textarea
                   ref={inputRef as React.RefObject<HTMLTextAreaElement>}
                   value={multiUrls}
-                  onChange={(event) => setMultiUrls(event.target.value)}
+                  onChange={(event) => setMultiUrls(ensureTrailingEditableLine(event.target.value))}
                   placeholder={'https://example.com/file-01.zip\nhttps://example.com/file-02.zip'}
                   rows={7}
-                  className="w-full resize-none rounded-md border border-input bg-background px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                  wrap={batchUrlTextAreaWrap}
+                  className={batchUrlTextAreaClassName}
                 />
               </Field>
             ) : null}
@@ -124,10 +146,11 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
                   <textarea
                     ref={inputRef as React.RefObject<HTMLTextAreaElement>}
                     value={bulkUrls}
-                    onChange={(event) => setBulkUrls(event.target.value)}
+                    onChange={(event) => setBulkUrls(ensureTrailingEditableLine(event.target.value))}
                     placeholder={'https://example.com/assets/model.fbx\nhttps://example.com/assets/textures.zip\nhttps://example.com/assets/readme.pdf'}
                     rows={7}
-                    className="w-full resize-none rounded-md border border-input bg-background px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                    wrap={batchUrlTextAreaWrap}
+                    className={batchUrlTextAreaClassName}
                   />
                 </Field>
 
@@ -228,13 +251,6 @@ function Field({ label, hint, children }: { label: string; hint: string; childre
       {children}
     </div>
   );
-}
-
-function parseUrlLines(value: string) {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
 }
 
 function normalizeArchiveName(value: string) {

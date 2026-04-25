@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
-import { loadInitialAppData } from '../src/appBootstrap';
-import { ConnectionState } from '../src/types';
-import type { DesktopSnapshot } from '../src/backend';
-import type { DiagnosticsSnapshot } from '../src/types';
+import { loadInitialAppData } from '../src/appBootstrap.ts';
+import type { DesktopSnapshot } from '../src/backend.ts';
+import type { DiagnosticsSnapshot } from '../src/types.ts';
 
 const snapshot: DesktopSnapshot = {
-  connectionState: ConnectionState.Connected,
+  connectionState: 'connected' as DesktopSnapshot['connectionState'],
   jobs: [
     {
       id: 'job_1',
@@ -24,6 +23,7 @@ const snapshot: DesktopSnapshot = {
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
+    downloadPerformanceMode: 'balanced',
     notificationsEnabled: true,
     theme: 'system',
     accentColor: '#3b82f6',

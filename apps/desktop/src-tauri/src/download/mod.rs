@@ -1,18 +1,21 @@
 use crate::commands::emit_snapshot;
 use crate::state::{BulkArchiveReady, SharedState, WorkerControl};
-use crate::storage::{FailureCategory, ResumeSupport};
+use crate::storage::{BulkArchiveStatus, DownloadPerformanceMode, FailureCategory, ResumeSupport};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::plugin::PermissionState;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::sync::Mutex;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -20,6 +23,8 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+const BALANCED_MIN_SEGMENTED_SIZE: u64 = 64 * 1024 * 1024;
+const FAST_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
 const REQUEST_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -63,7 +68,7 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                         WorkerControl::Canceled | WorkerControl::Missing
                     )
                 {
-                    let _ = fs::remove_file(&task.temp_path).await;
+                    cleanup_partial_artifacts(&task.temp_path).await;
                 }
             }
             Err(error) => {
@@ -95,6 +100,146 @@ enum DownloadOutcome {
     Completed,
     Paused,
     Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRange {
+    fn len(self) -> u64 {
+        self.end.saturating_sub(self.start).saturating_add(1)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RangePlan {
+    total_bytes: u64,
+    segments: Vec<ByteRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SegmentProgress {
+    index: usize,
+    range: ByteRange,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SegmentedDownloadState {
+    total_bytes: u64,
+    segments: Vec<SegmentProgress>,
+}
+
+struct SegmentedProgressRuntime {
+    segment_bytes: Vec<u64>,
+    rolling_speed: RollingSpeed,
+    sample_bytes: u64,
+    sample_started: Instant,
+    last_persisted_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DownloadPerformanceProfile {
+    max_segments: usize,
+    min_segmented_size: u64,
+    low_speed_threshold_bytes_per_second: u64,
+    low_speed_window: Duration,
+    max_low_speed_retries: u32,
+    speed_smoothing_alpha: f64,
+}
+
+#[derive(Debug)]
+struct RollingSpeed {
+    smoothed_bytes_per_second: Option<f64>,
+    alpha: f64,
+}
+
+impl Default for RollingSpeed {
+    fn default() -> Self {
+        Self {
+            smoothed_bytes_per_second: None,
+            alpha: 0.25,
+        }
+    }
+}
+
+impl RollingSpeed {
+    fn with_alpha(alpha: f64) -> Self {
+        Self {
+            smoothed_bytes_per_second: None,
+            alpha: alpha.clamp(0.05, 1.0),
+        }
+    }
+}
+
+impl RollingSpeed {
+    fn record_sample(&mut self, bytes: u64, elapsed: Duration) -> u64 {
+        if elapsed.is_zero() {
+            return self
+                .smoothed_bytes_per_second
+                .map(|value| value as u64)
+                .unwrap_or(0);
+        }
+
+        let sample = bytes as f64 / elapsed.as_secs_f64();
+        let next = match self.smoothed_bytes_per_second {
+            Some(previous) => previous.mul_add(1.0 - self.alpha, sample * self.alpha),
+            None => sample,
+        };
+        self.smoothed_bytes_per_second = Some(next);
+        next.max(0.0) as u64
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LowSpeedDecision {
+    Continue,
+    Retry,
+}
+
+#[derive(Debug)]
+struct LowSpeedMonitor {
+    threshold_bytes_per_second: u64,
+    window: Duration,
+    max_retries: u32,
+    retries: u32,
+}
+
+impl LowSpeedMonitor {
+    fn new(profile: DownloadPerformanceProfile) -> Self {
+        Self {
+            threshold_bytes_per_second: profile.low_speed_threshold_bytes_per_second,
+            window: profile.low_speed_window,
+            max_retries: profile.max_low_speed_retries,
+            retries: 0,
+        }
+    }
+
+    fn observe(&mut self, bytes: u64, elapsed: Duration, speed_limited: bool) -> LowSpeedDecision {
+        if speed_limited
+            || elapsed < self.window
+            || self.threshold_bytes_per_second == 0
+            || self.retries >= self.max_retries
+        {
+            return LowSpeedDecision::Continue;
+        }
+
+        let speed = if elapsed.is_zero() {
+            0
+        } else {
+            (bytes as f64 / elapsed.as_secs_f64()) as u64
+        };
+
+        if speed < self.threshold_bytes_per_second {
+            self.retries += 1;
+            LowSpeedDecision::Retry
+        } else {
+            LowSpeedDecision::Continue
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +284,32 @@ async fn run_download(
     }
 }
 
+fn download_client() -> Result<Client, DownloadError> {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .pool_idle_timeout(Some(Duration::from_secs(120)))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http2_adaptive_window(true)
+        .user_agent("SimpleDownloadManager/0.2")
+        .build()
+        .map_err(|error| format!("Could not create download client: {error}"))?;
+
+    let _ = CLIENT.set(client);
+    CLIENT.get().cloned().ok_or_else(|| {
+        "Could not initialize shared download client."
+            .to_string()
+            .into()
+    })
+}
+
 async fn run_download_attempt(
     app: &AppHandle,
     state: &SharedState,
@@ -156,14 +327,12 @@ async fn run_download_attempt(
         emit_snapshot(app, &snapshot);
     }
 
-    let client = Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
-        .user_agent("SimpleDownloadManager/0.1")
-        .build()
-        .map_err(|error| format!("Could not create download client: {error}"))?;
+    let client = download_client()?;
+    let speed_limit = state.speed_limit_bytes_per_second().await;
+    let profile = performance_profile(state.download_performance_mode().await);
 
-    if let Some(metadata) = preflight_download(&client, &task.url).await {
+    let preflight_metadata = preflight_download(&client, &task.url).await;
+    if let Some(metadata) = preflight_metadata.clone() {
         let snapshot = state
             .apply_preflight_metadata(
                 &task.id,
@@ -173,6 +342,26 @@ async fn run_download_attempt(
             )
             .await?;
         emit_snapshot(app, &snapshot);
+    }
+
+    if let Some(total_bytes) = preflight_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.total_bytes)
+    {
+        if let Some(plan) = plan_segmented_ranges(
+            total_bytes,
+            preflight_metadata
+                .as_ref()
+                .map(|metadata| metadata.resume_support)
+                .unwrap_or(ResumeSupport::Unknown),
+            speed_limit,
+            profile,
+        ) {
+            if existing_bytes == 0 && probe_range_support(&client, &task.url, total_bytes).await {
+                return run_segmented_download_attempt(app, state, task, client, plan, profile)
+                    .await;
+            }
+        }
     }
 
     let mut response = send_request(&client, &task.url, existing_bytes).await?;
@@ -210,7 +399,7 @@ async fn run_download_attempt(
         .await?;
     emit_snapshot(app, &snapshot);
 
-    let mut file = if existing_bytes > 0 {
+    let file = if existing_bytes > 0 {
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -226,14 +415,18 @@ async fn run_download_attempt(
             .await
             .map_err(|error| disk_error(format!("Could not create download file: {error}")))?
     };
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
 
     let mut stream = response.bytes_stream();
     let mut downloaded_bytes = existing_bytes;
-    let speed_limit = state.speed_limit_bytes_per_second().await;
     let attempt_started = Instant::now();
     let mut attempt_transferred_bytes = 0_u64;
     let mut sample_bytes = 0_u64;
     let mut sample_started = Instant::now();
+    let mut displayed_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
+    let mut low_speed_monitor = LowSpeedMonitor::new(profile);
+    let mut low_speed_bytes = 0_u64;
+    let mut low_speed_started = Instant::now();
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
 
@@ -288,10 +481,30 @@ async fn run_download_attempt(
 
         let elapsed = sample_started.elapsed();
         let speed = if elapsed.as_secs_f64() > 0.0 {
-            (sample_bytes as f64 / elapsed.as_secs_f64()) as u64
+            displayed_speed.record_sample(sample_bytes, elapsed)
         } else {
             0
         };
+
+        low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
+        if low_speed_started.elapsed() >= profile.low_speed_window {
+            if low_speed_monitor.observe(
+                low_speed_bytes,
+                low_speed_started.elapsed(),
+                speed_limit.is_some(),
+            ) == LowSpeedDecision::Retry
+            {
+                file.flush().await.ok();
+                return Err(download_error(
+                    FailureCategory::Network,
+                    "Download speed stayed below the recovery threshold; retrying the stream."
+                        .into(),
+                    true,
+                ));
+            }
+            low_speed_bytes = 0;
+            low_speed_started = Instant::now();
+        }
 
         if elapsed >= PROGRESS_UPDATE_INTERVAL {
             let should_persist = last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
@@ -317,7 +530,8 @@ async fn run_download_attempt(
     file.flush()
         .await
         .map_err(|error| disk_error(format!("Could not flush download file: {error}")))?;
-    file.sync_all()
+    file.get_mut()
+        .sync_all()
         .await
         .map_err(|error| disk_error(format!("Could not sync download file: {error}")))?;
 
@@ -348,14 +562,634 @@ async fn run_download_attempt(
         .complete_job(&task.id, downloaded_bytes, &final_path)
         .await?;
     emit_snapshot(app, &snapshot);
-    if let Some(archive) = state.bulk_archive_ready_for_job(&task.id).await? {
-        match create_bulk_archive(archive).await {
-            Ok(path) => notify_bulk_archive_completed(app, state, &path).await,
-            Err(error) => eprintln!("failed to create bulk archive: {error}"),
-        }
-    }
+    handle_bulk_archive_after_completion(app, state, &task.id).await?;
     notify_download_completed(app, state, &final_path).await;
     Ok(DownloadOutcome::Completed)
+}
+
+async fn handle_bulk_archive_after_completion(
+    app: &AppHandle,
+    state: &SharedState,
+    job_id: &str,
+) -> Result<(), String> {
+    if let Some(archive) = state.bulk_archive_ready_for_job(job_id).await? {
+        let archive_id = archive.archive_id.clone();
+        let archive_output_path = archive.output_path.display().to_string();
+        let snapshot = state
+            .mark_bulk_archive_status(
+                &archive_id,
+                BulkArchiveStatus::Compressing,
+                Some(archive_output_path.clone()),
+                None,
+            )
+            .await?;
+        emit_snapshot(app, &snapshot);
+
+        match create_bulk_archive(archive).await {
+            Ok(path) => {
+                let snapshot = state
+                    .mark_bulk_archive_status(
+                        &archive_id,
+                        BulkArchiveStatus::Completed,
+                        Some(path.display().to_string()),
+                        None,
+                    )
+                    .await?;
+                emit_snapshot(app, &snapshot);
+                notify_bulk_archive_completed(app, state, &path).await;
+            }
+            Err(error) => {
+                let snapshot = state
+                    .mark_bulk_archive_status(
+                        &archive_id,
+                        BulkArchiveStatus::Failed,
+                        Some(archive_output_path),
+                        Some(error.clone()),
+                    )
+                    .await?;
+                emit_snapshot(app, &snapshot);
+                eprintln!("failed to create bulk archive: {error}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
+    match mode {
+        DownloadPerformanceMode::Stable => DownloadPerformanceProfile {
+            max_segments: 1,
+            min_segmented_size: u64::MAX,
+            low_speed_threshold_bytes_per_second: 4 * 1024,
+            low_speed_window: Duration::from_secs(30),
+            max_low_speed_retries: 2,
+            speed_smoothing_alpha: 0.25,
+        },
+        DownloadPerformanceMode::Balanced => DownloadPerformanceProfile {
+            max_segments: 4,
+            min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
+            low_speed_threshold_bytes_per_second: 8 * 1024,
+            low_speed_window: Duration::from_secs(20),
+            max_low_speed_retries: 2,
+            speed_smoothing_alpha: 0.25,
+        },
+        DownloadPerformanceMode::Fast => DownloadPerformanceProfile {
+            max_segments: 8,
+            min_segmented_size: FAST_MIN_SEGMENTED_SIZE,
+            low_speed_threshold_bytes_per_second: 16 * 1024,
+            low_speed_window: Duration::from_secs(15),
+            max_low_speed_retries: 3,
+            speed_smoothing_alpha: 0.25,
+        },
+    }
+}
+
+fn plan_segmented_ranges(
+    total_bytes: u64,
+    resume_support: ResumeSupport,
+    speed_limit: Option<u64>,
+    profile: DownloadPerformanceProfile,
+) -> Option<RangePlan> {
+    if speed_limit.is_some()
+        || resume_support != ResumeSupport::Supported
+        || total_bytes < profile.min_segmented_size
+        || profile.max_segments < 2
+    {
+        return None;
+    }
+
+    let segment_count = profile
+        .max_segments
+        .min((total_bytes / (16 * 1024 * 1024)).max(2) as usize)
+        .max(2);
+    let segment_size = total_bytes / segment_count as u64;
+    let mut segments = Vec::with_capacity(segment_count);
+
+    for index in 0..segment_count {
+        let start = index as u64 * segment_size;
+        let end = if index == segment_count - 1 {
+            total_bytes - 1
+        } else {
+            ((index as u64 + 1) * segment_size).saturating_sub(1)
+        };
+        segments.push(ByteRange { start, end });
+    }
+
+    Some(RangePlan {
+        total_bytes,
+        segments,
+    })
+}
+
+async fn probe_range_support(client: &Client, url: &str, total_bytes: u64) -> bool {
+    let Ok(response) = client.get(url).header(RANGE, "bytes=0-0").send().await else {
+        return false;
+    };
+
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return false;
+    }
+
+    response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| content_range_matches(value, ByteRange { start: 0, end: 0 }, total_bytes))
+        .unwrap_or(false)
+}
+
+async fn run_segmented_download_attempt(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    client: Client,
+    plan: RangePlan,
+    profile: DownloadPerformanceProfile,
+) -> Result<DownloadOutcome, DownloadError> {
+    let mut segment_state = load_or_create_segment_state(&task.temp_path, &plan).await?;
+    refresh_segment_completion_from_disk(&task.temp_path, &mut segment_state).await;
+    persist_segment_state(&task.temp_path, &segment_state).await?;
+
+    let initial_segment_bytes = segment_state
+        .segments
+        .iter()
+        .map(|segment| segment_existing_len(&task.temp_path, segment))
+        .collect::<Vec<_>>();
+    let initial_downloaded = initial_segment_bytes.iter().sum::<u64>();
+
+    let snapshot = state
+        .mark_job_downloading(
+            &task.id,
+            initial_downloaded,
+            Some(plan.total_bytes),
+            ResumeSupport::Supported,
+            None,
+        )
+        .await?;
+    emit_snapshot(app, &snapshot);
+
+    let progress = Arc::new(Mutex::new(SegmentedProgressRuntime {
+        segment_bytes: initial_segment_bytes,
+        rolling_speed: RollingSpeed::with_alpha(profile.speed_smoothing_alpha),
+        sample_bytes: 0,
+        sample_started: Instant::now(),
+        last_persisted_at: Instant::now(),
+    }));
+    let metadata = Arc::new(Mutex::new(segment_state));
+
+    let mut handles = Vec::new();
+    for segment in plan.segments.iter().copied().enumerate() {
+        let (index, range) = segment;
+        if progress.lock().await.segment_bytes[index] >= range.len() {
+            continue;
+        }
+
+        handles.push(tauri::async_runtime::spawn(download_segment_worker(
+            app.clone(),
+            state.clone(),
+            client.clone(),
+            task.id.clone(),
+            task.url.clone(),
+            task.temp_path.clone(),
+            plan.total_bytes,
+            SegmentProgress {
+                index,
+                range,
+                completed: false,
+            },
+            profile,
+            progress.clone(),
+            metadata.clone(),
+        )));
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(DownloadOutcome::Completed)) => {}
+            Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
+                return Ok(outcome);
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(error) => {
+                return Err(download_error(
+                    FailureCategory::Internal,
+                    format!("Segment worker failed: {error}"),
+                    true,
+                ));
+            }
+        }
+    }
+
+    let final_state = metadata.lock().await.clone();
+    if !final_state.segments.iter().all(|segment| segment.completed) {
+        return Err(download_error(
+            FailureCategory::Network,
+            "Segmented download ended before every segment completed.".into(),
+            true,
+        ));
+    }
+
+    combine_segment_files(&task.temp_path, &final_state).await?;
+    cleanup_segment_artifacts(&task.temp_path, final_state.segments.len()).await;
+
+    let snapshot = state
+        .update_job_progress(&task.id, plan.total_bytes, Some(plan.total_bytes), 0, true)
+        .await?;
+    emit_snapshot(app, &snapshot);
+
+    let final_path = move_to_final_path(&task.temp_path, &task.target_path)
+        .await
+        .map_err(disk_error)?;
+    let snapshot = state
+        .complete_job(&task.id, plan.total_bytes, &final_path)
+        .await?;
+    emit_snapshot(app, &snapshot);
+    handle_bulk_archive_after_completion(app, state, &task.id).await?;
+    notify_download_completed(app, state, &final_path).await;
+    Ok(DownloadOutcome::Completed)
+}
+
+async fn download_segment_worker(
+    app: AppHandle,
+    state: SharedState,
+    client: Client,
+    job_id: String,
+    url: String,
+    temp_path: PathBuf,
+    total_bytes: u64,
+    segment: SegmentProgress,
+    profile: DownloadPerformanceProfile,
+    progress: Arc<Mutex<SegmentedProgressRuntime>>,
+    metadata: Arc<Mutex<SegmentedDownloadState>>,
+) -> Result<DownloadOutcome, DownloadError> {
+    let segment_path = segment_path(&temp_path, segment.index);
+    let mut current_len = metadata_len(&segment_path)
+        .await
+        .unwrap_or(0)
+        .min(segment.range.len());
+    let mut low_speed_monitor = LowSpeedMonitor::new(profile);
+
+    while current_len < segment.range.len() {
+        match state.worker_control(&job_id).await {
+            WorkerControl::Paused => return Ok(DownloadOutcome::Paused),
+            WorkerControl::Canceled | WorkerControl::Missing => {
+                return Ok(DownloadOutcome::Canceled)
+            }
+            WorkerControl::Continue => {}
+        }
+
+        let requested = ByteRange {
+            start: segment.range.start + current_len,
+            end: segment.range.end,
+        };
+        let response = client
+            .get(&url)
+            .header(
+                RANGE,
+                format!("bytes={}-{}", requested.start, requested.end),
+            )
+            .send()
+            .await
+            .map_err(request_error)?;
+
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(download_error(
+                FailureCategory::Resume,
+                "The server did not honor a segmented range request.".into(),
+                false,
+            ));
+        }
+
+        let range_ok = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| content_range_matches(value, requested, total_bytes))
+            .unwrap_or(false);
+
+        if !range_ok {
+            return Err(download_error(
+                FailureCategory::Resume,
+                "The server returned an unexpected Content-Range for a segment.".into(),
+                false,
+            ));
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&segment_path)
+            .await
+            .map_err(|error| disk_error(format!("Could not open segment file: {error}")))?;
+        let mut writer = BufWriter::with_capacity(256 * 1024, file);
+        let mut stream = response.bytes_stream();
+        let mut low_speed_bytes = 0_u64;
+        let mut low_speed_started = Instant::now();
+
+        while let Some(chunk_result) = stream.next().await {
+            match state.worker_control(&job_id).await {
+                WorkerControl::Paused => {
+                    writer.flush().await.ok();
+                    return Ok(DownloadOutcome::Paused);
+                }
+                WorkerControl::Canceled | WorkerControl::Missing => {
+                    writer.flush().await.ok();
+                    return Ok(DownloadOutcome::Canceled);
+                }
+                WorkerControl::Continue => {}
+            }
+
+            let chunk = chunk_result.map_err(download_stream_error)?;
+            let chunk_len = chunk.len() as u64;
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|error| disk_error(format!("Could not write segment chunk: {error}")))?;
+
+            current_len = current_len
+                .saturating_add(chunk_len)
+                .min(segment.range.len());
+            low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
+            record_segment_progress(
+                &app,
+                &state,
+                &job_id,
+                &progress,
+                segment.index,
+                current_len,
+                chunk_len,
+                total_bytes,
+            )
+            .await?;
+
+            if low_speed_started.elapsed() >= profile.low_speed_window {
+                if low_speed_monitor.observe(low_speed_bytes, low_speed_started.elapsed(), false)
+                    == LowSpeedDecision::Retry
+                {
+                    writer.flush().await.ok();
+                    tokio::time::sleep(retry_delay_for_attempt(
+                        low_speed_monitor.retries.saturating_sub(1) as usize,
+                    ))
+                    .await;
+                    break;
+                }
+                low_speed_bytes = 0;
+                low_speed_started = Instant::now();
+            }
+        }
+
+        writer
+            .flush()
+            .await
+            .map_err(|error| disk_error(format!("Could not flush segment file: {error}")))?;
+
+        if current_len >= segment.range.len() {
+            mark_segment_completed(&temp_path, &metadata, segment.index).await?;
+            return Ok(DownloadOutcome::Completed);
+        }
+
+        if low_speed_monitor.retries >= profile.max_low_speed_retries {
+            return Err(download_error(
+                FailureCategory::Network,
+                "A segment stayed below the recovery speed threshold.".into(),
+                true,
+            ));
+        }
+    }
+
+    mark_segment_completed(&temp_path, &metadata, segment.index).await?;
+    Ok(DownloadOutcome::Completed)
+}
+
+async fn record_segment_progress(
+    app: &AppHandle,
+    state: &SharedState,
+    job_id: &str,
+    progress: &Arc<Mutex<SegmentedProgressRuntime>>,
+    segment_index: usize,
+    segment_bytes: u64,
+    chunk_len: u64,
+    total_bytes: u64,
+) -> Result<(), DownloadError> {
+    let update = {
+        let mut progress = progress.lock().await;
+        progress.segment_bytes[segment_index] = segment_bytes;
+        progress.sample_bytes = progress.sample_bytes.saturating_add(chunk_len);
+        if progress.sample_started.elapsed() < PROGRESS_UPDATE_INTERVAL {
+            None
+        } else {
+            let elapsed = progress.sample_started.elapsed();
+            let sample_bytes = progress.sample_bytes;
+            let speed = progress.rolling_speed.record_sample(sample_bytes, elapsed);
+            let downloaded_bytes = progress.segment_bytes.iter().sum::<u64>();
+            let should_persist = progress.last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
+            progress.sample_bytes = 0;
+            progress.sample_started = Instant::now();
+            if should_persist {
+                progress.last_persisted_at = Instant::now();
+            }
+            Some((downloaded_bytes, speed, should_persist))
+        }
+    };
+
+    if let Some((downloaded_bytes, speed, should_persist)) = update {
+        let snapshot = state
+            .update_job_progress(
+                job_id,
+                downloaded_bytes,
+                Some(total_bytes),
+                speed,
+                should_persist,
+            )
+            .await?;
+        emit_snapshot(app, &snapshot);
+    }
+
+    Ok(())
+}
+
+async fn load_or_create_segment_state(
+    temp_path: &Path,
+    plan: &RangePlan,
+) -> Result<SegmentedDownloadState, DownloadError> {
+    let meta_path = segment_meta_path(temp_path);
+    if let Ok(raw) = fs::read_to_string(&meta_path).await {
+        if let Ok(state) = serde_json::from_str::<SegmentedDownloadState>(&raw) {
+            let same_plan = state.total_bytes == plan.total_bytes
+                && state.segments.len() == plan.segments.len()
+                && state
+                    .segments
+                    .iter()
+                    .zip(plan.segments.iter())
+                    .all(|(stored, planned)| stored.range == *planned);
+            if same_plan {
+                return Ok(state);
+            }
+        }
+    }
+
+    cleanup_segment_artifacts(temp_path, plan.segments.len()).await;
+    Ok(SegmentedDownloadState {
+        total_bytes: plan.total_bytes,
+        segments: plan
+            .segments
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, range)| SegmentProgress {
+                index,
+                range,
+                completed: false,
+            })
+            .collect(),
+    })
+}
+
+async fn refresh_segment_completion_from_disk(
+    temp_path: &Path,
+    state: &mut SegmentedDownloadState,
+) {
+    for segment in &mut state.segments {
+        let len = metadata_len(&segment_path(temp_path, segment.index))
+            .await
+            .unwrap_or(0);
+        segment.completed = len == segment.range.len();
+        if len > segment.range.len() {
+            let _ = fs::remove_file(segment_path(temp_path, segment.index)).await;
+            segment.completed = false;
+        }
+    }
+}
+
+fn segment_existing_len(temp_path: &Path, segment: &SegmentProgress) -> u64 {
+    let path = segment_path(temp_path, segment.index);
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len().min(segment.range.len()))
+        .unwrap_or(0)
+}
+
+async fn mark_segment_completed(
+    temp_path: &Path,
+    metadata: &Arc<Mutex<SegmentedDownloadState>>,
+    segment_index: usize,
+) -> Result<(), DownloadError> {
+    let state = {
+        let mut metadata = metadata.lock().await;
+        if let Some(segment) = metadata
+            .segments
+            .iter_mut()
+            .find(|segment| segment.index == segment_index)
+        {
+            segment.completed = true;
+        }
+        metadata.clone()
+    };
+
+    persist_segment_state(temp_path, &state).await
+}
+
+async fn persist_segment_state(
+    temp_path: &Path,
+    state: &SegmentedDownloadState,
+) -> Result<(), DownloadError> {
+    let serialized = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("Could not serialize segment metadata: {error}"))?;
+    fs::write(segment_meta_path(temp_path), serialized)
+        .await
+        .map_err(|error| disk_error(format!("Could not write segment metadata: {error}")))
+}
+
+async fn combine_segment_files(
+    temp_path: &Path,
+    state: &SegmentedDownloadState,
+) -> Result<(), DownloadError> {
+    let output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(temp_path)
+        .await
+        .map_err(|error| disk_error(format!("Could not create combined partial file: {error}")))?;
+    let mut writer = BufWriter::with_capacity(512 * 1024, output);
+
+    for segment in &state.segments {
+        let path = segment_path(temp_path, segment.index);
+        let actual_len = metadata_len(&path).await.unwrap_or(0);
+        if actual_len != segment.range.len() {
+            return Err(download_error(
+                FailureCategory::Disk,
+                format!(
+                    "Segment {} has {} bytes, expected {} bytes.",
+                    segment.index,
+                    actual_len,
+                    segment.range.len()
+                ),
+                true,
+            ));
+        }
+
+        let mut input = fs::File::open(&path)
+            .await
+            .map_err(|error| disk_error(format!("Could not read segment file: {error}")))?;
+        tokio::io::copy(&mut input, &mut writer)
+            .await
+            .map_err(|error| disk_error(format!("Could not combine segment file: {error}")))?;
+    }
+
+    writer
+        .flush()
+        .await
+        .map_err(|error| disk_error(format!("Could not flush combined file: {error}")))?;
+    writer
+        .get_mut()
+        .sync_all()
+        .await
+        .map_err(|error| disk_error(format!("Could not sync combined file: {error}")))?;
+    Ok(())
+}
+
+async fn cleanup_segment_artifacts(temp_path: &Path, segment_count: usize) {
+    let _ = fs::remove_file(segment_meta_path(temp_path)).await;
+    for index in 0..segment_count {
+        let _ = fs::remove_file(segment_path(temp_path, index)).await;
+    }
+}
+
+async fn cleanup_partial_artifacts(temp_path: &Path) {
+    let _ = fs::remove_file(temp_path).await;
+    let _ = fs::remove_file(segment_meta_path(temp_path)).await;
+
+    let Some(parent) = temp_path.parent() else {
+        return;
+    };
+    let Some(file_name) = temp_path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let segment_prefix = format!("{file_name}.seg");
+
+    let Ok(mut entries) = fs::read_dir(parent).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let should_remove = entry
+            .file_name()
+            .to_str()
+            .map(|name| name.starts_with(&segment_prefix))
+            .unwrap_or(false);
+        if should_remove {
+            let _ = fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
+fn segment_meta_path(temp_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.meta", temp_path.display()))
+}
+
+fn segment_path(temp_path: &Path, index: usize) -> PathBuf {
+    PathBuf::from(format!("{}.seg{index}", temp_path.display()))
 }
 
 async fn send_request(
@@ -644,6 +1478,29 @@ fn derive_filename_from_url(raw_url: &str) -> Option<String> {
 
 fn parse_content_range_total(value: &str) -> Option<u64> {
     value.rsplit('/').next()?.parse::<u64>().ok()
+}
+
+fn content_range_matches(value: &str, expected_range: ByteRange, expected_total: u64) -> bool {
+    let Some((range, total)) = parse_content_range(value) else {
+        return false;
+    };
+
+    range == expected_range && total == expected_total
+}
+
+fn parse_content_range(value: &str) -> Option<(ByteRange, u64)> {
+    let value = value.trim();
+    let range_and_total = value.strip_prefix("bytes ")?;
+    let (range, total) = range_and_total.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+
+    Some((
+        ByteRange {
+            start: start.parse().ok()?,
+            end: end.parse().ok()?,
+        },
+        total.parse().ok()?,
+    ))
 }
 
 fn sanitize_filename(input: &str) -> String {
@@ -1057,5 +1914,175 @@ mod tests {
             throttle_delay_for_limit(0, 4096, Duration::from_secs(0)),
             None
         );
+    }
+
+    #[test]
+    fn balanced_range_plan_uses_four_segments_for_large_supported_files() {
+        let profile = performance_profile(DownloadPerformanceMode::Balanced);
+        let plan =
+            plan_segmented_ranges(256 * 1024 * 1024, ResumeSupport::Supported, None, profile)
+                .expect("large range-capable files should use segmented downloading");
+
+        assert_eq!(plan.segments.len(), 4);
+        assert_eq!(
+            plan.segments[0],
+            ByteRange {
+                start: 0,
+                end: 67_108_863
+            }
+        );
+        assert_eq!(
+            plan.segments[3],
+            ByteRange {
+                start: 201_326_592,
+                end: 268_435_455,
+            }
+        );
+    }
+
+    #[test]
+    fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
+        assert!(plan_segmented_ranges(
+            256 * 1024 * 1024,
+            ResumeSupport::Supported,
+            None,
+            performance_profile(DownloadPerformanceMode::Stable),
+        )
+        .is_none());
+        assert!(plan_segmented_ranges(
+            32 * 1024 * 1024,
+            ResumeSupport::Supported,
+            None,
+            performance_profile(DownloadPerformanceMode::Balanced),
+        )
+        .is_none());
+        assert!(plan_segmented_ranges(
+            256 * 1024 * 1024,
+            ResumeSupport::Unknown,
+            None,
+            performance_profile(DownloadPerformanceMode::Balanced),
+        )
+        .is_none());
+        assert!(plan_segmented_ranges(
+            256 * 1024 * 1024,
+            ResumeSupport::Supported,
+            Some(1024),
+            performance_profile(DownloadPerformanceMode::Balanced),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn content_range_validation_rejects_mismatched_segments() {
+        assert!(content_range_matches(
+            "bytes 1048576-2097151/4194304",
+            ByteRange {
+                start: 1_048_576,
+                end: 2_097_151,
+            },
+            4_194_304,
+        ));
+        assert!(!content_range_matches(
+            "bytes 0-2097151/4194304",
+            ByteRange {
+                start: 1_048_576,
+                end: 2_097_151,
+            },
+            4_194_304,
+        ));
+        assert!(!content_range_matches(
+            "bytes 1048576-2097151/9999999",
+            ByteRange {
+                start: 1_048_576,
+                end: 2_097_151,
+            },
+            4_194_304,
+        ));
+    }
+
+    #[test]
+    fn rolling_speed_smoothing_avoids_one_sample_collapse() {
+        let mut speed = RollingSpeed::default();
+
+        assert_eq!(
+            speed.record_sample(8 * 1024 * 1024, Duration::from_secs(1)),
+            8 * 1024 * 1024
+        );
+        let smoothed = speed.record_sample(512, Duration::from_secs(1));
+
+        assert!(
+            smoothed > 1024 * 1024,
+            "one tiny sample should not collapse the displayed speed to near zero"
+        );
+    }
+
+    #[test]
+    fn low_speed_recovery_retries_only_after_sustained_unlimited_slowdown() {
+        let profile = performance_profile(DownloadPerformanceMode::Balanced);
+        let mut monitor = LowSpeedMonitor::new(profile);
+
+        assert_eq!(
+            monitor.observe(4 * 1024, Duration::from_secs(10), false),
+            LowSpeedDecision::Continue
+        );
+        assert_eq!(
+            monitor.observe(4 * 1024, Duration::from_secs(21), false),
+            LowSpeedDecision::Retry
+        );
+        assert_eq!(
+            monitor.observe(0, Duration::from_secs(30), true),
+            LowSpeedDecision::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn segmented_sidecar_resumes_only_valid_completed_ranges() {
+        let root = std::env::temp_dir().join(format!(
+            "sdm-segment-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let temp_path = root.join("download.bin.part");
+        let plan = RangePlan {
+            total_bytes: 12,
+            segments: vec![
+                ByteRange { start: 0, end: 3 },
+                ByteRange { start: 4, end: 7 },
+                ByteRange { start: 8, end: 11 },
+            ],
+        };
+
+        let mut state = load_or_create_segment_state(&temp_path, &plan)
+            .await
+            .unwrap();
+        tokio::fs::write(segment_path(&temp_path, 0), vec![1_u8; 4])
+            .await
+            .unwrap();
+        tokio::fs::write(segment_path(&temp_path, 1), vec![2_u8; 2])
+            .await
+            .unwrap();
+        tokio::fs::write(segment_path(&temp_path, 2), vec![3_u8; 5])
+            .await
+            .unwrap();
+
+        refresh_segment_completion_from_disk(&temp_path, &mut state).await;
+
+        assert!(state.segments[0].completed);
+        assert!(!state.segments[1].completed);
+        assert!(!state.segments[2].completed);
+        assert_eq!(segment_existing_len(&temp_path, &state.segments[1]), 2);
+        assert_eq!(metadata_len(&segment_path(&temp_path, 2)).await, None);
+
+        persist_segment_state(&temp_path, &state).await.unwrap();
+        let reloaded = load_or_create_segment_state(&temp_path, &plan)
+            .await
+            .unwrap();
+        assert!(reloaded.segments[0].completed);
+        assert!(!reloaded.segments[1].completed);
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

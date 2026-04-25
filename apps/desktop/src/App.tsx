@@ -4,19 +4,24 @@ import type { DownloadJob, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
 import { SettingsPage } from './SettingsPage';
 import { ToastArea } from './ToastArea';
-import { AddDownloadModal } from './AddDownloadModal';
+import { AddDownloadModal, type AddDownloadOutcome } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
+import { compareDownloadsForSort, type SortMode } from './downloadSorting';
+import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
 import { getErrorMessage } from './errors';
 import { loadInitialAppData } from './appBootstrap';
 import {
   browseDirectory,
   cancelJob,
   deleteJob,
+  deleteJobs,
   exportDiagnosticsReport,
   getDiagnostics,
   getAppSnapshot,
+  openBatchProgressWindow,
   openInstallDocs,
   openJobFile,
+  openProgressWindow,
   pauseAllJobs,
   pauseJob,
   revealJobInFolder,
@@ -32,7 +37,7 @@ import {
   subscribeToSelectedJobRequested,
   testExtensionHandoff,
 } from './backend';
-import type { AddJobResult } from './backend';
+import type { AddJobsResult } from './backend';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -52,9 +57,7 @@ import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
 
 type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings';
-type SortMode = 'status' | 'name' | 'progress' | 'size';
 
-const DEFAULT_ACCENT_COLOR = '#3b82f6';
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
 const finishedStates = [JobState.Completed, JobState.Canceled];
@@ -67,6 +70,7 @@ export default function App() {
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
+    downloadPerformanceMode: 'balanced',
     notificationsEnabled: true,
     theme: 'system',
     accentColor: DEFAULT_ACCENT_COLOR,
@@ -95,6 +99,7 @@ export default function App() {
   const [pendingSettingsView, setPendingSettingsView] = useState<ViewState | null>(null);
   const [isUnsavedSettingsPromptOpen, setIsUnsavedSettingsPromptOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const appearanceSettings = settingsDraft ?? settings;
 
   useEffect(() => {
     let isMounted = true;
@@ -181,22 +186,14 @@ export default function App() {
 
   useEffect(() => {
     function applyTheme() {
-      const shouldUseOled = settings.theme === 'oled_dark';
-      const shouldUseDark =
-        shouldUseOled ||
-        settings.theme === 'dark' ||
-        (settings.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-
-      document.documentElement.classList.toggle('dark', shouldUseDark);
-      document.documentElement.classList.toggle('oled-dark', shouldUseOled);
-      applyAccentColor(settings.accentColor);
+      applyAppearance(appearanceSettings);
     }
 
     applyTheme();
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
-  }, [settings.accentColor, settings.theme]);
+  }, [appearanceSettings.accentColor, appearanceSettings.theme]);
 
   function requestViewChange(nextView: ViewState) {
     if (nextView === view) return;
@@ -328,6 +325,25 @@ export default function App() {
     }
   }
 
+  async function handleDeleteMany(ids: string[], deleteFromDisk: boolean) {
+    const uniqueIds = [...new Set(ids)].filter(Boolean);
+    if (uniqueIds.length === 0) return;
+
+    try {
+      await deleteJobs(uniqueIds, deleteFromDisk);
+      if (selectedJobId && uniqueIds.includes(selectedJobId)) setSelectedJobId(null);
+      addToast({
+        type: 'success',
+        title: 'Downloads Deleted',
+        message: deleteFromDisk
+          ? `Removed ${uniqueIds.length} downloads from the list and deleted their files from disk.`
+          : `Removed ${uniqueIds.length} downloads from the download list.`,
+      });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Delete Failed', message: getErrorMessage(error) });
+    }
+  }
+
   async function handleRename(id: string, filename: string) {
     try {
       await renameJob(id, filename);
@@ -444,15 +460,42 @@ export default function App() {
     await handleSaveSettings(nextSettings, nextView);
   }
 
-  function handleAddDownloadResult(result: AddJobResult) {
-    setSelectedJobId(result.jobId);
+  function handleAddDownloadResult(outcome: AddDownloadOutcome) {
+    if (outcome.primaryResult) {
+      setSelectedJobId(outcome.primaryResult.jobId);
+    }
 
-    if (result.status === 'duplicate_existing_job') {
+    void openProgressIntent(outcome.intent);
+
+    if (outcome.mode === 'single') {
+      const result = outcome.primaryResult;
+      if (!result) return;
+      if (result.status === 'duplicate_existing_job') {
+        setView('all');
+        addToast({
+          type: 'info',
+          title: 'Already in Queue',
+          message: `${result.filename} is already in the download list.`,
+        });
+        return;
+      }
+
+      setView('queued');
+      addToast({
+        type: 'success',
+        title: 'Download Added',
+        message: `${result.filename} was added to the queue.`,
+      });
+      return;
+    }
+
+    const batchResult = outcome.result as AddJobsResult;
+    if (batchResult.queuedCount === 0) {
       setView('all');
       addToast({
         type: 'info',
         title: 'Already in Queue',
-        message: `${result.filename} is already in the download list.`,
+        message: `${batchResult.duplicateCount} ${batchResult.duplicateCount === 1 ? 'download is' : 'downloads are'} already in the list.`,
       });
       return;
     }
@@ -460,9 +503,26 @@ export default function App() {
     setView('queued');
     addToast({
       type: 'success',
-      title: 'Download Added',
-      message: `${result.filename} was added to the queue.`,
+      title: outcome.mode === 'bulk' ? 'Bulk Download Added' : 'Downloads Added',
+      message: `${batchResult.queuedCount} ${batchResult.queuedCount === 1 ? 'download was' : 'downloads were'} added to the queue.`,
     });
+  }
+
+  async function openProgressIntent(intent: AddDownloadOutcome['intent']) {
+    if (!intent) return;
+    try {
+      if (intent.type === 'single') {
+        await openProgressWindow(intent.jobId);
+      } else {
+        await openBatchProgressWindow(intent.context);
+      }
+    } catch (error) {
+      addToast({
+        type: 'warning',
+        title: 'Progress Popup Failed',
+        message: getErrorMessage(error, 'The download was queued, but the progress popup could not be opened.'),
+      });
+    }
   }
 
   async function handleBrowseDirectory(): Promise<string | null> {
@@ -497,12 +557,7 @@ export default function App() {
       return `${job.filename} ${job.url} ${job.targetPath ?? ''}`.toLowerCase().includes(query);
     });
 
-    return [...filtered].sort((a, b) => {
-      if (sortMode === 'name') return a.filename.localeCompare(b.filename);
-      if (sortMode === 'progress') return b.progress - a.progress;
-      if (sortMode === 'size') return b.totalBytes - a.totalBytes;
-      return statusRank(a.state) - statusRank(b.state) || a.filename.localeCompare(b.filename);
-    });
+    return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   }, [jobs, searchQuery, sortMode, view]);
 
   useEffect(() => {
@@ -591,6 +646,7 @@ export default function App() {
                 onRestart={handleRestart}
                 onRemove={handleRemove}
                 onDelete={handleDelete}
+                onDeleteMany={handleDeleteMany}
                 onRename={handleRename}
                 onOpen={handleOpenFile}
                 onReveal={handleReveal}
@@ -727,6 +783,8 @@ function CommandBar({
           <option value="name">Sort by: Name</option>
           <option value="progress">Sort by: Progress</option>
           <option value="size">Sort by: Size</option>
+          <option value="newest">Sort by: Newest</option>
+          <option value="oldest">Sort by: Oldest</option>
         </select>
         <button
           onClick={onCycleFilter}
@@ -845,54 +903,6 @@ function nextFilterView(view: ViewState): ViewState {
   if (view === 'active') return 'queued';
   if (view === 'queued') return 'completed';
   return 'all';
-}
-
-function statusRank(state: JobState) {
-  switch (state) {
-    case JobState.Downloading:
-      return 0;
-    case JobState.Starting:
-      return 1;
-    case JobState.Queued:
-      return 2;
-    case JobState.Paused:
-      return 3;
-    case JobState.Failed:
-      return 4;
-    case JobState.Completed:
-      return 5;
-    case JobState.Canceled:
-      return 6;
-    default:
-      return 7;
-  }
-}
-
-function applyAccentColor(rawColor: string | undefined) {
-  const accent = normalizeAccentColor(rawColor);
-  const foreground = readableForegroundForHex(accent);
-  const root = document.documentElement;
-
-  root.style.setProperty('--color-primary', accent);
-  root.style.setProperty('--color-ring', accent);
-  root.style.setProperty('--color-primary-foreground', foreground);
-  root.style.setProperty('--color-primary-soft', `color-mix(in oklch, ${accent} 20%, var(--color-background))`);
-  root.style.setProperty('--color-accent', `color-mix(in oklch, ${accent} 20%, var(--color-background))`);
-  root.style.setProperty('--color-accent-foreground', accent);
-  root.style.setProperty('--color-selected', `color-mix(in oklch, ${accent} 24%, var(--color-background))`);
-}
-
-function normalizeAccentColor(rawColor: string | undefined) {
-  const color = rawColor?.trim() ?? '';
-  return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_ACCENT_COLOR;
-}
-
-function readableForegroundForHex(hex: string) {
-  const red = Number.parseInt(hex.slice(1, 3), 16);
-  const green = Number.parseInt(hex.slice(3, 5), 16);
-  const blue = Number.parseInt(hex.slice(5, 7), 16);
-  const luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255;
-  return luminance > 0.58 ? '#0a0f14' : '#ffffff';
 }
 
 function formatBytes(bytes: number, decimals = 1) {

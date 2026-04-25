@@ -1,9 +1,9 @@
 use crate::storage::{
     default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
-    BulkArchiveInfo, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot, DownloadJob,
-    DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory,
-    HostRegistrationDiagnostics, JobState, MainWindowState, PersistedState, QueueSummary,
-    ResumeSupport, Settings,
+    BulkArchiveInfo, BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
+    DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
+    ExtensionIntegrationSettings, FailureCategory, HostRegistrationDiagnostics, JobState,
+    MainWindowState, PersistedState, QueueSummary, ResumeSupport, Settings,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
@@ -31,6 +31,7 @@ pub struct DownloadTask {
 
 #[derive(Debug, Clone)]
 pub struct BulkArchiveReady {
+    pub archive_id: String,
     pub output_path: PathBuf,
     pub entries: Vec<BulkArchiveEntry>,
 }
@@ -223,6 +224,11 @@ impl SharedState {
         }
     }
 
+    pub async fn download_performance_mode(&self) -> DownloadPerformanceMode {
+        let state = self.inner.read().await;
+        state.settings.download_performance_mode
+    }
+
     pub async fn extension_integration_settings(&self) -> ExtensionIntegrationSettings {
         let state = self.inner.read().await;
         state.settings.extension_integration.clone()
@@ -364,6 +370,9 @@ impl SharedState {
                     normalized_urls.len()
                 ),
                 name: normalize_archive_filename(&name),
+                archive_status: BulkArchiveStatus::Pending,
+                output_path: None,
+                error: None,
             });
 
         let mut results = Vec::with_capacity(normalized_urls.len());
@@ -460,6 +469,7 @@ impl RuntimeState {
             filename: filename.clone(),
             source: options.source,
             state: JobState::Queued,
+            created_at: current_unix_timestamp_millis(),
             progress: 0.0,
             total_bytes: 0,
             downloaded_bytes: 0,
@@ -471,6 +481,7 @@ impl RuntimeState {
             retry_attempts: 0,
             target_path: target_path.display().to_string(),
             temp_path: temp_path.display().to_string(),
+            artifact_exists: None,
             bulk_archive: options.bulk_archive,
         });
 
@@ -512,6 +523,27 @@ impl RuntimeState {
             target_path,
             duplicate_job,
         })
+    }
+
+    fn mark_bulk_archive_status_in_memory(
+        &mut self,
+        archive_id: &str,
+        archive_status: BulkArchiveStatus,
+        output_path: Option<String>,
+        error: Option<String>,
+    ) {
+        for job in &mut self.jobs {
+            let Some(archive) = &mut job.bulk_archive else {
+                continue;
+            };
+            if archive.id != archive_id {
+                continue;
+            }
+
+            archive.archive_status = archive_status;
+            archive.output_path = output_path.clone();
+            archive.error = error.clone();
+        }
     }
 }
 
@@ -1113,6 +1145,28 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn mark_bulk_archive_status(
+        &self,
+        archive_id: &str,
+        archive_status: BulkArchiveStatus,
+        output_path: Option<String>,
+        error: Option<String>,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.mark_bulk_archive_status_in_memory(
+                archive_id,
+                archive_status,
+                output_path,
+                error,
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn bulk_archive_ready_for_job(
         &self,
         id: &str,
@@ -1124,6 +1178,9 @@ impl SharedState {
         let Some(archive) = &job.bulk_archive else {
             return Ok(None);
         };
+        if archive.archive_status != BulkArchiveStatus::Pending {
+            return Ok(None);
+        }
 
         let members = state
             .jobs
@@ -1166,6 +1223,7 @@ impl SharedState {
         }
 
         Ok(Some(BulkArchiveReady {
+            archive_id: archive.id.clone(),
             output_path,
             entries,
         }))
@@ -1310,14 +1368,24 @@ impl RuntimeState {
     fn snapshot(&self) -> DesktopSnapshot {
         DesktopSnapshot {
             connection_state: self.connection_state,
-            jobs: self.jobs.clone(),
+            jobs: self
+                .jobs
+                .iter()
+                .cloned()
+                .map(add_artifact_existence)
+                .collect(),
             settings: self.settings.clone(),
         }
     }
 
     fn persisted(&self) -> PersistedState {
         PersistedState {
-            jobs: self.jobs.clone(),
+            jobs: self
+                .jobs
+                .iter()
+                .cloned()
+                .map(clear_transient_job_state)
+                .collect(),
             settings: self.settings.clone(),
             main_window: self.main_window.clone(),
         }
@@ -1439,7 +1507,34 @@ fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
         job.eta = 0;
     }
 
+    if job.created_at == 0 {
+        job.created_at = current_unix_timestamp_millis();
+    }
+
+    job.artifact_exists = None;
+
     job
+}
+
+fn add_artifact_existence(mut job: DownloadJob) -> DownloadJob {
+    job.artifact_exists = if job.state == JobState::Completed {
+        Some(Path::new(&job.target_path).is_file())
+    } else {
+        None
+    };
+    job
+}
+
+fn clear_transient_job_state(mut job: DownloadJob) -> DownloadJob {
+    job.artifact_exists = None;
+    job
+}
+
+fn current_unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
@@ -2150,6 +2245,39 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_marks_completed_artifact_existence() {
+        let download_dir = test_runtime_dir("snapshot-artifact-existence");
+        let existing_path = download_dir.join("exists.pdf");
+        std::fs::write(&existing_path, b"done").unwrap();
+        let missing_path = download_dir.join("missing.zip");
+
+        let mut existing_job =
+            download_job("job_24", JobState::Completed, ResumeSupport::Supported, 100);
+        existing_job.target_path = existing_path.display().to_string();
+        let mut missing_job =
+            download_job("job_25", JobState::Completed, ResumeSupport::Supported, 100);
+        missing_job.target_path = missing_path.display().to_string();
+
+        let state = runtime_state_with_jobs(vec![existing_job, missing_job]);
+        let snapshot = state.snapshot();
+
+        assert_eq!(snapshot.jobs[0].artifact_exists, Some(true));
+        assert_eq!(snapshot.jobs[1].artifact_exists, Some(false));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn normalize_job_populates_missing_created_at() {
+        let mut job = download_job("job_26", JobState::Queued, ResumeSupport::Unknown, 0);
+        job.created_at = 0;
+
+        let normalized = normalize_job(job, &Settings::default());
+
+        assert!(normalized.created_at > 0);
+    }
+
+    #[test]
     fn pause_all_jobs_only_pauses_schedulable_jobs() {
         let mut state = runtime_state_with_jobs(vec![
             download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0),
@@ -2320,6 +2448,7 @@ mod tests {
             filename: "file.zip".into(),
             source: None,
             state: JobState::Failed,
+            created_at: 1,
             progress: 42.0,
             total_bytes: 100,
             downloaded_bytes: 42,
@@ -2331,6 +2460,7 @@ mod tests {
             retry_attempts: 2,
             target_path: "C:/Downloads/file.zip".into(),
             temp_path: "C:/Downloads/file.zip.part".into(),
+            artifact_exists: None,
             bulk_archive: None,
         };
 
@@ -2348,6 +2478,82 @@ mod tests {
         assert_eq!(job.retry_attempts, 0);
     }
 
+    #[test]
+    fn bulk_archive_status_updates_all_archive_members() {
+        let archive = BulkArchiveInfo {
+            id: "bulk_1".into(),
+            name: "bundle.zip".into(),
+            archive_status: BulkArchiveStatus::Pending,
+            output_path: None,
+            error: None,
+        };
+        let mut first = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+        let mut second = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+        first.bulk_archive = Some(archive.clone());
+        second.bulk_archive = Some(archive);
+        let mut state = runtime_state_with_jobs(vec![
+            first,
+            second,
+            download_job("job_3", JobState::Completed, ResumeSupport::Supported, 100),
+        ]);
+
+        state.mark_bulk_archive_status_in_memory(
+            "bulk_1",
+            BulkArchiveStatus::Compressing,
+            Some("C:/Downloads/bundle.zip".into()),
+            None,
+        );
+
+        let mut archive_members = state
+            .jobs
+            .iter()
+            .filter_map(|job| job.bulk_archive.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(archive_members.len(), 2);
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.archive_status == BulkArchiveStatus::Compressing));
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.output_path.as_deref() == Some("C:/Downloads/bundle.zip")));
+
+        state.mark_bulk_archive_status_in_memory(
+            "bulk_1",
+            BulkArchiveStatus::Failed,
+            Some("C:/Downloads/bundle.zip".into()),
+            Some("zip failed".into()),
+        );
+        archive_members = state
+            .jobs
+            .iter()
+            .filter_map(|job| job.bulk_archive.as_ref())
+            .collect::<Vec<_>>();
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.archive_status == BulkArchiveStatus::Failed));
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.error.as_deref() == Some("zip failed")));
+
+        state.mark_bulk_archive_status_in_memory(
+            "bulk_1",
+            BulkArchiveStatus::Completed,
+            Some("C:/Downloads/bundle.zip".into()),
+            None,
+        );
+        archive_members = state
+            .jobs
+            .iter()
+            .filter_map(|job| job.bulk_archive.as_ref())
+            .collect::<Vec<_>>();
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.archive_status == BulkArchiveStatus::Completed));
+        assert!(archive_members
+            .iter()
+            .all(|archive| archive.error.is_none()));
+    }
+
     fn download_job(
         id: &str,
         state: JobState,
@@ -2360,6 +2566,7 @@ mod tests {
             filename: format!("{id}.zip"),
             source: None,
             state,
+            created_at: 1,
             progress: 0.0,
             total_bytes: 100,
             downloaded_bytes,
@@ -2371,6 +2578,7 @@ mod tests {
             retry_attempts: 0,
             target_path: format!("C:/Downloads/{id}.zip"),
             temp_path: format!("C:/Downloads/{id}.zip.part"),
+            artifact_exists: None,
             bulk_archive: None,
         }
     }

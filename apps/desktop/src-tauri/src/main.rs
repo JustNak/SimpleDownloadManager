@@ -10,6 +10,7 @@ fn main() {
         .setup(|app| {
             let shared_state = state::SharedState::new()?;
             let prompt_registry = prompts::PromptRegistry::default();
+            let progress_batch_registry = commands::ProgressBatchRegistry::default();
             download::schedule_downloads(app.handle().clone(), shared_state.clone());
             commands::initialize_native_host_registration();
             ipc::start_named_pipe_listener(
@@ -20,6 +21,7 @@ fn main() {
             let state_for_lifecycle = shared_state.clone();
             app.manage(shared_state);
             app.manage(prompt_registry);
+            app.manage(progress_batch_registry);
             lifecycle::initialize_app_lifecycle(app, &state_for_lifecycle)?;
             Ok(())
         })
@@ -48,6 +50,8 @@ fn main() {
             commands::show_existing_download_prompt,
             commands::cancel_download_prompt,
             commands::open_progress_window,
+            commands::open_batch_progress_window,
+            commands::get_progress_batch_context,
             commands::open_job_file,
             commands::reveal_job_in_folder,
             commands::open_install_docs,
