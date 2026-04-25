@@ -12,6 +12,7 @@ import {
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, getHost, joinDisplayPath } from './popupShared';
+import { getErrorMessage } from './errors';
 
 export function DownloadPromptWindow() {
   const [prompt, setPrompt] = useState<DownloadPrompt | null>(null);
@@ -56,7 +57,7 @@ export function DownloadPromptWindow() {
     try {
       await action();
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Action failed.');
+      setErrorMessage(getErrorMessage(error, 'Action failed.'));
       setIsBusy(false);
     }
   }

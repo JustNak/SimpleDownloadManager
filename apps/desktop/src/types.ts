@@ -76,6 +76,7 @@ export interface ExtensionIntegrationSettings {
   showProgressAfterHandoff: boolean;
   showBadgeStatus: boolean;
   excludedHosts: string[];
+  ignoredFileExtensions: string[];
 }
 
 export interface Settings {

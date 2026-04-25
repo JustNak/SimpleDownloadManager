@@ -34,6 +34,7 @@ const defaultSettings: Settings = {
     showProgressAfterHandoff: true,
     showBadgeStatus: true,
     excludedHosts: [],
+    ignoredFileExtensions: [],
   },
 };
 

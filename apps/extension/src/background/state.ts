@@ -17,6 +17,7 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showProgressAfterHandoff: true,
   showBadgeStatus: true,
   excludedHosts: [],
+  ignoredFileExtensions: [],
 };
 
 const defaultState: PopupStateResponse = {
@@ -89,6 +90,9 @@ function normalizeExtensionSettings(settings?: Partial<ExtensionIntegrationSetti
           .filter(Boolean),
       ),
     ),
+    ignoredFileExtensions: normalizeFileExtensions(
+      settings?.ignoredFileExtensions ?? defaultExtensionSettings.ignoredFileExtensions,
+    ),
   };
 }
 
@@ -98,4 +102,26 @@ function normalizeHost(host: string): string {
     .replace(/^https?:\/\//i, '')
     .replace(/\/.*$/, '')
     .toLowerCase();
+}
+
+function normalizeFileExtensions(values: string[]): string[] {
+  const extensions = new Set<string>();
+
+  for (const value of values) {
+    for (const candidate of value.split(/[,\s]+/)) {
+      const extension = normalizeFileExtension(candidate);
+      if (extension) extensions.add(extension);
+    }
+  }
+
+  return [...extensions];
+}
+
+function normalizeFileExtension(value: string): string {
+  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
+  if (!extension || extension.includes('/') || extension.includes('\\') || /^\.+$/.test(extension)) {
+    return '';
+  }
+
+  return extension;
 }

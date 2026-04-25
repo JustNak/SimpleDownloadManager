@@ -14,6 +14,7 @@ import {
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, formatTime, getHost } from './popupShared';
+import { getErrorMessage } from './errors';
 
 export function DownloadProgressWindow() {
   const [job, setJob] = useState<DownloadJob | null>(null);
@@ -52,7 +53,7 @@ export function DownloadProgressWindow() {
     try {
       await action();
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Action failed.');
+      setErrorMessage(getErrorMessage(error, 'Action failed.'));
     } finally {
       setIsBusy(false);
     }

@@ -47,7 +47,8 @@ Supported request types:
       "contextMenuEnabled": true,
       "showProgressAfterHandoff": true,
       "showBadgeStatus": true,
-      "excludedHosts": []
+      "excludedHosts": [],
+      "ignoredFileExtensions": []
     }
   }
 }
@@ -79,9 +80,13 @@ Supported request types:
   "contextMenuEnabled": true,
   "showProgressAfterHandoff": true,
   "showBadgeStatus": true,
-  "excludedHosts": ["example.com"]
+  "excludedHosts": ["example.com"],
+  "ignoredFileExtensions": ["exe", "zip", "txt", "pdf"]
 }
 ```
+
+`ignoredFileExtensions` applies only to automatic browser download capture.
+Manual sends, popup sends, and context-menu sends are still allowed.
 
 ## Host -> Extension
 

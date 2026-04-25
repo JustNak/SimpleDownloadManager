@@ -137,6 +137,8 @@ pub struct ExtensionIntegrationSettings {
     pub show_progress_after_handoff: bool,
     pub show_badge_status: bool,
     pub excluded_hosts: Vec<String>,
+    #[serde(default)]
+    pub ignored_file_extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +241,7 @@ impl Default for ExtensionIntegrationSettings {
             show_progress_after_handoff: true,
             show_badge_status: true,
             excluded_hosts: Vec::new(),
+            ignored_file_extensions: Vec::new(),
         }
     }
 }
@@ -409,6 +412,10 @@ mod tests {
         assert!(settings.extension_integration.show_progress_after_handoff);
         assert!(settings.extension_integration.show_badge_status);
         assert!(settings.extension_integration.excluded_hosts.is_empty());
+        assert!(settings
+            .extension_integration
+            .ignored_file_extensions
+            .is_empty());
     }
 
     #[test]
@@ -437,5 +444,10 @@ mod tests {
         assert!(state.settings.extension_integration.show_progress_after_handoff);
         assert!(state.settings.extension_integration.show_badge_status);
         assert!(state.settings.extension_integration.excluded_hosts.is_empty());
+        assert!(state
+            .settings
+            .extension_integration
+            .ignored_file_extensions
+            .is_empty());
     }
 }

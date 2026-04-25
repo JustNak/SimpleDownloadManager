@@ -4,11 +4,13 @@ import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
 const enabledToggle = document.querySelector<HTMLInputElement>('#enabled-toggle');
-const silentToggle = document.querySelector<HTMLInputElement>('#silent-toggle');
 const handoffMode = document.querySelector<HTMLSelectElement>('#handoff-mode');
 const contextMenuToggle = document.querySelector<HTMLInputElement>('#context-menu-toggle');
 const progressToggle = document.querySelector<HTMLInputElement>('#progress-toggle');
 const badgeToggle = document.querySelector<HTMLInputElement>('#badge-toggle');
+const ignoredExtensionInput = document.querySelector<HTMLInputElement>('#ignored-extension-input');
+const addExtensionButton = document.querySelector<HTMLButtonElement>('#add-extension-button');
+const ignoredExtensions = document.querySelector<HTMLDivElement>('#ignored-extensions');
 const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-host-input');
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
@@ -34,17 +36,17 @@ function renderState(state: PopupStateResponse) {
   if (!settings) return;
 
   if (enabledToggle) enabledToggle.checked = settings.enabled;
-  if (silentToggle) silentToggle.checked = settings.downloadHandoffMode === 'auto';
   if (handoffMode) handoffMode.value = settings.downloadHandoffMode;
   if (contextMenuToggle) contextMenuToggle.checked = settings.contextMenuEnabled;
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
-  renderExcludedHosts(settings.excludedHosts);
-  setControlsDisabled(isSaving);
+  renderIgnoredExtensions(settings.ignoredFileExtensions ?? []);
+  renderExcludedHosts(settings.excludedHosts ?? []);
+  setControlsDisabled(isSaving, settings.enabled);
 
   if (saveState && !isSaving) {
     saveState.textContent = state.lastError
-      ? `Cached locally. ${state.lastError.message}`
+      ? `Saved locally. ${state.lastError.message}`
       : 'Settings are up to date.';
   }
 }
@@ -82,50 +84,86 @@ function renderSummary(state: PopupStateResponse) {
   if (attentionCount) attentionCount.textContent = String(summary?.attention ?? summary?.failed ?? 0);
 }
 
+function renderIgnoredExtensions(extensions: string[]) {
+  if (!ignoredExtensions) return;
+  ignoredExtensions.textContent = '';
+
+  if (extensions.length === 0) {
+    ignoredExtensions.append(emptyState('No ignored file extensions.'));
+    return;
+  }
+
+  for (const extension of extensions) {
+    ignoredExtensions.append(
+      removableChip(`.${extension}`, `Remove .${extension}`, () => {
+        const nextExtensions = currentState?.extensionSettings?.ignoredFileExtensions.filter(
+          (candidate) => candidate !== extension,
+        ) ?? [];
+        void updateSettings({ ignoredFileExtensions: nextExtensions });
+      }),
+    );
+  }
+}
+
 function renderExcludedHosts(hosts: string[]) {
   if (!excludedHosts) return;
   excludedHosts.textContent = '';
 
   if (hosts.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = 'No excluded sites.';
-    excludedHosts.append(empty);
+    excludedHosts.append(emptyState('No excluded sites.'));
     return;
   }
 
   for (const host of hosts) {
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.textContent = host;
-
-    const removeButton = document.createElement('button');
-    removeButton.type = 'button';
-    removeButton.textContent = 'x';
-    removeButton.title = `Remove ${host}`;
-    removeButton.addEventListener('click', () => {
-      const nextHosts = currentState?.extensionSettings?.excludedHosts.filter((candidate) => candidate !== host) ?? [];
-      void updateSettings({ excludedHosts: nextHosts });
-    });
-
-    chip.append(removeButton);
-    excludedHosts.append(chip);
+    excludedHosts.append(
+      removableChip(host, `Remove ${host}`, () => {
+        const nextHosts = currentState?.extensionSettings?.excludedHosts.filter((candidate) => candidate !== host) ?? [];
+        void updateSettings({ excludedHosts: nextHosts });
+      }),
+    );
   }
 }
 
-function setControlsDisabled(disabled: boolean) {
-  for (const control of [
-    enabledToggle,
-    silentToggle,
+function removableChip(label: string, removeLabel: string, onRemove: () => void): HTMLSpanElement {
+  const chip = document.createElement('span');
+  chip.className = 'chip';
+  chip.textContent = label;
+
+  const removeButton = document.createElement('button');
+  removeButton.type = 'button';
+  removeButton.textContent = 'x';
+  removeButton.title = removeLabel;
+  removeButton.setAttribute('aria-label', removeLabel);
+  removeButton.addEventListener('click', onRemove);
+
+  chip.append(removeButton);
+  return chip;
+}
+
+function emptyState(text: string): HTMLDivElement {
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.textContent = text;
+  return empty;
+}
+
+function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
+  if (enabledToggle) enabledToggle.disabled = saving;
+  if (refreshButton) refreshButton.disabled = saving;
+
+  const extensionControls = [
     handoffMode,
     contextMenuToggle,
     progressToggle,
     badgeToggle,
+    ignoredExtensionInput,
+    addExtensionButton,
     excludedHostInput,
     addHostButton,
-    refreshButton,
-  ]) {
-    if (control) control.disabled = disabled;
+  ];
+
+  for (const control of extensionControls) {
+    if (control) control.disabled = saving || !extensionEnabled;
   }
 }
 
@@ -140,7 +178,7 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
   if (!settings) return;
 
   isSaving = true;
-  setControlsDisabled(true);
+  setControlsDisabled(true, settings.enabled);
   if (saveState) saveState.textContent = 'Saving settings...';
 
   const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
@@ -150,11 +188,6 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
 
 enabledToggle?.addEventListener('change', () => {
   void updateSettings({ enabled: enabledToggle.checked });
-});
-
-silentToggle?.addEventListener('change', () => {
-  const mode: DownloadHandoffMode = silentToggle.checked ? 'auto' : 'ask';
-  void updateSettings({ downloadHandoffMode: mode });
 });
 
 handoffMode?.addEventListener('change', () => {
@@ -173,6 +206,17 @@ badgeToggle?.addEventListener('change', () => {
   void updateSettings({ showBadgeStatus: badgeToggle.checked });
 });
 
+addExtensionButton?.addEventListener('click', () => {
+  addIgnoredExtensions();
+});
+
+ignoredExtensionInput?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addIgnoredExtensions();
+  }
+});
+
 addHostButton?.addEventListener('click', () => {
   addExcludedHost();
 });
@@ -185,10 +229,24 @@ excludedHostInput?.addEventListener('keydown', (event) => {
 });
 
 refreshButton?.addEventListener('click', async () => {
-  await sendMessage({ type: 'popup_ping' });
-  const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
-  renderState(state);
+  await refreshState();
 });
+
+function addIgnoredExtensions() {
+  const extensionsToAdd = parseFileExtensions(ignoredExtensionInput?.value ?? '');
+  if (extensionsToAdd.length === 0) return;
+
+  const extensions = currentState?.extensionSettings?.ignoredFileExtensions ?? [];
+  const nextExtensions = [...extensions];
+  for (const extension of extensionsToAdd) {
+    if (!nextExtensions.includes(extension)) {
+      nextExtensions.push(extension);
+    }
+  }
+
+  if (ignoredExtensionInput) ignoredExtensionInput.value = '';
+  void updateSettings({ ignoredFileExtensions: nextExtensions });
+}
 
 function addExcludedHost() {
   const host = normalizeHost(excludedHostInput?.value ?? '');
@@ -204,6 +262,26 @@ function addExcludedHost() {
   void updateSettings({ excludedHosts: [...hosts, host] });
 }
 
+function parseFileExtensions(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\s]+/)
+        .map(normalizeFileExtension)
+        .filter(Boolean),
+    ),
+  );
+}
+
+function normalizeFileExtension(value: string): string {
+  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
+  if (!extension || extension.includes('/') || extension.includes('\\') || /^\.+$/.test(extension)) {
+    return '';
+  }
+
+  return extension;
+}
+
 function normalizeHost(value: string): string {
   return value
     .trim()
@@ -212,10 +290,14 @@ function normalizeHost(value: string): string {
     .toLowerCase();
 }
 
-async function init() {
+async function refreshState() {
   await sendMessage({ type: 'popup_ping' }).catch(() => undefined);
   const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
   renderState(state);
+}
+
+async function init() {
+  await refreshState();
 }
 
 void init();

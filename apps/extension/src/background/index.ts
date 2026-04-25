@@ -69,7 +69,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
   }
 
   let settings = await getExtensionSettings();
-  if (!shouldHandleBrowserDownload(item.url, settings)) {
+  if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
     return;
   }
 
@@ -83,7 +83,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
 
   await setLastResult('connected', pingResponse);
   settings = getSyncedSettings(pingResponse, settings);
-  if (!shouldHandleBrowserDownload(item.url, settings)) {
+  if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
     return;
   }
 
@@ -232,10 +232,15 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
 
 void refreshConnectionState();
 
-function shouldHandleBrowserDownload(url: string, settings: ExtensionIntegrationSettings): boolean {
+function shouldHandleBrowserDownload(
+  url: string,
+  settings: ExtensionIntegrationSettings,
+  filename?: string,
+): boolean {
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
-    && !isHostExcluded(url, settings.excludedHosts);
+    && !isHostExcluded(url, settings.excludedHosts)
+    && !isFileExtensionIgnored(url, filename, settings.ignoredFileExtensions);
 }
 
 function isHostExcluded(url: string, excludedHosts: string[]): boolean {
@@ -250,6 +255,33 @@ function isHttpUrl(url: string | undefined): url is string {
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {
     return false;
+  }
+}
+
+function isFileExtensionIgnored(url: string, filename: string | undefined, ignoredExtensions: string[] = []): boolean {
+  const extensions = ignoredExtensions.map(normalizeFileExtension).filter(Boolean);
+  if (extensions.length === 0) {
+    return false;
+  }
+
+  const candidates = [basenameOnly(filename), basenameFromUrl(url)]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map((candidate) => candidate.toLowerCase());
+
+  return candidates.some((candidate) => extensions.some((extension) => candidate.endsWith(`.${extension}`)));
+}
+
+function normalizeFileExtension(value: string): string {
+  return value.trim().replace(/^\.+/, '').toLowerCase();
+}
+
+function basenameFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const pathname = decodeURIComponent(parsed.pathname);
+    return basenameOnly(pathname);
+  } catch {
+    return undefined;
   }
 }
 

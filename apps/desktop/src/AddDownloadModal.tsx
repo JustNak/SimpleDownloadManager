@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { addJob } from './backend';
 import type { AddJobResult } from './backend';
 import { X } from 'lucide-react';
+import { getErrorMessage } from './errors';
 
 interface AddDownloadModalProps {
   onClose: () => void;
@@ -29,7 +30,7 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
       onAdded(result);
       onClose();
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Failed to add the download.');
+      setErrorMessage(getErrorMessage(err, 'Failed to add the download.'));
     } finally {
       setIsSubmitting(false);
     }

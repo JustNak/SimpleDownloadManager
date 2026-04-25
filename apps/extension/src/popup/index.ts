@@ -122,6 +122,7 @@ async function init() {
         showProgressAfterHandoff: true,
         showBadgeStatus: true,
         excludedHosts: [],
+        ignoredFileExtensions: [],
       },
     });
   }

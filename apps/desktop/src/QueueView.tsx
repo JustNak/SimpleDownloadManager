@@ -329,7 +329,7 @@ function RowActions({
           onClick={(event) => event.stopPropagation()}
         >
           {job.targetPath ? (
-            <MenuItem icon={<FolderOpen size={16} />} label="Open folder" onClick={() => runMenuAction(onReveal)} />
+            <MenuItem icon={<FolderOpen size={16} />} label="Show in folder" onClick={() => runMenuAction(onReveal)} />
           ) : null}
           {canRetry ? (
             <MenuItem icon={<RotateCcw size={16} />} label="Restart" onClick={() => runMenuAction(onRestart)} />

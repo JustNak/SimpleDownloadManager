@@ -948,13 +948,16 @@ impl SharedState {
         } else {
             Err(BackendError {
                 code: "INTERNAL_ERROR",
-                message: "The downloaded file is not available on disk yet.".into(),
+                message: format!(
+                    "The downloaded file is not available on disk: {}",
+                    path.display()
+                ),
             })
         }
     }
 
     pub async fn resolve_revealable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
-        let (target_path, temp_path) = {
+        let (job_state, target_path, temp_path) = {
             let state = self.inner.read().await;
             let job = state
                 .jobs
@@ -966,6 +969,7 @@ impl SharedState {
                 })?;
 
             (
+                job.state,
                 PathBuf::from(&job.target_path),
                 PathBuf::from(&job.temp_path),
             )
@@ -979,6 +983,16 @@ impl SharedState {
             return Ok(temp_path);
         }
 
+        if job_state == JobState::Completed {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: format!(
+                    "Downloaded file is missing from disk: {}",
+                    target_path.display()
+                ),
+            });
+        }
+
         if let Some(parent) = target_path.parent() {
             if parent.exists() {
                 return Ok(parent.to_path_buf());
@@ -987,7 +1001,10 @@ impl SharedState {
 
         Err(BackendError {
             code: "INTERNAL_ERROR",
-            message: "No local path is available for this job yet.".into(),
+            message: format!(
+                "No local path is available for this job yet. Expected path: {}",
+                target_path.display()
+            ),
         })
     }
 
@@ -1154,6 +1171,35 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
     }
 
     settings.excluded_hosts = normalized_hosts;
+
+    let mut normalized_extensions = Vec::new();
+    let mut seen_extensions = HashSet::new();
+
+    for extension in &settings.ignored_file_extensions {
+        for candidate in extension.split(|character: char| character == ',' || character.is_whitespace()) {
+            let candidate = normalize_file_extension(candidate);
+            if candidate.is_empty() || !seen_extensions.insert(candidate.clone()) {
+                continue;
+            }
+
+            normalized_extensions.push(candidate);
+        }
+    }
+
+    settings.ignored_file_extensions = normalized_extensions;
+}
+
+fn normalize_file_extension(value: &str) -> String {
+    let extension = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    if extension.is_empty()
+        || extension.contains('/')
+        || extension.contains('\\')
+        || extension.chars().all(|character| character == '.')
+    {
+        return String::new();
+    }
+
+    extension
 }
 
 fn default_download_directory(base_dir: &Path) -> String {
@@ -1569,6 +1615,75 @@ mod tests {
         assert_eq!(job.progress, 0.0);
     }
 
+    #[tokio::test]
+    async fn reveal_completed_job_errors_when_file_is_missing_even_if_parent_exists() {
+        let download_dir = test_runtime_dir("reveal-missing-completed");
+        let target_path = download_dir.join("missing.zip");
+        let mut job = download_job("job_20", JobState::Completed, ResumeSupport::Supported, 100);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let error = state.resolve_revealable_path("job_20").await.unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error.message.contains("Downloaded file is missing from disk"));
+        assert!(error.message.contains(&target_path.display().to_string()));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn reveal_completed_job_returns_existing_target_file() {
+        let download_dir = test_runtime_dir("reveal-completed-existing");
+        let target_path = download_dir.join("file.zip");
+        std::fs::write(&target_path, b"downloaded").unwrap();
+        let mut job = download_job("job_21", JobState::Completed, ResumeSupport::Supported, 100);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let resolved = state.resolve_revealable_path("job_21").await.unwrap();
+
+        assert_eq!(resolved, target_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn reveal_interrupted_job_returns_existing_partial_file() {
+        let download_dir = test_runtime_dir("reveal-partial-existing");
+        let target_path = download_dir.join("file.zip");
+        let temp_path = download_dir.join("file.zip.part");
+        std::fs::write(&temp_path, b"partial").unwrap();
+        let mut job = download_job("job_22", JobState::Failed, ResumeSupport::Supported, 50);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = temp_path.display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let resolved = state.resolve_revealable_path("job_22").await.unwrap();
+
+        assert_eq!(resolved, temp_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn reveal_unfinished_job_without_artifact_returns_parent_directory() {
+        let download_dir = test_runtime_dir("reveal-parent-for-unfinished");
+        let target_path = download_dir.join("future.zip");
+        let mut job = download_job("job_23", JobState::Queued, ResumeSupport::Unknown, 0);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let resolved = state.resolve_revealable_path("job_23").await.unwrap();
+
+        assert_eq!(resolved, download_dir);
+
+        let _ = std::fs::remove_dir_all(resolved);
+    }
+
     #[test]
     fn pause_all_jobs_only_pauses_schedulable_jobs() {
         let mut state = runtime_state_with_jobs(vec![
@@ -1625,6 +1740,28 @@ mod tests {
         assert_eq!(
             normalized,
             "https://example.com/file.zip?from=clipboard"
+        );
+    }
+
+    #[test]
+    fn normalize_extension_settings_cleans_ignored_file_extensions() {
+        let mut settings = ExtensionIntegrationSettings {
+            ignored_file_extensions: vec![
+                " .ZIP ".into(),
+                "zip".into(),
+                "tar.gz".into(),
+                ".exe".into(),
+                "invalid/path".into(),
+                String::new(),
+            ],
+            ..ExtensionIntegrationSettings::default()
+        };
+
+        normalize_extension_settings(&mut settings);
+
+        assert_eq!(
+            settings.ignored_file_extensions,
+            vec!["zip", "tar.gz", "exe"]
         );
     }
 
@@ -1697,6 +1834,13 @@ mod tests {
             next_job_number: 99,
             active_workers: HashSet::new(),
             last_host_contact: None,
+        }
+    }
+
+    fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> SharedState {
+        SharedState {
+            inner: Arc::new(RwLock::new(runtime_state_with_jobs(jobs))),
+            storage_path: Arc::new(storage_path),
         }
     }
 

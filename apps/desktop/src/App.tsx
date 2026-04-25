@@ -6,6 +6,7 @@ import { SettingsPage } from './SettingsPage';
 import { ToastArea } from './ToastArea';
 import { AddDownloadModal } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
+import { getErrorMessage } from './errors';
 import {
   browseDirectory,
   cancelJob,
@@ -69,6 +70,7 @@ export default function App() {
       showProgressAfterHandoff: true,
       showBadgeStatus: true,
       excludedHosts: [],
+      ignoredFileExtensions: [],
     },
   });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -105,7 +107,7 @@ export default function App() {
         addToast({
           type: 'error',
           title: 'Backend Error',
-          message: error instanceof Error ? error.message : 'Failed to load desktop state.',
+          message: getErrorMessage(error, 'Failed to load desktop state.'),
           autoClose: false,
         });
       }
@@ -691,10 +693,6 @@ function formatBytes(bytes: number, decimals = 1) {
 
 function formatConnectionState(state: ConnectionState) {
   return state.replaceAll('_', ' ').replace(/\b\w/g, (value) => value.toUpperCase());
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'Unexpected error.';
 }
 
 function jobNeedsAttention(job: DownloadJob): boolean {

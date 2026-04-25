@@ -11,6 +11,8 @@ const distRoot = path.join(appRoot, 'dist');
 const releaseConfig = JSON.parse(
   readFileSync(path.resolve(appRoot, '..', '..', 'config', 'release.json'), 'utf8'),
 );
+const browserExtensionVersion = '0.2.0';
+const displayVersion = '0.2.0-a';
 
 const targets = [
   {
@@ -18,7 +20,8 @@ const targets = [
     manifest: {
       manifest_version: 3,
       name: 'Simple Download Manager',
-      version: '0.1.0',
+      version: browserExtensionVersion,
+      version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
       permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
@@ -41,7 +44,8 @@ const targets = [
     manifest: {
       manifest_version: 2,
       name: 'Simple Download Manager',
-      version: '0.1.0',
+      version: browserExtensionVersion,
+      version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
       permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
