@@ -82,9 +82,15 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
 
   isUpdating = true;
   if (currentState) renderState(currentState);
-  const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
-  isUpdating = false;
-  renderState(state);
+  try {
+    const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
+    renderState(state);
+  } catch (error) {
+    renderTransientError(error, 'Could not update extension settings.');
+  } finally {
+    isUpdating = false;
+    if (currentState) renderState(currentState);
+  }
 }
 
 silentDownloadToggle?.addEventListener('change', () => {
@@ -101,10 +107,50 @@ extensionToggleButton?.addEventListener('click', () => {
 advancedButton?.addEventListener('click', async () => {
   isUpdating = true;
   if (currentState) renderState(currentState);
-  const state = await sendMessage<PopupStateResponse>({ type: 'popup_open_options' });
-  isUpdating = false;
-  renderState(state);
+  try {
+    const state = await sendMessage<PopupStateResponse>({ type: 'popup_open_options' });
+    renderState(state);
+  } catch (error) {
+    renderTransientError(error, 'Could not open advanced settings.');
+  } finally {
+    isUpdating = false;
+    if (currentState) renderState(currentState);
+  }
 });
+
+function renderTransientError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  if (!currentState) {
+    currentState = fallbackErrorState(message);
+    return;
+  }
+
+  currentState = {
+    ...currentState,
+    connection: 'error',
+    lastError: {
+      code: 'HOST_NOT_AVAILABLE',
+      message,
+    },
+  };
+}
+
+function fallbackErrorState(message: string): PopupStateResponse {
+  return {
+    connection: 'error',
+    isSubmitting: false,
+    lastError: { code: 'HOST_NOT_AVAILABLE', message },
+    extensionSettings: {
+      enabled: true,
+      downloadHandoffMode: 'ask',
+      contextMenuEnabled: true,
+      showProgressAfterHandoff: true,
+      showBadgeStatus: true,
+      excludedHosts: [],
+      ignoredFileExtensions: [],
+    },
+  };
+}
 
 async function init() {
   try {

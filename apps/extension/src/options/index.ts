@@ -181,9 +181,15 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
   setControlsDisabled(true, settings.enabled);
   if (saveState) saveState.textContent = 'Saving settings...';
 
-  const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
-  isSaving = false;
-  renderState(state);
+  try {
+    const state = await sendMessage<PopupStateResponse>({ type: 'extension_settings_update', settings });
+    renderState(state);
+  } catch (error) {
+    renderTransientError(error, 'Could not update extension settings.');
+  } finally {
+    isSaving = false;
+    if (currentState) renderState(currentState);
+  }
 }
 
 enabledToggle?.addEventListener('change', () => {
@@ -228,8 +234,8 @@ excludedHostInput?.addEventListener('keydown', (event) => {
   }
 });
 
-refreshButton?.addEventListener('click', async () => {
-  await refreshState();
+refreshButton?.addEventListener('click', () => {
+  void refreshState();
 });
 
 function addIgnoredExtensions() {
@@ -291,9 +297,21 @@ function normalizeHost(value: string): string {
 }
 
 async function refreshState() {
-  await sendMessage({ type: 'popup_ping' }).catch(() => undefined);
-  const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
-  renderState(state);
+  isSaving = true;
+  const extensionEnabled = currentState?.extensionSettings?.enabled ?? true;
+  setControlsDisabled(true, extensionEnabled);
+  if (saveState) saveState.textContent = 'Refreshing status...';
+
+  try {
+    await sendMessage({ type: 'popup_ping' }).catch(() => undefined);
+    const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
+    renderState(state);
+  } catch (error) {
+    renderTransientError(error, 'Could not refresh extension status.');
+  } finally {
+    isSaving = false;
+    if (currentState) renderState(currentState);
+  }
 }
 
 async function init() {
@@ -301,3 +319,37 @@ async function init() {
 }
 
 void init();
+
+function renderTransientError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : fallback;
+  if (saveState) saveState.textContent = message;
+
+  if (!currentState) {
+    currentState = fallbackErrorState(message);
+    updateConnectionStatus('error');
+    return;
+  }
+
+  currentState = {
+    ...currentState,
+    connection: 'error',
+    lastError: { code: 'HOST_NOT_AVAILABLE', message },
+  };
+}
+
+function fallbackErrorState(message: string): PopupStateResponse {
+  return {
+    connection: 'error',
+    isSubmitting: false,
+    lastError: { code: 'HOST_NOT_AVAILABLE', message },
+    extensionSettings: {
+      enabled: true,
+      downloadHandoffMode: 'ask',
+      contextMenuEnabled: true,
+      showProgressAfterHandoff: true,
+      showBadgeStatus: true,
+      excludedHosts: [],
+      ignoredFileExtensions: [],
+    },
+  };
+}
