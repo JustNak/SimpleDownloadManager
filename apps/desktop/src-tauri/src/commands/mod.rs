@@ -1,7 +1,8 @@
 use crate::download::schedule_downloads;
 use crate::ipc::gather_host_registration_diagnostics;
+use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
-use crate::state::{EnqueueResult, EnqueueStatus, SharedState};
+use crate::state::{validate_settings, EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{
     DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, HostRegistrationStatus,
     Settings,
@@ -370,8 +371,10 @@ pub async fn clear_completed_jobs(
 pub async fn save_settings(
     app: AppHandle,
     state: State<'_, SharedState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> Result<Settings, String> {
+    validate_settings(&mut settings)?;
+    sync_autostart_setting(settings.start_on_startup)?;
     let snapshot = state.save_settings(settings).await?;
     let saved_settings = snapshot.settings.clone();
     emit_snapshot(&app, &snapshot);

@@ -35,6 +35,8 @@ const defaultSettings: Settings = {
   notificationsEnabled: true,
   theme: 'system',
   accentColor: '#3b82f6',
+  startOnStartup: false,
+  startupLaunchMode: 'open',
   extensionIntegration: {
     enabled: true,
     downloadHandoffMode: 'ask',

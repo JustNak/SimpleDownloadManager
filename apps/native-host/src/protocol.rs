@@ -378,7 +378,7 @@ mod tests {
         json!({
             "entryPoint": "context_menu",
             "browser": "firefox",
-            "extensionVersion": "0.2.1-a"
+            "extensionVersion": "0.2.2-a"
         })
     }
 
@@ -424,7 +424,7 @@ mod tests {
                 "source": {
                     "entryPoint": "unknown_entry",
                     "browser": "firefox",
-                    "extensionVersion": "0.2.1-a"
+                    "extensionVersion": "0.2.2-a"
                 }
             }),
         );

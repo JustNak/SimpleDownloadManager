@@ -70,6 +70,8 @@ export default function App() {
     notificationsEnabled: true,
     theme: 'system',
     accentColor: DEFAULT_ACCENT_COLOR,
+    startOnStartup: false,
+    startupLaunchMode: 'open',
     extensionIntegration: {
       enabled: true,
       downloadHandoffMode: 'ask',

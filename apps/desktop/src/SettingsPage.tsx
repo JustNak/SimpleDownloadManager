@@ -264,6 +264,28 @@ export function SettingsPage({
             </label>
           </FieldRow>
 
+          <FieldRow label="Start with Windows" description="Auto-launch app." tooltip="Register this application to launch when you sign in to Windows.">
+            <ToggleSwitch
+              id="startOnStartup"
+              checked={formData.startOnStartup}
+              onChange={(checked) => setFormData((prev) => ({ ...prev, startOnStartup: checked }))}
+            />
+          </FieldRow>
+
+          <FieldRow label="Startup Launch" description="Window behavior." tooltip="Choose whether Windows startup opens the main window or keeps the app in the tray.">
+            <select
+              id="startupLaunchMode"
+              name="startupLaunchMode"
+              value={formData.startupLaunchMode}
+              onChange={handleChange}
+              disabled={!formData.startOnStartup}
+              className="h-10 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="open">Open window</option>
+              <option value="tray">Tray only</option>
+            </select>
+          </FieldRow>
+
           <FieldRow label="App Theme" description="Shell theme." tooltip="Theme switching stays in Settings and applies to the entire shell.">
             <select
               id="theme"

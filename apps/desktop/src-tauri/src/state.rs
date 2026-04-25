@@ -2,7 +2,8 @@ use crate::storage::{
     default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
     BulkArchiveInfo, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot, DownloadJob,
     DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory,
-    HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary, ResumeSupport, Settings,
+    HostRegistrationDiagnostics, JobState, MainWindowState, PersistedState, QueueSummary,
+    ResumeSupport, Settings,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
@@ -84,6 +85,7 @@ struct RuntimeState {
     connection_state: ConnectionState,
     jobs: Vec<DownloadJob>,
     settings: Settings,
+    main_window: Option<MainWindowState>,
     next_job_number: u64,
     active_workers: HashSet<String>,
     last_host_contact: Option<Instant>,
@@ -146,6 +148,7 @@ impl SharedState {
                 connection_state: ConnectionState::Checking,
                 jobs,
                 settings: persisted.settings,
+                main_window: persisted.main_window,
                 next_job_number,
                 active_workers: HashSet::new(),
                 last_host_contact: None,
@@ -249,15 +252,7 @@ impl SharedState {
     }
 
     pub async fn save_settings(&self, mut settings: Settings) -> Result<DesktopSnapshot, String> {
-        if settings.download_directory.trim().is_empty() {
-            return Err("Download directory cannot be empty.".into());
-        }
-
-        normalize_accent_color(&mut settings);
-        normalize_extension_settings(&mut settings.extension_integration);
-
-        std::fs::create_dir_all(&settings.download_directory)
-            .map_err(|error| format!("Could not create download directory: {error}"))?;
+        validate_settings(&mut settings)?;
 
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -267,6 +262,46 @@ impl SharedState {
 
         persist_state(&self.storage_path, &persisted)?;
         Ok(snapshot)
+    }
+
+    pub async fn settings(&self) -> Settings {
+        let state = self.inner.read().await;
+        state.settings.clone()
+    }
+
+    pub fn settings_sync(&self) -> Settings {
+        let state = self.inner.blocking_read();
+        state.settings.clone()
+    }
+
+    pub async fn main_window_state(&self) -> Option<MainWindowState> {
+        let state = self.inner.read().await;
+        state.main_window.clone()
+    }
+
+    pub fn main_window_state_sync(&self) -> Option<MainWindowState> {
+        let state = self.inner.blocking_read();
+        state.main_window.clone()
+    }
+
+    pub async fn save_main_window_state(&self, main_window: MainWindowState) -> Result<(), String> {
+        let persisted = {
+            let mut state = self.inner.write().await;
+            state.main_window = Some(main_window);
+            state.persisted()
+        };
+
+        persist_state(&self.storage_path, &persisted)
+    }
+
+    pub fn save_main_window_state_sync(&self, main_window: MainWindowState) -> Result<(), String> {
+        let persisted = {
+            let mut state = self.inner.blocking_write();
+            state.main_window = Some(main_window);
+            state.persisted()
+        };
+
+        persist_state(&self.storage_path, &persisted)
     }
 
     pub async fn save_extension_integration_settings(
@@ -1284,6 +1319,7 @@ impl RuntimeState {
         PersistedState {
             jobs: self.jobs.clone(),
             settings: self.settings.clone(),
+            main_window: self.main_window.clone(),
         }
     }
 
@@ -1809,6 +1845,20 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
+pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
+    if settings.download_directory.trim().is_empty() {
+        return Err("Download directory cannot be empty.".into());
+    }
+
+    normalize_accent_color(settings);
+    normalize_extension_settings(&mut settings.extension_integration);
+
+    std::fs::create_dir_all(&settings.download_directory)
+        .map_err(|error| format!("Could not create download directory: {error}"))?;
+
+    Ok(())
+}
+
 fn internal_error(error: String) -> BackendError {
     BackendError {
         code: "INTERNAL_ERROR",
@@ -1842,6 +1892,7 @@ mod tests {
                 download_job("job_5", JobState::Queued, ResumeSupport::Unknown, 0),
             ],
             settings: Settings::default(),
+            main_window: None,
             next_job_number: 6,
             active_workers: HashSet::new(),
             last_host_contact: None,
@@ -1863,6 +1914,7 @@ mod tests {
             connection_state: ConnectionState::Connected,
             jobs: vec![existing_job],
             settings: Settings::default(),
+            main_window: None,
             next_job_number: 10,
             active_workers: HashSet::new(),
             last_host_contact: None,
@@ -2323,6 +2375,7 @@ mod tests {
             connection_state: ConnectionState::Connected,
             jobs,
             settings: Settings::default(),
+            main_window: None,
             next_job_number: 99,
             active_workers: HashSet::new(),
             last_host_contact: None,

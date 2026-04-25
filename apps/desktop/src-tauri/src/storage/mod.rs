@@ -133,6 +133,14 @@ pub enum DownloadHandoffMode {
     Auto,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupLaunchMode {
+    #[default]
+    Open,
+    Tray,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionIntegrationSettings {
@@ -161,6 +169,10 @@ pub struct Settings {
     pub theme: Theme,
     #[serde(default = "default_accent_color")]
     pub accent_color: String,
+    #[serde(default)]
+    pub start_on_startup: bool,
+    #[serde(default)]
+    pub startup_launch_mode: StartupLaunchMode,
     #[serde(default)]
     pub extension_integration: ExtensionIntegrationSettings,
 }
@@ -220,11 +232,23 @@ pub struct DesktopSnapshot {
     pub settings: Settings,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainWindowState {
+    pub width: u32,
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+    pub maximized: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedState {
     pub jobs: Vec<DownloadJob>,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_window: Option<MainWindowState>,
 }
 
 impl Default for Settings {
@@ -237,6 +261,8 @@ impl Default for Settings {
             notifications_enabled: true,
             theme: Theme::System,
             accent_color: default_accent_color(),
+            start_on_startup: false,
+            startup_launch_mode: StartupLaunchMode::Open,
             extension_integration: ExtensionIntegrationSettings::default(),
         }
     }
@@ -431,6 +457,20 @@ mod tests {
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.speed_limit_kib_per_second, 0);
         assert_eq!(settings.accent_color, "#3b82f6");
+        assert!(!settings.start_on_startup);
+        assert_eq!(settings.startup_launch_mode, StartupLaunchMode::Open);
+    }
+
+    #[test]
+    fn settings_serialize_startup_preferences_as_camel_case() {
+        let mut settings = Settings::default();
+        settings.start_on_startup = true;
+        settings.startup_launch_mode = StartupLaunchMode::Tray;
+
+        let value = serde_json::to_value(settings).expect("settings should serialize");
+
+        assert_eq!(value["startOnStartup"], true);
+        assert_eq!(value["startupLaunchMode"], "tray");
     }
 
     #[test]

@@ -27,6 +27,8 @@ const snapshot: DesktopSnapshot = {
     notificationsEnabled: true,
     theme: 'system',
     accentColor: '#3b82f6',
+    startOnStartup: true,
+    startupLaunchMode: 'tray',
     extensionIntegration: {
       enabled: true,
       downloadHandoffMode: 'ask',

@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod download;
 pub mod ipc;
+pub mod lifecycle;
 pub mod prompts;
 pub mod state;
 pub mod storage;

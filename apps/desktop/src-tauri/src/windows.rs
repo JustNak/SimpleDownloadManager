@@ -77,6 +77,8 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
 
 pub fn focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_skip_taskbar(false);
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }

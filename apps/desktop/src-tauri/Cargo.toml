@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-desktop-backend"
-version = "0.2.1-a"
+version = "0.2.2-a"
 edition = "2021"
 build = "build.rs"
 
@@ -10,7 +10,7 @@ reqwest = { version = "0.12.15", features = ["stream", "rustls-tls"] }
 rfd = "0.15.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tauri = { version = "2.4.1", features = [] }
+tauri = { version = "2.4.1", features = ["tray-icon"] }
 tokio = { version = "1.43.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2.5.4"
 dirs = "6.0.0"

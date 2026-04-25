@@ -28,6 +28,7 @@ export type FailureCategory =
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
+export type StartupLaunchMode = 'open' | 'tray';
 
 export interface DownloadSource {
   entryPoint: string;
@@ -92,6 +93,8 @@ export interface Settings {
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;
+  startOnStartup: boolean;
+  startupLaunchMode: StartupLaunchMode;
   extensionIntegration: ExtensionIntegrationSettings;
 }
 

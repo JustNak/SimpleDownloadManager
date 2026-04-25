@@ -1,11 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use simple_download_manager_desktop_backend::{commands, download, ipc, prompts, state};
+use simple_download_manager_desktop_backend::{commands, download, ipc, lifecycle, prompts, state};
 use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .on_window_event(lifecycle::handle_window_event)
         .setup(|app| {
             let shared_state = state::SharedState::new()?;
             let prompt_registry = prompts::PromptRegistry::default();
@@ -16,8 +17,10 @@ fn main() {
                 shared_state.clone(),
                 prompt_registry.clone(),
             );
+            let state_for_lifecycle = shared_state.clone();
             app.manage(shared_state);
             app.manage(prompt_registry);
+            lifecycle::initialize_app_lifecycle(app, &state_for_lifecycle)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
