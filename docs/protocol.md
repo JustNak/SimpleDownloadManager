@@ -111,6 +111,11 @@ Success:
 If the URL is already in the desktop queue, the host still returns `accepted` with
 `status: "duplicate_existing_job"` and the existing `jobId`.
 
+For automatic browser download capture, `status: "canceled"` means the desktop
+prompt was canceled and the extension should return control to the browser's
+original download flow. `status: "queued"` and `status: "duplicate_existing_job"`
+mean the extension should cancel and erase the original browser download item.
+
 Error:
 
 ```json

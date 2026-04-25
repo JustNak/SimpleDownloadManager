@@ -1701,7 +1701,7 @@ fn is_legacy_default_download_directory(download_directory: &str) -> bool {
         .trim_end_matches('/')
         .to_ascii_lowercase();
 
-    normalized == "c:/downloads"
+    normalized == "c:/downloads" || normalized == "c:/users/you/downloads"
 }
 
 fn is_windows_reserved_filename(filename: &str) -> bool {
@@ -2262,6 +2262,11 @@ mod tests {
         assert!(should_reset_download_directory("C:/Downloads", false, true));
         assert!(should_reset_download_directory(
             "C:\\Downloads",
+            false,
+            true
+        ));
+        assert!(should_reset_download_directory(
+            "C:\\Users\\You\\Downloads",
             false,
             true
         ));

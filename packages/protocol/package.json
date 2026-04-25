@@ -1,7 +1,7 @@
 {
   "name": "@myapp/protocol",
   "private": true,
-  "version": "0.2.2-a",
+  "version": "0.2.4-a",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

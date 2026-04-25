@@ -100,11 +100,11 @@ export function Titlebar({ children }: { children?: React.ReactNode }) {
     <div className="titlebar z-50 flex h-11 w-full shrink-0 select-none items-center justify-between border-b border-border bg-background">
       <div
         data-tauri-drag-region
-        className="flex h-full w-[252px] shrink-0 cursor-grab items-center gap-3 border-r border-border pl-5 active:cursor-grabbing"
+        className="flex h-full w-[220px] shrink-0 cursor-grab items-center gap-2.5 border-r border-border px-3 active:cursor-grabbing"
         onPointerDown={handleDragPointerDown}
         onDoubleClick={handleDragDoubleClick}
       >
-        <AppIcon size={24} className="pointer-events-none text-primary" />
+        <AppIcon size={20} className="pointer-events-none text-primary" />
         <span className="pointer-events-none text-sm font-semibold text-foreground">
           Download Manager
         </span>

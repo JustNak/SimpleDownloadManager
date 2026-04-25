@@ -1,27 +1,22 @@
 import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
-import { discardBrowserDownload, shouldDiscardBrowserDownloadAfterHandoff } from './browserDownloads';
+import {
+  createAsyncFilenameInterceptionListener,
+  discardBrowserDownload,
+  discardBrowserDownloadBeforeFilenameRelease,
+  selectFilenameInterceptionApi,
+  shouldDiscardBrowserDownloadAfterHandoff,
+  type BrowserDownloadFilenameInterceptionApi,
+  type BrowserDownloadFilenameInterceptionCandidate,
+  type BrowserDownloadFilenameSuggest,
+  type BrowserDownloadFilenameSuggestion,
+} from './browserDownloads';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const interceptedBrowserDownloadIds = new Set<number>();
-type DownloadFilenameSuggestion = {
-  filename?: string;
-  conflictAction?: 'uniquify' | 'overwrite' | 'prompt';
-};
-type DownloadFilenameSuggest = (suggestion?: DownloadFilenameSuggestion) => void;
-type DownloadsWithOptionalFilenameInterception = typeof browser.downloads & {
-  onDeterminingFilename?: {
-    addListener(listener: (item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) => void): void;
-  };
-};
-type DownloadsWithFilenameInterception = typeof browser.downloads & {
-  onDeterminingFilename: {
-    addListener(listener: (item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) => void): void;
-  };
-};
 
 async function ensureContextMenu() {
   const settings = await getExtensionSettings();
@@ -165,7 +160,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
 
 async function handleBrowserDownloadDeterminingFilename(
   item: browser.downloads.DownloadItem,
-  suggest: DownloadFilenameSuggest,
+  suggest: BrowserDownloadFilenameSuggest,
 ) {
   if (interceptedBrowserDownloadIds.has(item.id) || !isHttpUrl(item.url)) {
     suggestBrowserDownload(item, suggest);
@@ -221,7 +216,9 @@ async function handleBrowserDownloadDeterminingFilename(
     }
 
     if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
-      await discardBrowserDownload(browser.downloads, item.id);
+      await discardBrowserDownloadBeforeFilenameRelease(browser.downloads, item.id, () => {
+        suggestBrowserDownload(item, suggest);
+      });
       const state = await setLastResult('connected', response);
       await updateBrowserBadge(state);
       return;
@@ -259,9 +256,9 @@ browser.contextMenus.onClicked.addListener((info: browser.contextMenus.OnClickDa
 
 const filenameInterceptionApi = getFilenameInterceptionApi();
 if (filenameInterceptionApi) {
-  filenameInterceptionApi.onDeterminingFilename.addListener((item, suggest) => {
-    void handleBrowserDownloadDeterminingFilename(item, suggest);
-  });
+  filenameInterceptionApi.onDeterminingFilename.addListener(
+    createAsyncFilenameInterceptionListener(handleBrowserDownloadDeterminingFilename),
+  );
 } else {
   browser.downloads?.onCreated.addListener((item) => {
     void handleBrowserDownloadCreated(item);
@@ -441,15 +438,21 @@ function getBadgeApi() {
   return runtimeBrowser.action ?? runtimeBrowser.browserAction;
 }
 
-function getFilenameInterceptionApi(): DownloadsWithFilenameInterception | null {
-  const downloads = browser.downloads as DownloadsWithOptionalFilenameInterception | undefined;
-  return downloads?.onDeterminingFilename ? downloads as DownloadsWithFilenameInterception : null;
+function getFilenameInterceptionApi(): BrowserDownloadFilenameInterceptionApi<browser.downloads.DownloadItem> | null {
+  const downloads = browser.downloads as BrowserDownloadFilenameInterceptionCandidate<browser.downloads.DownloadItem>;
+  const rawChrome = globalThis as typeof globalThis & {
+    chrome?: {
+      downloads?: BrowserDownloadFilenameInterceptionCandidate<browser.downloads.DownloadItem>;
+    };
+  };
+
+  return selectFilenameInterceptionApi(downloads, rawChrome.chrome?.downloads);
 }
 
-function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) {
+function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: BrowserDownloadFilenameSuggest) {
   const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url);
   if (filename) {
-    suggest({ filename, conflictAction: 'uniquify' });
+    suggest({ filename, conflictAction: 'uniquify' } satisfies BrowserDownloadFilenameSuggestion);
     return;
   }
 

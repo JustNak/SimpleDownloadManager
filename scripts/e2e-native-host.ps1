@@ -111,7 +111,7 @@ try {
       source = @{
         entryPoint = 'popup'
         browser = 'chrome'
-        extensionVersion = '0.2.2-a'
+        extensionVersion = '0.2.3-a'
       }
     }
   }

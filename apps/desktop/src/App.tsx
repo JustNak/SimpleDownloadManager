@@ -542,18 +542,18 @@ export default function App() {
       </Titlebar>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="download-sidebar flex w-[252px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-3 py-3">
-          <nav className="flex flex-col gap-1">
-            <NavItem icon={<Download size={21} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
-            <NavItem icon={<AlertTriangle size={21} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
-            <NavItem icon={<Gauge size={21} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
-            <NavItem icon={<Clock3 size={21} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
-            <NavItem icon={<CheckCircle2 size={21} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
+        <aside className="download-sidebar flex w-[220px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-2 py-2">
+          <nav className="flex flex-col gap-0.5">
+            <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
+            <NavItem icon={<AlertTriangle size={18} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
+            <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
+            <NavItem icon={<Clock3 size={18} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
+            <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
           </nav>
 
-          <div className="space-y-3">
+          <div className="space-y-2">
             <div className="h-px bg-border" />
-            <NavItem icon={<SettingsIcon size={21} />} label="Settings" active={view === 'settings'} onClick={() => requestViewChange('settings')} />
+            <NavItem icon={<SettingsIcon size={18} />} label="Settings" active={view === 'settings'} onClick={() => requestViewChange('settings')} />
           </div>
         </aside>
 
@@ -786,14 +786,14 @@ function NavItem({
   return (
     <button
       onClick={onClick}
-      className={`group relative flex h-12 w-full items-center gap-3 rounded-md px-3.5 text-left text-sm font-medium transition ${
+      className={`group relative flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-medium transition ${
         active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted'
       }`}
     >
       <span className="shrink-0">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {typeof count === 'number' ? (
-        <span className={`rounded-full px-2.5 py-1 text-xs ${active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
+        <span className={`rounded-full px-2 py-0.5 text-[11px] leading-4 ${active ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'}`}>
           {count}
         </span>
       ) : null}

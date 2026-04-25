@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { shouldRevealJobDirectoryOnDoubleClick } from './queueInteractions';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -224,6 +225,14 @@ export function QueueView({
                     setOpenMenuJobId(null);
                     setContextMenu(null);
                   }}
+                  onDoubleClick={(event) => {
+                    if (!shouldRevealJobDirectoryOnDoubleClick(job, event.button)) return;
+                    event.preventDefault();
+                    onSelect(job.id);
+                    setOpenMenuJobId(null);
+                    setContextMenu(null);
+                    onReveal(job.id);
+                  }}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     onSelect(job.id);
@@ -271,7 +280,11 @@ export function QueueView({
                     {job.totalBytes > 0 ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}` : formatBytes(job.downloadedBytes)}
                   </div>
 
-                  <div className="relative flex items-center justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+                  <div
+                    className="relative flex items-center justify-end gap-1"
+                    onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                  >
                     <RowActions
                       job={job}
                       menuOpen={openMenuJobId === job.id}

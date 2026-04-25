@@ -108,13 +108,14 @@ async fn complete_prompt_action(
     id: &str,
     decision: PromptDecision,
 ) -> Result<(), String> {
+    let remember_prompt_position = matches!(&decision, PromptDecision::Download { .. });
     let next_prompt = prompts.resolve(id, decision).await?;
     if let Some(prompt) = next_prompt {
         show_download_prompt_window(app)?;
         app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, prompt)
             .map_err(|error| error.to_string())?;
     } else {
-        close_download_prompt_window(app);
+        close_download_prompt_window(app, remember_prompt_position);
     }
     Ok(())
 }
