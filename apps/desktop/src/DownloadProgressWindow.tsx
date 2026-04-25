@@ -91,51 +91,51 @@ export function DownloadProgressWindow() {
     <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
       <PopupTitlebar title="Download progress" />
 
-      <main className="flex min-h-0 flex-1 flex-col bg-surface px-5 py-4">
-        <section className="flex min-w-0 gap-4">
-          <FileBadge filename={job.filename} large />
+      <main className="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
+        <section className="flex min-w-0 gap-3">
+          <FileBadge filename={job.filename} />
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-lg font-semibold text-foreground" title={job.filename}>{job.filename}</h1>
-            <div className="mt-1 truncate text-sm text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
-            <div className={`mt-3 inline-flex h-7 items-center gap-2 rounded-md border px-2.5 text-xs font-semibold ${statusClass(job.state)}`}>
-              {isCompleted ? <CheckCircle2 size={14} /> : isFailed ? <X size={14} /> : <Download size={14} />}
+            <h1 className="truncate text-base font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</h1>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
+            <div className={`mt-2 inline-flex h-6 items-center gap-1.5 rounded border px-2 text-xs font-semibold ${statusClass(job.state)}`}>
+              {isCompleted ? <CheckCircle2 size={13} /> : isFailed ? <X size={13} /> : <Download size={13} />}
               {statusText(job)}
             </div>
           </div>
         </section>
 
-        <section className="mt-5">
-          <div className="mb-2 flex items-baseline justify-between">
-            <span className="text-3xl font-semibold tabular-nums text-foreground">{progress.toFixed(0)}%</span>
-            <span className="text-sm tabular-nums text-muted-foreground">
+        <section className="mt-4">
+          <div className="mb-1.5 flex items-baseline justify-between">
+            <span className="text-2xl font-semibold tabular-nums text-foreground">{progress.toFixed(0)}%</span>
+            <span className="text-xs tabular-nums text-muted-foreground">
               {formatBytes(job.downloadedBytes)} / {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
             </span>
           </div>
-          <div className="h-2 overflow-hidden rounded-full bg-progress-track">
-            <div className={`h-2 rounded-full transition-all duration-300 ${progressColor(job.state)}`} style={{ width: `${progress}%` }} />
+          <div className="h-1.5 overflow-hidden rounded-full bg-progress-track">
+            <div className={`h-1.5 rounded-full transition-all duration-300 ${progressColor(job.state)}`} style={{ width: `${progress}%` }} />
           </div>
         </section>
 
-        <section className="mt-5 grid grid-cols-3 gap-2 text-sm">
+        <section className="mt-3 grid grid-cols-3 gap-1 text-xs">
           <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : '--'} />
           <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(job.eta) : '--'} />
           <Metric label="State" value={statusText(job)} />
         </section>
 
-        <div className="mt-4 grid grid-cols-[94px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm">
-          <div className="flex items-center gap-2 text-muted-foreground"><FolderOpen size={15} /> Path</div>
+        <div className="mt-3 grid grid-cols-[76px_minmax(0,1fr)] gap-x-2 gap-y-1.5 text-xs">
+          <div className="flex items-center gap-1.5 text-muted-foreground"><FolderOpen size={14} /> Path</div>
           <div className="truncate text-foreground" title={job.targetPath}>{job.targetPath || 'No destination recorded yet.'}</div>
-          <div className="flex items-center gap-2 text-muted-foreground"><Clock3 size={15} /> Source</div>
+          <div className="flex items-center gap-1.5 text-muted-foreground"><Clock3 size={14} /> Source</div>
           <div className="truncate text-primary" title={job.url}>{job.url}</div>
         </div>
 
         {errorMessage ? (
-          <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
             {errorMessage}
           </div>
         ) : null}
 
-        <div className="mt-auto flex justify-end gap-2 border-t border-border pt-4">
+        <div className="mt-auto flex justify-end gap-2 border-t border-border pt-3">
           {isCompleted ? (
             <ActionButton label="Open" icon={<ExternalLink size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => openJobFile(job.id))} />
           ) : null}
@@ -165,9 +165,9 @@ export function DownloadProgressWindow() {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 px-3 py-1">
+    <div className="min-w-0 px-2 py-1">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-sm font-semibold tabular-nums text-foreground" title={value}>{value}</div>
+      <div className="mt-0.5 truncate text-sm font-semibold tabular-nums text-foreground" title={value}>{value}</div>
     </div>
   );
 }
@@ -201,7 +201,7 @@ function ActionButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
+      className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
     >
       {icon}
       {label}

@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 use url::Url;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+const MAX_URL_LENGTH: usize = 2048;
+const MAX_METADATA_LENGTH: usize = 512;
+
+type HostResult<T> = Result<T, Box<HostResponseEnvelope>>;
 
 #[derive(Debug, Deserialize)]
 pub struct NativeRequestEnvelope {
@@ -148,9 +152,9 @@ impl HostResponseEnvelope {
     }
 }
 
-pub fn validate_protocol(request: &NativeRequestEnvelope) -> Result<(), HostResponseEnvelope> {
+pub fn validate_protocol(request: &NativeRequestEnvelope) -> HostResult<()> {
     if request.protocol_version != PROTOCOL_VERSION {
-        return Err(HostResponseEnvelope::rejected(
+        return Err(Box::new(HostResponseEnvelope::rejected(
             request.request_id.clone(),
             "rejected",
             "HOST_PROTOCOL_MISMATCH",
@@ -158,7 +162,7 @@ pub fn validate_protocol(request: &NativeRequestEnvelope) -> Result<(), HostResp
                 "Expected protocol version {}, got {}.",
                 PROTOCOL_VERSION, request.protocol_version
             ),
-        ));
+        )));
     }
 
     Ok(())
@@ -166,70 +170,138 @@ pub fn validate_protocol(request: &NativeRequestEnvelope) -> Result<(), HostResp
 
 pub fn parse_enqueue_payload(
     request: &NativeRequestEnvelope,
-) -> Result<EnqueueDownloadPayload, HostResponseEnvelope> {
-    let payload = serde_json::from_value::<EnqueueDownloadPayload>(request.payload.clone())
+) -> HostResult<EnqueueDownloadPayload> {
+    let mut payload = serde_json::from_value::<EnqueueDownloadPayload>(request.payload.clone())
         .map_err(|error| {
-            HostResponseEnvelope::rejected(
+            Box::new(HostResponseEnvelope::rejected(
                 request.request_id.clone(),
                 "invalid_payload",
                 "INVALID_PAYLOAD",
                 format!("Payload could not be parsed: {error}"),
-            )
+            ))
         })?;
 
-    validate_http_url(&request.request_id, &payload.url)?;
+    payload.url = validate_http_url(&request.request_id, &payload.url)?;
+    validate_request_source(&request.request_id, &payload.source)?;
     Ok(payload)
 }
 
 pub fn parse_prompt_download_payload(
     request: &NativeRequestEnvelope,
-) -> Result<PromptDownloadPayload, HostResponseEnvelope> {
-    let payload = serde_json::from_value::<PromptDownloadPayload>(request.payload.clone())
+) -> HostResult<PromptDownloadPayload> {
+    let mut payload = serde_json::from_value::<PromptDownloadPayload>(request.payload.clone())
         .map_err(|error| {
-            HostResponseEnvelope::rejected(
+            Box::new(HostResponseEnvelope::rejected(
                 request.request_id.clone(),
                 "invalid_payload",
                 "INVALID_PAYLOAD",
                 format!("Payload could not be parsed: {error}"),
-            )
+            ))
         })?;
 
-    validate_http_url(&request.request_id, &payload.url)?;
+    payload.url = validate_http_url(&request.request_id, &payload.url)?;
+    validate_request_source(&request.request_id, &payload.source)?;
+    validate_metadata_field(
+        &request.request_id,
+        "suggestedFilename",
+        payload.suggested_filename.as_deref(),
+    )?;
     Ok(payload)
 }
 
-pub fn parse_open_app_payload(
-    request: &NativeRequestEnvelope,
-) -> Result<OpenAppPayload, HostResponseEnvelope> {
+pub fn parse_open_app_payload(request: &NativeRequestEnvelope) -> HostResult<OpenAppPayload> {
     serde_json::from_value::<OpenAppPayload>(request.payload.clone()).map_err(|error| {
-        HostResponseEnvelope::rejected(
+        Box::new(HostResponseEnvelope::rejected(
             request.request_id.clone(),
             "invalid_payload",
             "INVALID_PAYLOAD",
             format!("Payload could not be parsed: {error}"),
-        )
+        ))
     })
 }
 
-pub fn validate_http_url(request_id: &str, raw_url: &str) -> Result<(), HostResponseEnvelope> {
-    let parsed = Url::parse(raw_url).map_err(|_| {
-        HostResponseEnvelope::rejected(
+pub fn validate_http_url(request_id: &str, raw_url: &str) -> HostResult<String> {
+    let trimmed_url = raw_url.trim();
+    if trimmed_url.len() > MAX_URL_LENGTH {
+        return Err(Box::new(HostResponseEnvelope::rejected(
+            request_id.to_string(),
+            "invalid_payload",
+            "URL_TOO_LONG",
+            format!("URL exceeds {MAX_URL_LENGTH} characters."),
+        )));
+    }
+
+    let parsed = Url::parse(trimmed_url).map_err(|_| {
+        Box::new(HostResponseEnvelope::rejected(
             request_id.to_string(),
             "invalid_payload",
             "INVALID_URL",
             "URL is not valid.",
-        )
+        ))
     })?;
 
     match parsed.scheme() {
-        "http" | "https" => Ok(()),
-        _ => Err(HostResponseEnvelope::rejected(
+        "http" | "https" => Ok(parsed.to_string()),
+        _ => Err(Box::new(HostResponseEnvelope::rejected(
             request_id.to_string(),
             "invalid_payload",
             "UNSUPPORTED_SCHEME",
             "Only http and https URLs are supported.",
-        )),
+        ))),
     }
+}
+
+fn validate_request_source(request_id: &str, source: &RequestSource) -> HostResult<()> {
+    if !matches!(
+        source.entry_point.as_str(),
+        "context_menu" | "popup" | "browser_download"
+    ) {
+        return Err(invalid_payload(
+            request_id,
+            "Source entry point is not supported.",
+        ));
+    }
+
+    if !matches!(source.browser.as_str(), "chrome" | "edge" | "firefox") {
+        return Err(invalid_payload(request_id, "Browser is not supported."));
+    }
+
+    validate_metadata_field(request_id, "entryPoint", Some(source.entry_point.as_str()))?;
+    validate_metadata_field(request_id, "browser", Some(source.browser.as_str()))?;
+    validate_metadata_field(
+        request_id,
+        "extensionVersion",
+        Some(source.extension_version.as_str()),
+    )?;
+    validate_metadata_field(request_id, "pageUrl", source.page_url.as_deref())?;
+    validate_metadata_field(request_id, "pageTitle", source.page_title.as_deref())?;
+    validate_metadata_field(request_id, "referrer", source.referrer.as_deref())
+}
+
+fn validate_metadata_field(
+    request_id: &str,
+    field_name: &str,
+    value: Option<&str>,
+) -> HostResult<()> {
+    if value.is_some_and(|value| value.len() > MAX_METADATA_LENGTH) {
+        return Err(Box::new(HostResponseEnvelope::rejected(
+            request_id.to_string(),
+            "invalid_payload",
+            "METADATA_TOO_LARGE",
+            format!("{field_name} exceeds {MAX_METADATA_LENGTH} characters."),
+        )));
+    }
+
+    Ok(())
+}
+
+fn invalid_payload(request_id: &str, message: &str) -> Box<HostResponseEnvelope> {
+    Box::new(HostResponseEnvelope::rejected(
+        request_id.to_string(),
+        "invalid_payload",
+        "INVALID_PAYLOAD",
+        message,
+    ))
 }
 
 pub fn app_status_request(request_id: String) -> AppRequestEnvelope<Value> {
@@ -286,5 +358,80 @@ pub fn app_save_extension_settings_request(
         request_id,
         message_type: "save_extension_settings".into(),
         payload,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(message_type: &str, payload: Value) -> NativeRequestEnvelope {
+        NativeRequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "request-1".into(),
+            message_type: message_type.into(),
+            payload,
+        }
+    }
+
+    fn valid_source() -> Value {
+        json!({
+            "entryPoint": "context_menu",
+            "browser": "firefox",
+            "extensionVersion": "0.2.1-a"
+        })
+    }
+
+    #[test]
+    fn parse_enqueue_payload_rejects_urls_over_protocol_limit() {
+        let long_url = format!("https://example.com/{}", "a".repeat(2_048));
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": long_url,
+                "source": valid_source()
+            }),
+        );
+
+        let error = parse_enqueue_payload(&request).expect_err("long URL should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("URL_TOO_LONG"));
+    }
+
+    #[test]
+    fn parse_enqueue_payload_rejects_oversized_source_metadata() {
+        let mut source = valid_source();
+        source["pageTitle"] = json!("x".repeat(513));
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://example.com/file.zip",
+                "source": source
+            }),
+        );
+
+        let error = parse_enqueue_payload(&request).expect_err("large metadata should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("METADATA_TOO_LARGE"));
+    }
+
+    #[test]
+    fn parse_enqueue_payload_rejects_unknown_source_values() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://example.com/file.zip",
+                "source": {
+                    "entryPoint": "unknown_entry",
+                    "browser": "firefox",
+                    "extensionVersion": "0.2.1-a"
+                }
+            }),
+        );
+
+        let error =
+            parse_enqueue_payload(&request).expect_err("unknown entry point should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
     }
 }

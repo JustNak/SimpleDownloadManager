@@ -4,6 +4,13 @@ pub const DOWNLOAD_PROMPT_WINDOW: &str = "download-prompt";
 pub const SELECT_JOB_EVENT: &str = "app://select-job";
 const PROGRESS_WINDOW_PREFIX: &str = "download-progress-";
 
+struct ProgressWindowGeometry {
+    width: f64,
+    height: f64,
+    min_width: f64,
+    min_height: f64,
+}
+
 pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
         window.show().map_err(|error| error.to_string())?;
@@ -51,11 +58,13 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
         .count();
     let offset = (open_progress_windows.min(8) as f64) * 28.0;
     let url = format!("index.html?window=download-progress&jobId={job_id}");
+    let geometry = progress_window_geometry();
 
     WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Download progress")
-        .inner_size(460.0, 350.0)
-        .min_inner_size(420.0, 320.0)
+        .inner_size(geometry.width, geometry.height)
+        .min_inner_size(geometry.min_width, geometry.min_height)
+        .max_inner_size(geometry.width, geometry.height)
         .resizable(false)
         .maximizable(false)
         .decorations(false)
@@ -84,4 +93,26 @@ fn progress_window_label(job_id: &str) -> String {
         .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '/'))
         .collect();
     format!("{PROGRESS_WINDOW_PREFIX}{safe_job_id}")
+}
+
+fn progress_window_geometry() -> ProgressWindowGeometry {
+    ProgressWindowGeometry {
+        width: 500.0,
+        height: 360.0,
+        min_width: 500.0,
+        min_height: 360.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn progress_window_minimum_matches_content_size() {
+        let geometry = super::progress_window_geometry();
+
+        assert_eq!(geometry.width, 500.0);
+        assert_eq!(geometry.height, 360.0);
+        assert_eq!(geometry.min_width, geometry.width);
+        assert_eq!(geometry.min_height, geometry.height);
+    }
 }

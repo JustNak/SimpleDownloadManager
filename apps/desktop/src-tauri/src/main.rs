@@ -10,6 +10,7 @@ fn main() {
             let shared_state = state::SharedState::new()?;
             let prompt_registry = prompts::PromptRegistry::default();
             download::schedule_downloads(app.handle().clone(), shared_state.clone());
+            commands::initialize_native_host_registration();
             ipc::start_named_pipe_listener(
                 app.handle().clone(),
                 shared_state.clone(),

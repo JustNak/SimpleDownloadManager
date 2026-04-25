@@ -36,18 +36,13 @@ pub enum FailureCategory {
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeSupport {
+    #[default]
     Unknown,
     Supported,
     Unsupported,
-}
-
-impl Default for ResumeSupport {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,7 +220,7 @@ pub struct DesktopSnapshot {
     pub settings: Settings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedState {
     pub jobs: Vec<DownloadJob>,
@@ -235,7 +230,7 @@ pub struct PersistedState {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            download_directory: "C:/Downloads".into(),
+            download_directory: default_download_directory(),
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
@@ -262,15 +257,6 @@ impl Default for ExtensionIntegrationSettings {
     }
 }
 
-impl Default for PersistedState {
-    fn default() -> Self {
-        Self {
-            jobs: Vec::new(),
-            settings: Settings::default(),
-        }
-    }
-}
-
 fn default_auto_retry_attempts() -> u32 {
     3
 }
@@ -281,6 +267,27 @@ fn default_accent_color() -> String {
 
 pub fn default_extension_listen_port() -> u32 {
     1420
+}
+
+pub fn default_download_directory() -> String {
+    default_download_directory_path().display().to_string()
+}
+
+fn default_download_directory_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            return download_directory_for_user_profile(Path::new(&user_profile));
+        }
+    }
+
+    dirs::download_dir()
+        .or_else(|| dirs::home_dir().map(|path| path.join("Downloads")))
+        .unwrap_or_else(|| PathBuf::from("Downloads"))
+}
+
+fn download_directory_for_user_profile(user_profile: &Path) -> PathBuf {
+    user_profile.join("Downloads")
 }
 
 pub fn load_persisted_state(path: &Path) -> Result<PersistedState, String> {
@@ -420,9 +427,17 @@ mod tests {
     fn default_settings_enable_limited_auto_retry() {
         let settings = Settings::default();
 
+        assert!(settings.download_directory.ends_with("Downloads"));
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.speed_limit_kib_per_second, 0);
         assert_eq!(settings.accent_color, "#3b82f6");
+    }
+
+    #[test]
+    fn user_profile_download_directory_targets_downloads_folder() {
+        let path = download_directory_for_user_profile(Path::new(r"C:\Users\Alice"));
+
+        assert_eq!(path, PathBuf::from(r"C:\Users\Alice\Downloads"));
     }
 
     #[test]
@@ -468,10 +483,19 @@ mod tests {
             DownloadHandoffMode::Ask
         );
         assert!(state.settings.extension_integration.context_menu_enabled);
-        assert!(state.settings.extension_integration.show_progress_after_handoff);
+        assert!(
+            state
+                .settings
+                .extension_integration
+                .show_progress_after_handoff
+        );
         assert!(state.settings.extension_integration.show_badge_status);
         assert_eq!(state.settings.extension_integration.listen_port, 1420);
-        assert!(state.settings.extension_integration.excluded_hosts.is_empty());
+        assert!(state
+            .settings
+            .extension_integration
+            .excluded_hosts
+            .is_empty());
         assert!(state
             .settings
             .extension_integration

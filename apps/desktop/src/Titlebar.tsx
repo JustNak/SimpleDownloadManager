@@ -2,13 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { X, Minus, Square, Copy } from 'lucide-react';
 import { AppIcon } from './AppIcon';
+import { shouldStartWindowDrag } from './windowDrag';
 
 export function Titlebar({ children }: { children?: React.ReactNode }) {
   const [isMaximized, setIsMaximized] = useState(false);
   const appWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
 
   const handleDragPointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || !appWindow) {
+    if (!appWindow || !shouldStartWindowDrag(event)) {
       return;
     }
 
@@ -19,8 +20,8 @@ export function Titlebar({ children }: { children?: React.ReactNode }) {
     }
   };
 
-  const handleDragDoubleClick = async () => {
-    if (!appWindow) return;
+  const handleDragDoubleClick = async (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!appWindow || !shouldStartWindowDrag(event)) return;
     await toggleMaximize();
   };
 
@@ -97,7 +98,7 @@ export function Titlebar({ children }: { children?: React.ReactNode }) {
 
   return (
     <div className="titlebar z-50 flex h-11 w-full shrink-0 select-none items-center justify-between border-b border-border bg-background">
-      <div 
+      <div
         data-tauri-drag-region
         className="flex h-full w-[252px] shrink-0 cursor-grab items-center gap-3 border-r border-border pl-5 active:cursor-grabbing"
         onPointerDown={handleDragPointerDown}
@@ -109,7 +110,11 @@ export function Titlebar({ children }: { children?: React.ReactNode }) {
         </span>
       </div>
 
-      <div className="flex h-full min-w-0 flex-1 items-center px-4">
+      <div
+        className="flex h-full min-w-0 flex-1 items-center px-4"
+        onPointerDown={handleDragPointerDown}
+        onDoubleClick={handleDragDoubleClick}
+      >
         {children ? (
           <div className="min-w-0 flex-1">{children}</div>
         ) : (

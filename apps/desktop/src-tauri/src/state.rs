@@ -1,16 +1,18 @@
 use crate::storage::{
-    default_extension_listen_port,
-    load_persisted_state, persist_state, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
-    BulkArchiveInfo, DownloadJob, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
-    FailureCategory, HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary,
-    ResumeSupport, Settings,
+    default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
+    BulkArchiveInfo, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot, DownloadJob,
+    DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory,
+    HostRegistrationDiagnostics, JobState, PersistedState, QueueSummary, ResumeSupport, Settings,
 };
+use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
+
+const MAX_URL_LENGTH: usize = 2048;
 
 #[derive(Debug, Clone)]
 pub struct BackendError {
@@ -53,16 +55,11 @@ impl EnqueueStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DuplicatePolicy {
+    #[default]
     ReturnExisting,
     Allow,
-}
-
-impl Default for DuplicatePolicy {
-    fn default() -> Self {
-        Self::ReturnExisting
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -126,10 +123,12 @@ impl SharedState {
         let storage_exists = storage_path.exists();
         let mut persisted = load_persisted_state(&storage_path)?;
 
-        if persisted.settings.download_directory.trim().is_empty()
-            || (data_dir_override.is_some() && !storage_exists)
-        {
-            persisted.settings.download_directory = default_download_directory(&base_dir);
+        if should_reset_download_directory(
+            &persisted.settings.download_directory,
+            data_dir_override.is_some(),
+            storage_exists,
+        ) {
+            persisted.settings.download_directory = default_download_directory();
         }
 
         normalize_accent_color(&mut persisted.settings);
@@ -388,7 +387,7 @@ impl RuntimeState {
         url: &str,
         options: EnqueueOptions,
     ) -> Result<EnqueueResult, BackendError> {
-        let url = normalize_download_url(&url)?;
+        let url = normalize_download_url(url)?;
 
         if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
             if let Some(result) = self.duplicate_enqueue_result(&url) {
@@ -703,25 +702,31 @@ impl SharedState {
         if delete_from_disk {
             let (target_path, temp_path) = {
                 let state = self.inner.read().await;
-                let job = state
-                    .jobs
-                    .iter()
-                    .find(|job| job.id == id)
-                    .ok_or_else(|| BackendError {
-                        code: "INTERNAL_ERROR",
-                        message: "Job not found.".into(),
-                    })?;
+                let job =
+                    state
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == id)
+                        .ok_or_else(|| BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        })?;
 
                 if state.active_workers.contains(id)
                     || matches!(job.state, JobState::Starting | JobState::Downloading)
                 {
                     return Err(BackendError {
                         code: "INTERNAL_ERROR",
-                        message: "Pause or cancel the active transfer before deleting files from disk.".into(),
+                        message:
+                            "Pause or cancel the active transfer before deleting files from disk."
+                                .into(),
                     });
                 }
 
-                (PathBuf::from(&job.target_path), PathBuf::from(&job.temp_path))
+                (
+                    PathBuf::from(&job.target_path),
+                    PathBuf::from(&job.temp_path),
+                )
             };
 
             remove_file_if_exists(&target_path).map_err(internal_error)?;
@@ -783,15 +788,22 @@ impl SharedState {
                 });
             }
 
-            (current_target_path, current_temp_path, next_target_path, next_temp_path)
+            (
+                current_target_path,
+                current_temp_path,
+                next_target_path,
+                next_temp_path,
+            )
         };
 
         if current_target_path.is_file() && current_target_path != next_target_path {
-            std::fs::rename(&current_target_path, &next_target_path)
-                .map_err(|error| internal_error(format!("Could not rename downloaded file: {error}")))?;
+            std::fs::rename(&current_target_path, &next_target_path).map_err(|error| {
+                internal_error(format!("Could not rename downloaded file: {error}"))
+            })?;
         } else if current_temp_path.is_file() && current_temp_path != next_temp_path {
-            std::fs::rename(&current_temp_path, &next_temp_path)
-                .map_err(|error| internal_error(format!("Could not rename partial download file: {error}")))?;
+            std::fs::rename(&current_temp_path, &next_temp_path).map_err(|error| {
+                internal_error(format!("Could not rename partial download file: {error}"))
+            })?;
         }
 
         let (snapshot, persisted) = {
@@ -1089,7 +1101,11 @@ impl SharedState {
             })
             .collect::<Vec<_>>();
 
-        if members.len() < 2 || members.iter().any(|member| member.state != JobState::Completed) {
+        if members.len() < 2
+            || members
+                .iter()
+                .any(|member| member.state != JobState::Completed)
+        {
             return Ok(None);
         }
 
@@ -1328,7 +1344,11 @@ impl RuntimeState {
                     )
                 })
                 .count(),
-            attention: self.jobs.iter().filter(|job| job_needs_attention(job)).count(),
+            attention: self
+                .jobs
+                .iter()
+                .filter(|job| job_needs_attention(job))
+                .count(),
             queued: self
                 .jobs
                 .iter()
@@ -1421,7 +1441,9 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
     let mut seen_extensions = HashSet::new();
 
     for extension in &settings.ignored_file_extensions {
-        for candidate in extension.split(|character: char| character == ',' || character.is_whitespace()) {
+        for candidate in
+            extension.split(|character: char| character == ',' || character.is_whitespace())
+        {
             let candidate = normalize_file_extension(candidate);
             if candidate.is_empty() || !seen_extensions.insert(candidate.clone()) {
                 continue;
@@ -1463,12 +1485,16 @@ fn normalize_file_extension(value: &str) -> String {
     extension
 }
 
-fn default_download_directory(base_dir: &Path) -> String {
-    base_dir.join("downloads").display().to_string()
-}
-
 fn normalize_download_url(raw_url: &str) -> Result<String, BackendError> {
-    let parsed = Url::parse(raw_url.trim()).map_err(|_| BackendError {
+    let trimmed_url = raw_url.trim();
+    if trimmed_url.len() > MAX_URL_LENGTH {
+        return Err(BackendError {
+            code: "URL_TOO_LONG",
+            message: format!("URL exceeds {MAX_URL_LENGTH} characters."),
+        });
+    }
+
+    let parsed = Url::parse(trimmed_url).map_err(|_| BackendError {
         code: "INVALID_URL",
         message: "URL is not valid.".into(),
     })?;
@@ -1583,16 +1609,20 @@ fn derive_filename(raw_url: &str) -> String {
 
     let candidate = url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())
         .unwrap_or("download.bin");
 
-    sanitize_filename(candidate)
+    let decoded = percent_decode_str(candidate).decode_utf8_lossy();
+    sanitize_filename(&decoded)
 }
 
 fn filename_from_hint(filename_hint: Option<&str>, raw_url: &str) -> String {
     filename_hint
-        .map(sanitize_filename)
+        .map(|hint| {
+            let decoded = percent_decode_str(hint).decode_utf8_lossy();
+            sanitize_filename(&decoded)
+        })
         .filter(|filename| !filename.trim().is_empty())
         .unwrap_or_else(|| derive_filename(raw_url))
 }
@@ -1602,15 +1632,74 @@ fn sanitize_filename(input: &str) -> String {
         .chars()
         .map(|character| match character {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            character if character.is_control() => '_',
             _ => character,
         })
         .collect();
+    let mut sanitized = sanitized.trim().trim_matches('.').trim().to_string();
 
     if sanitized.trim().is_empty() {
         "download.bin".into()
     } else {
+        if is_windows_reserved_filename(&sanitized) {
+            sanitized.push('_');
+        }
         sanitized
     }
+}
+
+fn should_reset_download_directory(
+    download_directory: &str,
+    has_data_dir_override: bool,
+    storage_exists: bool,
+) -> bool {
+    download_directory.trim().is_empty()
+        || is_legacy_default_download_directory(download_directory)
+        || (has_data_dir_override && !storage_exists)
+}
+
+fn is_legacy_default_download_directory(download_directory: &str) -> bool {
+    let normalized = download_directory
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+
+    normalized == "c:/downloads"
+}
+
+fn is_windows_reserved_filename(filename: &str) -> bool {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(filename)
+        .to_ascii_uppercase();
+
+    matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn normalize_archive_filename(input: &str) -> String {
@@ -1738,8 +1827,18 @@ mod tests {
             jobs: vec![
                 download_job("job_1", JobState::Failed, ResumeSupport::Supported, 25),
                 download_job("job_2", JobState::Paused, ResumeSupport::Unsupported, 40),
-                download_job("job_3", JobState::Downloading, ResumeSupport::Unsupported, 0),
-                download_job("job_4", JobState::Completed, ResumeSupport::Unsupported, 100),
+                download_job(
+                    "job_3",
+                    JobState::Downloading,
+                    ResumeSupport::Unsupported,
+                    0,
+                ),
+                download_job(
+                    "job_4",
+                    JobState::Completed,
+                    ResumeSupport::Unsupported,
+                    100,
+                ),
                 download_job("job_5", JobState::Queued, ResumeSupport::Unknown, 0),
             ],
             settings: Settings::default(),
@@ -1828,8 +1927,13 @@ mod tests {
             .expect("download should enqueue into override directory");
 
         assert_eq!(result.status, EnqueueStatus::Queued);
-        assert!(state.jobs[0].target_path.starts_with(&override_dir.display().to_string()));
-        assert_eq!(state.settings.download_directory, default_dir.display().to_string());
+        assert!(state.jobs[0]
+            .target_path
+            .starts_with(&override_dir.display().to_string()));
+        assert_eq!(
+            state.settings.download_directory,
+            default_dir.display().to_string()
+        );
 
         let _ = std::fs::remove_dir_all(default_dir);
         let _ = std::fs::remove_dir_all(override_dir);
@@ -1837,8 +1941,12 @@ mod tests {
 
     #[test]
     fn prepare_download_prompt_marks_duplicate_job() {
-        let mut existing_job =
-            download_job("job_12", JobState::Downloading, ResumeSupport::Supported, 20);
+        let mut existing_job = download_job(
+            "job_12",
+            JobState::Downloading,
+            ResumeSupport::Supported,
+            20,
+        );
         existing_job.url = "https://example.com/archive.zip".into();
         existing_job.filename = "archive.zip".into();
 
@@ -1856,7 +1964,10 @@ mod tests {
         assert_eq!(prompt.id, "prompt_1");
         assert_eq!(prompt.filename, "archive.zip");
         assert_eq!(prompt.total_bytes, Some(4096));
-        assert_eq!(prompt.duplicate_job.as_ref().map(|job| job.id.as_str()), Some("job_12"));
+        assert_eq!(
+            prompt.duplicate_job.as_ref().map(|job| job.id.as_str()),
+            Some("job_12")
+        );
     }
 
     #[test]
@@ -1879,7 +1990,12 @@ mod tests {
 
     #[test]
     fn download_filename_metadata_updates_display_name_without_moving_partial_file() {
-        let mut job = download_job("job_11", JobState::Downloading, ResumeSupport::Supported, 10);
+        let mut job = download_job(
+            "job_11",
+            JobState::Downloading,
+            ResumeSupport::Supported,
+            10,
+        );
         job.filename = "download.bin".into();
         job.target_path = "C:/Downloads/download.bin".into();
         job.temp_path = "C:/Downloads/download.bin.part".into();
@@ -1922,7 +2038,9 @@ mod tests {
         let error = state.resolve_revealable_path("job_20").await.unwrap_err();
 
         assert_eq!(error.code, "INTERNAL_ERROR");
-        assert!(error.message.contains("Downloaded file is missing from disk"));
+        assert!(error
+            .message
+            .contains("Downloaded file is missing from disk"));
         assert!(error.message.contains(&target_path.display().to_string()));
 
         let _ = std::fs::remove_dir_all(download_dir);
@@ -2032,10 +2150,74 @@ mod tests {
         let normalized =
             normalize_download_url(" \n https://example.com/file.zip?from=clipboard \t ").unwrap();
 
-        assert_eq!(
-            normalized,
-            "https://example.com/file.zip?from=clipboard"
+        assert_eq!(normalized, "https://example.com/file.zip?from=clipboard");
+    }
+
+    #[test]
+    fn normalize_download_url_rejects_urls_over_protocol_limit() {
+        let long_url = format!("https://example.com/{}", "a".repeat(2_048));
+
+        let error = normalize_download_url(&long_url).unwrap_err();
+
+        assert_eq!(error.code, "URL_TOO_LONG");
+    }
+
+    #[test]
+    fn sanitize_filename_falls_back_for_dot_only_names() {
+        assert_eq!(sanitize_filename("."), "download.bin");
+        assert_eq!(sanitize_filename(".."), "download.bin");
+        assert_eq!(sanitize_filename("  ...  "), "download.bin");
+    }
+
+    #[test]
+    fn sanitize_filename_avoids_windows_reserved_device_names() {
+        assert_eq!(sanitize_filename("CON"), "CON_");
+        assert_eq!(sanitize_filename("con.txt"), "con.txt_");
+    }
+
+    #[test]
+    fn filename_from_hint_cannot_escape_download_directory_with_parent_segment() {
+        let filename = filename_from_hint(Some(".."), "https://example.com/archive.zip");
+
+        assert_eq!(filename, "download.bin");
+    }
+
+    #[test]
+    fn filename_from_url_decodes_percent_encoded_path_segment() {
+        let filename = filename_from_hint(
+            None,
+            "https://example.com/%5BNanakoRaws%5D%20Tensei%20Shitara%20Slime%20Datta%20Ken%20S4%20-%2002%20%28AT-X%20TV%201080p%20HEVC%20AAC%29.mkv",
         );
+
+        assert_eq!(
+            filename,
+            "[NanakoRaws] Tensei Shitara Slime Datta Ken S4 - 02 (AT-X TV 1080p HEVC AAC).mkv"
+        );
+    }
+
+    #[test]
+    fn filename_from_browser_hint_decodes_percent_encoded_name() {
+        let filename = filename_from_hint(
+            Some("%5BASW%5D%20Re%20Zero%20kara%20Hajimeru%20Isekai%20Seikatsu.mkv"),
+            "https://example.com/download",
+        );
+
+        assert_eq!(filename, "[ASW] Re Zero kara Hajimeru Isekai Seikatsu.mkv");
+    }
+
+    #[test]
+    fn legacy_default_download_directory_is_replaced_on_load() {
+        assert!(should_reset_download_directory("C:/Downloads", false, true));
+        assert!(should_reset_download_directory(
+            "C:\\Downloads",
+            false,
+            true
+        ));
+        assert!(!should_reset_download_directory(
+            "D:/Custom Downloads",
+            false,
+            true
+        ));
     }
 
     #[test]

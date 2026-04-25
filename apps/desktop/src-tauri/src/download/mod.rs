@@ -5,8 +5,8 @@ use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
-use std::process::Command;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::plugin::PermissionState;
 use tauri::AppHandle;
@@ -196,8 +196,8 @@ async fn run_download_attempt(
 
     let total_bytes = derive_total_bytes(&response, existing_bytes);
     let resume_support = derive_resume_support(&response, existing_bytes);
-    let display_filename = extract_filename(&response)
-        .or_else(|| derive_filename_from_url(response.url().as_str()));
+    let display_filename =
+        extract_filename(&response).or_else(|| derive_filename_from_url(response.url().as_str()));
     let target_path = derive_target_path(&task.target_path, &response);
     let snapshot = state
         .mark_job_downloading(
@@ -585,10 +585,8 @@ fn parse_content_disposition_filename(header_value: &str) -> Option<String> {
     if let Some(encoded) = header_value
         .split(';')
         .find_map(|segment| segment.trim().strip_prefix("filename*="))
-        .and_then(|value| value.split("''").nth(1).or(Some(value)))
     {
-        let decoded = percent_decode_str(encoded).decode_utf8_lossy();
-        let sanitized = sanitize_filename(decoded.trim_matches('"').trim());
+        let sanitized = decode_content_disposition_filename(encoded);
         if !sanitized.is_empty() {
             return Some(sanitized);
         }
@@ -597,8 +595,15 @@ fn parse_content_disposition_filename(header_value: &str) -> Option<String> {
     header_value
         .split(';')
         .find_map(|segment| segment.trim().strip_prefix("filename="))
-        .map(|value| sanitize_filename(value.trim_matches('"').trim()))
+        .map(decode_content_disposition_filename)
         .filter(|value| !value.is_empty())
+}
+
+fn decode_content_disposition_filename(value: &str) -> String {
+    let value = value.trim().trim_matches('"').trim();
+    let encoded = value.split("''").nth(1).unwrap_or(value);
+    let decoded = percent_decode_str(encoded).decode_utf8_lossy();
+    sanitize_filename(decoded.trim())
 }
 
 fn derive_target_path(
@@ -626,9 +631,10 @@ fn derive_filename_from_url(raw_url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(raw_url).ok()?;
     let candidate = parsed
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty())?;
-    let sanitized = sanitize_filename(candidate);
+    let decoded = percent_decode_str(candidate).decode_utf8_lossy();
+    let sanitized = sanitize_filename(&decoded);
     if sanitized.is_empty() || sanitized == "download.bin" {
         None
     } else {
@@ -645,11 +651,50 @@ fn sanitize_filename(input: &str) -> String {
         .chars()
         .map(|character| match character {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            character if character.is_control() => '_',
             _ => character,
         })
         .collect();
 
-    sanitized.trim().trim_matches('.').to_string()
+    let mut sanitized = sanitized.trim().trim_matches('.').trim().to_string();
+    if is_windows_reserved_filename(&sanitized) {
+        sanitized.push('_');
+    }
+    sanitized
+}
+
+fn is_windows_reserved_filename(filename: &str) -> bool {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(filename)
+        .to_ascii_uppercase();
+
+    matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn should_retry_status(status: StatusCode) -> bool {
@@ -959,6 +1004,43 @@ mod tests {
         assert_eq!(metadata.total_bytes, Some(4_096));
         assert_eq!(metadata.resume_support, ResumeSupport::Supported);
         assert_eq!(metadata.filename.as_deref(), Some("server-report.pdf"));
+    }
+
+    #[test]
+    fn content_disposition_filename_avoids_windows_reserved_device_names() {
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=\"CON\"").as_deref(),
+            Some("CON_")
+        );
+        assert_eq!(
+            parse_content_disposition_filename("attachment; filename=\"con.txt\"").as_deref(),
+            Some("con.txt_")
+        );
+    }
+
+    #[test]
+    fn content_disposition_plain_filename_decodes_percent_encoded_name() {
+        assert_eq!(
+            parse_content_disposition_filename(
+                "attachment; filename=\"%5BNanakoRaws%5D%20Tensei%20Shitara%20Slime%20S4%20-%2002.mkv\""
+            )
+            .as_deref(),
+            Some("[NanakoRaws] Tensei Shitara Slime S4 - 02.mkv")
+        );
+    }
+
+    #[test]
+    fn url_filename_decodes_percent_encoded_path_segment() {
+        let filename = derive_filename_from_url(
+            "https://example.com/%5BNanakoRaws%5D%20Tensei%20Shitara%20Slime%20Datta%20Ken%20S4%20-%2002%20%28AT-X%20TV%201080p%20HEVC%20AAC%29.mkv",
+        );
+
+        assert_eq!(
+            filename.as_deref(),
+            Some(
+                "[NanakoRaws] Tensei Shitara Slime Datta Ken S4 - 02 (AT-X TV 1080p HEVC AAC).mkv"
+            )
+        );
     }
 
     #[test]

@@ -2,6 +2,8 @@ import React, { useEffect } from 'react';
 import type { ToastMessage } from './types';
 import { X, CheckCircle, AlertCircle, Info, AlertTriangle } from 'lucide-react';
 
+const TOAST_AUTO_CLOSE_MS = 3000;
+
 interface ToastAreaProps {
   toasts: ToastMessage[];
   onDismiss: (id: string) => void;
@@ -22,7 +24,7 @@ export function ToastArea({ toasts, onDismiss }: ToastAreaProps) {
 function ToastItem({ toast, onDismiss }: { toast: ToastMessage, onDismiss: () => void }) {
   useEffect(() => {
     if (toast.autoClose !== false) {
-      const timer = setTimeout(onDismiss, 5000);
+      const timer = setTimeout(onDismiss, TOAST_AUTO_CLOSE_MS);
       return () => clearTimeout(timer);
     }
   }, [toast, onDismiss]);

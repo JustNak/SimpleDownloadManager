@@ -2,7 +2,10 @@ use crate::download::schedule_downloads;
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{EnqueueResult, EnqueueStatus, SharedState};
-use crate::storage::{DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, Settings};
+use crate::storage::{
+    DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, HostRegistrationStatus,
+    Settings,
+};
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_download_prompt_window,
     show_progress_window, DOWNLOAD_PROMPT_WINDOW,
@@ -10,11 +13,13 @@ use crate::windows::{
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tauri::{AppHandle, Emitter, State};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+
+#[cfg(windows)]
+use serde_json::json;
 
 #[cfg(windows)]
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -22,13 +27,46 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+#[cfg(windows)]
+use winreg::enums::HKEY_CURRENT_USER;
+
+#[cfg(windows)]
+use winreg::RegKey;
+
 pub const STATE_CHANGED_EVENT: &str = "app://state-changed";
 const INSTALL_RESOURCE_DIR: &str = "resources\\install";
+const NATIVE_HOST_NAME: &str = "com.myapp.download_manager";
+const DEFAULT_CHROMIUM_EXTENSION_ID: &str = "pkaojpfpjieklhinoibjibmjldohlmbb";
+const DEFAULT_FIREFOX_EXTENSION_ID: &str = "simple-download-manager@example.com";
+
+#[cfg(windows)]
+const CHROME_REGISTRY_PATH: &str =
+    r"Software\Google\Chrome\NativeMessagingHosts\com.myapp.download_manager";
+#[cfg(windows)]
+const EDGE_REGISTRY_PATH: &str =
+    r"Software\Microsoft\Edge\NativeMessagingHosts\com.myapp.download_manager";
+#[cfg(windows)]
+const FIREFOX_REGISTRY_PATH: &str =
+    r"Software\Mozilla\NativeMessagingHosts\com.myapp.download_manager";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReleaseMetadata {
     sidecar_binary_name: Option<String>,
+    chromium_extension_id: Option<String>,
+    edge_extension_id: Option<String>,
+    firefox_extension_id: Option<String>,
+}
+
+impl Default for ReleaseMetadata {
+    fn default() -> Self {
+        Self {
+            sidecar_binary_name: None,
+            chromium_extension_id: Some(DEFAULT_CHROMIUM_EXTENSION_ID.into()),
+            edge_extension_id: Some(DEFAULT_CHROMIUM_EXTENSION_ID.into()),
+            firefox_extension_id: Some(DEFAULT_FIREFOX_EXTENSION_ID.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,7 +130,9 @@ pub async fn get_diagnostics(state: State<'_, SharedState>) -> Result<Diagnostic
 }
 
 #[tauri::command]
-pub async fn export_diagnostics_report(state: State<'_, SharedState>) -> Result<Option<String>, String> {
+pub async fn export_diagnostics_report(
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
     let host_registration = gather_host_registration_diagnostics()?;
     let diagnostics = state.diagnostics_snapshot(host_registration).await;
     let report = serde_json::to_string_pretty(&diagnostics)
@@ -117,7 +157,11 @@ pub async fn export_diagnostics_report(state: State<'_, SharedState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn add_job(app: AppHandle, state: State<'_, SharedState>, url: String) -> Result<AddJobResult, String> {
+pub async fn add_job(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    url: String,
+) -> Result<AddJobResult, String> {
     let result = state
         .enqueue_download(url, None)
         .await
@@ -192,7 +236,10 @@ pub async fn resume_job(
 
 #[tauri::command]
 pub async fn pause_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = state.pause_all_jobs().await.map_err(|error| error.message)?;
+    let snapshot = state
+        .pause_all_jobs()
+        .await
+        .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
@@ -200,7 +247,10 @@ pub async fn pause_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Re
 
 #[tauri::command]
 pub async fn resume_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = state.resume_all_jobs().await.map_err(|error| error.message)?;
+    let snapshot = state
+        .resume_all_jobs()
+        .await
+        .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
@@ -236,15 +286,24 @@ pub async fn restart_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.restart_job(&id).await.map_err(|error| error.message)?;
+    let snapshot = state
+        .restart_job(&id)
+        .await
+        .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
 }
 
 #[tauri::command]
-pub async fn retry_failed_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = state.retry_failed_jobs().await.map_err(|error| error.message)?;
+pub async fn retry_failed_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let snapshot = state
+        .retry_failed_jobs()
+        .await
+        .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
@@ -295,7 +354,10 @@ pub async fn rename_job(
 }
 
 #[tauri::command]
-pub async fn clear_completed_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
+pub async fn clear_completed_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
     let snapshot = state
         .clear_completed_jobs()
         .await
@@ -365,8 +427,13 @@ pub async fn show_existing_download_prompt(
         .and_then(|prompt| prompt.duplicate_job.as_ref())
         .map(|job| job.id.clone());
 
-    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::ShowExisting)
-        .await?;
+    complete_prompt_action(
+        &app,
+        prompts.inner().clone(),
+        &id,
+        PromptDecision::ShowExisting,
+    )
+    .await?;
 
     if let Some(job_id) = existing_job_id {
         focus_job_in_main_window(&app, &job_id);
@@ -391,7 +458,10 @@ pub async fn open_progress_window(app: AppHandle, id: String) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn open_job_file(state: State<'_, SharedState>, id: String) -> Result<(), String> {
-    let path = state.resolve_openable_path(&id).await.map_err(|error| error.message)?;
+    let path = state
+        .resolve_openable_path(&id)
+        .await
+        .map_err(|error| error.message)?;
 
     tauri::async_runtime::spawn_blocking(move || open_path(&path))
         .await
@@ -427,14 +497,27 @@ pub async fn open_install_docs() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn run_host_registration_fix() -> Result<(), String> {
-    let script_path = resolve_install_resource_path("register-native-host.ps1")?;
-    let host_binary_path = resolve_host_binary_path()?;
-
-    tauri::async_runtime::spawn_blocking(move || run_registration_script(&script_path, &host_binary_path))
+    tauri::async_runtime::spawn_blocking(register_native_host)
         .await
         .map_err(|error| format!("Could not start host registration: {error}"))??;
 
     Ok(())
+}
+
+pub fn initialize_native_host_registration() {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn(async move {
+            let result = tauri::async_runtime::spawn_blocking(ensure_native_host_registration)
+                .await
+                .map_err(|error| format!("Could not start native host registration: {error}"))
+                .and_then(|result| result);
+
+            if let Err(error) = result {
+                eprintln!("native host auto-registration failed: {error}");
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -561,7 +644,11 @@ fn reveal_path(_path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn shell_execute(operation: &OsStr, file: &OsStr, parameters: Option<&OsStr>) -> Result<(), String> {
+fn shell_execute(
+    operation: &OsStr,
+    file: &OsStr,
+    parameters: Option<&OsStr>,
+) -> Result<(), String> {
     let operation = wide_null(operation);
     let file = wide_null(file);
     let parameters = parameters.map(wide_null);
@@ -595,7 +682,8 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
 }
 
 fn current_install_root() -> Result<PathBuf, String> {
-    let current_exe = std::env::current_exe().map_err(|error| format!("Could not locate app binary: {error}"))?;
+    let current_exe =
+        std::env::current_exe().map_err(|error| format!("Could not locate app binary: {error}"))?;
     current_exe
         .parent()
         .map(Path::to_path_buf)
@@ -610,7 +698,10 @@ fn resolve_install_resource_path(file_name: &str) -> Result<PathBuf, String> {
     }
 
     for ancestor in install_root.ancestors() {
-        for relative_root in ["src-tauri\\resources\\install", "apps\\desktop\\src-tauri\\resources\\install"] {
+        for relative_root in [
+            "src-tauri\\resources\\install",
+            "apps\\desktop\\src-tauri\\resources\\install",
+        ] {
             let candidate = ancestor.join(relative_root).join(file_name);
             if candidate.exists() {
                 return Ok(candidate);
@@ -618,21 +709,18 @@ fn resolve_install_resource_path(file_name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    Err(format!("Could not find bundled install resource: {file_name}."))
+    Err(format!(
+        "Could not find bundled install resource: {file_name}."
+    ))
 }
 
 fn resolve_host_binary_path() -> Result<PathBuf, String> {
     let install_root = current_install_root()?;
     let mut candidate_names = Vec::new();
 
-    if let Ok(release_path) = resolve_install_resource_path("release.json") {
-        if let Ok(content) = std::fs::read_to_string(release_path) {
-            if let Ok(metadata) = serde_json::from_str::<ReleaseMetadata>(&content) {
-                if let Some(sidecar_binary_name) = metadata.sidecar_binary_name {
-                    candidate_names.push(sidecar_binary_name);
-                }
-            }
-        }
+    let metadata = resolve_release_metadata();
+    if let Some(sidecar_binary_name) = metadata.sidecar_binary_name {
+        candidate_names.push(sidecar_binary_name);
     }
 
     candidate_names.push("simple-download-manager-native-host.exe".into());
@@ -649,25 +737,171 @@ fn resolve_host_binary_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn run_registration_script(script_path: &Path, host_binary_path: &Path) -> Result<(), String> {
-    let status = Command::new("pwsh")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(script_path)
-        .arg("-HostBinaryPath")
-        .arg(host_binary_path)
-        .status()
-        .map_err(|error| format!("Could not start registration script: {error}"))?;
-
-    if !status.success() {
-        return Err(format!("Registration script exited with status {status}."));
+fn ensure_native_host_registration() -> Result<(), String> {
+    let diagnostics = gather_host_registration_diagnostics()?;
+    if should_register_native_host(diagnostics.status) {
+        register_native_host()?;
     }
 
     Ok(())
 }
 
+#[cfg(windows)]
+fn register_native_host() -> Result<(), String> {
+    let install_root = current_install_root()?;
+    let host_binary_path = resolve_host_binary_path()?;
+    let manifest_root = install_root.join("native-messaging");
+    let metadata = resolve_release_metadata();
+    let chromium_extension_id = metadata
+        .chromium_extension_id
+        .as_deref()
+        .unwrap_or(DEFAULT_CHROMIUM_EXTENSION_ID);
+    let edge_extension_id = metadata
+        .edge_extension_id
+        .as_deref()
+        .unwrap_or(chromium_extension_id);
+    let firefox_extension_id = metadata
+        .firefox_extension_id
+        .as_deref()
+        .unwrap_or(DEFAULT_FIREFOX_EXTENSION_ID);
+
+    std::fs::create_dir_all(&manifest_root).map_err(|error| {
+        format!("Could not create native messaging manifest directory: {error}")
+    })?;
+
+    let chrome_manifest_path = manifest_root.join(format!("{NATIVE_HOST_NAME}.chrome.json"));
+    let edge_manifest_path = manifest_root.join(format!("{NATIVE_HOST_NAME}.edge.json"));
+    let firefox_manifest_path = manifest_root.join(format!("{NATIVE_HOST_NAME}.firefox.json"));
+
+    write_native_host_manifest(
+        &chrome_manifest_path,
+        native_host_manifest_json(
+            &host_binary_path,
+            "allowed_origins",
+            json!([format!("chrome-extension://{chromium_extension_id}/")]),
+        ),
+    )?;
+    write_native_host_manifest(
+        &edge_manifest_path,
+        native_host_manifest_json(
+            &host_binary_path,
+            "allowed_origins",
+            json!([format!("chrome-extension://{edge_extension_id}/")]),
+        ),
+    )?;
+    write_native_host_manifest(
+        &firefox_manifest_path,
+        native_host_manifest_json(
+            &host_binary_path,
+            "allowed_extensions",
+            json!([firefox_extension_id]),
+        ),
+    )?;
+
+    set_registry_default_value(CHROME_REGISTRY_PATH, &chrome_manifest_path)?;
+    set_registry_default_value(EDGE_REGISTRY_PATH, &edge_manifest_path)?;
+    set_registry_default_value(FIREFOX_REGISTRY_PATH, &firefox_manifest_path)?;
+
+    Ok(())
+}
+
 #[cfg(not(windows))]
-fn run_registration_script(_script_path: &Path, _host_binary_path: &Path) -> Result<(), String> {
+fn register_native_host() -> Result<(), String> {
     Err("Native host registration is only supported on Windows in this build.".into())
+}
+
+fn resolve_release_metadata() -> ReleaseMetadata {
+    resolve_install_resource_path("release.json")
+        .ok()
+        .and_then(|release_path| std::fs::read_to_string(release_path).ok())
+        .and_then(|content| serde_json::from_str::<ReleaseMetadata>(&content).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn native_host_manifest_json(
+    host_binary_path: &Path,
+    browser_key: &str,
+    browser_value: serde_json::Value,
+) -> serde_json::Value {
+    let mut manifest = json!({
+        "name": NATIVE_HOST_NAME,
+        "description": "Simple Download Manager native messaging host",
+        "path": host_binary_path.display().to_string(),
+        "type": "stdio",
+    });
+
+    if let Some(object) = manifest.as_object_mut() {
+        object.insert(browser_key.into(), browser_value);
+    }
+
+    manifest
+}
+
+#[cfg(windows)]
+fn write_native_host_manifest(path: &Path, manifest: serde_json::Value) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("Could not serialize native host manifest: {error}"))?;
+
+    std::fs::write(path, content)
+        .map_err(|error| format!("Could not write native host manifest: {error}"))
+}
+
+#[cfg(windows)]
+fn set_registry_default_value(registry_path: &str, manifest_path: &Path) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu
+        .create_subkey(registry_path)
+        .map_err(|error| format!("Could not create HKCU\\{registry_path}: {error}"))?;
+
+    key.set_value("", &manifest_path.display().to_string())
+        .map_err(|error| format!("Could not write HKCU\\{registry_path}: {error}"))
+}
+
+fn should_register_native_host(status: HostRegistrationStatus) -> bool {
+    !matches!(status, HostRegistrationStatus::Configured)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_register_native_host;
+    use crate::storage::HostRegistrationStatus;
+    #[cfg(windows)]
+    use std::path::Path;
+
+    #[test]
+    fn native_host_registration_runs_for_missing_or_broken_entries() {
+        assert!(!should_register_native_host(
+            HostRegistrationStatus::Configured
+        ));
+        assert!(should_register_native_host(HostRegistrationStatus::Missing));
+        assert!(should_register_native_host(HostRegistrationStatus::Broken));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_host_manifest_uses_native_path_and_browser_allowlist() {
+        let manifest = super::native_host_manifest_json(
+            Path::new(
+                r"C:\Program Files\Simple Download Manager\simple-download-manager-native-host.exe",
+            ),
+            "allowed_origins",
+            serde_json::json!(["chrome-extension://extension-id/"]),
+        );
+
+        assert_eq!(
+            manifest.get("path").and_then(|value| value.as_str()),
+            Some(
+                r"C:\Program Files\Simple Download Manager\simple-download-manager-native-host.exe"
+            )
+        );
+        assert_eq!(
+            manifest
+                .get("allowed_origins")
+                .and_then(|value| value.as_array())
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str()),
+            Some("chrome-extension://extension-id/")
+        );
+    }
 }

@@ -25,9 +25,10 @@ export interface AddJobsResult {
 const STATE_CHANGED_EVENT = 'app://state-changed';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
+const mockDownloadDirectory = 'C:\\Users\\You\\Downloads';
 
 const defaultSettings: Settings = {
-  downloadDirectory: 'C:/Downloads',
+  downloadDirectory: mockDownloadDirectory,
   maxConcurrentDownloads: 3,
   autoRetryAttempts: 3,
   speedLimitKibPerSecond: 0,
@@ -59,7 +60,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 2792853504,
       speed: 8808038,
       eta: 72,
-      targetPath: 'C:\\Downloads\\Ubuntu 24.04 LTS Desktop (iso).iso',
+      targetPath: `${mockDownloadDirectory}\\Ubuntu 24.04 LTS Desktop (iso).iso`,
     },
     {
       id: '2',
@@ -71,7 +72,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 1503238554,
       speed: 5452595,
       eta: 388,
-      targetPath: 'C:\\Downloads\\The.Wild.Robot.2024.1080p.mkv',
+      targetPath: `${mockDownloadDirectory}\\The.Wild.Robot.2024.1080p.mkv`,
     },
     {
       id: '3',
@@ -83,7 +84,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 106199777,
       speed: 3250585,
       eta: 581,
-      targetPath: 'C:\\Downloads\\Blender 4.1.1 Setup.exe',
+      targetPath: `${mockDownloadDirectory}\\Blender 4.1.1 Setup.exe`,
     },
     {
       id: '4',
@@ -95,7 +96,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 0,
       speed: 0,
       eta: 0,
-      targetPath: 'C:\\Downloads\\Project_Assets_2024.zip',
+      targetPath: `${mockDownloadDirectory}\\Project_Assets_2024.zip`,
     },
     {
       id: '5',
@@ -107,7 +108,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 13002342,
       speed: 0,
       eta: 0,
-      targetPath: 'C:\\Downloads\\Getting_Started_Guide.pdf',
+      targetPath: `${mockDownloadDirectory}\\Getting_Started_Guide.pdf`,
     },
     {
       id: '6',
@@ -119,7 +120,7 @@ let mockState: DesktopSnapshot = {
       downloadedBytes: 2254857830,
       speed: 0,
       eta: 0,
-      targetPath: 'C:\\Downloads\\Music_Collection_FLAC.zip',
+      targetPath: `${mockDownloadDirectory}\\Music_Collection_FLAC.zip`,
     },
     {
       id: '7',
@@ -132,7 +133,7 @@ let mockState: DesktopSnapshot = {
       speed: 0,
       eta: 135,
       resumeSupport: 'unsupported',
-      targetPath: 'C:\\Downloads\\Fedora-40-x86_64-DVD.iso',
+      targetPath: `${mockDownloadDirectory}\\Fedora-40-x86_64-DVD.iso`,
     },
     {
       id: '8',
@@ -147,7 +148,7 @@ let mockState: DesktopSnapshot = {
       error: 'The server closed the connection before the transfer completed.',
       failureCategory: 'network',
       retryAttempts: 3,
-      targetPath: 'C:\\Downloads\\driver-installer.exe',
+      targetPath: `${mockDownloadDirectory}\\driver-installer.exe`,
     }
   ],
   settings: defaultSettings,
@@ -190,6 +191,21 @@ function replacePathFilename(path: string | undefined, filename: string): string
   const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   if (lastSlash < 0) return filename;
   return `${path.slice(0, lastSlash + 1)}${filename}`;
+}
+
+function filenameFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const segment = parsed.pathname.split('/').filter(Boolean).pop();
+    return segment ? decodeURIComponent(segment) : 'download';
+  } catch {
+    const segment = url.split('/').pop() || 'download';
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  }
 }
 
 export async function getAppSnapshot(): Promise<DesktopSnapshot> {
@@ -431,7 +447,7 @@ export async function addJob(url: string): Promise<AddJobResult> {
     }
 
     const jobId = crypto.randomUUID();
-    const filename = url.split('/').pop() || 'download';
+    const filename = filenameFromUrl(url);
     mockState.jobs.push({
       id: jobId,
       url,
@@ -472,7 +488,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
       }
 
       const jobId = crypto.randomUUID();
-      const filename = url.split('/').pop() || 'download';
+      const filename = filenameFromUrl(url);
       mockState.jobs.push({
         id: jobId,
         url,

@@ -1,11 +1,27 @@
 import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
+import { discardBrowserDownload, shouldDiscardBrowserDownloadAfterHandoff } from './browserDownloads';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const interceptedBrowserDownloadIds = new Set<number>();
+type DownloadFilenameSuggestion = {
+  filename?: string;
+  conflictAction?: 'uniquify' | 'overwrite' | 'prompt';
+};
+type DownloadFilenameSuggest = (suggestion?: DownloadFilenameSuggestion) => void;
+type DownloadsWithOptionalFilenameInterception = typeof browser.downloads & {
+  onDeterminingFilename?: {
+    addListener(listener: (item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) => void): void;
+  };
+};
+type DownloadsWithFilenameInterception = typeof browser.downloads & {
+  onDeterminingFilename: {
+    addListener(listener: (item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) => void): void;
+  };
+};
 
 async function ensureContextMenu() {
   const settings = await getExtensionSettings();
@@ -73,26 +89,32 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
     return;
   }
 
-  const pingResponse = await pingNativeHost();
-  if (isErrorResponse(pingResponse)) {
-    const connection = connectionForErrorCode(pingResponse.code);
-    const state = await setHostError(pingResponse.code, toUserFacingMessage(pingResponse.code, pingResponse.message), connection);
-    await updateBrowserBadge(state);
-    return;
-  }
-
-  await setLastResult('connected', pingResponse);
-  settings = getSyncedSettings(pingResponse, settings);
-  if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
-    return;
-  }
-
   interceptedBrowserDownloadIds.add(item.id);
   let paused = false;
 
   try {
     await browser.downloads.pause(item.id);
     paused = true;
+
+    const pingResponse = await pingNativeHost();
+    if (isErrorResponse(pingResponse)) {
+      if (paused) {
+        await browser.downloads.resume(item.id).catch(() => undefined);
+      }
+      const connection = connectionForErrorCode(pingResponse.code);
+      const state = await setHostError(pingResponse.code, toUserFacingMessage(pingResponse.code, pingResponse.message), connection);
+      await updateBrowserBadge(state);
+      return;
+    }
+
+    await setLastResult('connected', pingResponse);
+    settings = getSyncedSettings(pingResponse, settings);
+    if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
+      if (paused) {
+        await browser.downloads.resume(item.id).catch(() => undefined);
+      }
+      return;
+    }
 
     const response = settings.downloadHandoffMode === 'auto'
       ? await enqueueDownload(item.url, {
@@ -119,18 +141,13 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
       return;
     }
 
-    if (isCanceledHandoff(response)) {
-      if (paused) {
-        await browser.downloads.resume(item.id).catch(() => undefined);
-      }
+    if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
+      await discardBrowserDownload(browser.downloads, item.id);
       const state = await setLastResult('connected', response);
       await updateBrowserBadge(state);
-      return;
+    } else if (paused) {
+      await browser.downloads.resume(item.id).catch(() => undefined);
     }
-
-    await browser.downloads.cancel(item.id).catch(() => undefined);
-    const state = await setLastResult('connected', response);
-    await updateBrowserBadge(state);
   } catch (error) {
     if (paused) {
       await browser.downloads.resume(item.id).catch(() => undefined);
@@ -141,6 +158,84 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
       'error',
     );
     await updateBrowserBadge(state);
+  } finally {
+    interceptedBrowserDownloadIds.delete(item.id);
+  }
+}
+
+async function handleBrowserDownloadDeterminingFilename(
+  item: browser.downloads.DownloadItem,
+  suggest: DownloadFilenameSuggest,
+) {
+  if (interceptedBrowserDownloadIds.has(item.id) || !isHttpUrl(item.url)) {
+    suggestBrowserDownload(item, suggest);
+    return;
+  }
+
+  let settings = await getExtensionSettings();
+  if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
+    suggestBrowserDownload(item, suggest);
+    return;
+  }
+
+  interceptedBrowserDownloadIds.add(item.id);
+
+  try {
+    const pingResponse = await pingNativeHost();
+    if (isErrorResponse(pingResponse)) {
+      const connection = connectionForErrorCode(pingResponse.code);
+      const state = await setHostError(pingResponse.code, toUserFacingMessage(pingResponse.code, pingResponse.message), connection);
+      await updateBrowserBadge(state);
+      suggestBrowserDownload(item, suggest);
+      return;
+    }
+
+    await setLastResult('connected', pingResponse);
+    settings = getSyncedSettings(pingResponse, settings);
+    if (!shouldHandleBrowserDownload(item.url, settings, item.filename)) {
+      suggestBrowserDownload(item, suggest);
+      return;
+    }
+
+    const response = settings.downloadHandoffMode === 'auto'
+      ? await enqueueDownload(item.url, {
+          entryPoint: 'browser_download',
+          extensionVersion: browser.runtime.getManifest().version,
+          incognito: item.incognito,
+        })
+      : await promptDownload(item.url, {
+          entryPoint: 'browser_download',
+          extensionVersion: browser.runtime.getManifest().version,
+          incognito: item.incognito,
+        }, {
+          suggestedFilename: basenameOnly(item.filename),
+          totalBytes: item.totalBytes > 0 ? item.totalBytes : undefined,
+        });
+
+    if (isErrorResponse(response)) {
+      const connection = connectionForErrorCode(response.code);
+      const state = await setHostError(response.code, toUserFacingMessage(response.code, response.message), connection);
+      await updateBrowserBadge(state);
+      suggestBrowserDownload(item, suggest);
+      return;
+    }
+
+    if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
+      await discardBrowserDownload(browser.downloads, item.id);
+      const state = await setLastResult('connected', response);
+      await updateBrowserBadge(state);
+      return;
+    }
+
+    suggestBrowserDownload(item, suggest);
+  } catch (error) {
+    const state = await setHostError(
+      'HOST_NOT_AVAILABLE',
+      error instanceof Error ? error.message : 'Could not hand the browser download to the desktop app.',
+      'error',
+    );
+    await updateBrowserBadge(state);
+    suggestBrowserDownload(item, suggest);
   } finally {
     interceptedBrowserDownloadIds.delete(item.id);
   }
@@ -162,9 +257,16 @@ browser.contextMenus.onClicked.addListener((info: browser.contextMenus.OnClickDa
   void handleContextMenuClick(info, tab);
 });
 
-browser.downloads?.onCreated.addListener((item) => {
-  void handleBrowserDownloadCreated(item);
-});
+const filenameInterceptionApi = getFilenameInterceptionApi();
+if (filenameInterceptionApi) {
+  filenameInterceptionApi.onDeterminingFilename.addListener((item, suggest) => {
+    void handleBrowserDownloadDeterminingFilename(item, suggest);
+  });
+} else {
+  browser.downloads?.onCreated.addListener((item) => {
+    void handleBrowserDownloadCreated(item);
+  });
+}
 
 browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   switch (message.type) {
@@ -300,10 +402,6 @@ function getSyncedSettings(response: HostToExtensionResponse, fallback: Extensio
   return payload.extensionSettings ?? fallback;
 }
 
-function isCanceledHandoff(response: HostToExtensionResponse): boolean {
-  return response.ok && response.type === 'accepted' && response.payload.status === 'canceled';
-}
-
 async function updateBrowserBadge(state: PopupStateResponse) {
   const badgeApi = getBadgeApi();
   if (!badgeApi) {
@@ -341,6 +439,21 @@ function getBadgeApi() {
   };
 
   return runtimeBrowser.action ?? runtimeBrowser.browserAction;
+}
+
+function getFilenameInterceptionApi(): DownloadsWithFilenameInterception | null {
+  const downloads = browser.downloads as DownloadsWithOptionalFilenameInterception | undefined;
+  return downloads?.onDeterminingFilename ? downloads as DownloadsWithFilenameInterception : null;
+}
+
+function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: DownloadFilenameSuggest) {
+  const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url);
+  if (filename) {
+    suggest({ filename, conflictAction: 'uniquify' });
+    return;
+  }
+
+  suggest();
 }
 
 async function openOptionsPage() {

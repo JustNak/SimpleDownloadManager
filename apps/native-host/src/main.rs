@@ -34,7 +34,7 @@ fn run() -> Result<(), String> {
 
 fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
     if let Err(response) = validate_protocol(&request) {
-        return response;
+        return *response;
     }
 
     let forwarder = AppForwarder::from_environment();
@@ -54,7 +54,7 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
                 Ok(response) => map_status_response(response),
                 Err(error) => map_forwarder_error(request.request_id, error),
             },
-            Err(response) => response,
+            Err(response) => *response,
         },
         "enqueue_download" => match parse_enqueue_payload(&request) {
             Ok(payload) => {
@@ -63,7 +63,7 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
                     Err(error) => map_forwarder_error(request.request_id, error),
                 }
             }
-            Err(response) => response,
+            Err(response) => *response,
         },
         "prompt_download" => match parse_prompt_download_payload(&request) {
             Ok(payload) => match forwarder.send(&app_prompt_download_request(
@@ -73,7 +73,7 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
                 Ok(response) => map_app_response(response),
                 Err(error) => map_forwarder_error(request.request_id, error),
             },
-            Err(response) => response,
+            Err(response) => *response,
         },
         "save_extension_settings" => match forwarder.send(&app_save_extension_settings_request(
             request.request_id.clone(),

@@ -11,8 +11,8 @@ const distRoot = path.join(appRoot, 'dist');
 const releaseConfig = JSON.parse(
   readFileSync(path.resolve(appRoot, '..', '..', 'config', 'release.json'), 'utf8'),
 );
-const browserExtensionVersion = '0.2.0';
-const displayVersion = '0.2.0-a';
+const browserExtensionVersion = '0.2.1';
+const displayVersion = '0.2.1-a';
 
 const targets = [
   {

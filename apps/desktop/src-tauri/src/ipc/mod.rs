@@ -265,10 +265,9 @@ async fn accept_single_connection(
                 .await
                 .map_err(|error| format!("Could not write named pipe response: {error}"))?;
 
-            writer
-                .write_all(b"\n")
-                .await
-                .map_err(|error| format!("Could not write named pipe response terminator: {error}"))?;
+            writer.write_all(b"\n").await.map_err(|error| {
+                format!("Could not write named pipe response terminator: {error}")
+            })?;
 
             Ok(())
         }
@@ -327,19 +326,18 @@ async fn handle_request(
             )
         }
         "save_extension_settings" => {
-            let extension_settings = match serde_json::from_value::<ExtensionIntegrationSettings>(
-                request.payload,
-            ) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    return HostResponse::error(
-                        request.request_id,
-                        "invalid_payload",
-                        "INVALID_PAYLOAD",
-                        format!("Could not parse extension settings: {error}"),
-                    )
-                }
-            };
+            let extension_settings =
+                match serde_json::from_value::<ExtensionIntegrationSettings>(request.payload) {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        return HostResponse::error(
+                            request.request_id,
+                            "invalid_payload",
+                            "INVALID_PAYLOAD",
+                            format!("Could not parse extension settings: {error}"),
+                        )
+                    }
+                };
 
             match state
                 .save_extension_integration_settings(extension_settings)
@@ -587,7 +585,11 @@ pub fn gather_host_registration_diagnostics() -> Result<HostRegistrationDiagnost
             }
         };
 
-        entries.push(read_host_registration_entry(browser, registry_path, Path::new(&manifest_path))?);
+        entries.push(read_host_registration_entry(
+            browser,
+            registry_path,
+            Path::new(&manifest_path),
+        )?);
     }
 
     let status = if entries.iter().any(|entry| entry.host_binary_exists) {
@@ -618,10 +620,28 @@ fn read_host_registration_entry(
         });
     }
 
-    let content = std::fs::read_to_string(manifest_path)
-        .map_err(|error| format!("Could not read native host manifest: {error}"))?;
-    let manifest: Value = serde_json::from_str(&content)
-        .map_err(|error| format!("Could not parse native host manifest: {error}"))?;
+    let content = match std::fs::read_to_string(manifest_path) {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!("could not read native host manifest for diagnostics: {error}");
+            return Ok(broken_host_registration_entry(
+                browser,
+                registry_path,
+                manifest_path,
+            ));
+        }
+    };
+    let manifest: Value = match serde_json::from_str(&content) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("could not parse native host manifest for diagnostics: {error}");
+            return Ok(broken_host_registration_entry(
+                browser,
+                registry_path,
+                manifest_path,
+            ));
+        }
+    };
     let host_path = manifest
         .get("path")
         .and_then(|value| value.as_str())
@@ -639,6 +659,22 @@ fn read_host_registration_entry(
         host_binary_path: host_path.as_ref().map(|value| value.display().to_string()),
         host_binary_exists,
     })
+}
+
+#[cfg(windows)]
+fn broken_host_registration_entry(
+    browser: &str,
+    registry_path: &str,
+    manifest_path: &Path,
+) -> HostRegistrationEntry {
+    HostRegistrationEntry {
+        browser: browser.into(),
+        registry_path: registry_path.into(),
+        manifest_path: Some(manifest_path.display().to_string()),
+        manifest_exists: true,
+        host_binary_path: None,
+        host_binary_exists: false,
+    }
 }
 
 #[cfg(windows)]
@@ -660,4 +696,30 @@ fn map_backend_error(request_id: String, error: BackendError) -> HostResponse {
     };
 
     HostResponse::error(request_id, message_type, error.code, error.message)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn invalid_native_host_manifest_is_reported_as_broken_entry() {
+        let manifest_path = std::env::temp_dir().join(format!(
+            "simple-download-manager-invalid-manifest-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&manifest_path, "{not valid json").expect("write invalid manifest");
+
+        let entry = super::read_host_registration_entry("Chrome", "Software\\Test", &manifest_path)
+            .expect("invalid manifest should not fail diagnostics");
+
+        assert!(entry.manifest_exists);
+        assert_eq!(
+            entry.manifest_path.as_deref(),
+            Some(manifest_path.display().to_string().as_str())
+        );
+        assert_eq!(entry.host_binary_path, None);
+        assert!(!entry.host_binary_exists);
+
+        let _ = std::fs::remove_file(manifest_path);
+    }
 }

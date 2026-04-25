@@ -7,6 +7,7 @@ import { ToastArea } from './ToastArea';
 import { AddDownloadModal } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
 import { getErrorMessage } from './errors';
+import { loadInitialAppData } from './appBootstrap';
 import {
   browseDirectory,
   cancelJob,
@@ -48,11 +49,13 @@ import {
   WifiOff,
 } from 'lucide-react';
 import type { DiagnosticsSnapshot } from './types';
+import type { DesktopSnapshot } from './backend';
 
 type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings';
 type SortMode = 'status' | 'name' | 'progress' | 'size';
 
 const DEFAULT_ACCENT_COLOR = '#3b82f6';
+const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
 const finishedStates = [JobState.Completed, JobState.Canceled];
 
@@ -60,7 +63,7 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Checking);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [settings, setSettings] = useState<Settings>({
-    downloadDirectory: 'C:/Downloads',
+    downloadDirectory: DEFAULT_DOWNLOAD_DIRECTORY,
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
@@ -97,29 +100,38 @@ export default function App() {
 
     async function initialize() {
       try {
-        const [snapshot, diagnosticSnapshot] = await Promise.all([getAppSnapshot(), getDiagnostics()]);
-        if (isMounted) {
-          setConnectionState(snapshot.connectionState);
-          setJobs(snapshot.jobs);
-          setSettings(snapshot.settings);
-          setDiagnostics(diagnosticSnapshot);
+        const initialData = await loadInitialAppData(getAppSnapshot, getDiagnostics);
+        if (!isMounted) return;
+
+        if (!initialData.snapshot) {
+          throw initialData.snapshotError ?? new Error('Failed to load desktop state.');
+        }
+
+        applyDesktopSnapshot(initialData.snapshot);
+        if (initialData.diagnostics) {
+          setDiagnostics(initialData.diagnostics);
+        } else if (initialData.diagnosticsError) {
+          addToast({
+            type: 'warning',
+            title: 'Diagnostics Unavailable',
+            message: getErrorMessage(initialData.diagnosticsError, 'Download state loaded, but diagnostics could not be refreshed.'),
+          });
         }
 
         dispose = await subscribeToStateChanged((nextSnapshot) => {
-          setConnectionState(nextSnapshot.connectionState);
-          setJobs(nextSnapshot.jobs);
-          setSettings(nextSnapshot.settings);
+          applyDesktopSnapshot(nextSnapshot);
           void refreshDiagnostics();
         });
       } catch (error) {
-        if (!isMounted) return;
-        setConnectionState(ConnectionState.Error);
-        addToast({
-          type: 'error',
-          title: 'Backend Error',
-          message: getErrorMessage(error, 'Failed to load desktop state.'),
-          autoClose: false,
-        });
+        if (isMounted) {
+          setConnectionState(ConnectionState.Error);
+          addToast({
+            type: 'error',
+            title: 'Backend Error',
+            message: getErrorMessage(error, 'Failed to load desktop state.'),
+            autoClose: false,
+          });
+        }
       }
     }
 
@@ -144,6 +156,24 @@ export default function App() {
     void subscribe();
     return () => {
       void dispose?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      void refreshSnapshotFromBackend();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh();
+      }
+    };
+
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, []);
 
@@ -176,6 +206,25 @@ export default function App() {
     }
 
     setView(nextView);
+  }
+
+  function applyDesktopSnapshot(snapshot: DesktopSnapshot) {
+    setConnectionState(snapshot.connectionState);
+    setJobs(snapshot.jobs);
+    setSettings(snapshot.settings);
+  }
+
+  async function refreshSnapshotFromBackend() {
+    try {
+      applyDesktopSnapshot(await getAppSnapshot());
+    } catch (error) {
+      setConnectionState(ConnectionState.Error);
+      addToast({
+        type: 'error',
+        title: 'Refresh Failed',
+        message: getErrorMessage(error, 'Failed to refresh desktop state.'),
+      });
+    }
   }
 
   function addToast(toast: Omit<ToastMessage, 'id'>) {
