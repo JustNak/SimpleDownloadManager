@@ -2,19 +2,27 @@ use crate::state::TorrentRuntimeSnapshot;
 use librqbit::api::TorrentIdOrHash;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, ManagedTorrent, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, ManagedTorrent, PeerConnectionOptions, Session, SessionOptions,
     SessionPersistenceConfig,
 };
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
-#[derive(Clone)]
+pub const TORRENT_LISTEN_PORT_RANGE: Range<u16> = 42000..42100;
+pub const TORRENT_PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+pub const TORRENT_PEER_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct TorrentEngine {
     session: Arc<Session>,
     handles: Arc<Mutex<HashMap<usize, Arc<ManagedTorrent>>>>,
+    listener_fallback_message: Option<String>,
+    listener_fallback_reported: AtomicBool,
 }
 
 impl TorrentEngine {
@@ -27,23 +35,48 @@ impl TorrentEngine {
             .await
             .map_err(|error| format!("Could not create torrent session directory: {error}"))?;
 
-        let session = Session::new_with_opts(
-            default_output_folder,
-            SessionOptions {
-                fastresume: true,
-                persistence: Some(SessionPersistenceConfig::Json {
-                    folder: Some(persistence_dir),
-                }),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| format!("Could not initialize torrent engine: {error:#}"))?;
+        let (session, listener_fallback_message) =
+            match Session::new_with_opts(
+                default_output_folder.clone(),
+                torrent_session_options(persistence_dir.clone()),
+            )
+            .await
+            {
+                Ok(session) => (session, None),
+                Err(error) if is_listen_error(&format!("{error:#}")) => {
+                    let message = format!(
+                        "Torrent listen ports 42000-42099 are unavailable; continuing without inbound peer listener: {error:#}"
+                    );
+                    let fallback_session = Session::new_with_opts(
+                        default_output_folder,
+                        torrent_session_options_with_listener(persistence_dir, None),
+                    )
+                    .await
+                    .map_err(|fallback_error| {
+                        format!("Could not initialize torrent engine: {fallback_error:#}")
+                    })?;
+                    (fallback_session, Some(message))
+                }
+                Err(error) => {
+                    return Err(format!("Could not initialize torrent engine: {error:#}"));
+                }
+            };
 
         Ok(Self {
             session,
             handles: Arc::new(Mutex::new(HashMap::new())),
+            listener_fallback_message,
+            listener_fallback_reported: AtomicBool::new(false),
         })
+    }
+
+    pub fn take_listener_fallback_message(&self) -> Option<String> {
+        let message = self.listener_fallback_message.as_ref()?;
+        if self.listener_fallback_reported.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(message.clone())
+        }
     }
 
     pub async fn add_source(
@@ -57,7 +90,7 @@ impl TorrentEngine {
             .map_err(|error| format!("Could not create torrent output directory: {error}"))?;
         self.set_upload_limit(upload_limit_kib_per_second);
         let options = AddTorrentOptions {
-            paused: true,
+            paused: false,
             output_folder: Some(output_folder.display().to_string()),
             overwrite: true,
             ratelimits: torrent_limits(upload_limit_kib_per_second),
@@ -127,6 +160,34 @@ impl TorrentEngine {
     }
 }
 
+pub(crate) fn torrent_session_options(persistence_dir: PathBuf) -> SessionOptions {
+    torrent_session_options_with_listener(persistence_dir, Some(TORRENT_LISTEN_PORT_RANGE))
+}
+
+fn torrent_session_options_with_listener(
+    persistence_dir: PathBuf,
+    listen_port_range: Option<Range<u16>>,
+) -> SessionOptions {
+    SessionOptions {
+        fastresume: true,
+        persistence: Some(SessionPersistenceConfig::Json {
+            folder: Some(persistence_dir),
+        }),
+        peer_opts: Some(PeerConnectionOptions {
+            connect_timeout: Some(TORRENT_PEER_CONNECT_TIMEOUT),
+            read_write_timeout: Some(TORRENT_PEER_READ_WRITE_TIMEOUT),
+            keep_alive_interval: None,
+        }),
+        listen_port_range,
+        enable_upnp_port_forwarding: false,
+        ..Default::default()
+    }
+}
+
+fn is_listen_error(message: &str) -> bool {
+    message.contains("error listening on TCP") || message.contains("no ports in range")
+}
+
 fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
     let stats = handle.stats();
     let peers = stats
@@ -160,4 +221,20 @@ fn upload_limit_bps(upload_limit_kib_per_second: u32) -> Option<NonZeroU32> {
     upload_limit_kib_per_second
         .checked_mul(1024)
         .and_then(NonZeroU32::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_options_enable_listen_range_and_peer_timeouts() {
+        let options = torrent_session_options(PathBuf::from("session"));
+
+        assert_eq!(options.listen_port_range, Some(TORRENT_LISTEN_PORT_RANGE));
+        assert!(!options.enable_upnp_port_forwarding);
+        let peer_options = options.peer_opts.expect("peer options");
+        assert_eq!(peer_options.connect_timeout, Some(TORRENT_PEER_CONNECT_TIMEOUT));
+        assert_eq!(peer_options.read_write_timeout, Some(TORRENT_PEER_READ_WRITE_TIMEOUT));
+    }
 }

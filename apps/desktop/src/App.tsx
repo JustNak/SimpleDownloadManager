@@ -652,8 +652,8 @@ export default function App() {
       </Titlebar>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="download-sidebar flex w-[220px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-2 py-2">
-          <nav className="flex flex-col gap-0.5">
+        <aside className="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
+          <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 flex flex-col gap-0.5">
             <div className="flex items-center gap-1">
               <SectionCollapseButton
                 expanded={isDownloadSectionExpanded}
@@ -713,7 +713,7 @@ export default function App() {
             </div>
           </nav>
 
-          <div className="space-y-2">
+          <div className="shrink-0 space-y-2">
             <div className="h-px bg-border" />
             <NavItem icon={<SettingsIcon size={18} />} label="Settings" active={view === 'settings'} onClick={() => requestViewChange('settings')} />
           </div>

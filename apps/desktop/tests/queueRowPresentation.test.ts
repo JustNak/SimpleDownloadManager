@@ -101,6 +101,18 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  queueStatusPresentation({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 0,
+    torrent: { uploadedBytes: 0, ratio: 0 },
+  }),
+  { label: 'Finding', tone: 'warning' },
+  'metadata-pending torrents should show a specific Finding badge instead of Downloading',
+);
+
+assert.deepEqual(
   torrentDetailMetrics({
     ...baseJob,
     transferKind: 'torrent',

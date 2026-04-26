@@ -32,3 +32,21 @@ assert.match(
   /mode=\{isTorrentStatusView \? 'torrents' : 'downloads'\}/,
   'the footer status bar should switch to a torrent-specific mode in torrent views',
 );
+
+assert.match(
+  source,
+  /download-sidebar flex w-\[220px\] shrink-0 flex-col overflow-hidden/,
+  'the sidebar shell should constrain overflow so only the navigation section scrolls',
+);
+
+assert.match(
+  source,
+  /<nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain/,
+  'the sidebar navigation should scroll independently on short windows',
+);
+
+assert.match(
+  source,
+  /<div className="shrink-0 space-y-2">/,
+  'the Settings footer should stay fixed below the scrollable sidebar navigation',
+);

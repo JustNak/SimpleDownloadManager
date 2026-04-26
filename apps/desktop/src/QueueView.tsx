@@ -11,6 +11,7 @@ import { canRemoveDownloadImmediately } from './queueCommands';
 import {
   clampQueueProgress,
   formatQueueSize,
+  isTorrentMetadataPending,
   queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
@@ -1037,7 +1038,7 @@ function TorrentDetailLine({ job }: { job: DownloadJob }) {
   if (!metrics.length) {
     return (
       <div className="truncate" title={job.url}>
-        Torrent metadata pending
+        {isTorrentMetadataPending(job) ? 'Finding metadata' : 'Torrent metadata pending'}
       </div>
     );
   }

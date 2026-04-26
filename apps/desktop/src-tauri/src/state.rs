@@ -208,6 +208,23 @@ impl SharedState {
         Ok(state)
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_tests(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(RuntimeState {
+                connection_state: ConnectionState::Connected,
+                jobs,
+                settings: Settings::default(),
+                main_window: None,
+                diagnostic_events: Vec::new(),
+                next_job_number: 99,
+                active_workers: HashSet::new(),
+                last_host_contact: None,
+            })),
+            storage_path: Arc::new(storage_path),
+        }
+    }
+
     pub async fn snapshot(&self) -> DesktopSnapshot {
         let state = self.inner.read().await;
         state.snapshot()
@@ -792,7 +809,7 @@ impl SharedState {
         };
 
         if let Some(temp_path) = temp_to_remove {
-            let _ = std::fs::remove_file(temp_path);
+            let _ = remove_path_if_exists(&temp_path);
         }
 
         let (snapshot, persisted) = {
@@ -936,12 +953,7 @@ impl SharedState {
             let is_active_worker = state.active_workers.contains(id);
             let job = &state.jobs[job_index];
 
-            if is_active_worker
-                || matches!(
-                    job.state,
-                    JobState::Starting | JobState::Downloading | JobState::Seeding
-                )
-            {
+            if job_blocks_removal(job, is_active_worker) {
                 return Err(BackendError {
                     code: "INTERNAL_ERROR",
                     message: "Pause or cancel the active transfer before removing it.".into(),
@@ -949,7 +961,19 @@ impl SharedState {
             }
 
             let paths_to_cleanup = (PathBuf::from(&job.temp_path), job.state);
+            let removed_canceled_torrent =
+                job.transfer_kind == TransferKind::Torrent && job.state == JobState::Canceled;
+            let filename = job.filename.clone();
+            state.active_workers.remove(id);
             state.jobs.remove(job_index);
+            if removed_canceled_torrent {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent".into(),
+                    format!("Removed canceled torrent {filename}"),
+                    Some(id.into()),
+                );
+            }
 
             (state.snapshot(), state.persisted(), paths_to_cleanup)
         };
@@ -981,12 +1005,7 @@ impl SharedState {
                             message: "Job not found.".into(),
                         })?;
 
-                if state.active_workers.contains(id)
-                    || matches!(
-                        job.state,
-                        JobState::Starting | JobState::Downloading | JobState::Seeding
-                    )
-                {
+                if job_blocks_removal(job, state.active_workers.contains(id)) {
                     return Err(BackendError {
                         code: "INTERNAL_ERROR",
                         message:
@@ -2580,6 +2599,18 @@ fn reset_integrity_for_retry(job: &mut DownloadJob) {
     }
 }
 
+fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {
+    if job.state == JobState::Canceled {
+        return false;
+    }
+
+    is_active_worker
+        || matches!(
+            job.state,
+            JobState::Starting | JobState::Downloading | JobState::Seeding
+        )
+}
+
 fn apply_download_filename(job: &mut DownloadJob, filename: &str) {
     let filename = filename.trim();
     if !filename.is_empty() {
@@ -3622,6 +3653,74 @@ mod tests {
             .await
             .expect("claiming jobs should still work");
         assert!(tasks.is_empty());
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn remove_canceled_torrent_job_clears_stale_worker_slot() {
+        let download_dir = test_runtime_dir("remove-canceled-torrent");
+        let mut canceled_job =
+            download_job("job_1", JobState::Canceled, ResumeSupport::Unsupported, 0);
+        canceled_job.transfer_kind = TransferKind::Torrent;
+        canceled_job.torrent = Some(TorrentInfo::default());
+        canceled_job.target_path = download_dir.join("torrent-a634dc94").display().to_string();
+        canceled_job.temp_path = download_dir
+            .join(".torrent-state")
+            .join("job_1")
+            .display()
+            .to_string();
+        std::fs::create_dir_all(&canceled_job.temp_path).unwrap();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![canceled_job]);
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.active_workers.insert("job_1".into());
+        }
+
+        let snapshot = state
+            .remove_job("job_1")
+            .await
+            .expect("canceled torrent should be removable even while worker cleanup is pending");
+
+        assert!(snapshot.jobs.is_empty());
+        let runtime = state.inner.read().await;
+        assert!(!runtime.active_workers.contains("job_1"));
+        drop(runtime);
+        assert!(!download_dir.join(".torrent-state").join("job_1").exists());
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_canceled_torrent_job_with_files_clears_stale_worker_slot() {
+        let download_dir = test_runtime_dir("delete-canceled-torrent");
+        let target_path = download_dir.join("torrent-a634dc94");
+        let temp_path = download_dir.join(".torrent-state").join("job_1");
+        std::fs::create_dir_all(&target_path).unwrap();
+        std::fs::create_dir_all(&temp_path).unwrap();
+        let mut canceled_job =
+            download_job("job_1", JobState::Canceled, ResumeSupport::Unsupported, 0);
+        canceled_job.transfer_kind = TransferKind::Torrent;
+        canceled_job.torrent = Some(TorrentInfo::default());
+        canceled_job.target_path = target_path.display().to_string();
+        canceled_job.temp_path = temp_path.display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![canceled_job]);
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.active_workers.insert("job_1".into());
+        }
+
+        let snapshot = state
+            .delete_job("job_1", true)
+            .await
+            .expect("delete from disk should work for canceled torrents with stale workers");
+
+        assert!(snapshot.jobs.is_empty());
+        let runtime = state.inner.read().await;
+        assert!(!runtime.active_workers.contains("job_1"));
+        drop(runtime);
+        assert!(!target_path.exists());
+        assert!(!temp_path.exists());
 
         let _ = std::fs::remove_dir_all(download_dir);
     }

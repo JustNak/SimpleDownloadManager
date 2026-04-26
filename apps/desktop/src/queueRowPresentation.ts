@@ -35,7 +35,21 @@ export function clampQueueProgress(progress: number): number {
   return Math.max(0, Math.min(100, progress));
 }
 
-export function queueStatusPresentation(job: Pick<DownloadJob, 'state' | 'torrent'>): QueueStatusPresentation {
+type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
+  Partial<Pick<DownloadJob, 'torrent' | 'transferKind' | 'totalBytes'>>;
+
+export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolean {
+  if (job.transferKind !== 'torrent') return false;
+  if (job.state !== 'starting' && job.state !== 'downloading') return false;
+  if ((job.totalBytes ?? 0) > 0) return false;
+  return !job.torrent?.infoHash && !job.torrent?.name;
+}
+
+export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueStatusPresentation {
+  if (isTorrentMetadataPending(job)) {
+    return { label: 'Finding', tone: 'warning' };
+  }
+
   switch (job.state) {
     case 'seeding':
       return {

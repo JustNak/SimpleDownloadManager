@@ -6,7 +6,8 @@ build = "build.rs"
 
 [dependencies]
 futures-util = "0.3.31"
-librqbit = { version = "8.1.1", default-features = false, features = ["default-tls"] }
+aws-lc-rs = { version = "1.16.3", features = ["prebuilt-nasm"] }
+librqbit = { version = "8.1.1", default-features = false, features = ["rust-tls"] }
 reqwest = { version = "0.12.15", features = ["stream", "rustls-tls"] }
 rfd = "0.15.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,3 +24,6 @@ windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_UI_Sh
 
 [build-dependencies]
 tauri-build = { version = "2.0.6", features = [] }
+
+[profile.dev.package.aws-lc-sys]
+debug = 0

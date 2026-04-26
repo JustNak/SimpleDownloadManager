@@ -64,3 +64,9 @@ assert.equal(
   true,
   'inactive queued downloads can be removed immediately',
 );
+
+assert.equal(
+  canRemoveDownloadImmediately(job('job_1', 'canceled')),
+  true,
+  'canceled transfers should be removable immediately even if backend cleanup is still settling',
+);

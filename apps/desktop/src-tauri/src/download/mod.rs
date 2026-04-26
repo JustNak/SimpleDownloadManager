@@ -11,6 +11,7 @@ use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -28,6 +29,8 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(600);
+const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const BALANCED_MIN_SEGMENTED_SIZE: u64 = 64 * 1024 * 1024;
 const FAST_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
 const REQUEST_RETRY_DELAYS: [Duration; 3] = [
@@ -101,10 +104,17 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
     });
 }
 
+#[derive(Debug)]
 enum DownloadOutcome {
     Completed,
     Paused,
     Canceled,
+}
+
+#[derive(Debug)]
+enum TorrentAddOutcome {
+    Added(usize),
+    Interrupted(DownloadOutcome),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,19 +397,50 @@ async fn run_torrent_download_attempt(
     let engine = torrent_engine(state)
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+    if let Some(message) = engine.take_listener_fallback_message() {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent",
+                message,
+                Some(task.id.clone()),
+            )
+            .await;
+    }
+
     let output_folder = task.target_path.clone();
-    let engine_id = engine
-        .add_source(
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "torrent",
+            "Finding torrent metadata",
+            Some(task.id.clone()),
+        )
+        .await;
+    let add_outcome = add_torrent_with_controls(
+        state,
+        &task.id,
+        engine.add_source(
             &task.url,
             &output_folder,
             settings.torrent.upload_limit_kib_per_second,
+        ),
+        TORRENT_METADATA_TIMEOUT,
+        TORRENT_METADATA_CONTROL_INTERVAL,
+    )
+    .await?;
+    let engine_id = match add_outcome {
+        TorrentAddOutcome::Added(engine_id) => engine_id,
+        TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+    };
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "torrent",
+            "Torrent metadata resolved",
+            Some(task.id.clone()),
         )
-        .await
-        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-    engine
-        .unpause(engine_id)
-        .await
-        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+        .await;
 
     let mut last_downloaded = 0;
     let mut last_sample = Instant::now();
@@ -469,6 +510,82 @@ async fn run_torrent_download_attempt(
         }
 
         tokio::time::sleep(PROGRESS_UPDATE_INTERVAL).await;
+    }
+}
+
+async fn add_torrent_with_controls<F>(
+    state: &SharedState,
+    job_id: &str,
+    add_torrent: F,
+    metadata_timeout: Duration,
+    control_interval: Duration,
+) -> Result<TorrentAddOutcome, DownloadError>
+where
+    F: Future<Output = Result<usize, String>>,
+{
+    tokio::pin!(add_torrent);
+    let timeout = tokio::time::sleep(metadata_timeout);
+    tokio::pin!(timeout);
+    let mut control_tick = tokio::time::interval(control_interval);
+
+    loop {
+        tokio::select! {
+            result = &mut add_torrent => {
+                return match result {
+                    Ok(engine_id) => Ok(TorrentAddOutcome::Added(engine_id)),
+                    Err(message) => {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Error,
+                                "torrent",
+                                format!("Torrent add failed: {message}"),
+                                Some(job_id.to_string()),
+                            )
+                            .await;
+                        Err(download_error(FailureCategory::Torrent, message, false))
+                    }
+                };
+            }
+            _ = &mut timeout => {
+                let message = "Torrent metadata lookup timed out.".to_string();
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Error,
+                        "torrent",
+                        message.clone(),
+                        Some(job_id.to_string()),
+                    )
+                    .await;
+                return Err(download_error(FailureCategory::Torrent, message, true));
+            }
+            _ = control_tick.tick() => {
+                match state.worker_control(job_id).await {
+                    WorkerControl::Paused => {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Info,
+                                "torrent",
+                                "Torrent metadata lookup paused",
+                                Some(job_id.to_string()),
+                            )
+                            .await;
+                        return Ok(TorrentAddOutcome::Interrupted(DownloadOutcome::Paused));
+                    }
+                    WorkerControl::Canceled | WorkerControl::Missing => {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Info,
+                                "torrent",
+                                "Torrent metadata lookup canceled",
+                                Some(job_id.to_string()),
+                            )
+                            .await;
+                        return Ok(TorrentAddOutcome::Interrupted(DownloadOutcome::Canceled));
+                    }
+                    WorkerControl::Continue => {}
+                }
+            }
+        }
     }
 }
 
@@ -2032,6 +2149,8 @@ async fn notify(app: &AppHandle, state: &SharedState, title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{DownloadJob, JobState, TorrentInfo};
+    use std::future::pending;
 
     #[test]
     fn http_status_errors_are_classified_by_recoverability() {
@@ -2053,6 +2172,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn torrent_metadata_add_returns_canceled_when_job_is_canceled() {
+        let state = SharedState::for_tests(
+            test_storage_path("torrent-metadata-canceled"),
+            vec![torrent_job("job_1", JobState::Canceled)],
+        );
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            add_torrent_with_controls(
+                &state,
+                "job_1",
+                pending::<Result<usize, String>>(),
+                Duration::from_secs(60),
+                Duration::from_millis(1),
+            ),
+        )
+        .await
+        .expect("metadata helper should observe canceled job")
+        .expect("canceled job should not fail");
+
+        assert!(matches!(
+            outcome,
+            TorrentAddOutcome::Interrupted(DownloadOutcome::Canceled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn torrent_metadata_timeout_is_retryable_torrent_error() {
+        let state = SharedState::for_tests(
+            test_storage_path("torrent-metadata-timeout"),
+            vec![torrent_job("job_1", JobState::Starting)],
+        );
+
+        let error = add_torrent_with_controls(
+            &state,
+            "job_1",
+            pending::<Result<usize, String>>(),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect_err("metadata timeout should fail");
+
+        assert_eq!(error.category, FailureCategory::Torrent);
+        assert!(error.retryable);
+    }
+
     #[test]
     fn resume_support_uses_partial_content_before_header_hints() {
         assert_eq!(
@@ -2071,6 +2238,43 @@ mod tests {
             derive_resume_support_from_parts(StatusCode::OK, 0, None),
             ResumeSupport::Unknown
         );
+    }
+
+    fn torrent_job(id: &str, state: JobState) -> DownloadJob {
+        DownloadJob {
+            id: id.into(),
+            url: format!("magnet:?xt=urn:btih:{id}"),
+            filename: format!("torrent-{id}"),
+            source: None,
+            transfer_kind: TransferKind::Torrent,
+            integrity_check: None,
+            torrent: Some(TorrentInfo::default()),
+            state,
+            created_at: 1,
+            progress: 0.0,
+            total_bytes: 0,
+            downloaded_bytes: 0,
+            speed: 0,
+            eta: 0,
+            error: None,
+            failure_category: None,
+            resume_support: ResumeSupport::Unknown,
+            retry_attempts: 0,
+            target_path: format!("C:/Downloads/torrent-{id}"),
+            temp_path: format!("C:/Downloads/torrent-{id}.part"),
+            artifact_exists: None,
+            bulk_archive: None,
+        }
+    }
+
+    fn test_storage_path(name: &str) -> PathBuf {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("state.json")
     }
 
     #[test]
