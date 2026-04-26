@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Clock3, Download, ExternalLink, FolderOpen, Pause, Play, RotateCw, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { JobState, type DownloadJob } from './types';
@@ -16,12 +16,19 @@ import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, formatTime, getHost } from './popupShared';
 import { getErrorMessage } from './errors';
 import { applyAppearance } from './appearance';
+import {
+  calculateDownloadProgressMetrics,
+  recordProgressSample,
+  shouldShowCompletedFileAction,
+  type ProgressSample,
+} from './downloadProgressMetrics';
 
 export function DownloadProgressWindow() {
   const [job, setJob] = useState<DownloadJob | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [isConfirmingCancel, setIsConfirmingCancel] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const progressSamplesRef = useRef<ProgressSample[]>([]);
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const jobId = useMemo(() => new URLSearchParams(window.location.search).get('jobId') || '', []);
 
@@ -33,6 +40,13 @@ export function DownloadProgressWindow() {
       latestSettings = snapshot.settings;
       applyAppearance(snapshot.settings);
     };
+    const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+      const nextJob = snapshot.jobs.find((candidate) => candidate.id === jobId) ?? null;
+      if (nextJob) {
+        progressSamplesRef.current = recordProgressSample(progressSamplesRef.current, nextJob);
+      }
+      setJob(nextJob);
+    };
 
     const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
     const handleSystemThemeChange = () => {
@@ -43,10 +57,10 @@ export function DownloadProgressWindow() {
     async function initialize() {
       const snapshot = await getAppSnapshot();
       applySnapshotAppearance(snapshot);
-      setJob(snapshot.jobs.find((candidate) => candidate.id === jobId) ?? null);
+      applySnapshotJob(snapshot);
       dispose = await subscribeToStateChanged((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
-        setJob(nextSnapshot.jobs.find((candidate) => candidate.id === jobId) ?? null);
+        applySnapshotJob(nextSnapshot);
       });
     }
 
@@ -90,6 +104,7 @@ export function DownloadProgressWindow() {
   const isPaused = job.state === JobState.Paused;
   const isCompleted = job.state === JobState.Completed;
   const isFailed = job.state === JobState.Failed;
+  const progressMetrics = calculateDownloadProgressMetrics(job, progressSamplesRef.current);
   const activeJobId = job.id;
   const cancelLabel = isConfirmingCancel ? 'Confirm' : 'Cancel';
 
@@ -132,8 +147,8 @@ export function DownloadProgressWindow() {
         </section>
 
         <section className="mt-3 grid grid-cols-3 gap-1 text-xs">
-          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : '--'} />
-          <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(job.eta) : '--'} />
+          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
+          <Metric label="Time" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
           <Metric label="State" value={statusText(job)} />
         </section>
 
@@ -154,8 +169,8 @@ export function DownloadProgressWindow() {
           {isCompleted ? (
             <ActionButton label="Open" icon={<ExternalLink size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => openJobFile(job.id))} />
           ) : null}
-          {(isCompleted || isFailed || job.targetPath) ? (
-            <ActionButton label="Reveal" icon={<FolderOpen size={16} />} disabled={isBusy} onClick={() => void runAction(() => revealJobInFolder(job.id))} />
+          {shouldShowCompletedFileAction(job) ? (
+            <ActionButton label="Show" icon={<FolderOpen size={16} />} disabled={isBusy} onClick={() => void runAction(() => revealJobInFolder(job.id))} />
           ) : null}
           {isActive ? (
             <ActionButton label="Pause" icon={<Pause size={16} />} disabled={isBusy} onClick={() => void runAction(() => pauseJob(job.id))} />

@@ -16,6 +16,7 @@ import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, getHost, joinDisplayPath } from './popupShared';
 import { getErrorMessage } from './errors';
 import { applyAppearance } from './appearance';
+import { categoryFolderForFilename } from './downloadCategories';
 
 export function DownloadPromptWindow() {
   const [prompt, setPrompt] = useState<DownloadPrompt | null>(null);
@@ -64,7 +65,9 @@ export function DownloadPromptWindow() {
 
   const destination = useMemo(() => {
     if (!prompt) return '';
-    return directoryOverride ? joinDisplayPath(directoryOverride, prompt.filename) : prompt.targetPath;
+    return directoryOverride
+      ? joinDisplayPath(joinDisplayPath(directoryOverride, categoryFolderForFilename(prompt.filename)), prompt.filename)
+      : prompt.targetPath;
   }, [directoryOverride, prompt]);
 
   const isDuplicate = Boolean(prompt?.duplicateJob);

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ConnectionState, JobState } from './types';
 import type { DownloadJob, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
@@ -8,6 +8,17 @@ import { AddDownloadModal, type AddDownloadOutcome } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
 import { compareDownloadsForSort, type SortMode } from './downloadSorting';
 import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
+import {
+  countJobsByCategory,
+  DOWNLOAD_CATEGORIES,
+  filterJobsByCategory,
+  type DownloadCategory,
+} from './downloadCategories';
+import {
+  calculateDownloadProgressMetricsByJobId,
+  recordProgressSample,
+  type ProgressSample,
+} from './downloadProgressMetrics';
 import { getErrorMessage } from './errors';
 import { loadInitialAppData } from './appBootstrap';
 import {
@@ -44,6 +55,7 @@ import {
   Clock3,
   Download,
   Filter,
+  Folder,
   Gauge,
   Pause,
   Play,
@@ -56,7 +68,8 @@ import {
 import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
 
-type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings';
+type CategoryViewState = `category:${DownloadCategory}`;
+type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings' | CategoryViewState;
 
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
@@ -99,6 +112,7 @@ export default function App() {
   const [pendingSettingsView, setPendingSettingsView] = useState<ViewState | null>(null);
   const [isUnsavedSettingsPromptOpen, setIsUnsavedSettingsPromptOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const progressSamplesRef = useRef<ProgressSample[]>([]);
   const appearanceSettings = settingsDraft ?? settings;
 
   useEffect(() => {
@@ -208,6 +222,10 @@ export default function App() {
   }
 
   function applyDesktopSnapshot(snapshot: DesktopSnapshot) {
+    progressSamplesRef.current = snapshot.jobs.reduce(
+      (samples, job) => recordProgressSample(samples, job),
+      progressSamplesRef.current,
+    );
     setConnectionState(snapshot.connectionState);
     setJobs(snapshot.jobs);
     setSettings(snapshot.settings);
@@ -542,13 +560,16 @@ export default function App() {
       attention: jobs.filter(jobNeedsAttention).length,
       queued: jobs.filter((job) => job.state === JobState.Queued).length,
       completed: jobs.filter((job) => finishedStates.includes(job.state)).length,
+      categories: countJobsByCategory(jobs),
     };
   }, [jobs]);
 
   const displayedJobs = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
+    const category = categoryFromView(view);
     const filtered = jobs.filter((job) => {
       if (view === 'settings') return false;
+      if (category && filterJobsByCategory([job], category).length === 0) return false;
       if (view === 'attention' && !jobNeedsAttention(job)) return false;
       if (view === 'active' && !activeStates.includes(job.state)) return false;
       if (view === 'queued' && job.state !== JobState.Queued) return false;
@@ -559,6 +580,11 @@ export default function App() {
 
     return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   }, [jobs, searchQuery, sortMode, view]);
+
+  const progressMetricsByJobId = useMemo(
+    () => calculateDownloadProgressMetricsByJobId(jobs, progressSamplesRef.current),
+    [jobs],
+  );
 
   useEffect(() => {
     if (view === 'settings') return;
@@ -575,7 +601,7 @@ export default function App() {
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
   const totalDownloadSpeed = jobs
     .filter((job) => job.state === JobState.Downloading)
-    .reduce((total, job) => total + job.speed, 0);
+    .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0);
 
   return (
     <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
@@ -600,6 +626,19 @@ export default function App() {
         <aside className="download-sidebar flex w-[220px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-2 py-2">
           <nav className="flex flex-col gap-0.5">
             <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
+            <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+              {DOWNLOAD_CATEGORIES.map((category) => (
+                <NavItem
+                  key={category.id}
+                  icon={<Folder size={15} />}
+                  label={category.label}
+                  count={counts.categories[category.id]}
+                  active={view === categoryView(category.id)}
+                  onClick={() => requestViewChange(categoryView(category.id))}
+                  branch
+                />
+              ))}
+            </div>
             <NavItem icon={<AlertTriangle size={18} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
             <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
             <NavItem icon={<Clock3 size={18} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
@@ -636,6 +675,7 @@ export default function App() {
               <QueueView
                 jobs={displayedJobs}
                 view={view}
+                progressMetricsByJobId={progressMetricsByJobId}
                 selectedJobId={selectedJobId}
                 onSelect={setSelectedJobId}
                 onClearSelection={() => setSelectedJobId(null)}
@@ -834,19 +874,21 @@ function NavItem({
   count,
   active,
   onClick,
+  branch = false,
 }: {
   icon: React.ReactNode;
   label: string;
   count?: number;
   active: boolean;
   onClick: () => void;
+  branch?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`group relative flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-medium transition ${
+      className={`group relative flex w-full items-center gap-2 rounded-md text-left text-xs font-medium transition ${
         active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted'
-      }`}
+      } ${branch ? 'h-7 px-2 text-[11px]' : 'h-9 px-2.5'}`}
     >
       <span className="shrink-0">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -903,6 +945,18 @@ function nextFilterView(view: ViewState): ViewState {
   if (view === 'active') return 'queued';
   if (view === 'queued') return 'completed';
   return 'all';
+}
+
+function categoryView(category: DownloadCategory): CategoryViewState {
+  return `category:${category}`;
+}
+
+function categoryFromView(view: ViewState): DownloadCategory | null {
+  if (!view.startsWith('category:')) return null;
+  const category = view.slice('category:'.length);
+  return DOWNLOAD_CATEGORIES.some((item) => item.id === category)
+    ? category as DownloadCategory
+    : null;
 }
 
 function formatBytes(bytes: number, decimals = 1) {

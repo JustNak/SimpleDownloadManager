@@ -14,6 +14,25 @@ use tokio::sync::RwLock;
 use url::Url;
 
 const MAX_URL_LENGTH: usize = 2048;
+const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
+    "Document",
+    "Program",
+    "Picture",
+    "Video",
+    "Compressed",
+    "Music",
+    "Other",
+];
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "csv", "md", "epub",
+];
+const PROGRAM_EXTENSIONS: &[&str] = &["exe", "msi", "apk", "dmg", "pkg", "deb", "rpm", "appimage"];
+const PICTURE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "tif", "tiff", "heic",
+];
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv"];
+const COMPRESSED_EXTENSIONS: &[&str] = &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz"];
+const MUSIC_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "wma"];
 
 #[derive(Debug, Clone)]
 pub struct BackendError {
@@ -136,6 +155,7 @@ impl SharedState {
 
         normalize_accent_color(&mut persisted.settings);
         normalize_extension_settings(&mut persisted.settings.extension_integration);
+        ensure_download_category_directories(Path::new(&persisted.settings.download_directory))?;
 
         let jobs = persisted
             .jobs
@@ -456,10 +476,11 @@ impl RuntimeState {
             code: "DESTINATION_INVALID",
             message: format!("Could not create the download directory: {error}"),
         })?;
-        verify_download_directory_writable(&download_dir)?;
 
         let filename = filename_from_hint(options.filename_hint.as_deref(), &url);
-        let (target_path, temp_path) = allocate_target_paths(&download_dir, &filename, &self.jobs);
+        let target_dir = prepare_category_download_directory(&download_dir, &filename)?;
+        verify_download_directory_writable(&target_dir)?;
+        let (target_path, temp_path) = allocate_target_paths(&target_dir, &filename, &self.jobs);
         let job_id = format!("job_{}", self.next_job_number);
         self.next_job_number += 1;
 
@@ -507,8 +528,9 @@ impl RuntimeState {
         let target_path = if default_directory.trim().is_empty() {
             String::new()
         } else {
-            let (target_path, _) =
-                allocate_target_paths(Path::new(&default_directory), &filename, &self.jobs);
+            let category_dir =
+                category_download_directory(Path::new(&default_directory), &filename);
+            let (target_path, _) = allocate_target_paths(&category_dir, &filename, &self.jobs);
             target_path.display().to_string()
         };
         let duplicate_job = self.jobs.iter().find(|job| job.url == url).cloned();
@@ -1681,6 +1703,52 @@ fn destination_write_error(error: std::io::Error) -> BackendError {
     }
 }
 
+fn prepare_category_download_directory(
+    download_dir: &Path,
+    filename: &str,
+) -> Result<PathBuf, BackendError> {
+    ensure_download_category_directories(download_dir).map_err(|error| BackendError {
+        code: "DESTINATION_INVALID",
+        message: error,
+    })?;
+    Ok(category_download_directory(download_dir, filename))
+}
+
+fn ensure_download_category_directories(download_dir: &Path) -> Result<(), String> {
+    for folder in DOWNLOAD_CATEGORY_FOLDERS {
+        let category_dir = download_dir.join(folder);
+        std::fs::create_dir_all(&category_dir).map_err(|error| {
+            format!("Could not create {folder} download category directory: {error}")
+        })?;
+    }
+
+    Ok(())
+}
+
+fn category_download_directory(download_dir: &Path, filename: &str) -> PathBuf {
+    download_dir.join(category_folder_for_filename(filename))
+}
+
+fn category_folder_for_filename(filename: &str) -> &'static str {
+    let Some(extension) = Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+    else {
+        return "Other";
+    };
+
+    match extension.as_str() {
+        ext if DOCUMENT_EXTENSIONS.contains(&ext) => "Document",
+        ext if PROGRAM_EXTENSIONS.contains(&ext) => "Program",
+        ext if PICTURE_EXTENSIONS.contains(&ext) => "Picture",
+        ext if VIDEO_EXTENSIONS.contains(&ext) => "Video",
+        ext if COMPRESSED_EXTENSIONS.contains(&ext) => "Compressed",
+        ext if MUSIC_EXTENSIONS.contains(&ext) => "Music",
+        _ => "Other",
+    }
+}
+
 fn allocate_target_paths(
     download_dir: &Path,
     filename: &str,
@@ -1950,6 +2018,7 @@ pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
 
     std::fs::create_dir_all(&settings.download_directory)
         .map_err(|error| format!("Could not create download directory: {error}"))?;
+    ensure_download_category_directories(Path::new(&settings.download_directory))?;
 
     Ok(())
 }
@@ -2051,7 +2120,11 @@ mod tests {
         assert_eq!(result.status, EnqueueStatus::Queued);
         assert_eq!(state.jobs.len(), 2);
         assert_eq!(state.jobs[1].filename, "file.zip");
-        assert!(state.jobs[1].target_path.ends_with("file (1).zip"));
+        assert_eq!(
+            target_parent_folder(&state.jobs[1].target_path),
+            "Compressed"
+        );
+        assert!(state.jobs[1].target_path.ends_with("file.zip"));
 
         let _ = std::fs::remove_dir_all(download_dir);
     }
@@ -2077,6 +2150,7 @@ mod tests {
         assert!(state.jobs[0]
             .target_path
             .starts_with(&override_dir.display().to_string()));
+        assert_eq!(target_parent_folder(&state.jobs[0].target_path), "Document");
         assert_eq!(
             state.settings.download_directory,
             default_dir.display().to_string()
@@ -2084,6 +2158,74 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(default_dir);
         let _ = std::fs::remove_dir_all(override_dir);
+    }
+
+    #[test]
+    fn validate_settings_creates_download_category_directories() {
+        let download_dir = test_runtime_dir("category-settings");
+        let mut settings = Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        };
+
+        validate_settings(&mut settings).expect("settings should validate");
+
+        for folder in [
+            "Document",
+            "Program",
+            "Picture",
+            "Video",
+            "Compressed",
+            "Music",
+            "Other",
+        ] {
+            assert!(
+                download_dir.join(folder).is_dir(),
+                "{folder} category directory should exist"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_routes_downloads_into_category_directories() {
+        let download_dir = test_runtime_dir("category-routing");
+        let mut state = runtime_state_with_jobs(Vec::new());
+        state.settings.download_directory = download_dir.display().to_string();
+
+        for url in [
+            "https://example.com/archive.zip",
+            "https://example.com/setup.exe",
+            "https://example.com/photo.jpg",
+            "https://example.com/movie.mp4",
+            "https://example.com/song.flac",
+            "https://example.com/blob.custom",
+        ] {
+            state
+                .enqueue_download_in_memory(url, EnqueueOptions::default())
+                .expect("download should enqueue");
+        }
+
+        let folders = state
+            .jobs
+            .iter()
+            .map(|job| target_parent_folder(&job.target_path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            folders,
+            vec![
+                "Compressed",
+                "Program",
+                "Picture",
+                "Video",
+                "Music",
+                "Other"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(download_dir);
     }
 
     #[test]
@@ -2097,7 +2239,9 @@ mod tests {
         existing_job.url = "https://example.com/archive.zip".into();
         existing_job.filename = "archive.zip".into();
 
-        let state = runtime_state_with_jobs(vec![existing_job]);
+        let download_dir = test_runtime_dir("prompt-category");
+        let mut state = runtime_state_with_jobs(vec![existing_job]);
+        state.settings.download_directory = download_dir.display().to_string();
         let prompt = state
             .prepare_download_prompt(
                 "prompt_1",
@@ -2115,6 +2259,9 @@ mod tests {
             prompt.duplicate_job.as_ref().map(|job| job.id.as_str()),
             Some("job_12")
         );
+        assert_eq!(target_parent_folder(&prompt.target_path), "Compressed");
+
+        let _ = std::fs::remove_dir_all(download_dir);
     }
 
     #[test]
@@ -2610,5 +2757,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn target_parent_folder(target_path: &str) -> String {
+        PathBuf::from(target_path)
+            .parent()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 }

@@ -20,6 +20,12 @@ struct ProgressWindowGeometry {
     min_height: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressWindowPolicy {
+    minimizable: bool,
+    always_on_top: bool,
+}
+
 pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
         window.show().map_err(|error| error.to_string())?;
@@ -73,6 +79,7 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
         current_download_prompt_position(app).or_else(last_download_prompt_position);
     let url = format!("index.html?window=download-progress&jobId={job_id}");
     let geometry = progress_window_geometry();
+    let policy = progress_window_policy();
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Download progress")
@@ -80,9 +87,10 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
         .min_inner_size(geometry.min_width, geometry.min_height)
         .max_inner_size(geometry.width, geometry.height)
         .resizable(false)
+        .minimizable(policy.minimizable)
         .maximizable(false)
         .decorations(false)
-        .always_on_top(true);
+        .always_on_top(policy.always_on_top);
 
     let builder =
         if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
@@ -110,6 +118,7 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
         current_download_prompt_position(app).or_else(last_download_prompt_position);
     let url = format!("index.html?window=batch-progress&batchId={batch_id}");
     let geometry = batch_progress_window_geometry();
+    let policy = progress_window_policy();
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Batch progress")
@@ -117,9 +126,10 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
         .min_inner_size(geometry.min_width, geometry.min_height)
         .max_inner_size(geometry.width, geometry.height)
         .resizable(false)
+        .minimizable(policy.minimizable)
         .maximizable(false)
         .decorations(false)
-        .always_on_top(true);
+        .always_on_top(policy.always_on_top);
 
     let builder =
         if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
@@ -179,6 +189,13 @@ fn batch_progress_window_geometry() -> ProgressWindowGeometry {
         height: 430.0,
         min_width: 560.0,
         min_height: 430.0,
+    }
+}
+
+fn progress_window_policy() -> ProgressWindowPolicy {
+    ProgressWindowPolicy {
+        minimizable: true,
+        always_on_top: false,
     }
 }
 
@@ -245,6 +262,14 @@ mod tests {
     }
 
     #[test]
+    fn progress_windows_are_minimizable_and_not_always_on_top() {
+        let policy = super::progress_window_policy();
+
+        assert!(policy.minimizable);
+        assert!(!policy.always_on_top);
+    }
+
+    #[test]
     fn progress_window_position_uses_prompt_position_with_stack_offset() {
         let prompt_position = super::PopupWindowPosition { x: 280.0, y: 221.0 };
 
@@ -274,5 +299,13 @@ mod tests {
         assert_eq!(geometry.height, 430.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
+    }
+
+    #[test]
+    fn batch_progress_windows_are_minimizable_and_not_always_on_top() {
+        let policy = super::progress_window_policy();
+
+        assert!(policy.minimizable);
+        assert!(!policy.always_on_top);
     }
 }

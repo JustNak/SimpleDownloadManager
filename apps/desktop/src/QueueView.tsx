@@ -6,6 +6,7 @@ import {
   shouldRevealJobDirectoryOnDoubleClick,
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
+import type { DownloadProgressMetrics } from './downloadProgressMetrics';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -43,6 +44,7 @@ const TABLE_MIN_HEIGHT = 180;
 interface QueueViewProps {
   jobs: DownloadJob[];
   view: string;
+  progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
   selectedJobId: string | null;
   onSelect: (id: string) => void;
   onClearSelection: () => void;
@@ -62,6 +64,7 @@ interface QueueViewProps {
 export function QueueView({
   jobs,
   view,
+  progressMetricsByJobId,
   selectedJobId,
   onSelect,
   onClearSelection,
@@ -340,7 +343,7 @@ export function QueueView({
     <section ref={queueRootRef} className="flex min-h-0 flex-1 flex-col bg-surface">
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="download-table min-w-[1120px] overflow-visible border-b border-t border-border bg-card">
-          <div className="grid grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-5 py-2 text-xs font-medium text-muted-foreground">
+          <div className="grid grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-3">
               <SelectionCheckbox
                 checked={allVisibleSelected}
@@ -353,7 +356,7 @@ export function QueueView({
             <div>Date</div>
             <div>Progress</div>
             <div>Speed</div>
-            <div>ETA</div>
+            <div>Time</div>
             <div>Size</div>
             <div className="text-right">Actions</div>
           </div>
@@ -365,6 +368,9 @@ export function QueueView({
               const rowSelected = selected || multiSelected;
               const artifactMissing = isJobArtifactMissing(job);
               const blurIdentity = shouldBlurJobIdentity(job);
+              const progressMetrics = progressMetricsByJobId[job.id];
+              const averageSpeed = progressMetrics?.averageSpeed ?? job.speed;
+              const timeRemaining = progressMetrics?.timeRemaining ?? job.eta;
               return (
                 <div
                   key={job.id}
@@ -399,7 +405,7 @@ export function QueueView({
                   onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[58px] w-full grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-5 py-2 text-left text-sm transition ${
+                  className={`grid min-h-[50px] w-full grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-4 py-1.5 text-left text-sm transition ${
                     rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
                 >
@@ -440,10 +446,10 @@ export function QueueView({
                   </div>
 
                   <div className="tabular-nums text-muted-foreground">
-                    {job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : '--'}
+                    {job.state === JobState.Downloading ? `${formatBytes(averageSpeed)}/s` : '--'}
                   </div>
                   <div className="tabular-nums text-muted-foreground">
-                    {job.state === JobState.Downloading ? formatTime(job.eta) : '--'}
+                    {job.state === JobState.Downloading ? formatTime(timeRemaining) : '--'}
                   </div>
                   <div className="tabular-nums text-muted-foreground">
                     {job.totalBytes > 0 ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}` : formatBytes(job.downloadedBytes)}
@@ -1001,14 +1007,14 @@ function FileBadge({
   blurred?: boolean;
 }) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
-  const iconSize = large ? 28 : 20;
+  const iconSize = large ? 28 : 18;
   const icon = getFileIcon(ext, iconSize);
   const label = ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
   const selectable = !large && onSelectionChange;
 
   return (
-    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-10 w-9'}`}>
-      <div className={`absolute right-0 top-0 h-2.5 w-2.5 border-b border-l border-border bg-surface ${selectable ? 'opacity-0' : ''}`} />
+    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-8 w-8'}`}>
+      <div className={`absolute right-0 top-0 h-2 w-2 border-b border-l border-border bg-surface ${selectable ? 'opacity-0' : ''}`} />
       {selectable ? (
         <SelectionCheckbox
           checked={selected}
