@@ -146,6 +146,7 @@ export function shouldHandleBrowserDownload(
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
     && !isHostExcluded(url, settings.excludedHosts)
+    && !isBrowserExtensionPackage(url, item.filename)
     && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, item.filename, settings.ignoredFileExtensions));
 }
 
@@ -449,4 +450,16 @@ function isTorrentUrl(url: string | undefined): boolean {
 function isTorrentFilename(filename: string | undefined): boolean {
   if (!filename) return false;
   return basenameOnly(filename)?.toLowerCase().endsWith('.torrent') ?? false;
+}
+
+function isBrowserExtensionPackage(url: string, filename: string | undefined): boolean {
+  return hasPackageExtension(url, filename, 'xpi');
+}
+
+function hasPackageExtension(url: string, filename: string | undefined, extension: string): boolean {
+  const candidates = [basenameOnly(filename), basenameFromUrl(url)]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map((candidate) => candidate.toLowerCase());
+
+  return candidates.some((candidate) => candidate.endsWith(`.${extension}`));
 }

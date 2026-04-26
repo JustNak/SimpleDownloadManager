@@ -71,6 +71,17 @@ async function main() {
     true,
     '.torrent downloads should still be handed off as torrent jobs',
   );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://addons.mozilla.org/firefox/downloads/file/4780131/e2f3c242819942eeb738-0.3.2.xpi',
+        filename: 'e2f3c242819942eeb738-0.3.2.xpi',
+      },
+      defaultSettings,
+    ),
+    false,
+    'Firefox .xpi packages should stay with the browser because AMO downloads can require browser session context',
+  );
 
   await discardBrowserDownload(
     {
