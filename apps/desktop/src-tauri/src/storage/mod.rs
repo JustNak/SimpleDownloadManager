@@ -278,6 +278,8 @@ pub struct ExtensionIntegrationSettings {
     pub ignored_file_extensions: Vec<String>,
 }
 
+const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -427,7 +429,10 @@ impl Default for ExtensionIntegrationSettings {
             context_menu_enabled: true,
             show_progress_after_handoff: true,
             show_badge_status: true,
-            excluded_hosts: Vec::new(),
+            excluded_hosts: DEFAULT_EXCLUDED_HOSTS
+                .iter()
+                .map(|host| (*host).to_string())
+                .collect(),
             ignored_file_extensions: Vec::new(),
         }
     }
@@ -766,7 +771,10 @@ mod tests {
         assert!(settings.extension_integration.show_progress_after_handoff);
         assert!(settings.extension_integration.show_badge_status);
         assert_eq!(settings.extension_integration.listen_port, 1420);
-        assert!(settings.extension_integration.excluded_hosts.is_empty());
+        assert_eq!(
+            settings.extension_integration.excluded_hosts,
+            vec!["web.telegram.org".to_string()]
+        );
         assert!(settings
             .extension_integration
             .ignored_file_extensions
@@ -804,11 +812,10 @@ mod tests {
         );
         assert!(state.settings.extension_integration.show_badge_status);
         assert_eq!(state.settings.extension_integration.listen_port, 1420);
-        assert!(state
-            .settings
-            .extension_integration
-            .excluded_hosts
-            .is_empty());
+        assert_eq!(
+            state.settings.extension_integration.excluded_hosts,
+            vec!["web.telegram.org".to_string()]
+        );
         assert!(state
             .settings
             .extension_integration

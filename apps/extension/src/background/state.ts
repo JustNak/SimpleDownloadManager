@@ -6,25 +6,19 @@ import type {
 } from '@myapp/protocol';
 import browser from './browser';
 import type { PopupStateResponse } from '../shared/messages';
+import {
+  createDefaultExtensionSettings,
+  defaultExtensionSettings,
+  normalizeExtensionSettings,
+} from '../shared/defaultExtensionSettings';
 
 const STATE_KEY = 'popup-state';
 const EXTENSION_SETTINGS_KEY = 'extension-settings';
 
-export const defaultExtensionSettings: ExtensionIntegrationSettings = {
-  enabled: true,
-  downloadHandoffMode: 'ask',
-  listenPort: 1420,
-  contextMenuEnabled: true,
-  showProgressAfterHandoff: true,
-  showBadgeStatus: true,
-  excludedHosts: [],
-  ignoredFileExtensions: [],
-};
-
 const defaultState: PopupStateResponse = {
   connection: 'checking',
   isSubmitting: false,
-  extensionSettings: defaultExtensionSettings,
+  extensionSettings: createDefaultExtensionSettings(),
 };
 
 type PartialState = Partial<PopupStateResponse>;
@@ -80,62 +74,4 @@ export async function setLastResult(connection: PopupStateResponse['connection']
   });
 }
 
-function normalizeExtensionSettings(settings?: Partial<ExtensionIntegrationSettings>): ExtensionIntegrationSettings {
-  return {
-    ...defaultExtensionSettings,
-    ...settings,
-    listenPort: normalizeListenPort(settings?.listenPort),
-    excludedHosts: Array.from(
-      new Set(
-        (settings?.excludedHosts ?? defaultExtensionSettings.excludedHosts)
-          .map((host) => normalizeHost(host))
-          .filter(Boolean),
-      ),
-    ),
-    ignoredFileExtensions: normalizeFileExtensions(
-      settings?.ignoredFileExtensions ?? defaultExtensionSettings.ignoredFileExtensions,
-    ),
-  };
-}
-
-function normalizeListenPort(value: unknown): number {
-  const port = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(port)) return defaultExtensionSettings.listenPort;
-
-  const normalizedPort = Math.floor(port);
-  if (normalizedPort < 1 || normalizedPort > 65535) {
-    return defaultExtensionSettings.listenPort;
-  }
-
-  return normalizedPort;
-}
-
-function normalizeHost(host: string): string {
-  return host
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/.*$/, '')
-    .toLowerCase();
-}
-
-function normalizeFileExtensions(values: string[]): string[] {
-  const extensions = new Set<string>();
-
-  for (const value of values) {
-    for (const candidate of value.split(/[,\s]+/)) {
-      const extension = normalizeFileExtension(candidate);
-      if (extension) extensions.add(extension);
-    }
-  }
-
-  return [...extensions];
-}
-
-function normalizeFileExtension(value: string): string {
-  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
-  if (!extension || extension.includes('/') || extension.includes('\\') || /^\.+$/.test(extension)) {
-    return '';
-  }
-
-  return extension;
-}
+export { defaultExtensionSettings };

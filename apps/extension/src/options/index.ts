@@ -1,6 +1,7 @@
 import type { DownloadHandoffMode, ExtensionIntegrationSettings } from '@myapp/protocol';
 import browser from 'webextension-polyfill';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
+import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
 
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
 const enabledToggle = document.querySelector<HTMLInputElement>('#enabled-toggle');
@@ -350,15 +351,6 @@ function fallbackErrorState(message: string): PopupStateResponse {
     connection: 'error',
     isSubmitting: false,
     lastError: { code: 'HOST_NOT_AVAILABLE', message },
-    extensionSettings: {
-      enabled: true,
-      downloadHandoffMode: 'ask',
-      listenPort: 1420,
-      contextMenuEnabled: true,
-      showProgressAfterHandoff: true,
-      showBadgeStatus: true,
-      excludedHosts: [],
-      ignoredFileExtensions: [],
-    },
+    extensionSettings: createDefaultExtensionSettings(),
   };
 }
