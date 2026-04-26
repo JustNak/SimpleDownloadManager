@@ -12,6 +12,7 @@ const baseJob: DownloadJob = {
   id: 'job_1',
   url: 'https://example.com/file.bin',
   filename: 'file.bin',
+  transferKind: 'http',
   state: 'queued',
   progress: 0,
   totalBytes: 0,
@@ -28,6 +29,20 @@ assert.deepEqual(
   DOWNLOAD_CATEGORIES.map((category) => category.folderName),
   ['Document', 'Program', 'Picture', 'Video', 'Compressed', 'Music', 'Other'],
   'sidebar category folders should stay in the requested display order',
+);
+
+assert.deepEqual(
+  DOWNLOAD_CATEGORIES.map((category) => [category.id, category.iconName]),
+  [
+    ['document', 'document'],
+    ['program', 'program'],
+    ['picture', 'picture'],
+    ['video', 'video'],
+    ['compressed', 'compressed'],
+    ['music', 'music'],
+    ['other', 'other'],
+  ],
+  'sidebar category branches should expose specific icon identities instead of sharing a generic folder icon',
 );
 
 assert.equal(categoryForFilename('report.PDF'), 'document');

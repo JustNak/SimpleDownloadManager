@@ -33,6 +33,7 @@ pub enum FailureCategory {
     Disk,
     Permission,
     Resume,
+    Integrity,
     Internal,
 }
 
@@ -43,6 +44,37 @@ pub enum ResumeSupport {
     Unknown,
     Supported,
     Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferKind {
+    #[default]
+    Http,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityAlgorithm {
+    Sha256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrityStatus {
+    Pending,
+    Verified,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrityCheck {
+    pub algorithm: IntegrityAlgorithm,
+    pub expected: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    pub status: IntegrityStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +101,10 @@ pub struct DownloadJob {
     pub filename: String,
     #[serde(default)]
     pub source: Option<DownloadSource>,
+    #[serde(default)]
+    pub transfer_kind: TransferKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity_check: Option<IntegrityCheck>,
     pub state: JobState,
     #[serde(default)]
     pub created_at: u64,
@@ -231,6 +267,26 @@ pub struct DiagnosticsSnapshot {
     pub queue_summary: QueueSummary,
     pub last_host_contact_seconds_ago: Option<u64>,
     pub host_registration: HostRegistrationDiagnostics,
+    pub recent_events: Vec<DiagnosticEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticEvent {
+    pub timestamp: u64,
+    pub level: DiagnosticLevel,
+    pub category: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -284,6 +340,8 @@ pub struct PersistedState {
     pub settings: Settings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_window: Option<MainWindowState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_events: Vec<DiagnosticEvent>,
 }
 
 impl Default for Settings {
@@ -487,6 +545,39 @@ mod tests {
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
         assert_eq!(state.jobs[0].retry_attempts, 0);
+        assert_eq!(state.jobs[0].transfer_kind, TransferKind::Http);
+        assert_eq!(state.jobs[0].integrity_check, None);
+        assert!(state.diagnostic_events.is_empty());
+    }
+
+    #[test]
+    fn persisted_jobs_reject_unknown_transfer_kind() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_1",
+                "url": "https://example.com/file.zip",
+                "filename": "file.zip",
+                "transferKind": "torrent",
+                "state": "queued",
+                "progress": 0,
+                "totalBytes": 0,
+                "downloadedBytes": 0,
+                "speed": 0,
+                "eta": 0,
+                "targetPath": "C:/Downloads/file.zip",
+                "tempPath": "C:/Downloads/file.zip.part"
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        );
+
+        assert!(state.is_err(), "unknown transfer kinds should not silently run");
     }
 
     #[test]

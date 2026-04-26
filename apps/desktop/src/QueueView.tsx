@@ -8,6 +8,13 @@ import {
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
 import { canRemoveDownloadImmediately } from './queueCommands';
+import {
+  clampQueueProgress,
+  QUEUE_TABLE_COLUMNS,
+  queueStatusPresentation,
+  shouldShowNameProgress,
+  type QueueStatusTone,
+} from './queueRowPresentation';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -345,8 +352,8 @@ export function QueueView({
   return (
     <section ref={queueRootRef} className="flex min-h-0 flex-1 flex-col bg-surface">
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="download-table min-w-[1120px] overflow-visible border-b border-t border-border bg-card">
-          <div className="grid grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] border-b border-border bg-header px-4 py-1.5 text-xs font-medium text-muted-foreground">
+        <div className="download-table min-w-[980px] overflow-visible border-b border-t border-border bg-card">
+          <div className="grid grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] border-b border-border bg-header px-4 py-1.5 text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-3">
               <SelectionCheckbox
                 checked={allVisibleSelected}
@@ -354,14 +361,13 @@ export function QueueView({
                 title={allVisibleSelected ? 'Clear selection' : 'Select all downloads'}
                 onChange={setAllVisibleSelected}
               />
-              <span>Name</span>
+              <span>{QUEUE_TABLE_COLUMNS[0]}</span>
             </div>
-            <div>Date</div>
-            <div>Progress</div>
-            <div>Speed</div>
-            <div>Time</div>
-            <div>Size</div>
-            <div className="text-right">Actions</div>
+            <div>{QUEUE_TABLE_COLUMNS[1]}</div>
+            <div>{QUEUE_TABLE_COLUMNS[2]}</div>
+            <div>{QUEUE_TABLE_COLUMNS[3]}</div>
+            <div>{QUEUE_TABLE_COLUMNS[4]}</div>
+            <div className="text-right">{QUEUE_TABLE_COLUMNS[5]}</div>
           </div>
 
           <div className="divide-y divide-border/70">
@@ -374,6 +380,7 @@ export function QueueView({
               const progressMetrics = progressMetricsByJobId[job.id];
               const averageSpeed = progressMetrics?.averageSpeed ?? job.speed;
               const timeRemaining = progressMetrics?.timeRemaining ?? job.eta;
+              const statusPresentation = queueStatusPresentation(job);
               return (
                 <div
                   key={job.id}
@@ -408,7 +415,7 @@ export function QueueView({
                   onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[50px] w-full grid-cols-[minmax(300px,2.2fr)_150px_180px_110px_100px_150px_72px] items-center gap-0 px-4 py-1.5 text-left text-sm transition ${
+                  className={`grid min-h-[50px] w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-4 py-1.5 text-left text-sm transition ${
                     rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
                 >
@@ -422,30 +429,16 @@ export function QueueView({
                       muted={artifactMissing}
                       blurred={blurIdentity}
                     />
-                    <div className="min-w-0">
-                      <div
-                        className={`truncate text-sm font-semibold text-foreground ${artifactMissing ? 'text-muted-foreground' : ''} ${
-                          blurIdentity ? 'opacity-70 blur-[0.7px]' : ''
-                        }`}
-                        title={job.filename}
-                      >
-                        {job.filename}
-                      </div>
-                      <div
-                        className={`mt-0.5 truncate text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}
-                        title={job.url}
-                      >
-                        {getHost(job.url)}
-                      </div>
-                    </div>
+                    <InlineNameProgress
+                      job={job}
+                      statusPresentation={statusPresentation}
+                      artifactMissing={artifactMissing}
+                      blurIdentity={blurIdentity}
+                    />
                   </div>
 
                   <div className="truncate pr-4 text-muted-foreground tabular-nums" title={formatFullJobDate(job.createdAt)}>
                     {formatJobDate(job.createdAt)}
-                  </div>
-
-                  <div className="pr-6">
-                    <ProgressBar job={job} />
                   </div>
 
                   <div className="tabular-nums text-muted-foreground">
@@ -927,6 +920,58 @@ function DownloadDetailsPane({
   );
 }
 
+function InlineNameProgress({
+  job,
+  statusPresentation,
+  artifactMissing,
+  blurIdentity,
+}: {
+  job: DownloadJob;
+  statusPresentation: ReturnType<typeof queueStatusPresentation>;
+  artifactMissing: boolean;
+  blurIdentity: boolean;
+}) {
+  const showProgress = shouldShowNameProgress(job);
+  const progress = clampQueueProgress(job.progress);
+
+  return (
+    <div className="relative -ml-2 min-w-0 flex-1 overflow-hidden rounded-sm px-2 py-1">
+      {showProgress ? (
+        <div
+          className={`pointer-events-none absolute left-0 top-0 z-20 h-[3px] rounded-full ${nameProgressClass(statusPresentation.tone)}`}
+          style={{ width: `${progress}%` }}
+          aria-hidden="true"
+        />
+      ) : null}
+      <div className="relative z-10 flex min-w-0 items-center gap-2">
+        <div
+          className={`truncate text-sm font-semibold text-foreground ${artifactMissing ? 'text-muted-foreground' : ''} ${
+            blurIdentity ? 'opacity-70 blur-[0.7px]' : ''
+          }`}
+          title={job.filename}
+        >
+          {job.filename}
+        </div>
+        <QueueStatusBadge presentation={statusPresentation} />
+      </div>
+      <div
+        className={`relative z-10 mt-0.5 truncate text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}
+        title={job.url}
+      >
+        {getHost(job.url)}
+      </div>
+    </div>
+  );
+}
+
+function QueueStatusBadge({ presentation }: { presentation: ReturnType<typeof queueStatusPresentation> }) {
+  return (
+    <span className={`shrink-0 rounded border px-1.5 py-[1px] text-[10px] font-semibold leading-4 ${statusBadgeClass(presentation.tone)}`}>
+      {presentation.label}
+    </span>
+  );
+}
+
 function RowActions({
   job,
   menuOpen,
@@ -1098,23 +1143,6 @@ function getFileIcon(ext: string, size: number) {
   if (['exe', 'msi', 'apk', 'dmg', 'pkg', 'deb'].includes(ext)) return <Box size={size} />;
   if (['js', 'ts', 'json', 'html', 'css'].includes(ext)) return <FileCode size={size} />;
   return <FileText size={size} />;
-}
-
-function ProgressBar({ job, large = false }: { job: DownloadJob; large?: boolean }) {
-  const color =
-    job.state === JobState.Completed
-      ? 'bg-success'
-      : job.state === JobState.Failed
-        ? 'bg-destructive'
-        : job.state === JobState.Queued
-          ? 'bg-warning'
-          : 'bg-primary';
-
-  return (
-    <div className={`${large ? 'h-2' : 'h-1'} w-full overflow-hidden rounded-full bg-progress-track`}>
-      <div className={`${large ? 'h-2' : 'h-1'} rounded-full ${color} transition-all duration-300`} style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
-    </div>
-  );
 }
 
 function DetailLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
@@ -1297,6 +1325,34 @@ function getContextMenuPosition(jobId: string, x: number, y: number) {
   };
 }
 
+function statusBadgeClass(tone: QueueStatusTone) {
+  switch (tone) {
+    case 'success':
+      return 'border-success/35 bg-success/10 text-success';
+    case 'destructive':
+      return 'border-destructive/35 bg-destructive/10 text-destructive';
+    case 'warning':
+      return 'border-warning/35 bg-warning/10 text-warning';
+    case 'primary':
+      return 'border-primary/35 bg-primary/10 text-primary';
+    default:
+      return 'border-border bg-muted text-muted-foreground';
+  }
+}
+
+function nameProgressClass(tone: QueueStatusTone) {
+  switch (tone) {
+    case 'destructive':
+      return 'bg-destructive/20';
+    case 'warning':
+      return 'bg-warning/20';
+    case 'muted':
+      return 'bg-muted';
+    default:
+      return 'bg-primary';
+  }
+}
+
 function getDetailsMaxHeight(containerHeight: number) {
   if (!Number.isFinite(containerHeight) || containerHeight <= 0) {
     return DETAILS_MAX_HEIGHT;
@@ -1361,6 +1417,8 @@ function formatFailureCategory(category: NonNullable<DownloadJob['failureCategor
       return 'Permission';
     case 'resume':
       return 'Resume';
+    case 'integrity':
+      return 'Integrity';
     default:
       return 'Internal';
   }

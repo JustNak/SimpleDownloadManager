@@ -11,6 +11,7 @@ export interface DownloadCategoryDefinition {
   id: DownloadCategory;
   label: string;
   folderName: string;
+  iconName: DownloadCategory;
   extensions: readonly string[];
 }
 
@@ -19,42 +20,49 @@ export const DOWNLOAD_CATEGORIES: readonly DownloadCategoryDefinition[] = [
     id: 'document',
     label: 'Document',
     folderName: 'Document',
+    iconName: 'document',
     extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf', 'csv', 'md', 'epub'],
   },
   {
     id: 'program',
     label: 'Program',
     folderName: 'Program',
+    iconName: 'program',
     extensions: ['exe', 'msi', 'apk', 'dmg', 'pkg', 'deb', 'rpm', 'appimage'],
   },
   {
     id: 'picture',
     label: 'Picture',
     folderName: 'Picture',
+    iconName: 'picture',
     extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'tif', 'tiff', 'heic'],
   },
   {
     id: 'video',
     label: 'Video',
     folderName: 'Video',
+    iconName: 'video',
     extensions: ['mp4', 'mkv', 'avi', 'mov', 'webm', 'm4v', 'wmv', 'flv'],
   },
   {
     id: 'compressed',
     label: 'Compressed',
     folderName: 'Compressed',
+    iconName: 'compressed',
     extensions: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'tgz'],
   },
   {
     id: 'music',
     label: 'Music',
     folderName: 'Music',
+    iconName: 'music',
     extensions: ['mp3', 'wav', 'flac', 'ogg', 'm4a', 'aac', 'opus', 'wma'],
   },
   {
     id: 'other',
     label: 'Other',
     folderName: 'Other',
+    iconName: 'other',
     extensions: [],
   },
 ] as const;

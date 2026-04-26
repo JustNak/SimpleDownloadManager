@@ -5,8 +5,8 @@ use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
 use crate::storage::{
-    ConnectionState, DownloadSource, ExtensionIntegrationSettings, HostRegistrationDiagnostics,
-    HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
+    ConnectionState, DiagnosticLevel, DownloadSource, ExtensionIntegrationSettings,
+    HostRegistrationDiagnostics, HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
     focus_job_in_main_window, focus_main_window, show_download_prompt_window, show_progress_window,
@@ -256,7 +256,20 @@ async fn accept_single_connection(
             let request = serde_json::from_str::<HostRequest>(&request_line)
                 .map_err(|error| format!("Could not parse host request: {error}"))?;
 
-            let response = handle_request(app, state, prompts, request).await;
+            let response = handle_request(app, state.clone(), prompts, request).await;
+            if !response.ok {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "native_host",
+                        response
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "Native host request was rejected.".into()),
+                        None,
+                    )
+                    .await;
+            }
             let response_json = serde_json::to_string(&response)
                 .map_err(|error| format!("Could not serialize host response: {error}"))?;
 

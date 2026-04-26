@@ -12,6 +12,7 @@ import {
 } from './downloadInput';
 import { Archive, Link2, ListPlus, PackagePlus, X } from 'lucide-react';
 import { getErrorMessage } from './errors';
+import { validateOptionalSha256 } from './downloadIntegrity';
 
 export type { DownloadMode } from './downloadInput';
 
@@ -30,6 +31,7 @@ interface AddDownloadModalProps {
 export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
   const [mode, setMode] = useState<DownloadMode>('single');
   const [singleUrl, setSingleUrl] = useState('');
+  const [singleSha256, setSingleSha256] = useState('');
   const [multiUrls, setMultiUrls] = useState('');
   const [bulkUrls, setBulkUrls] = useState('');
   const [archiveName, setArchiveName] = useState('bulk-download.zip');
@@ -56,7 +58,7 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
 
     try {
       if (mode === 'single') {
-        const result = await addJob(activeUrls[0]);
+        const result = await addJob(activeUrls[0], validateOptionalSha256(singleSha256));
         onAdded({
           mode,
           intent: progressPopupIntentForSubmission(mode, result),
@@ -122,6 +124,19 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
                   placeholder="https://example.com/file.zip"
                   required
                   className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                />
+              </Field>
+            ) : null}
+
+            {mode === 'single' ? (
+              <Field label="SHA-256 Checksum" hint="Optional integrity check after download.">
+                <input
+                  type="text"
+                  value={singleSha256}
+                  onChange={(event) => setSingleSha256(event.target.value)}
+                  placeholder="64-character hex digest"
+                  spellCheck={false}
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
                 />
               </Field>
             ) : null}

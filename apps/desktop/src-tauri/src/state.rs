@@ -1,9 +1,10 @@
 use crate::storage::{
     default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
-    BulkArchiveInfo, BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticsSnapshot,
-    DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
-    ExtensionIntegrationSettings, FailureCategory, HostRegistrationDiagnostics, JobState,
-    MainWindowState, PersistedState, QueueSummary, ResumeSupport, Settings,
+    BulkArchiveInfo, BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticEvent,
+    DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt,
+    DownloadSource, ExtensionIntegrationSettings, FailureCategory, HostRegistrationDiagnostics,
+    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
+    QueueSummary, ResumeSupport, Settings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
@@ -14,6 +15,8 @@ use tokio::sync::RwLock;
 use url::Url;
 
 const MAX_URL_LENGTH: usize = 2048;
+const SHA256_HEX_LENGTH: usize = 64;
+const DIAGNOSTIC_EVENT_LIMIT: usize = 100;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -44,6 +47,7 @@ pub struct BackendError {
 pub struct DownloadTask {
     pub id: String,
     pub url: String,
+    pub transfer_kind: TransferKind,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
 }
@@ -88,6 +92,7 @@ pub struct EnqueueOptions {
     pub source: Option<DownloadSource>,
     pub directory_override: Option<String>,
     pub filename_hint: Option<String>,
+    pub expected_sha256: Option<String>,
     pub duplicate_policy: DuplicatePolicy,
     pub bulk_archive: Option<BulkArchiveInfo>,
 }
@@ -106,6 +111,7 @@ struct RuntimeState {
     jobs: Vec<DownloadJob>,
     settings: Settings,
     main_window: Option<MainWindowState>,
+    diagnostic_events: Vec<DiagnosticEvent>,
     next_job_number: u64,
     active_workers: HashSet<String>,
     last_host_contact: Option<Instant>,
@@ -162,6 +168,7 @@ impl SharedState {
             .into_iter()
             .map(|job| normalize_job(job, &persisted.settings))
             .collect::<Vec<_>>();
+        let diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
         let next_job_number = next_job_number(&jobs);
 
         let state = Self {
@@ -170,6 +177,7 @@ impl SharedState {
                 jobs,
                 settings: persisted.settings,
                 main_window: persisted.main_window,
+                diagnostic_events,
                 next_job_number,
                 active_workers: HashSet::new(),
                 last_host_contact: None,
@@ -274,7 +282,24 @@ impl SharedState {
                 .last_host_contact
                 .map(|last_seen| last_seen.elapsed().as_secs()),
             host_registration,
+            recent_events: state.diagnostic_events.clone(),
         }
+    }
+
+    pub async fn record_diagnostic_event(
+        &self,
+        level: DiagnosticLevel,
+        category: impl Into<String>,
+        message: impl Into<String>,
+        job_id: Option<String>,
+    ) -> Result<(), String> {
+        let persisted = {
+            let mut state = self.inner.write().await;
+            state.push_diagnostic_event(level, category.into(), message.into(), job_id);
+            state.persisted()
+        };
+
+        persist_state(&self.storage_path, &persisted)
     }
 
     pub async fn save_settings(&self, mut settings: Settings) -> Result<DesktopSnapshot, String> {
@@ -449,9 +474,10 @@ impl RuntimeState {
     fn enqueue_download_in_memory(
         &mut self,
         url: &str,
-        options: EnqueueOptions,
+        mut options: EnqueueOptions,
     ) -> Result<EnqueueResult, BackendError> {
         let url = normalize_download_url(url)?;
+        options.expected_sha256 = normalize_expected_sha256(options.expected_sha256)?;
 
         if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
             if let Some(result) = self.duplicate_enqueue_result(&url) {
@@ -483,12 +509,20 @@ impl RuntimeState {
         let (target_path, temp_path) = allocate_target_paths(&target_dir, &filename, &self.jobs);
         let job_id = format!("job_{}", self.next_job_number);
         self.next_job_number += 1;
+        let integrity_check = options.expected_sha256.map(|expected| IntegrityCheck {
+            algorithm: IntegrityAlgorithm::Sha256,
+            expected,
+            actual: None,
+            status: IntegrityStatus::Pending,
+        });
 
         self.jobs.push(DownloadJob {
             id: job_id.clone(),
             url: url.clone(),
             filename: filename.clone(),
             source: options.source,
+            transfer_kind: TransferKind::Http,
+            integrity_check,
             state: JobState::Queued,
             created_at: current_unix_timestamp_millis(),
             progress: 0.0,
@@ -505,6 +539,12 @@ impl RuntimeState {
             artifact_exists: None,
             bulk_archive: options.bulk_archive,
         });
+        self.push_diagnostic_event(
+            DiagnosticLevel::Info,
+            "download".into(),
+            format!("Queued {filename}"),
+            Some(job_id.clone()),
+        );
 
         Ok(EnqueueResult {
             snapshot: self.snapshot(),
@@ -573,14 +613,27 @@ impl SharedState {
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let job = find_job_mut(&mut state.jobs, id)?;
-            if matches!(
-                job.state,
-                JobState::Queued | JobState::Starting | JobState::Downloading
-            ) {
-                job.state = JobState::Paused;
-                job.speed = 0;
-                job.eta = 0;
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                if matches!(
+                    job.state,
+                    JobState::Queued | JobState::Starting | JobState::Downloading
+                ) {
+                    job.state = JobState::Paused;
+                    job.speed = 0;
+                    job.eta = 0;
+                    Some(format!("Paused {}", job.filename))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = event_message {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    message,
+                    Some(id.into()),
+                );
             }
             (state.snapshot(), state.persisted())
         };
@@ -592,17 +645,31 @@ impl SharedState {
     pub async fn resume_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let job = find_job_mut(&mut state.jobs, id)?;
-            if matches!(
-                job.state,
-                JobState::Paused | JobState::Failed | JobState::Canceled
-            ) {
-                job.state = JobState::Queued;
-                job.error = None;
-                job.failure_category = None;
-                job.retry_attempts = 0;
-                job.speed = 0;
-                job.eta = 0;
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                if matches!(
+                    job.state,
+                    JobState::Paused | JobState::Failed | JobState::Canceled
+                ) {
+                    job.state = JobState::Queued;
+                    job.error = None;
+                    job.failure_category = None;
+                    job.retry_attempts = 0;
+                    job.speed = 0;
+                    job.eta = 0;
+                    reset_integrity_for_retry(job);
+                    Some(format!("Resumed {}", job.filename))
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = event_message {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    message,
+                    Some(id.into()),
+                );
             }
             (state.snapshot(), state.persisted())
         };
@@ -658,16 +725,26 @@ impl SharedState {
 
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let job = find_job_mut(&mut state.jobs, id)?;
-            job.state = JobState::Canceled;
-            job.progress = 0.0;
-            job.total_bytes = 0;
-            job.downloaded_bytes = 0;
-            job.speed = 0;
-            job.eta = 0;
-            job.error = None;
-            job.failure_category = None;
-            job.retry_attempts = 0;
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                job.state = JobState::Canceled;
+                job.progress = 0.0;
+                job.total_bytes = 0;
+                job.downloaded_bytes = 0;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = None;
+                job.failure_category = None;
+                job.retry_attempts = 0;
+                reset_integrity_for_retry(job);
+                format!("Canceled {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
             (state.snapshot(), state.persisted())
         };
 
@@ -678,13 +755,23 @@ impl SharedState {
     pub async fn retry_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let job = find_job_mut(&mut state.jobs, id)?;
-            job.state = JobState::Queued;
-            job.speed = 0;
-            job.eta = 0;
-            job.error = None;
-            job.failure_category = None;
-            job.retry_attempts = 0;
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                job.state = JobState::Queued;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = None;
+                job.failure_category = None;
+                job.retry_attempts = 0;
+                reset_integrity_for_retry(job);
+                format!("Retry queued for {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
             (state.snapshot(), state.persisted())
         };
 
@@ -702,9 +789,18 @@ impl SharedState {
                 });
             }
 
-            let job = find_job_mut(&mut state.jobs, id)?;
-            remove_file_if_exists(Path::new(&job.temp_path)).map_err(internal_error)?;
-            reset_job_for_restart(job);
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                remove_file_if_exists(Path::new(&job.temp_path)).map_err(internal_error)?;
+                reset_job_for_restart(job);
+                format!("Restart queued for {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
             (state.snapshot(), state.persisted())
         };
 
@@ -724,8 +820,15 @@ impl SharedState {
                     job.error = None;
                     job.failure_category = None;
                     job.retry_attempts = 0;
+                    reset_integrity_for_retry(job);
                 }
             }
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                "Retry queued for failed downloads".into(),
+                None,
+            );
 
             (state.snapshot(), state.persisted())
         };
@@ -951,12 +1054,19 @@ impl SharedState {
                     let task = DownloadTask {
                         id: job.id.clone(),
                         url: job.url.clone(),
+                        transfer_kind: job.transfer_kind,
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
                     };
                     let task_id = task.id.clone();
                     let _ = job;
                     state.active_workers.insert(task_id);
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "download".into(),
+                        format!("Starting {}", task.id),
+                        Some(task.id.clone()),
+                    );
                     tasks.push(task);
                 }
             }
@@ -1075,13 +1185,22 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
-                return Err("Job not found.".into());
-            };
+            let event_message = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
 
-            job.retry_attempts = retry_attempts;
-            job.speed = 0;
-            job.eta = 0;
+                job.retry_attempts = retry_attempts;
+                job.speed = 0;
+                job.eta = 0;
+                format!("Retry attempt {retry_attempts} for {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
             (state.snapshot(), state.persisted())
         };
 
@@ -1133,11 +1252,35 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn job_requires_sha256(&self, id: &str) -> bool {
+        let state = self.inner.read().await;
+        state
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .and_then(|job| job.integrity_check.as_ref())
+            .is_some_and(|check| {
+                check.algorithm == IntegrityAlgorithm::Sha256
+                    && check.status == IntegrityStatus::Pending
+            })
+    }
+
     pub async fn complete_job(
         &self,
         id: &str,
         total_bytes: u64,
         target_path: &Path,
+    ) -> Result<DesktopSnapshot, String> {
+        self.complete_job_with_integrity(id, total_bytes, target_path, None)
+            .await
+    }
+
+    pub async fn complete_job_with_integrity(
+        &self,
+        id: &str,
+        total_bytes: u64,
+        target_path: &Path,
+        actual_sha256: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -1159,7 +1302,37 @@ impl SharedState {
                 .to_string();
             job.target_path = target_path.display().to_string();
             job.temp_path = format!("{}.part", job.target_path);
+            let completed_filename = job.filename.clone();
+            let mut event = (
+                DiagnosticLevel::Info,
+                format!("Completed {completed_filename}"),
+            );
+            if let Some(check) = &mut job.integrity_check {
+                if let Some(actual) = actual_sha256 {
+                    check.actual = Some(actual.clone());
+                    if check.expected.eq_ignore_ascii_case(&actual) {
+                        check.status = IntegrityStatus::Verified;
+                        event = (
+                            DiagnosticLevel::Info,
+                            format!("Verified SHA-256 for {completed_filename}"),
+                        );
+                    } else {
+                        check.status = IntegrityStatus::Failed;
+                        job.state = JobState::Failed;
+                        job.failure_category = Some(FailureCategory::Integrity);
+                        job.error = Some(format!(
+                            "SHA-256 checksum mismatch. Expected {}, got {actual}.",
+                            check.expected
+                        ));
+                        event = (
+                            DiagnosticLevel::Error,
+                            format!("SHA-256 verification failed for {completed_filename}"),
+                        );
+                    }
+                }
+            }
             state.active_workers.remove(id);
+            state.push_diagnostic_event(event.0, "download".into(), event.1, Some(id.into()));
             (state.snapshot(), state.persisted())
         };
 
@@ -1257,18 +1430,28 @@ impl SharedState {
         message: impl Into<String>,
         failure_category: FailureCategory,
     ) -> Result<DesktopSnapshot, String> {
+        let message = message.into();
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
-                return Err("Job not found.".into());
-            };
-
-            job.state = JobState::Failed;
-            job.speed = 0;
-            job.eta = 0;
-            job.error = Some(message.into());
-            job.failure_category = Some(failure_category);
             state.active_workers.remove(id);
+            let event_message = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                job.state = JobState::Failed;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = Some(message.clone());
+                job.failure_category = Some(failure_category);
+                format!("Failed {}: {message}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Error,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
             (state.snapshot(), state.persisted())
         };
 
@@ -1387,6 +1570,24 @@ impl SharedState {
 }
 
 impl RuntimeState {
+    fn push_diagnostic_event(
+        &mut self,
+        level: DiagnosticLevel,
+        category: String,
+        message: String,
+        job_id: Option<String>,
+    ) {
+        self.diagnostic_events.push(DiagnosticEvent {
+            timestamp: current_unix_timestamp_millis(),
+            level,
+            category,
+            message,
+            job_id,
+        });
+
+        trim_diagnostic_events(&mut self.diagnostic_events);
+    }
+
     fn snapshot(&self) -> DesktopSnapshot {
         DesktopSnapshot {
             connection_state: self.connection_state,
@@ -1410,6 +1611,7 @@ impl RuntimeState {
                 .collect(),
             settings: self.settings.clone(),
             main_window: self.main_window.clone(),
+            diagnostic_events: self.diagnostic_events.clone(),
         }
     }
 
@@ -1510,6 +1712,11 @@ fn job_needs_attention(job: &DownloadJob) -> bool {
 }
 
 fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
+    if let Some(check) = &mut job.integrity_check {
+        check.expected = check.expected.trim().to_ascii_lowercase();
+        check.actual = check.actual.as_ref().map(|value| value.trim().to_ascii_lowercase());
+    }
+
     if job.filename.trim().is_empty() {
         job.filename = derive_filename(&job.url);
     }
@@ -1557,6 +1764,18 @@ fn current_unix_timestamp_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn normalize_diagnostic_events(mut events: Vec<DiagnosticEvent>) -> Vec<DiagnosticEvent> {
+    trim_diagnostic_events(&mut events);
+    events
+}
+
+fn trim_diagnostic_events(events: &mut Vec<DiagnosticEvent>) {
+    if events.len() > DIAGNOSTIC_EVENT_LIMIT {
+        let overflow = events.len() - DIAGNOSTIC_EVENT_LIMIT;
+        events.drain(0..overflow);
+    }
 }
 
 fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
@@ -1636,6 +1855,30 @@ fn normalize_file_extension(value: &str) -> String {
     }
 
     extension
+}
+
+fn normalize_expected_sha256(value: Option<String>) -> Result<Option<String>, BackendError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    if normalized.len() != SHA256_HEX_LENGTH
+        || !normalized
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(BackendError {
+            code: "INVALID_INTEGRITY_HASH",
+            message: "SHA-256 checksum must be 64 hexadecimal characters.".into(),
+        });
+    }
+
+    Ok(Some(normalized))
 }
 
 fn normalize_download_url(raw_url: &str) -> Result<String, BackendError> {
@@ -1967,6 +2210,14 @@ fn reset_job_for_restart(job: &mut DownloadJob) {
     job.failure_category = None;
     job.resume_support = ResumeSupport::Unknown;
     job.retry_attempts = 0;
+    reset_integrity_for_retry(job);
+}
+
+fn reset_integrity_for_retry(job: &mut DownloadJob) {
+    if let Some(check) = &mut job.integrity_check {
+        check.actual = None;
+        check.status = IntegrityStatus::Pending;
+    }
 }
 
 fn apply_download_filename(job: &mut DownloadJob, filename: &str) {
@@ -2033,6 +2284,7 @@ fn internal_error(error: String) -> BackendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::HostRegistrationStatus;
 
     #[test]
     fn queue_summary_counts_attention_jobs() {
@@ -2057,6 +2309,7 @@ mod tests {
             ],
             settings: Settings::default(),
             main_window: None,
+            diagnostic_events: Vec::new(),
             next_job_number: 6,
             active_workers: HashSet::new(),
             last_host_contact: None,
@@ -2079,6 +2332,7 @@ mod tests {
             jobs: vec![existing_job],
             settings: Settings::default(),
             main_window: None,
+            diagnostic_events: Vec::new(),
             next_job_number: 10,
             active_workers: HashSet::new(),
             last_host_contact: None,
@@ -2588,12 +2842,138 @@ mod tests {
     }
 
     #[test]
+    fn expected_sha256_is_validated_and_normalized() {
+        let mixed_case = "A".repeat(64);
+
+        assert_eq!(
+            normalize_expected_sha256(Some(mixed_case)).unwrap().as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+
+        let error = normalize_expected_sha256(Some("abc123".into())).unwrap_err();
+        assert_eq!(error.code, "INVALID_INTEGRITY_HASH");
+        assert!(error.message.contains("64 hexadecimal characters"));
+    }
+
+    #[tokio::test]
+    async fn complete_job_with_matching_sha256_marks_integrity_verified() {
+        let download_dir = test_runtime_dir("integrity-match");
+        let target_path = download_dir.join("hello.txt");
+        let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let mut job = download_job("job_30", JobState::Downloading, ResumeSupport::Supported, 0);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        job.integrity_check = Some(IntegrityCheck {
+            algorithm: IntegrityAlgorithm::Sha256,
+            expected: expected.into(),
+            actual: None,
+            status: IntegrityStatus::Pending,
+        });
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state
+            .complete_job_with_integrity("job_30", 5, &target_path, Some(expected.into()))
+            .await
+            .unwrap();
+
+        let runtime = state.inner.read().await;
+        let job = &runtime.jobs[0];
+        assert_eq!(job.state, JobState::Completed);
+        assert_eq!(
+            job.integrity_check.as_ref().map(|check| check.status),
+            Some(IntegrityStatus::Verified)
+        );
+        assert_eq!(
+            job.integrity_check
+                .as_ref()
+                .and_then(|check| check.actual.as_deref()),
+            Some(expected)
+        );
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn complete_job_with_mismatched_sha256_marks_integrity_failed() {
+        let download_dir = test_runtime_dir("integrity-mismatch");
+        let target_path = download_dir.join("hello.txt");
+        let expected = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let actual = "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7";
+        let mut job = download_job("job_31", JobState::Downloading, ResumeSupport::Supported, 0);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        job.integrity_check = Some(IntegrityCheck {
+            algorithm: IntegrityAlgorithm::Sha256,
+            expected: expected.into(),
+            actual: None,
+            status: IntegrityStatus::Pending,
+        });
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state
+            .complete_job_with_integrity("job_31", 5, &target_path, Some(actual.into()))
+            .await
+            .unwrap();
+
+        let runtime = state.inner.read().await;
+        let job = &runtime.jobs[0];
+        assert_eq!(job.state, JobState::Failed);
+        assert_eq!(job.failure_category, Some(FailureCategory::Integrity));
+        assert!(job.error.as_deref().unwrap_or_default().contains("SHA-256"));
+        assert_eq!(
+            job.integrity_check.as_ref().map(|check| check.status),
+            Some(IntegrityStatus::Failed)
+        );
+        assert_eq!(
+            job.integrity_check
+                .as_ref()
+                .and_then(|check| check.actual.as_deref()),
+            Some(actual)
+        );
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_keep_newest_hundred_events() {
+        let download_dir = test_runtime_dir("diagnostic-events");
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+
+        for index in 0..105 {
+            state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "test",
+                    format!("event {index}"),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        let snapshot = state
+            .diagnostics_snapshot(HostRegistrationDiagnostics {
+                status: HostRegistrationStatus::Configured,
+                entries: Vec::new(),
+            })
+            .await;
+
+        assert_eq!(snapshot.recent_events.len(), 100);
+        assert_eq!(snapshot.recent_events[0].message, "event 5");
+        assert_eq!(snapshot.recent_events[99].message, "event 104");
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
     fn restart_reset_clears_partial_progress_and_failure_metadata() {
         let mut job = DownloadJob {
             id: "job_1".into(),
             url: "https://example.com/file.zip".into(),
             filename: "file.zip".into(),
             source: None,
+            transfer_kind: TransferKind::Http,
+            integrity_check: None,
             state: JobState::Failed,
             created_at: 1,
             progress: 42.0,
@@ -2750,6 +3130,8 @@ mod tests {
             url: format!("https://example.com/{id}.zip"),
             filename: format!("{id}.zip"),
             source: None,
+            transfer_kind: TransferKind::Http,
+            integrity_check: None,
             state,
             created_at: 1,
             progress: 0.0,
@@ -2774,6 +3156,7 @@ mod tests {
             jobs,
             settings: Settings::default(),
             main_window: None,
+            diagnostic_events: Vec::new(),
             next_job_number: 99,
             active_workers: HashSet::new(),
             last_host_contact: None,

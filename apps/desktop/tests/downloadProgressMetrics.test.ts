@@ -11,6 +11,7 @@ const baseJob: DownloadJob = {
   id: 'job_1',
   url: 'https://example.com/file.zip',
   filename: 'file.zip',
+  transferKind: 'http',
   state: 'downloading',
   createdAt: 1_000,
   progress: 0,

@@ -2,6 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
 import { normalizeAccentColor } from './appearance';
 import {
+  addExcludedHosts,
+  filterExcludedHosts,
+  formatExcludedSitesSummary,
+  normalizeHostInput,
+  parseExcludedHostInput,
+  removeExcludedHost,
+} from './settingsExcludedSites';
+import {
   Activity,
   Ban,
   Check,
@@ -16,6 +24,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -23,6 +32,7 @@ import {
   TestTube2,
   Trash2,
   Wrench,
+  X,
 } from 'lucide-react';
 
 const ACCENT_COLOR_PRESETS = [
@@ -67,11 +77,17 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [formData, setFormData] = useState<Settings>(settings);
   const [excludedHostInput, setExcludedHostInput] = useState('');
+  const [excludedBulkInput, setExcludedBulkInput] = useState('');
+  const [excludedSearchQuery, setExcludedSearchQuery] = useState('');
+  const [isExcludedSitesDialogOpen, setIsExcludedSitesDialogOpen] = useState(false);
   const [accentColorInput, setAccentColorInput] = useState(normalizeAccentColor(settings.accentColor));
 
   useEffect(() => {
     setFormData(settings);
     setExcludedHostInput('');
+    setExcludedBulkInput('');
+    setExcludedSearchQuery('');
+    setIsExcludedSitesDialogOpen(false);
     setAccentColorInput(normalizeAccentColor(settings.accentColor));
   }, [settings]);
 
@@ -136,54 +152,46 @@ export function SettingsPage({
   };
 
   const handleAddExcludedHost = () => {
-    const normalizedHost = normalizeHostInput(excludedHostInput);
-    if (!normalizedHost) return;
-
-    setFormData((prev) => {
-      if (prev.extensionIntegration.excludedHosts.includes(normalizedHost)) {
-        return prev;
-      }
-
-      return {
-        ...prev,
-        extensionIntegration: {
-          ...prev.extensionIntegration,
-          excludedHosts: [...prev.extensionIntegration.excludedHosts, normalizedHost],
-        },
-      };
-    });
+    const nextHosts = addExcludedHosts(formData.extensionIntegration.excludedHosts, [excludedHostInput]).hosts;
+    updateExtensionIntegration({ excludedHosts: nextHosts });
     setExcludedHostInput('');
   };
 
+  const handleAddBulkExcludedHosts = () => {
+    const candidates = parseExcludedHostInput(excludedBulkInput);
+    if (candidates.length === 0) return;
+
+    const nextHosts = addExcludedHosts(formData.extensionIntegration.excludedHosts, candidates).hosts;
+    updateExtensionIntegration({ excludedHosts: nextHosts });
+    setExcludedBulkInput('');
+  };
+
   const handleRemoveExcludedHost = (host: string) => {
-    setFormData((prev) => ({
-      ...prev,
-      extensionIntegration: {
-        ...prev.extensionIntegration,
-        excludedHosts: prev.extensionIntegration.excludedHosts.filter((candidate) => candidate !== host),
-      },
-    }));
+    updateExtensionIntegration({
+      excludedHosts: removeExcludedHost(formData.extensionIntegration.excludedHosts, host),
+    });
   };
 
   return (
-    <form onSubmit={handleSubmit} className="settings-surface mx-auto flex w-full max-w-4xl flex-col gap-5 p-6">
-      <header className="flex items-center justify-between border-b border-border pb-5">
+    <>
+    <form onSubmit={handleSubmit} className="settings-surface mx-auto flex w-full max-w-3xl flex-col gap-3 p-4">
+      <header className="flex items-center justify-between border-b border-border pb-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-normal text-foreground">Settings</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Configure downloads, appearance, notifications, and native host diagnostics.</p>
+          <h1 className="text-xl font-semibold tracking-normal text-foreground">Settings</h1>
+          <p className="mt-0.5 text-xs text-muted-foreground">Configure downloads, appearance, notifications, and native host diagnostics.</p>
         </div>
         <div className="flex items-center gap-2">
-          <button type="button" onClick={onCancel} className="h-10 rounded-md px-4 text-sm font-medium text-foreground transition hover:bg-muted">
+          <button type="button" onClick={onCancel} className="h-9 rounded-md px-3 text-sm font-medium text-foreground transition hover:bg-muted">
             Cancel
           </button>
-          <button type="submit" className="flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90">
+          <button type="submit" className="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90">
             <Save size={16} />
             Save Changes
           </button>
         </div>
       </header>
 
-      <div className="space-y-5">
+      <div className="space-y-3">
         <SettingsPanel icon={<Settings2 size={20} />} title="General">
           <FieldRow label="Download Directory" description="Default save path." tooltip="Files are saved here by default.">
             <div className="flex min-w-0 gap-2">
@@ -193,12 +201,12 @@ export function SettingsPage({
                 name="downloadDirectory"
                 value={formData.downloadDirectory}
                 readOnly
-                className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm text-muted-foreground outline-none"
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-muted-foreground outline-none"
               />
               <button
                 type="button"
                 onClick={() => void handleBrowseDirectory()}
-                className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted"
+                className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted"
               >
                 <FolderOpen size={16} />
                 Browse
@@ -215,7 +223,7 @@ export function SettingsPage({
               onChange={handleChange}
               min="1"
               max="10"
-              className="h-10 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              className="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
           </FieldRow>
 
@@ -228,7 +236,7 @@ export function SettingsPage({
               onChange={handleChange}
               min="0"
               max="10"
-              className="h-10 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              className="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
           </FieldRow>
 
@@ -242,7 +250,7 @@ export function SettingsPage({
                 onChange={handleChange}
                 min="0"
                 max="1048576"
-                className="h-10 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                className="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
               />
               <span className="text-sm text-muted-foreground">KB/s</span>
             </div>
@@ -254,7 +262,7 @@ export function SettingsPage({
               name="downloadPerformanceMode"
               value={formData.downloadPerformanceMode}
               onChange={handleChange}
-              className="h-10 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              className="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             >
               <option value="stable">Stable</option>
               <option value="balanced">Balanced</option>
@@ -294,7 +302,7 @@ export function SettingsPage({
               value={formData.startupLaunchMode}
               onChange={handleChange}
               disabled={!formData.startOnStartup}
-              className="h-10 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <option value="open">Open window</option>
               <option value="tray">Tray only</option>
@@ -307,7 +315,7 @@ export function SettingsPage({
               name="theme"
               value={formData.theme}
               onChange={handleChange}
-              className="h-10 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              className="h-9 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
             >
               <option value="light">Light Mode</option>
               <option value="dark">Dark Mode</option>
@@ -342,7 +350,7 @@ export function SettingsPage({
                 ))}
               </div>
 
-              <label className="flex h-10 items-center gap-3 rounded-md border border-input bg-background px-3 text-sm text-foreground">
+              <label className="flex h-9 items-center gap-3 rounded-md border border-input bg-background px-3 text-sm text-foreground">
                 <span className="text-muted-foreground">Custom</span>
                 <input
                   type="color"
@@ -381,7 +389,7 @@ export function SettingsPage({
               value={formData.extensionIntegration.downloadHandoffMode}
               onChange={(event) => updateExtensionIntegration({ downloadHandoffMode: event.target.value as Settings['extensionIntegration']['downloadHandoffMode'] })}
               disabled={!formData.extensionIntegration.enabled}
-              className="h-10 w-60 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 w-60 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <option value="off">Off</option>
               <option value="ask">Ask before sending</option>
@@ -402,7 +410,7 @@ export function SettingsPage({
                 inputMode="numeric"
                 aria-label="Extension listen port"
                 disabled={!formData.extensionIntegration.enabled}
-                className="h-10 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
               />
               <span className="text-sm text-muted-foreground">port</span>
             </div>
@@ -486,57 +494,15 @@ export function SettingsPage({
           </div>
 
           <FieldRow label="Excluded Sites" description="Browser-only hosts." tooltip="Downloads from these hostnames stay in the browser.">
-            <div className="space-y-3">
-              <div className="flex min-w-0 gap-2">
-                <input
-                  type="text"
-                  value={excludedHostInput}
-                  onChange={(event) => setExcludedHostInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault();
-                      handleAddExcludedHost();
-                    }
-                  }}
-                  placeholder="example.com"
-                  disabled={!formData.extensionIntegration.enabled}
-                  className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
-                />
-                <button
-                  type="button"
-                  onClick={handleAddExcludedHost}
-                  disabled={!formData.extensionIntegration.enabled || !normalizeHostInput(excludedHostInput)}
-                  className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Plus size={16} />
-                  Add
-                </button>
-              </div>
-
-              {formData.extensionIntegration.excludedHosts.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {formData.extensionIntegration.excludedHosts.map((host) => (
-                    <span key={host} className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-surface px-2.5 text-sm text-foreground">
-                      <Ban size={14} className="text-muted-foreground" />
-                      {host}
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveExcludedHost(host)}
-                        className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-destructive"
-                        title={`Remove ${host}`}
-                        aria-label={`Remove ${host}`}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <div className="rounded-md border border-dashed border-border bg-surface px-3 py-2 text-sm text-muted-foreground">
-                  No excluded sites.
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsExcludedSitesDialogOpen(true)}
+              disabled={!formData.extensionIntegration.enabled}
+              className="flex h-9 w-fit items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Ban size={15} />
+              Configure Sites
+            </button>
           </FieldRow>
         </SettingsPanel>
 
@@ -598,9 +564,247 @@ export function SettingsPage({
               </div>
             ))}
           </div>
+
+          <div className="rounded-md border border-border bg-surface p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="font-semibold text-foreground">Recent diagnostic events</div>
+              <span className="text-xs text-muted-foreground">{diagnostics?.recentEvents.length ?? 0} events</span>
+            </div>
+            <div className="max-h-48 space-y-2 overflow-auto">
+              {diagnostics?.recentEvents.length ? (
+                diagnostics.recentEvents.slice().reverse().map((event) => (
+                  <div key={`${event.timestamp}-${event.category}-${event.message}`} className="rounded border border-border bg-background px-3 py-2 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className={`font-semibold ${diagnosticLevelClass(event.level)}`}>{event.level.toUpperCase()}</span>
+                      <span className="text-xs tabular-nums text-muted-foreground">{formatDiagnosticEventTime(event.timestamp)}</span>
+                    </div>
+                    <div className="mt-1 truncate text-foreground" title={event.message}>{event.message}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {event.category}{event.jobId ? ` / ${event.jobId}` : ''}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded border border-border bg-background px-3 py-6 text-center text-sm text-muted-foreground">
+                  No diagnostic events recorded.
+                </div>
+              )}
+            </div>
+          </div>
         </SettingsPanel>
       </div>
     </form>
+    {isExcludedSitesDialogOpen ? (
+      <ExcludedSitesDialog
+        enabled={formData.extensionIntegration.enabled}
+        hosts={formData.extensionIntegration.excludedHosts}
+        singleInput={excludedHostInput}
+        bulkInput={excludedBulkInput}
+        searchQuery={excludedSearchQuery}
+        onSingleInputChange={setExcludedHostInput}
+        onBulkInputChange={setExcludedBulkInput}
+        onSearchQueryChange={setExcludedSearchQuery}
+        onAddSingle={handleAddExcludedHost}
+        onAddBulk={handleAddBulkExcludedHosts}
+        onRemove={handleRemoveExcludedHost}
+        onClearAll={() => updateExtensionIntegration({ excludedHosts: [] })}
+        onClose={() => setIsExcludedSitesDialogOpen(false)}
+      />
+    ) : null}
+    </>
+  );
+}
+
+function ExcludedSitesDialog({
+  enabled,
+  hosts,
+  singleInput,
+  bulkInput,
+  searchQuery,
+  onSingleInputChange,
+  onBulkInputChange,
+  onSearchQueryChange,
+  onAddSingle,
+  onAddBulk,
+  onRemove,
+  onClearAll,
+  onClose,
+}: {
+  enabled: boolean;
+  hosts: string[];
+  singleInput: string;
+  bulkInput: string;
+  searchQuery: string;
+  onSingleInputChange: (value: string) => void;
+  onBulkInputChange: (value: string) => void;
+  onSearchQueryChange: (value: string) => void;
+  onAddSingle: () => void;
+  onAddBulk: () => void;
+  onRemove: (host: string) => void;
+  onClearAll: () => void;
+  onClose: () => void;
+}) {
+  const filteredHosts = filterExcludedHosts(hosts, searchQuery);
+  const bulkCandidates = parseExcludedHostInput(bulkInput);
+  const canAddSingle = enabled && Boolean(normalizeHostInput(singleInput));
+  const canAddBulk = enabled && bulkCandidates.length > 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-6 py-8">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="excludedSitesTitle"
+        className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-md border border-border bg-card shadow-2xl"
+      >
+        <header className="flex h-12 items-center justify-between border-b border-border bg-header px-4">
+          <div className="min-w-0">
+            <h2 id="excludedSitesTitle" className="text-base font-semibold text-foreground">
+              Excluded Sites
+            </h2>
+            <p className="text-xs text-muted-foreground">{formatExcludedSitesSummary(hosts)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+            aria-label="Close excluded sites"
+          >
+            <X size={16} />
+          </button>
+        </header>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+          <div className="grid grid-cols-3 gap-2">
+            <MetricCard label="Total" value={hosts.length.toString()} />
+            <MetricCard label="Visible" value={filteredHosts.length.toString()} />
+            <MetricCard label="Pending" value={bulkCandidates.length.toString()} />
+          </div>
+
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+            <input
+              type="text"
+              value={singleInput}
+              onChange={(event) => onSingleInputChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  onAddSingle();
+                }
+              }}
+              placeholder="example.com"
+              disabled={!enabled}
+              className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={onAddSingle}
+              disabled={!canAddSingle}
+              className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus size={15} />
+              Add
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-sm font-semibold text-foreground" htmlFor="excludedSitesBulk">
+                Bulk Add
+              </label>
+              <span className="text-xs text-muted-foreground">One host or URL per line</span>
+            </div>
+            <textarea
+              id="excludedSitesBulk"
+              value={bulkInput}
+              onChange={(event) => onBulkInputChange(event.target.value)}
+              disabled={!enabled}
+              placeholder={'cdn.example.com\nhttps://mirror.example.org/file.zip'}
+              className="h-24 w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-muted-foreground">{bulkCandidates.length} pending hosts</span>
+              <button
+                type="button"
+                onClick={onAddBulk}
+                disabled={!canAddBulk}
+                className="flex h-8 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Plus size={14} />
+                Add Bulk
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-semibold text-foreground" htmlFor="excludedSitesSearch">
+              Current Sites
+            </label>
+            <div className="relative">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input
+                id="excludedSitesSearch"
+                type="text"
+                value={searchQuery}
+                onChange={(event) => onSearchQueryChange(event.target.value)}
+                placeholder="Search hosts"
+                className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+              />
+            </div>
+            <div className="max-h-56 overflow-auto rounded-md border border-border bg-surface">
+              {filteredHosts.length > 0 ? (
+                filteredHosts.map((host) => (
+                  <div key={host} className="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3 last:border-b-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <Ban size={14} className="shrink-0 text-muted-foreground" />
+                      <span className="truncate text-sm font-medium text-foreground">{host}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(host)}
+                      disabled={!enabled}
+                      className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+                      title={`Remove ${host}`}
+                      aria-label={`Remove ${host}`}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                  {hosts.length === 0 ? 'No excluded sites.' : 'No matching sites.'}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <footer className="flex items-center justify-between border-t border-border bg-card px-4 py-3">
+          <button
+            type="button"
+            onClick={onClearAll}
+            disabled={!enabled || hosts.length === 0}
+            className="flex h-9 items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 text-sm font-medium text-destructive transition hover:bg-destructive/15 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Trash2 size={15} />
+            Clear All
+          </button>
+          <button type="button" onClick={onClose} className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90">
+            Done
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-surface px-3 py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-semibold tabular-nums text-foreground">{value}</div>
+    </div>
   );
 }
 
@@ -617,14 +821,14 @@ function SettingsPanel({
 }) {
   return (
     <section className="rounded-md border border-border bg-card">
-      <header className="flex min-h-14 items-center justify-between gap-3 border-b border-border bg-header px-5 py-3">
-        <div className="flex items-center gap-3 font-semibold text-foreground">
+      <header className="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-header px-4 py-2">
+        <div className="flex items-center gap-2 font-semibold text-foreground">
           <span className="text-primary">{icon}</span>
           {title}
         </div>
         {action}
       </header>
-      <div className="space-y-4 p-5">{children}</div>
+      <div className="space-y-3 p-4">{children}</div>
     </section>
   );
 }
@@ -641,10 +845,10 @@ function FieldRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-[minmax(180px,260px)_minmax(0,1fr)] items-center gap-5">
+    <div className="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4">
       <div>
         <label className="text-sm font-semibold text-foreground">{label}</label>
-        <p className="mt-1 text-sm leading-5 text-muted-foreground" title={tooltip ?? description}>
+        <p className="mt-0.5 text-xs leading-4 text-muted-foreground" title={tooltip ?? description}>
           {description}
         </p>
       </div>
@@ -694,12 +898,12 @@ function CompactSetting({
   control: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-20 items-center justify-between gap-3 rounded-md border border-border bg-surface px-4 py-3">
+    <div className="flex min-h-16 items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
       <div className="flex min-w-0 items-start gap-3">
         <span className="mt-0.5 text-primary">{icon}</span>
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{title}</div>
-          <div className="mt-1 text-sm leading-5 text-muted-foreground" title={tooltip ?? description}>
+          <div className="mt-0.5 text-xs leading-4 text-muted-foreground" title={tooltip ?? description}>
             {description}
           </div>
         </div>
@@ -724,7 +928,7 @@ function UtilityButton({
     <button
       type="button"
       onClick={onClick}
-      className={`flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium transition ${
+      className={`flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition ${
         primary
           ? 'bg-primary text-primary-foreground hover:bg-primary/90'
           : 'border border-input bg-background text-foreground hover:bg-muted'
@@ -795,12 +999,25 @@ function registrationBadgeClass(status?: DiagnosticsSnapshot['hostRegistration']
   }
 }
 
-function normalizeHostInput(value: string): string {
-  return value
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/.*$/, '')
-    .toLowerCase();
+function diagnosticLevelClass(level: DiagnosticsSnapshot['recentEvents'][number]['level']) {
+  switch (level) {
+    case 'error':
+      return 'text-destructive';
+    case 'warning':
+      return 'text-warning';
+    default:
+      return 'text-success';
+  }
+}
+
+function formatDiagnosticEventTime(timestamp: number) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 'Unknown time';
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp));
 }
 
 function normalizeListenPort(value: string): number {

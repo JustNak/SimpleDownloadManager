@@ -53,9 +53,15 @@ import {
 import type { AddJobsResult } from './backend';
 import {
   AlertTriangle,
+  Box,
   CheckCircle2,
   Clock3,
   Download,
+  FileArchive,
+  FileAudio,
+  FileImage,
+  FileText,
+  FileVideo,
   Filter,
   Folder,
   Gauge,
@@ -76,6 +82,7 @@ import {
   shouldNotifyDiagnosticsRefreshFailure,
   type DiagnosticsRefreshOptions,
 } from './diagnosticsRefresh';
+import { formatDiagnosticsReport } from './diagnosticsReport';
 
 type CategoryViewState = `category:${DownloadCategory}`;
 type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings' | CategoryViewState;
@@ -665,7 +672,7 @@ export default function App() {
               {DOWNLOAD_CATEGORIES.map((category) => (
                 <NavItem
                   key={category.id}
-                  icon={<Folder size={15} />}
+                  icon={categoryIcon(category.iconName, 15)}
                   label={category.label}
                   count={counts.categories[category.id]}
                   active={view === categoryView(category.id)}
@@ -1004,6 +1011,25 @@ function categoryFromView(view: ViewState): DownloadCategory | null {
     : null;
 }
 
+function categoryIcon(category: DownloadCategory, size: number): React.ReactNode {
+  switch (category) {
+    case 'document':
+      return <FileText size={size} />;
+    case 'program':
+      return <Box size={size} />;
+    case 'picture':
+      return <FileImage size={size} />;
+    case 'video':
+      return <FileVideo size={size} />;
+    case 'compressed':
+      return <FileArchive size={size} />;
+    case 'music':
+      return <FileAudio size={size} />;
+    default:
+      return <Folder size={size} />;
+  }
+}
+
 function formatBytes(bytes: number, decimals = 1) {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const k = 1024;
@@ -1023,31 +1049,3 @@ function jobNeedsAttention(job: DownloadJob): boolean {
   return isUnfinished && hasPartialProgress && job.resumeSupport === 'unsupported';
 }
 
-function formatDiagnosticsReport(diagnostics: DiagnosticsSnapshot): string {
-  const lines = [
-    'Simple Download Manager Diagnostics',
-    `Connection State: ${diagnostics.connectionState}`,
-    `Last Host Contact: ${diagnostics.lastHostContactSecondsAgo ?? 'never'} seconds ago`,
-    `Queue Total: ${diagnostics.queueSummary.total}`,
-    `Queue Active: ${diagnostics.queueSummary.active}`,
-    `Queue Needs Attention: ${diagnostics.queueSummary.attention}`,
-    `Queue Queued: ${diagnostics.queueSummary.queued}`,
-    `Queue Downloading: ${diagnostics.queueSummary.downloading}`,
-    `Queue Completed: ${diagnostics.queueSummary.completed}`,
-    `Queue Failed: ${diagnostics.queueSummary.failed}`,
-    `Host Registration Status: ${diagnostics.hostRegistration.status}`,
-    '',
-    'Host Registration Entries:',
-  ];
-
-  for (const entry of diagnostics.hostRegistration.entries) {
-    lines.push(`- ${entry.browser}`);
-    lines.push(`  Registry: ${entry.registryPath}`);
-    lines.push(`  Manifest: ${entry.manifestPath ?? 'missing'}`);
-    lines.push(`  Manifest Exists: ${entry.manifestExists}`);
-    lines.push(`  Host Binary: ${entry.hostBinaryPath ?? 'missing'}`);
-    lines.push(`  Host Binary Exists: ${entry.hostBinaryExists}`);
-  }
-
-  return lines.join('\n');
-}

@@ -203,9 +203,16 @@ pub async fn add_job(
     app: AppHandle,
     state: State<'_, SharedState>,
     url: String,
+    expected_sha256: Option<String>,
 ) -> Result<AddJobResult, String> {
     let result = state
-        .enqueue_download(url, None)
+        .enqueue_download_with_options(
+            url,
+            crate::state::EnqueueOptions {
+                expected_sha256,
+                ..Default::default()
+            },
+        )
         .await
         .map_err(|error| error.message)?;
     emit_snapshot(&app, &result.snapshot);

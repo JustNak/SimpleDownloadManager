@@ -1,11 +1,15 @@
 use crate::commands::emit_snapshot;
 use crate::state::{BulkArchiveReady, SharedState, WorkerControl};
-use crate::storage::{BulkArchiveStatus, DownloadPerformanceMode, FailureCategory, ResumeSupport};
+use crate::storage::{
+    BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, ResumeSupport,
+    TransferKind,
+};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -14,7 +18,7 @@ use tauri::plugin::PermissionState;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -100,6 +104,17 @@ enum DownloadOutcome {
     Completed,
     Paused,
     Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferDispatch {
+    Http,
+}
+
+fn transfer_dispatch_for_kind(kind: TransferKind) -> Option<TransferDispatch> {
+    match kind {
+        TransferKind::Http => Some(TransferDispatch::Http),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +311,7 @@ async fn run_download(
     let mut retry_attempts = 0;
 
     loop {
-        match run_download_attempt(app, state, task).await {
+        match run_transfer_attempt(app, state, task).await {
             Ok(outcome) => return Ok(outcome),
             Err(error) if error.retryable && retry_attempts < max_retry_attempts => {
                 retry_attempts += 1;
@@ -335,7 +350,22 @@ fn download_client() -> Result<Client, DownloadError> {
     })
 }
 
-async fn run_download_attempt(
+async fn run_transfer_attempt(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+) -> Result<DownloadOutcome, DownloadError> {
+    match transfer_dispatch_for_kind(task.transfer_kind) {
+        Some(TransferDispatch::Http) => run_http_download_attempt(app, state, task).await,
+        None => Err(download_error(
+            FailureCategory::Internal,
+            "Unsupported transfer kind.".into(),
+            false,
+        )),
+    }
+}
+
+async fn run_http_download_attempt(
     app: &AppHandle,
     state: &SharedState,
     task: &crate::state::DownloadTask,
@@ -583,13 +613,50 @@ async fn run_download_attempt(
     let final_path = move_to_final_path(&task.temp_path, &target_path)
         .await
         .map_err(disk_error)?;
-    let snapshot = state
-        .complete_job(&task.id, downloaded_bytes, &final_path)
-        .await?;
-    emit_snapshot(app, &snapshot);
-    handle_bulk_archive_after_completion(app, state, &task.id).await?;
-    notify_download_completed(app, state, &final_path).await;
+    complete_http_download(app, state, task, downloaded_bytes, &final_path).await?;
     Ok(DownloadOutcome::Completed)
+}
+
+async fn complete_http_download(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    total_bytes: u64,
+    final_path: &Path,
+) -> Result<(), DownloadError> {
+    let actual_sha256 = if state.job_requires_sha256(&task.id).await {
+        Some(compute_sha256(final_path).await.map_err(disk_error)?)
+    } else {
+        None
+    };
+    let snapshot = state
+        .complete_job_with_integrity(&task.id, total_bytes, final_path, actual_sha256)
+        .await?;
+    let failed_integrity = snapshot.jobs.iter().any(|job| {
+        job.id == task.id
+            && job.state == crate::storage::JobState::Failed
+            && job.failure_category == Some(FailureCategory::Integrity)
+    });
+    emit_snapshot(app, &snapshot);
+
+    if failed_integrity {
+        notify_download_failure(
+            app,
+            state,
+            task,
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == task.id)
+                .and_then(|job| job.error.as_deref()),
+        )
+        .await;
+        return Ok(());
+    }
+
+    handle_bulk_archive_after_completion(app, state, &task.id).await?;
+    notify_download_completed(app, state, final_path).await;
+    Ok(())
 }
 
 async fn handle_bulk_archive_after_completion(
@@ -624,6 +691,14 @@ async fn handle_bulk_archive_after_completion(
                 notify_bulk_archive_completed(app, state, &path).await;
             }
             Err(error) => {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Error,
+                        "bulk_archive",
+                        format!("Bulk archive failed: {error}"),
+                        Some(job_id.into()),
+                    )
+                    .await;
                 let snapshot = state
                     .mark_bulk_archive_status(
                         &archive_id,
@@ -829,12 +904,7 @@ async fn run_segmented_download_attempt(
     let final_path = move_to_final_path(&task.temp_path, &task.target_path)
         .await
         .map_err(disk_error)?;
-    let snapshot = state
-        .complete_job(&task.id, plan.total_bytes, &final_path)
-        .await?;
-    emit_snapshot(app, &snapshot);
-    handle_bulk_archive_after_completion(app, state, &task.id).await?;
-    notify_download_completed(app, state, &final_path).await;
+    complete_http_download(app, state, task, plan.total_bytes, &final_path).await?;
     Ok(DownloadOutcome::Completed)
 }
 
@@ -1376,6 +1446,27 @@ async fn truncate_file(path: &Path) -> Result<(), String> {
 
 async fn metadata_len(path: &Path) -> Option<u64> {
     fs::metadata(path).await.ok().map(|metadata| metadata.len())
+}
+
+async fn compute_sha256(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .await
+        .map_err(|error| format!("Could not open file for SHA-256 verification: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 256 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("Could not read file for SHA-256 verification: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn move_to_final_path(
@@ -2045,6 +2136,37 @@ mod tests {
             monitor.observe(0, Duration::from_secs(30), true),
             LowSpeedDecision::Continue
         );
+    }
+
+    #[test]
+    fn transfer_dispatch_accepts_http_jobs() {
+        assert_eq!(
+            transfer_dispatch_for_kind(TransferKind::Http),
+            Some(TransferDispatch::Http)
+        );
+    }
+
+    #[tokio::test]
+    async fn sha256_digest_reads_file_contents() {
+        let root = std::env::temp_dir().join(format!(
+            "sdm-sha256-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("hello.txt");
+        tokio::fs::write(&path, b"hello").await.unwrap();
+
+        let digest = compute_sha256(&path).await.unwrap();
+
+        assert_eq!(
+            digest,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

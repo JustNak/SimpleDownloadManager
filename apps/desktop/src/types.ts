@@ -24,9 +24,13 @@ export type FailureCategory =
   | 'disk'
   | 'permission'
   | 'resume'
+  | 'integrity'
   | 'internal';
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
+export type TransferKind = 'http';
+export type IntegrityAlgorithm = 'sha256';
+export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type StartupLaunchMode = 'open' | 'tray';
 export type BulkArchiveStatus = 'pending' | 'compressing' | 'completed' | 'failed';
@@ -47,6 +51,13 @@ export interface DownloadJob {
   url: string;
   filename: string;
   source?: DownloadSource;
+  transferKind: TransferKind;
+  integrityCheck?: {
+    algorithm: IntegrityAlgorithm;
+    expected: string;
+    actual?: string;
+    status: IntegrityStatus;
+  };
   state: JobState;
   createdAt?: number;
   progress: number; // 0-100
@@ -132,11 +143,22 @@ export interface HostRegistrationDiagnostics {
   entries: HostRegistrationEntry[];
 }
 
+export type DiagnosticLevel = 'info' | 'warning' | 'error';
+
+export interface DiagnosticEvent {
+  timestamp: number;
+  level: DiagnosticLevel;
+  category: string;
+  message: string;
+  jobId?: string;
+}
+
 export interface DiagnosticsSnapshot {
   connectionState: ConnectionState;
   queueSummary: QueueSummary;
   lastHostContactSecondsAgo?: number;
   hostRegistration: HostRegistrationDiagnostics;
+  recentEvents: DiagnosticEvent[];
 }
 
 export interface ToastMessage {

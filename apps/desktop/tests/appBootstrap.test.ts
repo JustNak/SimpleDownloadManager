@@ -10,6 +10,7 @@ const snapshot: DesktopSnapshot = {
       id: 'job_1',
       url: 'https://example.com/file.zip',
       filename: 'file.zip',
+      transferKind: 'http',
       state: 'completed',
       progress: 100,
       totalBytes: 10,

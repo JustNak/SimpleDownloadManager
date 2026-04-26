@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
 import type { ProgressBatchContext } from './batchProgress';
+import { buildAddJobCommandArgs } from './backendCommandArgs';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -60,6 +61,7 @@ let mockState: DesktopSnapshot = {
       id: '1',
       url: 'https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso',
       filename: 'Ubuntu 24.04 LTS Desktop (iso)',
+      transferKind: 'http',
       state: JobState.Downloading,
       createdAt: mockNow - 1000 * 60 * 48,
       progress: 68,
@@ -73,6 +75,7 @@ let mockState: DesktopSnapshot = {
       id: '2',
       url: 'https://cdn.example.com/The.Wild.Robot.2024.1080p.mkv',
       filename: 'The.Wild.Robot.2024.1080p.mkv',
+      transferKind: 'http',
       state: JobState.Downloading,
       createdAt: mockNow - 1000 * 60 * 36,
       progress: 35,
@@ -86,6 +89,7 @@ let mockState: DesktopSnapshot = {
       id: '3',
       url: 'https://download.blender.org/release/Blender4.1/blender-4.1.1-windows-x64.msi',
       filename: 'Blender 4.1.1 Setup.exe',
+      transferKind: 'http',
       state: JobState.Downloading,
       createdAt: mockNow - 1000 * 60 * 18,
       progress: 12,
@@ -99,6 +103,7 @@ let mockState: DesktopSnapshot = {
       id: '4',
       url: 'https://files.example.com/project-assets-2024.zip',
       filename: 'Project_Assets_2024.zip',
+      transferKind: 'http',
       state: JobState.Queued,
       createdAt: mockNow - 1000 * 60 * 12,
       progress: 0,
@@ -112,6 +117,7 @@ let mockState: DesktopSnapshot = {
       id: '5',
       url: 'https://docs.example.com/getting-started.pdf',
       filename: 'Getting_Started_Guide.pdf',
+      transferKind: 'http',
       state: JobState.Completed,
       createdAt: mockNow - 1000 * 60 * 90,
       progress: 100,
@@ -126,6 +132,7 @@ let mockState: DesktopSnapshot = {
       id: '6',
       url: 'https://mirror.example.com/music-collection-flac.zip',
       filename: 'Music_Collection_FLAC.zip',
+      transferKind: 'http',
       state: JobState.Completed,
       createdAt: mockNow - 1000 * 60 * 120,
       progress: 100,
@@ -140,6 +147,7 @@ let mockState: DesktopSnapshot = {
       id: '7',
       url: 'https://dl.fedoraproject.org/pub/fedora/linux/releases/40/Everything/x86_64/iso/Fedora-40-x86_64-DVD.iso',
       filename: 'Fedora-40-x86_64-DVD.iso',
+      transferKind: 'http',
       state: JobState.Paused,
       createdAt: mockNow - 1000 * 60 * 72,
       progress: 58,
@@ -154,6 +162,7 @@ let mockState: DesktopSnapshot = {
       id: '8',
       url: 'https://example.com/broken-driver.exe',
       filename: 'driver-installer.exe',
+      transferKind: 'http',
       state: JobState.Failed,
       createdAt: mockNow - 1000 * 60 * 24,
       progress: 22,
@@ -290,6 +299,14 @@ export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {
           },
         ],
       },
+      recentEvents: [
+        {
+          timestamp: mockNow - 30_000,
+          level: 'info',
+          category: 'download',
+          message: 'Mock diagnostics are available.',
+        },
+      ],
     };
   }
 
@@ -501,7 +518,8 @@ export async function clearCompletedJobs(): Promise<void> {
   await invokeCommand('clear_completed_jobs');
 }
 
-export async function addJob(url: string): Promise<AddJobResult> {
+export async function addJob(url: string, expectedSha256?: string | null): Promise<AddJobResult> {
+  const args = buildAddJobCommandArgs(url, expectedSha256);
   if (!isTauriRuntime()) {
     const duplicateJob = mockState.jobs.find((job) => job.url === url);
     if (duplicateJob) {
@@ -518,6 +536,14 @@ export async function addJob(url: string): Promise<AddJobResult> {
       id: jobId,
       url,
       filename,
+      transferKind: 'http',
+      integrityCheck: args.expectedSha256
+        ? {
+            algorithm: 'sha256',
+            expected: args.expectedSha256,
+            status: 'pending',
+          }
+        : undefined,
       state: JobState.Queued,
       createdAt: Date.now(),
       progress: 0,
@@ -529,7 +555,7 @@ export async function addJob(url: string): Promise<AddJobResult> {
     emitMockState();
     return { jobId, filename, status: 'queued' };
   }
-  return invokeCommand<AddJobResult>('add_job', { url });
+  return invokeCommand<AddJobResult>('add_job', args);
 }
 
 export async function addJobs(urls: string[], bulkArchiveName?: string): Promise<AddJobsResult> {
@@ -560,6 +586,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
         id: jobId,
         url,
         filename,
+        transferKind: 'http',
         state: JobState.Queued,
         createdAt: Date.now(),
         progress: 0,
