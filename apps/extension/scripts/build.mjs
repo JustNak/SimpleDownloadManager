@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { cp, mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -50,7 +50,7 @@ const targets = [
       version: browserExtensionVersion,
       version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
-      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
       background: {
         scripts: ['background.js']
       },
@@ -64,7 +64,11 @@ const targets = [
       },
       browser_specific_settings: {
         gecko: {
-          id: releaseConfig.firefoxExtensionId
+          id: releaseConfig.firefoxExtensionId,
+          strict_min_version: '142.0',
+          data_collection_permissions: {
+            required: ['browsingActivity', 'websiteActivity', 'websiteContent']
+          }
         }
       }
     }
@@ -73,6 +77,7 @@ const targets = [
 
 async function buildTarget(target) {
   const outdir = path.join(distRoot, target.name);
+  await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
 
   await build({

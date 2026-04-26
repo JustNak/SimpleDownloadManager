@@ -13,6 +13,10 @@ assert.equal(extensionDisplayVersion('0.2.9-alpha'), '0.2.9-alpha');
 
 const firefoxManifestPath = path.resolve('apps/extension/dist/firefox/manifest.json');
 const firefoxManifest = JSON.parse(await readFile(firefoxManifestPath, 'utf8'));
+const buildScript = await readFile(
+  new URL('../scripts/build.mjs', import.meta.url),
+  'utf8',
+);
 
 assert.equal(firefoxManifest.manifest_version, 2);
 assert.deepEqual(firefoxManifest.background, { scripts: ['background.js'] });
@@ -21,7 +25,25 @@ assert.equal(
   firefoxManifest.browser_specific_settings.gecko.id,
   'simple-download-manager@example.com',
 );
+assert.equal(
+  firefoxManifest.browser_specific_settings.gecko.strict_min_version,
+  '142.0',
+  'Firefox upload should rely on the built-in data consent prompt without web-ext Android compatibility warnings',
+);
+assert.deepEqual(
+  firefoxManifest.browser_specific_settings.gecko.data_collection_permissions,
+  {
+    required: ['browsingActivity', 'websiteActivity', 'websiteContent'],
+  },
+  'Firefox manifest should disclose required data transmission for AMO upload compliance',
+);
 assert.deepEqual(
   firefoxManifest.permissions,
-  ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
+  ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
+);
+
+assert.match(
+  buildScript,
+  /rm\(outdir,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/,
+  'extension build should clear each target output directory before writing release ZIP contents',
 );
