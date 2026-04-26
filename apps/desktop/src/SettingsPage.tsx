@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
 import { normalizeAccentColor } from './appearance';
+import { shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
 import {
   addExcludedHosts,
   filterExcludedHosts,
@@ -78,13 +79,25 @@ export function SettingsPage({
   onExportDiagnostics,
 }: SettingsPageProps) {
   const [formData, setFormData] = useState<Settings>(settings);
+  const formDataRef = useRef(formData);
+  const previousSettingsRef = useRef(settings);
   const [excludedHostInput, setExcludedHostInput] = useState('');
   const [excludedBulkInput, setExcludedBulkInput] = useState('');
   const [excludedSearchQuery, setExcludedSearchQuery] = useState('');
   const [isExcludedSitesDialogOpen, setIsExcludedSitesDialogOpen] = useState(false);
   const [accentColorInput, setAccentColorInput] = useState(normalizeAccentColor(settings.accentColor));
 
+  formDataRef.current = formData;
+
   useEffect(() => {
+    const previousSettings = previousSettingsRef.current;
+    previousSettingsRef.current = settings;
+
+    if (!shouldAdoptIncomingSettingsDraft(formDataRef.current, previousSettings, settings)) {
+      return;
+    }
+
+    formDataRef.current = settings;
     setFormData(settings);
     setExcludedHostInput('');
     setExcludedBulkInput('');

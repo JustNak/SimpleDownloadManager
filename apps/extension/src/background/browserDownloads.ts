@@ -54,11 +54,44 @@ export type BrowserDownloadPolicyItem = {
   finalUrl?: string;
   filename?: string;
 };
+export type FirefoxWebRequestHeader = {
+  name: string;
+  value?: string;
+};
+export type FirefoxWebRequestDownloadDetails = {
+  url: string;
+  method?: string;
+  type?: string;
+  responseHeaders?: FirefoxWebRequestHeader[];
+  incognito?: boolean;
+};
+export type FirefoxWebRequestDownloadCandidate = {
+  url: string;
+  filename?: string;
+  totalBytes?: number;
+  incognito: boolean;
+};
 
 export type BrowserDownloadBypassState = {
   downloadIds: Set<number>;
   urls: Map<string, number>;
 };
+
+const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame']);
+const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
+  'application/octet-stream',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/x-7z-compressed',
+  'application/x-rar-compressed',
+  'application/x-tar',
+  'application/gzip',
+  'application/x-bzip2',
+  'application/x-xz',
+  'application/pdf',
+  'application/x-msdownload',
+  'application/x-msi',
+]);
 
 export function createBrowserDownloadBypassState(): BrowserDownloadBypassState {
   return {
@@ -78,6 +111,18 @@ export function shouldBypassBrowserDownload(
   }
 
   return consumeBypassUrl(bypass, item.finalUrl) || consumeBypassUrl(bypass, item.url);
+}
+
+export function markBrowserDownloadBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
+  addBypassUrl(bypass, url);
+}
+
+export function revokeBrowserDownloadBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
+  revokeBypassUrl(bypass, url);
+}
+
+export function shouldBypassBrowserDownloadUrl(url: string | undefined, bypass: BrowserDownloadBypassState): boolean {
+  return consumeBypassUrl(bypass, url);
 }
 
 export function browserDownloadUrl(item: BrowserDownloadPolicyItem): string | undefined {
@@ -102,6 +147,45 @@ export function shouldHandleBrowserDownload(
     && settings.downloadHandoffMode !== 'off'
     && !isHostExcluded(url, settings.excludedHosts)
     && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, item.filename, settings.ignoredFileExtensions));
+}
+
+export function firefoxWebRequestDownloadCandidate(
+  details: FirefoxWebRequestDownloadDetails,
+  settings: ExtensionIntegrationSettings,
+): FirefoxWebRequestDownloadCandidate | null {
+  if (details.method && details.method.toUpperCase() !== 'GET') {
+    return null;
+  }
+
+  if (details.type && !FIREFOX_DOWNLOAD_RESOURCE_TYPES.has(details.type)) {
+    return null;
+  }
+
+  const url = browserDownloadUrl({ url: details.url });
+  if (!url) {
+    return null;
+  }
+
+  const contentDisposition = headerValue(details.responseHeaders, 'content-disposition');
+  const contentType = normalizeContentType(headerValue(details.responseHeaders, 'content-type'));
+  const filename = filenameFromContentDisposition(contentDisposition) ?? basenameFromUrl(url);
+  const isAttachment = /\battachment\b/i.test(contentDisposition ?? '');
+  const hasDownloadMimeType = Boolean(contentType && FIREFOX_DOWNLOAD_MIME_TYPES.has(contentType));
+
+  if (!isAttachment && !hasDownloadMimeType) {
+    return null;
+  }
+
+  if (!shouldHandleBrowserDownload({ url, filename }, settings)) {
+    return null;
+  }
+
+  return {
+    url,
+    filename,
+    totalBytes: positiveIntegerHeader(details.responseHeaders, 'content-length'),
+    incognito: details.incognito ?? false,
+  };
 }
 
 export function createAsyncFilenameInterceptionListener<TItem>(
@@ -253,6 +337,53 @@ function consumeBypassUrl(bypass: BrowserDownloadBypassState, url: string | unde
 
   revokeBypassUrl(bypass, url);
   return true;
+}
+
+function headerValue(headers: FirefoxWebRequestHeader[] | undefined, name: string): string | undefined {
+  const header = headers?.find((candidate) => candidate.name.toLowerCase() === name);
+  return header?.value;
+}
+
+function normalizeContentType(value: string | undefined): string | undefined {
+  return value?.split(';', 1)[0]?.trim().toLowerCase() || undefined;
+}
+
+function positiveIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {
+  const value = headerValue(headers, name);
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function filenameFromContentDisposition(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const encodedFilename = /(?:^|;)\s*filename\*\s*=\s*(?:UTF-8''|)([^;]+)/i.exec(value)?.[1];
+  if (encodedFilename) {
+    return decodeFilename(encodedFilename);
+  }
+
+  const quotedFilename = /(?:^|;)\s*filename\s*=\s*"([^"]+)"/i.exec(value)?.[1];
+  if (quotedFilename) {
+    return basenameOnly(quotedFilename);
+  }
+
+  const plainFilename = /(?:^|;)\s*filename\s*=\s*([^;]+)/i.exec(value)?.[1];
+  return plainFilename ? basenameOnly(plainFilename) : undefined;
+}
+
+function decodeFilename(value: string): string | undefined {
+  const cleaned = value.trim().replace(/^"|"$/g, '');
+  try {
+    return basenameOnly(decodeURIComponent(cleaned));
+  } catch {
+    return basenameOnly(cleaned);
+  }
 }
 
 function basenameOnly(path: string | undefined): string | undefined {

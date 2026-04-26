@@ -46,9 +46,8 @@ Firefox temporary add-ons are removed after the browser restarts unless you load
 export async function packageFirefoxTest(repoRoot = defaultRepoRoot) {
   const paths = firefoxTestPackagePaths(repoRoot);
   await assertFirefoxBuildExists(paths.sourceDir);
-  await rm(paths.packageRoot, { recursive: true, force: true });
   await mkdir(paths.packageRoot, { recursive: true });
-  await copyFirefoxExtensionFiles(paths.sourceDir, paths.extensionDir);
+  await syncFirefoxExtensionFiles(paths.sourceDir, paths.extensionDir);
   await writeFile(paths.readmePath, createFirefoxTestReadme(paths), 'utf8');
   await createZipFromDirectory(paths.extensionDir, paths.zipPath);
   return paths;
@@ -60,16 +59,27 @@ async function assertFirefoxBuildExists(sourceDir) {
   });
 }
 
-async function copyFirefoxExtensionFiles(sourceDir, extensionDir) {
+async function syncFirefoxExtensionFiles(sourceDir, extensionDir) {
   await mkdir(extensionDir, { recursive: true });
-  const entries = await readdir(sourceDir, { withFileTypes: true });
+  const sourceEntries = await readdir(sourceDir, { withFileTypes: true });
+  const expectedFiles = new Set();
 
-  for (const entry of entries) {
+  for (const entry of sourceEntries) {
     if (!entry.isFile()) {
       continue;
     }
 
+    expectedFiles.add(entry.name);
     await cp(path.join(sourceDir, entry.name), path.join(extensionDir, entry.name));
+  }
+
+  const existingEntries = await readdir(extensionDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of existingEntries) {
+    if (expectedFiles.has(entry.name)) {
+      continue;
+    }
+
+    await rm(path.join(extensionDir, entry.name), { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

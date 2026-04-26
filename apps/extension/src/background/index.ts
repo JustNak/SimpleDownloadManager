@@ -6,21 +6,28 @@ import {
   createAsyncFilenameInterceptionListener,
   discardBrowserDownload,
   discardBrowserDownloadBeforeFilenameRelease,
+  firefoxWebRequestDownloadCandidate,
+  markBrowserDownloadBypassUrl,
   restartBrowserDownload,
+  revokeBrowserDownloadBypassUrl,
   selectFilenameInterceptionApi,
   shouldBypassBrowserDownload,
+  shouldBypassBrowserDownloadUrl,
   shouldHandleBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
   type BrowserDownloadFilenameInterceptionApi,
   type BrowserDownloadFilenameInterceptionCandidate,
   type BrowserDownloadFilenameSuggest,
   type BrowserDownloadFilenameSuggestion,
+  type FirefoxWebRequestDownloadCandidate,
+  type FirefoxWebRequestDownloadDetails,
 } from './browserDownloads';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
+const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
 const activeBrowserDownloadIds = new Set<number>();
 const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
 
@@ -244,6 +251,7 @@ if (filenameInterceptionApi) {
   browser.downloads?.onCreated.addListener((item) => {
     void handleBrowserDownloadCreated(item);
   });
+  registerFirefoxWebRequestInterception();
 }
 
 browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
@@ -320,7 +328,7 @@ function shouldSkipBrowserDownloadInterception(item: browser.downloads.DownloadI
 
 async function handOffBrowserDownload(
   url: string,
-  item: browser.downloads.DownloadItem,
+  item: BrowserDownloadHandoffItem,
   settings: ExtensionIntegrationSettings,
 ): Promise<HostToExtensionResponse> {
   const source = {
@@ -335,7 +343,7 @@ async function handOffBrowserDownload(
 
   return promptDownload(url, source, {
     suggestedFilename: basenameOnly(item.filename),
-    totalBytes: item.totalBytes > 0 ? item.totalBytes : undefined,
+    totalBytes: item.totalBytes && item.totalBytes > 0 ? item.totalBytes : undefined,
   });
 }
 
@@ -364,6 +372,81 @@ async function restoreBrowserDownloadFallback(
       error instanceof Error
         ? `Could not return the download to the browser: ${error.message}`
         : 'Could not return the download to the browser.',
+      'error',
+    );
+    await updateBrowserBadge(state);
+  }
+}
+
+async function handleFirefoxWebRequestDownload(
+  candidate: FirefoxWebRequestDownloadCandidate,
+  initialSettings: ExtensionIntegrationSettings,
+): Promise<void> {
+  let settings = initialSettings;
+
+  try {
+    const pingResponse = await pingNativeHost();
+    if (isErrorResponse(pingResponse)) {
+      await recordHostError(pingResponse);
+      await restoreFirefoxWebRequestFallback(candidate);
+      return;
+    }
+
+    await setLastResult('connected', pingResponse);
+    settings = getSyncedSettings(pingResponse, settings);
+    if (!shouldHandleBrowserDownload({ url: candidate.url, filename: candidate.filename }, settings)) {
+      await restoreFirefoxWebRequestFallback(candidate);
+      return;
+    }
+
+    const response = await handOffBrowserDownload(candidate.url, candidate, settings);
+
+    if (isErrorResponse(response)) {
+      await recordHostError(response);
+      await restoreFirefoxWebRequestFallback(candidate);
+      return;
+    }
+
+    if (!shouldDiscardBrowserDownloadAfterHandoff(response)) {
+      const state = await setLastResult('connected', response);
+      await updateBrowserBadge(state);
+      await restoreFirefoxWebRequestFallback(candidate);
+      return;
+    }
+
+    const state = await setLastResult('connected', response);
+    await updateBrowserBadge(state);
+  } catch (error) {
+    const state = await setHostError(
+      'HOST_NOT_AVAILABLE',
+      error instanceof Error ? error.message : 'Could not hand the Firefox download to the desktop app.',
+      'error',
+    );
+    await updateBrowserBadge(state);
+    await restoreFirefoxWebRequestFallback(candidate);
+  }
+}
+
+async function restoreFirefoxWebRequestFallback(candidate: FirefoxWebRequestDownloadCandidate): Promise<void> {
+  const releaseExtraBypass = markFirefoxWebRequestBypass(candidate.url);
+
+  try {
+    await restartBrowserDownload(
+      browser.downloads,
+      {
+        id: -1,
+        url: candidate.url,
+        filename: candidate.filename,
+      },
+      browserDownloadFallbackBypass,
+    );
+  } catch (error) {
+    releaseExtraBypass();
+    const state = await setHostError(
+      'DOWNLOAD_FAILED',
+      error instanceof Error
+        ? `Could not return the Firefox download to the browser: ${error.message}`
+        : 'Could not return the Firefox download to the browser.',
       'error',
     );
     await updateBrowserBadge(state);
@@ -445,6 +528,72 @@ function getFilenameInterceptionApi(): BrowserDownloadFilenameInterceptionApi<br
   return selectFilenameInterceptionApi(downloads, rawChrome.chrome?.downloads);
 }
 
+function registerFirefoxWebRequestInterception(): void {
+  const webRequest = getFirefoxWebRequestApi();
+  if (!webRequest) {
+    return;
+  }
+
+  webRequest.onHeadersReceived.addListener(
+    handleFirefoxWebRequestHeadersReceived,
+    {
+      urls: ['http://*/*', 'https://*/*'],
+      types: ['main_frame', 'sub_frame'],
+    },
+    ['blocking', 'responseHeaders'],
+  );
+}
+
+async function handleFirefoxWebRequestHeadersReceived(
+  details: FirefoxWebRequestDownloadDetails,
+): Promise<{ cancel?: boolean }> {
+  try {
+    if (shouldBypassBrowserDownloadUrl(details.url, browserDownloadFallbackBypass)) {
+      return {};
+    }
+
+    const settings = await getExtensionSettings();
+    const candidate = firefoxWebRequestDownloadCandidate(details, settings);
+    if (!candidate) {
+      return {};
+    }
+
+    void handleFirefoxWebRequestDownload(candidate, settings);
+    return { cancel: true };
+  } catch {
+    return {};
+  }
+}
+
+function markFirefoxWebRequestBypass(url: string): () => void {
+  let released = false;
+  markBrowserDownloadBypassUrl(browserDownloadFallbackBypass, url);
+
+  const timeout = globalThis.setTimeout(() => {
+    release();
+  }, FIREFOX_FALLBACK_BYPASS_TTL_MS);
+
+  function release() {
+    if (released) {
+      return;
+    }
+
+    released = true;
+    globalThis.clearTimeout(timeout);
+    revokeBrowserDownloadBypassUrl(browserDownloadFallbackBypass, url);
+  }
+
+  return release;
+}
+
+function getFirefoxWebRequestApi(): FirefoxWebRequestApi | null {
+  const runtimeBrowser = browser as typeof browser & {
+    webRequest?: FirefoxWebRequestApi;
+  };
+
+  return runtimeBrowser.webRequest?.onHeadersReceived ? runtimeBrowser.webRequest : null;
+}
+
 function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: BrowserDownloadFilenameSuggest) {
   const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url);
   if (filename) {
@@ -473,3 +622,19 @@ async function openOptionsPage() {
 
   await runtimeBrowser.tabs?.create({ url: runtimeBrowser.runtime.getURL('options.html') });
 }
+
+type BrowserDownloadHandoffItem = {
+  filename?: string;
+  totalBytes?: number;
+  incognito?: boolean;
+};
+
+type FirefoxWebRequestApi = {
+  onHeadersReceived: {
+    addListener(
+      listener: (details: FirefoxWebRequestDownloadDetails) => Promise<{ cancel?: boolean }> | { cancel?: boolean },
+      filter: { urls: string[]; types: string[] },
+      extraInfoSpec: string[],
+    ): void;
+  };
+};

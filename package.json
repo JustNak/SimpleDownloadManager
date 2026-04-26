@@ -1,7 +1,7 @@
 {
   "name": "simple-download-manager",
   "private": true,
-  "version": "0.3.1-alpha",
+  "version": "0.3.2-alpha",
   "workspaces": [
     "apps/desktop",
     "apps/extension",
@@ -15,6 +15,8 @@
     "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && cargo test --manifest-path apps/native-host/Cargo.toml",
     "clippy": "cargo clippy --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/native-host/Cargo.toml -- -D warnings",
     "check": "npm run typecheck && npm test && npm run build:extension && npm run build:desktop && npm run clippy",
+    "lint:firefox": "node ./scripts/lint-firefox.mjs",
+    "package:firefox-amo": "npm run build:extension && node ./scripts/package-firefox-amo.mjs",
     "package:firefox-test": "npm run build:extension && node ./scripts/package-firefox-test.mjs",
     "prepare:release": "node ./scripts/prepare-release.mjs",
     "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
@@ -22,6 +24,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "web-ext": "^10.1.0"
   }
 }
