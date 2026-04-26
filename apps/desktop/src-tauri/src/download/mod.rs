@@ -4,7 +4,7 @@ use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, ResumeSupport,
     TransferKind,
 };
-use crate::torrent::TorrentEngine;
+use crate::torrent::{prepare_torrent_source, TorrentEngine};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
@@ -29,7 +29,7 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
-const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(600);
+const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const BALANCED_MIN_SEGMENTED_SIZE: u64 = 64 * 1024 * 1024;
 const FAST_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
@@ -409,6 +409,16 @@ async fn run_torrent_download_attempt(
     }
 
     let output_folder = task.target_path.clone();
+    let prepared_source = prepare_torrent_source(&task.url);
+    if prepared_source.fallback_trackers_added > 0 {
+        record_fallback_tracker_usage(
+            state,
+            &task.id,
+            prepared_source.fallback_trackers_added,
+            prepared_source.source_kind.label(),
+        )
+        .await;
+    }
     let _ = state
         .record_diagnostic_event(
             DiagnosticLevel::Info,
@@ -421,7 +431,7 @@ async fn run_torrent_download_attempt(
         state,
         &task.id,
         engine.add_source(
-            &task.url,
+            &prepared_source,
             &output_folder,
             settings.torrent.upload_limit_kib_per_second,
         ),
@@ -547,7 +557,7 @@ where
                 };
             }
             _ = &mut timeout => {
-                let message = "Torrent metadata lookup timed out.".to_string();
+                let message = torrent_metadata_timeout_message();
                 let _ = state
                     .record_diagnostic_event(
                         DiagnosticLevel::Error,
@@ -587,6 +597,29 @@ where
             }
         }
     }
+}
+
+async fn record_fallback_tracker_usage(
+    state: &SharedState,
+    job_id: &str,
+    count: usize,
+    source_kind: &str,
+) {
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "torrent",
+            format!("Added {count} fallback trackers for {source_kind} metadata lookup"),
+            Some(job_id.to_string()),
+        )
+        .await;
+}
+
+fn torrent_metadata_timeout_message() -> String {
+    format!(
+        "Torrent metadata lookup timed out after {} seconds. Add trackers or retry later.",
+        TORRENT_METADATA_TIMEOUT.as_secs()
+    )
 }
 
 async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
@@ -2218,6 +2251,43 @@ mod tests {
 
         assert_eq!(error.category, FailureCategory::Torrent);
         assert!(error.retryable);
+        assert_eq!(
+            error.message,
+            "Torrent metadata lookup timed out after 5 seconds. Add trackers or retry later."
+        );
+    }
+
+    #[test]
+    fn torrent_metadata_timeout_is_five_seconds() {
+        assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn fallback_tracker_usage_records_diagnostic_event() {
+        let state = SharedState::for_tests(
+            test_storage_path("torrent-fallback-trackers-diagnostic"),
+            vec![torrent_job("job_1", JobState::Starting)],
+        );
+
+        record_fallback_tracker_usage(&state, "job_1", 8, "magnet").await;
+
+        let snapshot = state
+            .diagnostics_snapshot(crate::storage::HostRegistrationDiagnostics {
+                status: crate::storage::HostRegistrationStatus::Missing,
+                entries: Vec::new(),
+            })
+            .await;
+        let event = snapshot
+            .recent_events
+            .last()
+            .expect("fallback diagnostic event");
+        assert_eq!(event.level, DiagnosticLevel::Info);
+        assert_eq!(event.category, "torrent");
+        assert_eq!(
+            event.message,
+            "Added 8 fallback trackers for magnet metadata lookup"
+        );
+        assert_eq!(event.job_id.as_deref(), Some("job_1"));
     }
 
     #[test]

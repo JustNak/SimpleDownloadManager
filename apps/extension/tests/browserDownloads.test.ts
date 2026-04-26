@@ -1,19 +1,94 @@
 import assert from 'node:assert/strict';
+import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
+  browserDownloadUrl,
+  createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
   discardBrowserDownloadBeforeFilenameRelease,
   discardBrowserDownload,
+  restartBrowserDownload,
   selectFilenameInterceptionApi,
+  shouldBypassBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
+  shouldHandleBrowserDownload,
 } from '../src/background/browserDownloads.ts';
 
 const calls: string[] = [];
 
 async function main() {
+  const defaultSettings: ExtensionIntegrationSettings = {
+    enabled: true,
+    downloadHandoffMode: 'ask',
+    listenPort: 1420,
+    contextMenuEnabled: true,
+    showProgressAfterHandoff: true,
+    showBadgeStatus: true,
+    excludedHosts: [],
+    ignoredFileExtensions: [],
+  };
+  assert.equal(
+    browserDownloadUrl({
+      url: 'https://example.com/redirect',
+      finalUrl: 'https://cdn.example.com/file.zip',
+    }),
+    'https://cdn.example.com/file.zip',
+    'finalUrl should be preferred when the browser exposes it',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload({ url: 'https://example.com/file.zip' }, { ...defaultSettings, enabled: false }),
+    false,
+    'disabled integration should not capture browser downloads',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://example.com/file.zip' },
+      { ...defaultSettings, downloadHandoffMode: 'off' },
+    ),
+    false,
+    'off handoff mode should not capture browser downloads',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://downloads.example.com/file.zip' },
+      { ...defaultSettings, excludedHosts: ['example.com'] },
+    ),
+    false,
+    'excluded hosts should include subdomains',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://example.com/file.zip' },
+      { ...defaultSettings, ignoredFileExtensions: ['zip'] },
+    ),
+    false,
+    'ignored extensions should not capture normal HTTP downloads',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://example.com/file.torrent', filename: 'file.torrent' },
+      { ...defaultSettings, ignoredFileExtensions: ['torrent'] },
+    ),
+    true,
+    '.torrent downloads should still be handed off as torrent jobs',
+  );
+
   await discardBrowserDownload(
     {
       async cancel(downloadId: number) {
         calls.push(`cancel:${downloadId}`);
+      },
+      async search(query: { id: number }) {
+        calls.push(`search:${query.id}`);
+        return [
+          {
+            id: query.id,
+            state: 'complete',
+            exists: true,
+          },
+        ];
+      },
+      async removeFile(downloadId: number) {
+        calls.push(`removeFile:${downloadId}`);
       },
       async erase(query: { id: number }) {
         calls.push(`erase:${query.id}`);
@@ -22,7 +97,7 @@ async function main() {
     42,
   );
 
-  assert.deepEqual(calls, ['cancel:42', 'erase:42']);
+  assert.deepEqual(calls, ['cancel:42', 'search:42', 'removeFile:42', 'erase:42']);
   assert.equal(
     shouldDiscardBrowserDownloadAfterHandoff({
       ok: true,
@@ -80,6 +155,7 @@ async function main() {
     async (item: { id: number }, suggest) => {
       handledIds.push(item.id);
       suggest({ filename: 'CymaticsHubSetup.exe', conflictAction: 'uniquify' });
+      suggest({ filename: 'duplicate.exe', conflictAction: 'uniquify' });
     },
   );
   const returned = listener({ id: 7 }, (suggestion) => {
@@ -89,13 +165,21 @@ async function main() {
   assert.equal(returned, true, 'async filename listeners must keep the browser suggest callback open');
   await Promise.resolve();
   assert.deepEqual(handledIds, [7]);
-  assert.deepEqual(suggestionCalls, [{ filename: 'CymaticsHubSetup.exe', conflictAction: 'uniquify' }]);
+  assert.deepEqual(
+    suggestionCalls,
+    [{ filename: 'CymaticsHubSetup.exe', conflictAction: 'uniquify' }],
+    'filename listeners should only release the browser callback once',
+  );
 
   const releaseOrder: string[] = [];
   await discardBrowserDownloadBeforeFilenameRelease(
     {
       async cancel(downloadId: number) {
         releaseOrder.push(`cancel:${downloadId}`);
+      },
+      async search(query: { id: number }) {
+        releaseOrder.push(`search:${query.id}`);
+        return [];
       },
       async erase(query: { id: number }) {
         releaseOrder.push(`erase:${query.id}`);
@@ -108,7 +192,7 @@ async function main() {
   );
   assert.deepEqual(
     releaseOrder,
-    ['cancel:99', 'suggest', 'erase:99'],
+    ['cancel:99', 'suggest', 'search:99', 'erase:99'],
     'accepted handoffs should cancel before releasing filename determination to prevent Save As leakage',
   );
 
@@ -118,6 +202,10 @@ async function main() {
       async cancel(downloadId: number) {
         fallbackReleaseOrder.push(`cancel:${downloadId}`);
         throw new Error('not in progress');
+      },
+      async search(query: { id: number }) {
+        fallbackReleaseOrder.push(`search:${query.id}`);
+        return [];
       },
       async erase(query: { id: number }) {
         fallbackReleaseOrder.push(`erase:${query.id}`);
@@ -130,8 +218,49 @@ async function main() {
   );
   assert.deepEqual(
     fallbackReleaseOrder,
-    ['cancel:100', 'suggest', 'cancel:100', 'erase:100'],
+    ['cancel:100', 'suggest', 'cancel:100', 'search:100', 'erase:100'],
     'accepted handoffs should retry cancel after release if Chrome rejects pre-release cancellation',
+  );
+
+  let restartedWith: unknown;
+  const bypass = createBrowserDownloadBypassState();
+  const restartedId = await restartBrowserDownload(
+    {
+      async download(options) {
+        restartedWith = options;
+        assert.equal(
+          shouldBypassBrowserDownload({ id: 500, url: options.url }, bypass),
+          true,
+          'fallback restart should bypass one URL event that races before the id is known',
+        );
+        return 501;
+      },
+    },
+    {
+      id: 100,
+      url: 'https://example.com/download?id=1',
+      finalUrl: 'https://cdn.example.com/File%20Name.zip',
+      filename: 'C:\\Users\\Downloads\\File Name.zip',
+    },
+    bypass,
+  );
+
+  assert.equal(restartedId, 501);
+  assert.deepEqual(restartedWith, {
+    url: 'https://cdn.example.com/File%20Name.zip',
+    filename: 'File Name.zip',
+    conflictAction: 'uniquify',
+    saveAs: false,
+  });
+  assert.equal(
+    shouldBypassBrowserDownload({ id: 501, url: 'https://cdn.example.com/File%20Name.zip' }, bypass),
+    true,
+    'fallback restart should bypass interception by returned download id',
+  );
+  assert.equal(
+    shouldBypassBrowserDownload({ id: 502, url: 'https://cdn.example.com/File%20Name.zip' }, bypass),
+    false,
+    'fallback bypass should be one-shot',
   );
 
   const rawFilenameApi = {

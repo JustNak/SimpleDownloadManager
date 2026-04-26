@@ -5,7 +5,7 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, ManagedTorrent, PeerConnectionOptions, Session, SessionOptions,
     SessionPersistenceConfig,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,39 @@ use tokio::sync::Mutex;
 pub const TORRENT_LISTEN_PORT_RANGE: Range<u16> = 42000..42100;
 pub const TORRENT_PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 pub const TORRENT_PEER_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://udp.tracker.projectk.org:23333/announce",
+    "udp://tracker.tvunderground.org.ru:3218/announce",
+    "udp://tracker.tryhackx.org:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.theoks.net:6969/announce",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TorrentSourceKind {
+    Magnet,
+    TorrentFile,
+}
+
+impl TorrentSourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Magnet => "magnet",
+            Self::TorrentFile => "torrent file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTorrentSource {
+    pub source: String,
+    pub source_kind: TorrentSourceKind,
+    pub fallback_trackers_added: usize,
+    pub fallback_trackers_for_options: Vec<String>,
+}
 
 pub struct TorrentEngine {
     session: Arc<Session>,
@@ -35,32 +68,31 @@ impl TorrentEngine {
             .await
             .map_err(|error| format!("Could not create torrent session directory: {error}"))?;
 
-        let (session, listener_fallback_message) =
-            match Session::new_with_opts(
-                default_output_folder.clone(),
-                torrent_session_options(persistence_dir.clone()),
-            )
-            .await
-            {
-                Ok(session) => (session, None),
-                Err(error) if is_listen_error(&format!("{error:#}")) => {
-                    let message = format!(
+        let (session, listener_fallback_message) = match Session::new_with_opts(
+            default_output_folder.clone(),
+            torrent_session_options(persistence_dir.clone()),
+        )
+        .await
+        {
+            Ok(session) => (session, None),
+            Err(error) if is_listen_error(&format!("{error:#}")) => {
+                let message = format!(
                         "Torrent listen ports 42000-42099 are unavailable; continuing without inbound peer listener: {error:#}"
                     );
-                    let fallback_session = Session::new_with_opts(
-                        default_output_folder,
-                        torrent_session_options_with_listener(persistence_dir, None),
-                    )
-                    .await
-                    .map_err(|fallback_error| {
-                        format!("Could not initialize torrent engine: {fallback_error:#}")
-                    })?;
-                    (fallback_session, Some(message))
-                }
-                Err(error) => {
-                    return Err(format!("Could not initialize torrent engine: {error:#}"));
-                }
-            };
+                let fallback_session = Session::new_with_opts(
+                    default_output_folder,
+                    torrent_session_options_with_listener(persistence_dir, None),
+                )
+                .await
+                .map_err(|fallback_error| {
+                    format!("Could not initialize torrent engine: {fallback_error:#}")
+                })?;
+                (fallback_session, Some(message))
+            }
+            Err(error) => {
+                return Err(format!("Could not initialize torrent engine: {error:#}"));
+            }
+        };
 
         Ok(Self {
             session,
@@ -81,7 +113,7 @@ impl TorrentEngine {
 
     pub async fn add_source(
         &self,
-        source: &str,
+        source: &PreparedTorrentSource,
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
     ) -> Result<usize, String> {
@@ -89,14 +121,12 @@ impl TorrentEngine {
             .await
             .map_err(|error| format!("Could not create torrent output directory: {error}"))?;
         self.set_upload_limit(upload_limit_kib_per_second);
-        let options = AddTorrentOptions {
-            paused: false,
-            output_folder: Some(output_folder.display().to_string()),
-            overwrite: true,
-            ratelimits: torrent_limits(upload_limit_kib_per_second),
-            ..Default::default()
-        };
-        let add_torrent = AddTorrent::from_cli_argument(source)
+        let options = torrent_add_options(
+            output_folder,
+            upload_limit_kib_per_second,
+            &source.fallback_trackers_for_options,
+        );
+        let add_torrent = AddTorrent::from_cli_argument(&source.source)
             .map_err(|error| format!("Could not read torrent source: {error:#}"))?;
         let handle = self
             .session
@@ -160,6 +190,31 @@ impl TorrentEngine {
     }
 }
 
+pub fn prepare_torrent_source(source: &str) -> PreparedTorrentSource {
+    if source
+        .get(..source.len().min("magnet:".len()))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:"))
+    {
+        let existing_trackers = magnet_tracker_values(source);
+        let fallback_trackers =
+            missing_fallback_trackers(existing_trackers.iter().map(String::as_str));
+        return PreparedTorrentSource {
+            source: append_trackers_to_magnet(source, &fallback_trackers),
+            source_kind: TorrentSourceKind::Magnet,
+            fallback_trackers_added: fallback_trackers.len(),
+            fallback_trackers_for_options: Vec::new(),
+        };
+    }
+
+    let fallback_trackers = missing_fallback_trackers(std::iter::empty::<&str>());
+    PreparedTorrentSource {
+        source: source.to_string(),
+        source_kind: TorrentSourceKind::TorrentFile,
+        fallback_trackers_added: fallback_trackers.len(),
+        fallback_trackers_for_options: fallback_trackers,
+    }
+}
+
 pub(crate) fn torrent_session_options(persistence_dir: PathBuf) -> SessionOptions {
     torrent_session_options_with_listener(persistence_dir, Some(TORRENT_LISTEN_PORT_RANGE))
 }
@@ -210,11 +265,66 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
     }
 }
 
+fn torrent_add_options(
+    output_folder: &Path,
+    upload_limit_kib_per_second: u32,
+    fallback_trackers: &[String],
+) -> AddTorrentOptions {
+    AddTorrentOptions {
+        paused: false,
+        output_folder: Some(output_folder.display().to_string()),
+        overwrite: true,
+        ratelimits: torrent_limits(upload_limit_kib_per_second),
+        trackers: (!fallback_trackers.is_empty()).then(|| fallback_trackers.to_vec()),
+        ..Default::default()
+    }
+}
+
 fn torrent_limits(upload_limit_kib_per_second: u32) -> LimitsConfig {
     LimitsConfig {
         upload_bps: upload_limit_bps(upload_limit_kib_per_second),
         download_bps: None,
     }
+}
+
+fn magnet_tracker_values(source: &str) -> Vec<String> {
+    url::Url::parse(source)
+        .ok()
+        .map(|url| {
+            url.query_pairs()
+                .filter_map(|(key, value)| (key == "tr").then(|| value.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn missing_fallback_trackers<'a>(existing_trackers: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = existing_trackers
+        .map(|tracker| tracker.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    FALLBACK_TORRENT_TRACKERS
+        .iter()
+        .filter(|tracker| seen.insert(tracker.to_ascii_lowercase()))
+        .map(|tracker| (*tracker).to_string())
+        .collect()
+}
+
+fn append_trackers_to_magnet(source: &str, trackers: &[String]) -> String {
+    let mut output = source.to_string();
+    for tracker in trackers {
+        if !output.contains('?') {
+            output.push('?');
+        } else if !output.ends_with('?') && !output.ends_with('&') {
+            output.push('&');
+        }
+        output.push_str("tr=");
+        output.push_str(&encode_query_value(tracker));
+    }
+    output
+}
+
+fn encode_query_value(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn upload_limit_bps(upload_limit_kib_per_second: u32) -> Option<NonZeroU32> {
@@ -228,13 +338,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bare_magnet_appends_fallback_trackers_encoded() {
+        let prepared =
+            prepare_torrent_source("magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6");
+
+        let parsed = url::Url::parse(&prepared.source).expect("prepared magnet should parse");
+        let trackers = parsed
+            .query_pairs()
+            .filter_map(|(key, value)| (key == "tr").then(|| value.into_owned()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(prepared.source_kind, TorrentSourceKind::Magnet);
+        assert_eq!(
+            prepared.fallback_trackers_added,
+            FALLBACK_TORRENT_TRACKERS.len()
+        );
+        assert_eq!(trackers.len(), FALLBACK_TORRENT_TRACKERS.len());
+        assert_eq!(trackers[0], FALLBACK_TORRENT_TRACKERS[0]);
+        assert!(prepared
+            .source
+            .contains("tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"));
+    }
+
+    #[test]
+    fn magnet_preserves_existing_trackers_first_and_dedupes_fallbacks() {
+        let prepared = prepare_torrent_source(
+            "magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce&tr=udp%3A%2F%2Fcustom.example%3A1337%2Fannounce",
+        );
+
+        let parsed = url::Url::parse(&prepared.source).expect("prepared magnet should parse");
+        let trackers = parsed
+            .query_pairs()
+            .filter_map(|(key, value)| (key == "tr").then(|| value.into_owned()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(trackers[0], "udp://tracker.torrent.eu.org:451/announce");
+        assert_eq!(trackers[1], "udp://custom.example:1337/announce");
+        assert_eq!(
+            trackers
+                .iter()
+                .filter(|tracker| tracker.as_str() == "udp://tracker.torrent.eu.org:451/announce")
+                .count(),
+            1
+        );
+        assert_eq!(
+            prepared.fallback_trackers_added,
+            FALLBACK_TORRENT_TRACKERS.len() - 1
+        );
+    }
+
+    #[test]
+    fn torrent_file_options_include_fallback_trackers() {
+        let prepared = prepare_torrent_source("https://example.com/releases/file.torrent");
+        let options = torrent_add_options(
+            Path::new("C:/Downloads/file"),
+            0,
+            &prepared.fallback_trackers_for_options,
+        );
+
+        assert_eq!(prepared.source, "https://example.com/releases/file.torrent");
+        assert_eq!(prepared.source_kind, TorrentSourceKind::TorrentFile);
+        assert_eq!(
+            options
+                .trackers
+                .as_ref()
+                .expect("fallback trackers")
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            FALLBACK_TORRENT_TRACKERS
+        );
+    }
+
+    #[test]
     fn session_options_enable_listen_range_and_peer_timeouts() {
         let options = torrent_session_options(PathBuf::from("session"));
 
         assert_eq!(options.listen_port_range, Some(TORRENT_LISTEN_PORT_RANGE));
         assert!(!options.enable_upnp_port_forwarding);
         let peer_options = options.peer_opts.expect("peer options");
-        assert_eq!(peer_options.connect_timeout, Some(TORRENT_PEER_CONNECT_TIMEOUT));
-        assert_eq!(peer_options.read_write_timeout, Some(TORRENT_PEER_READ_WRITE_TIMEOUT));
+        assert_eq!(
+            peer_options.connect_timeout,
+            Some(TORRENT_PEER_CONNECT_TIMEOUT)
+        );
+        assert_eq!(
+            peer_options.read_write_timeout,
+            Some(TORRENT_PEER_READ_WRITE_TIMEOUT)
+        );
     }
 }
