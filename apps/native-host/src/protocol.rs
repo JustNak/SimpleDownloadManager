@@ -241,12 +241,12 @@ pub fn validate_http_url(request_id: &str, raw_url: &str) -> HostResult<String> 
     })?;
 
     match parsed.scheme() {
-        "http" | "https" => Ok(parsed.to_string()),
+        "http" | "https" | "magnet" => Ok(parsed.to_string()),
         _ => Err(Box::new(HostResponseEnvelope::rejected(
             request_id.to_string(),
             "invalid_payload",
             "UNSUPPORTED_SCHEME",
-            "Only http and https URLs are supported.",
+            "Only http, https, and magnet URLs are supported.",
         ))),
     }
 }
@@ -396,6 +396,24 @@ mod tests {
         let error = parse_enqueue_payload(&request).expect_err("long URL should be rejected");
 
         assert_eq!(error.code.as_deref(), Some("URL_TOO_LONG"));
+    }
+
+    #[test]
+    fn parse_enqueue_payload_accepts_magnet_urls() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example",
+                "source": valid_source()
+            }),
+        );
+
+        let payload = parse_enqueue_payload(&request).expect("magnet URL should be accepted");
+
+        assert_eq!(
+            payload.url,
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example"
+        );
     }
 
     #[test]

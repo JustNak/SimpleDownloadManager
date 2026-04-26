@@ -5,4 +5,5 @@ pub mod lifecycle;
 pub mod prompts;
 pub mod state;
 pub mod storage;
+pub mod torrent;
 pub mod windows;

@@ -6,14 +6,21 @@ import { SettingsPage } from './SettingsPage';
 import { ToastArea } from './ToastArea';
 import { AddDownloadModal, type AddDownloadOutcome } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
-import { compareDownloadsForSort, type SortMode } from './downloadSorting';
+import { compareDownloadsForSort, nextSortModeForColumn, type SortMode } from './downloadSorting';
 import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
 import {
-  countJobsByCategory,
   DOWNLOAD_CATEGORIES,
-  filterJobsByCategory,
   type DownloadCategory,
 } from './downloadCategories';
+import {
+  categoryView,
+  filterJobsForView,
+  getQueueCounts,
+  getTorrentFooterStats,
+  isTorrentView,
+  type TorrentFooterStats,
+  type ViewState,
+} from './downloadViews';
 import {
   calculateDownloadProgressMetricsByJobId,
   recordProgressSample,
@@ -24,7 +31,6 @@ import { loadInitialAppData } from './appBootstrap';
 import {
   browseDirectory,
   cancelJob,
-  clearCompletedJobs,
   deleteJob,
   deleteJobs,
   exportDiagnosticsReport,
@@ -54,6 +60,8 @@ import type { AddJobsResult } from './backend';
 import {
   AlertTriangle,
   Box,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
   Clock3,
   Download,
@@ -65,31 +73,28 @@ import {
   Filter,
   Folder,
   Gauge,
+  Magnet,
   Pause,
   Play,
   Plus,
   RotateCw,
   Search,
   Settings as SettingsIcon,
-  Trash2,
+  Upload,
   Wifi,
   WifiOff,
 } from 'lucide-react';
 import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
-import { canClearCompletedDownloads, canRetryFailedDownloads } from './queueCommands';
+import { canRetryFailedDownloads } from './queueCommands';
 import {
   shouldNotifyDiagnosticsRefreshFailure,
   type DiagnosticsRefreshOptions,
 } from './diagnosticsRefresh';
 import { formatDiagnosticsReport } from './diagnosticsReport';
 
-type CategoryViewState = `category:${DownloadCategory}`;
-type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings' | CategoryViewState;
-
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
-const activeStates = [JobState.Starting, JobState.Downloading, JobState.Paused];
-const finishedStates = [JobState.Completed, JobState.Canceled];
+const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
 
 export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Checking);
@@ -100,6 +105,13 @@ export default function App() {
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
     downloadPerformanceMode: 'balanced',
+    torrent: {
+      enabled: true,
+      seedMode: 'forever',
+      seedRatioLimit: 1,
+      seedTimeLimitMinutes: 60,
+      uploadLimitKibPerSecond: 0,
+    },
     notificationsEnabled: true,
     theme: 'system',
     accentColor: DEFAULT_ACCENT_COLOR,
@@ -119,7 +131,9 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [view, setView] = useState<ViewState>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortMode, setSortMode] = useState<SortMode>('status');
+  const [sortMode, setSortMode] = useState<SortMode>('date:desc');
+  const [isDownloadSectionExpanded, setIsDownloadSectionExpanded] = useState(true);
+  const [isTorrentSectionExpanded, setIsTorrentSectionExpanded] = useState(true);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
@@ -370,15 +384,6 @@ export default function App() {
     }
   }
 
-  async function handleClearCompletedJobs() {
-    try {
-      await clearCompletedJobs();
-      addToast({ type: 'success', title: 'Finished Downloads Cleared', message: 'Completed and canceled downloads were removed from the list.' });
-    } catch (error) {
-      addToast({ type: 'error', title: 'Clear Finished Downloads Failed', message: getErrorMessage(error) });
-    }
-  }
-
   async function handleDeleteMany(ids: string[], deleteFromDisk: boolean) {
     const uniqueIds = [...new Set(ids)].filter(Boolean);
     if (uniqueIds.length === 0) return;
@@ -521,11 +526,11 @@ export default function App() {
 
     void openProgressIntent(outcome.intent);
 
-    if (outcome.mode === 'single') {
+    if (outcome.mode === 'single' || outcome.mode === 'torrent') {
       const result = outcome.primaryResult;
       if (!result) return;
       if (result.status === 'duplicate_existing_job') {
-        setView('all');
+        setView(outcome.mode === 'torrent' ? 'torrents' : 'all');
         addToast({
           type: 'info',
           title: 'Already in Queue',
@@ -534,10 +539,10 @@ export default function App() {
         return;
       }
 
-      setView('queued');
+      setView(outcome.mode === 'torrent' ? 'torrent-queued' : 'queued');
       addToast({
         type: 'success',
-        title: 'Download Added',
+        title: outcome.mode === 'torrent' ? 'Torrent Added' : 'Download Added',
         message: `${result.filename} was added to the queue.`,
       });
       return;
@@ -590,29 +595,15 @@ export default function App() {
   }
 
   const counts = useMemo(() => {
-    return {
-      all: jobs.length,
-      active: jobs.filter((job) => activeStates.includes(job.state)).length,
-      attention: jobs.filter(jobNeedsAttention).length,
-      queued: jobs.filter((job) => job.state === JobState.Queued).length,
-      completed: jobs.filter((job) => finishedStates.includes(job.state)).length,
-      categories: countJobsByCategory(jobs),
-    };
+    return getQueueCounts(jobs);
+  }, [jobs]);
+
+  const torrentFooterStats = useMemo(() => {
+    return getTorrentFooterStats(jobs);
   }, [jobs]);
 
   const displayedJobs = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    const category = categoryFromView(view);
-    const filtered = jobs.filter((job) => {
-      if (view === 'settings') return false;
-      if (category && filterJobsByCategory([job], category).length === 0) return false;
-      if (view === 'attention' && !jobNeedsAttention(job)) return false;
-      if (view === 'active' && !activeStates.includes(job.state)) return false;
-      if (view === 'queued' && job.state !== JobState.Queued) return false;
-      if (view === 'completed' && !finishedStates.includes(job.state)) return false;
-      if (!query) return true;
-      return `${job.filename} ${job.url} ${job.targetPath ?? ''}`.toLowerCase().includes(query);
-    });
+    const filtered = filterJobsForView(jobs, view, searchQuery);
 
     return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   }, [jobs, searchQuery, sortMode, view]);
@@ -633,10 +624,10 @@ export default function App() {
     }
   }, [displayedJobs, selectedJobId, view]);
 
-  const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state));
+  const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state));
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
   const canRetryFailed = canRetryFailedDownloads(jobs);
-  const canClearCompleted = canClearCompletedDownloads(jobs);
+  const isTorrentStatusView = isTorrentView(view);
   const totalDownloadSpeed = jobs
     .filter((job) => job.state === JobState.Downloading)
     .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0);
@@ -647,18 +638,14 @@ export default function App() {
         {view !== 'settings' ? (
           <CommandBar
             searchQuery={searchQuery}
-            sortMode={sortMode}
             onSearchChange={setSearchQuery}
-            onSortChange={setSortMode}
             onAdd={() => setIsAddModalOpen(true)}
             onResumeAll={() => void handleResumeAll()}
             onPauseAll={() => void handlePauseAll()}
             onRetryFailed={() => void handleRetryFailedJobs()}
-            onClearCompleted={() => void handleClearCompletedJobs()}
             canResumeAll={canResumeAny}
             canPauseAll={canPauseAny}
             canRetryFailed={canRetryFailed}
-            canClearCompleted={canClearCompleted}
             onCycleFilter={() => requestViewChange(nextFilterView(view))}
           />
         ) : null}
@@ -667,24 +654,63 @@ export default function App() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside className="download-sidebar flex w-[220px] shrink-0 flex-col justify-between border-r border-border bg-sidebar px-2 py-2">
           <nav className="flex flex-col gap-0.5">
-            <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
-            <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
-              {DOWNLOAD_CATEGORIES.map((category) => (
-                <NavItem
-                  key={category.id}
-                  icon={categoryIcon(category.iconName, 15)}
-                  label={category.label}
-                  count={counts.categories[category.id]}
-                  active={view === categoryView(category.id)}
-                  onClick={() => requestViewChange(categoryView(category.id))}
-                  branch
-                />
-              ))}
+            <div className="flex items-center gap-1">
+              <SectionCollapseButton
+                expanded={isDownloadSectionExpanded}
+                collapseLabel="Collapse downloads section"
+                expandLabel="Expand downloads section"
+                onToggle={() => setIsDownloadSectionExpanded((expanded) => !expanded)}
+              />
+              <div className="min-w-0 flex-1">
+                <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
+              </div>
             </div>
-            <NavItem icon={<AlertTriangle size={18} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
-            <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
-            <NavItem icon={<Clock3 size={18} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
-            <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
+            {isDownloadSectionExpanded ? (
+              <>
+                <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+                  {DOWNLOAD_CATEGORIES.map((category) => (
+                    <NavItem
+                      key={category.id}
+                      icon={categoryIcon(category.iconName, 15)}
+                      label={category.label}
+                      count={counts.categories[category.id]}
+                      active={view === categoryView(category.id)}
+                      onClick={() => requestViewChange(categoryView(category.id))}
+                      branch
+                    />
+                  ))}
+                </div>
+                <NavItem icon={<AlertTriangle size={18} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
+                <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
+                <NavItem icon={<Clock3 size={18} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
+                <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
+              </>
+            ) : null}
+            <div className="mt-2 border-t border-border/70 pt-2">
+              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                Torrents
+              </div>
+              <div className="flex items-center gap-1">
+                <SectionCollapseButton
+                  expanded={isTorrentSectionExpanded}
+                  collapseLabel="Collapse torrents section"
+                  expandLabel="Expand torrents section"
+                  onToggle={() => setIsTorrentSectionExpanded((expanded) => !expanded)}
+                />
+                <div className="min-w-0 flex-1">
+                  <NavItem icon={<Magnet size={18} />} label="All Torrents" count={counts.torrents.all} active={view === 'torrents'} onClick={() => requestViewChange('torrents')} />
+                </div>
+              </div>
+              {isTorrentSectionExpanded ? (
+                <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+                  <NavItem icon={<Gauge size={15} />} label="Active" count={counts.torrents.active} active={view === 'torrent-active'} onClick={() => requestViewChange('torrent-active')} branch />
+                  <NavItem icon={<Upload size={15} />} label="Seeding" count={counts.torrents.seeding} active={view === 'torrent-seeding'} onClick={() => requestViewChange('torrent-seeding')} branch />
+                  <NavItem icon={<AlertTriangle size={15} />} label="Needs Attention" count={counts.torrents.attention} active={view === 'torrent-attention'} onClick={() => requestViewChange('torrent-attention')} branch />
+                  <NavItem icon={<Clock3 size={15} />} label="Queued" count={counts.torrents.queued} active={view === 'torrent-queued'} onClick={() => requestViewChange('torrent-queued')} branch />
+                  <NavItem icon={<CheckCircle2 size={15} />} label="Completed" count={counts.torrents.completed} active={view === 'torrent-completed'} onClick={() => requestViewChange('torrent-completed')} branch />
+                </div>
+              ) : null}
+            </div>
           </nav>
 
           <div className="space-y-2">
@@ -717,6 +743,8 @@ export default function App() {
               <QueueView
                 jobs={displayedJobs}
                 view={view}
+                sortMode={sortMode}
+                onSortChange={(column) => setSortMode((current) => nextSortModeForColumn(current, column))}
                 progressMetricsByJobId={progressMetricsByJobId}
                 selectedJobId={selectedJobId}
                 onSelect={setSelectedJobId}
@@ -735,8 +763,10 @@ export default function App() {
               />
 
               <StatusBar
+                mode={isTorrentStatusView ? 'torrents' : 'downloads'}
                 activeCount={counts.active}
                 downloadSpeed={totalDownloadSpeed}
+                torrentStats={torrentFooterStats}
                 connectionState={connectionState}
                 connectionSlots={settings.maxConcurrentDownloads}
               />
@@ -815,33 +845,25 @@ function UnsavedSettingsPrompt({
 
 function CommandBar({
   searchQuery,
-  sortMode,
   onSearchChange,
-  onSortChange,
   onAdd,
   onResumeAll,
   onPauseAll,
   onRetryFailed,
-  onClearCompleted,
   canResumeAll,
   canPauseAll,
   canRetryFailed,
-  canClearCompleted,
   onCycleFilter,
 }: {
   searchQuery: string;
-  sortMode: SortMode;
   onSearchChange: (value: string) => void;
-  onSortChange: (value: SortMode) => void;
   onAdd: () => void;
   onResumeAll: () => void;
   onPauseAll: () => void;
   onRetryFailed: () => void;
-  onClearCompleted: () => void;
   canResumeAll: boolean;
   canPauseAll: boolean;
   canRetryFailed: boolean;
-  canClearCompleted: boolean;
   onCycleFilter: () => void;
 }) {
   return (
@@ -852,7 +874,6 @@ function CommandBar({
         <ToolbarButton icon={<Play size={16} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
         <ToolbarButton icon={<Pause size={16} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
         <ToolbarButton icon={<RotateCw size={16} />} label="Retry Failed" onClick={onRetryFailed} disabled={!canRetryFailed} />
-        <ToolbarButton icon={<Trash2 size={16} />} label="Clear Finished" onClick={onClearCompleted} disabled={!canClearCompleted} />
       </div>
 
       <div className="flex min-w-[320px] max-w-[620px] flex-1 items-center justify-end gap-2">
@@ -865,19 +886,6 @@ function CommandBar({
             placeholder="Search downloads..."
           />
         </label>
-        <select
-          value={sortMode}
-          onChange={(event) => onSortChange(event.target.value as SortMode)}
-          className="h-8 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
-          aria-label="Sort downloads"
-        >
-          <option value="status">Sort by: Status</option>
-          <option value="name">Sort by: Name</option>
-          <option value="progress">Sort by: Progress</option>
-          <option value="size">Sort by: Size</option>
-          <option value="newest">Sort by: Newest</option>
-          <option value="oldest">Sort by: Oldest</option>
-        </select>
         <button
           onClick={onCycleFilter}
           className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
@@ -920,6 +928,30 @@ function ToolbarButton({
   );
 }
 
+function SectionCollapseButton({
+  expanded,
+  collapseLabel,
+  expandLabel,
+  onToggle,
+}: {
+  expanded: boolean;
+  collapseLabel: string;
+  expandLabel: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={expanded ? collapseLabel : expandLabel}
+      aria-expanded={expanded}
+      onClick={onToggle}
+      className="flex h-9 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+    >
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    </button>
+  );
+}
+
 function NavItem({
   icon,
   label,
@@ -954,30 +986,57 @@ function NavItem({
 }
 
 function StatusBar({
+  mode,
   activeCount,
   downloadSpeed,
+  torrentStats,
   connectionState,
   connectionSlots,
 }: {
+  mode: 'downloads' | 'torrents';
   activeCount: number;
   downloadSpeed: number;
+  torrentStats: TorrentFooterStats;
   connectionState: ConnectionState;
   connectionSlots: number;
 }) {
   const isConnected = connectionState === ConnectionState.Connected;
+  const seedDisplay = torrentStats.seedSpeed > 0
+    ? `${formatBytes(torrentStats.seedSpeed)}/s`
+    : `Up ${formatBytes(torrentStats.uploadedBytes)}`;
 
   return (
     <footer className="status-bar flex h-10 shrink-0 items-center justify-between border-t border-border bg-command px-6 text-xs text-muted-foreground">
       <div className="flex items-center gap-4">
-        <span className="flex items-center gap-2">
-          <Gauge size={16} className="text-primary" />
-          {activeCount} active downloads
-        </span>
-        <span className="h-4 w-px bg-border" />
-        <span className="flex items-center gap-2 text-foreground">
-          <Download size={16} className="text-primary" />
-          {formatBytes(downloadSpeed)}/s
-        </span>
+        {mode === 'torrents' ? (
+          <>
+            <span className="flex items-center gap-2">
+              <Magnet size={16} className="text-primary" />
+              {torrentStats.all} torrents
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="flex items-center gap-2 text-foreground">
+              <Upload size={16} className="text-fuchsia-400" />
+              Seed {seedDisplay}
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="flex items-center gap-2 text-muted-foreground">
+              Ratio {formatTorrentStatusRatio(torrentStats.averageRatio)}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="flex items-center gap-2">
+              <Gauge size={16} className="text-primary" />
+              {activeCount} active downloads
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="flex items-center gap-2 text-foreground">
+              <Download size={16} className="text-primary" />
+              {formatBytes(downloadSpeed)}/s
+            </span>
+          </>
+        )}
       </div>
 
       <div className="flex items-center gap-3">
@@ -992,23 +1051,17 @@ function StatusBar({
 }
 
 function nextFilterView(view: ViewState): ViewState {
+  if (view === 'torrents') return 'torrent-active';
+  if (view === 'torrent-active') return 'torrent-seeding';
+  if (view === 'torrent-seeding') return 'torrent-attention';
+  if (view === 'torrent-attention') return 'torrent-queued';
+  if (view === 'torrent-queued') return 'torrent-completed';
+  if (view === 'torrent-completed') return 'torrents';
   if (view === 'all') return 'attention';
   if (view === 'attention') return 'active';
   if (view === 'active') return 'queued';
   if (view === 'queued') return 'completed';
   return 'all';
-}
-
-function categoryView(category: DownloadCategory): CategoryViewState {
-  return `category:${category}`;
-}
-
-function categoryFromView(view: ViewState): DownloadCategory | null {
-  if (!view.startsWith('category:')) return null;
-  const category = view.slice('category:'.length);
-  return DOWNLOAD_CATEGORIES.some((item) => item.id === category)
-    ? category as DownloadCategory
-    : null;
 }
 
 function categoryIcon(category: DownloadCategory, size: number): React.ReactNode {
@@ -1038,14 +1091,12 @@ function formatBytes(bytes: number, decimals = 1) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
 
-function formatConnectionState(state: ConnectionState) {
-  return state.replaceAll('_', ' ').replace(/\b\w/g, (value) => value.toUpperCase());
+function formatTorrentStatusRatio(ratio: number) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return '--';
+  return `${ratio.toFixed(2)}x`;
 }
 
-function jobNeedsAttention(job: DownloadJob): boolean {
-  if (job.state === JobState.Failed || job.failureCategory) return true;
-  const isUnfinished = ![JobState.Completed, JobState.Canceled].includes(job.state);
-  const hasPartialProgress = job.downloadedBytes > 0 || job.progress > 0;
-  return isUnfinished && hasPartialProgress && job.resumeSupport === 'unsupported';
+function formatConnectionState(state: ConnectionState) {
+  return state.replaceAll('_', ' ').replace(/\b\w/g, (value) => value.toUpperCase());
 }
 

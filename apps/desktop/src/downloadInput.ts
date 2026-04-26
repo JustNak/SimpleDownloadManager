@@ -1,4 +1,4 @@
-export type DownloadMode = 'single' | 'multi' | 'bulk';
+export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
 
 export const batchUrlTextAreaWrap = 'off';
 export const batchUrlTextAreaClassName =
@@ -19,6 +19,7 @@ export function ensureTrailingEditableLine(value: string) {
 
 export function downloadSubmitLabel(mode: DownloadMode, linkCount: number, combineBulk: boolean) {
   if (mode === 'single') return 'Start Download';
+  if (mode === 'torrent') return 'Add Torrent';
 
   if (mode === 'bulk' && combineBulk) {
     return linkCount > 0

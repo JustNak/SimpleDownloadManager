@@ -4,7 +4,8 @@ use crate::storage::{
     DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt,
     DownloadSource, ExtensionIntegrationSettings, FailureCategory, HostRegistrationDiagnostics,
     IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    QueueSummary, ResumeSupport, Settings, TransferKind,
+    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentSeedMode, TorrentSettings,
+    TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
@@ -65,6 +66,22 @@ pub struct BulkArchiveEntry {
     pub archive_name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct TorrentRuntimeSnapshot {
+    pub engine_id: usize,
+    pub info_hash: String,
+    pub name: Option<String>,
+    pub total_files: Option<u32>,
+    pub peers: Option<u32>,
+    pub seeds: Option<u32>,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub uploaded_bytes: u64,
+    pub download_speed: u64,
+    pub finished: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueStatus {
     Queued,
@@ -93,6 +110,7 @@ pub struct EnqueueOptions {
     pub directory_override: Option<String>,
     pub filename_hint: Option<String>,
     pub expected_sha256: Option<String>,
+    pub transfer_kind: Option<TransferKind>,
     pub duplicate_policy: DuplicatePolicy,
     pub bulk_archive: Option<BulkArchiveInfo>,
 }
@@ -161,6 +179,7 @@ impl SharedState {
 
         normalize_accent_color(&mut persisted.settings);
         normalize_extension_settings(&mut persisted.settings.extension_integration);
+        normalize_torrent_settings(&mut persisted.settings.torrent);
         ensure_download_category_directories(Path::new(&persisted.settings.download_directory))?;
 
         let jobs = persisted
@@ -325,6 +344,13 @@ impl SharedState {
         state.settings.clone()
     }
 
+    pub fn app_data_dir(&self) -> PathBuf {
+        self.storage_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| std::env::temp_dir().join("SimpleDownloadManager"))
+    }
+
     pub async fn main_window_state(&self) -> Option<MainWindowState> {
         let state = self.inner.read().await;
         state.main_window.clone()
@@ -427,6 +453,7 @@ impl SharedState {
                     url,
                     EnqueueOptions {
                         source: source.clone(),
+                        transfer_kind: Some(TransferKind::Http),
                         bulk_archive: bulk_archive.clone(),
                         ..Default::default()
                     },
@@ -476,8 +503,33 @@ impl RuntimeState {
         url: &str,
         mut options: EnqueueOptions,
     ) -> Result<EnqueueResult, BackendError> {
-        let url = normalize_download_url(url)?;
+        let explicit_transfer_kind = options.transfer_kind;
+        let url = normalize_download_input(url, explicit_transfer_kind)?;
         options.expected_sha256 = normalize_expected_sha256(options.expected_sha256)?;
+        let inferred_transfer_kind = transfer_kind_for_url(&url);
+        let transfer_kind = explicit_transfer_kind.unwrap_or(inferred_transfer_kind);
+        if transfer_kind != inferred_transfer_kind {
+            return Err(BackendError {
+                code: "INVALID_TRANSFER_KIND",
+                message:
+                    "Torrent transfers require a magnet link, HTTP(S) .torrent URL, or local .torrent file."
+                        .into(),
+            });
+        }
+
+        if transfer_kind == TransferKind::Torrent && !self.settings.torrent.enabled {
+            return Err(BackendError {
+                code: "TORRENT_DISABLED",
+                message: "Torrent downloads are disabled in settings.".into(),
+            });
+        }
+
+        if transfer_kind == TransferKind::Torrent && options.expected_sha256.is_some() {
+            return Err(BackendError {
+                code: "INVALID_CHECKSUM",
+                message: "SHA-256 checks are only supported for HTTP downloads.".into(),
+            });
+        }
 
         if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
             if let Some(result) = self.duplicate_enqueue_result(&url) {
@@ -503,12 +555,23 @@ impl RuntimeState {
             message: format!("Could not create the download directory: {error}"),
         })?;
 
-        let filename = filename_from_hint(options.filename_hint.as_deref(), &url);
+        let filename = if transfer_kind == TransferKind::Torrent {
+            torrent_filename_from_url(&url, options.filename_hint.as_deref())
+        } else {
+            filename_from_hint(options.filename_hint.as_deref(), &url)
+        };
         let target_dir = prepare_category_download_directory(&download_dir, &filename)?;
         verify_download_directory_writable(&target_dir)?;
-        let (target_path, temp_path) = allocate_target_paths(&target_dir, &filename, &self.jobs);
         let job_id = format!("job_{}", self.next_job_number);
         self.next_job_number += 1;
+        let (target_path, temp_path) = if transfer_kind == TransferKind::Torrent {
+            (
+                unique_target_path(&target_dir, &filename, &self.jobs),
+                torrent_state_path_for_job(&download_dir, &job_id),
+            )
+        } else {
+            allocate_target_paths(&target_dir, &filename, &self.jobs)
+        };
         let integrity_check = options.expected_sha256.map(|expected| IntegrityCheck {
             algorithm: IntegrityAlgorithm::Sha256,
             expected,
@@ -521,8 +584,9 @@ impl RuntimeState {
             url: url.clone(),
             filename: filename.clone(),
             source: options.source,
-            transfer_kind: TransferKind::Http,
+            transfer_kind,
             integrity_check,
+            torrent: (transfer_kind == TransferKind::Torrent).then(TorrentInfo::default),
             state: JobState::Queued,
             created_at: current_unix_timestamp_millis(),
             progress: 0.0,
@@ -563,7 +627,12 @@ impl RuntimeState {
         total_bytes: Option<u64>,
     ) -> Result<DownloadPrompt, BackendError> {
         let url = normalize_download_url(url)?;
-        let filename = filename_from_hint(filename_hint.as_deref(), &url);
+        let transfer_kind = transfer_kind_for_url(&url);
+        let filename = if transfer_kind == TransferKind::Torrent {
+            torrent_filename_from_url(&url, filename_hint.as_deref())
+        } else {
+            filename_from_hint(filename_hint.as_deref(), &url)
+        };
         let default_directory = self.settings.download_directory.clone();
         let target_path = if default_directory.trim().is_empty() {
             String::new()
@@ -617,7 +686,10 @@ impl SharedState {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 if matches!(
                     job.state,
-                    JobState::Queued | JobState::Starting | JobState::Downloading
+                    JobState::Queued
+                        | JobState::Starting
+                        | JobState::Downloading
+                        | JobState::Seeding
                 ) {
                     job.state = JobState::Paused;
                     job.speed = 0;
@@ -864,7 +936,12 @@ impl SharedState {
             let is_active_worker = state.active_workers.contains(id);
             let job = &state.jobs[job_index];
 
-            if is_active_worker || matches!(job.state, JobState::Starting | JobState::Downloading) {
+            if is_active_worker
+                || matches!(
+                    job.state,
+                    JobState::Starting | JobState::Downloading | JobState::Seeding
+                )
+            {
                 return Err(BackendError {
                     code: "INTERNAL_ERROR",
                     message: "Pause or cancel the active transfer before removing it.".into(),
@@ -879,7 +956,7 @@ impl SharedState {
 
         let (temp_path, job_state) = paths_to_cleanup;
         if job_state != JobState::Completed {
-            let _ = std::fs::remove_file(temp_path);
+            let _ = remove_path_if_exists(&temp_path);
         }
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
@@ -905,7 +982,10 @@ impl SharedState {
                         })?;
 
                 if state.active_workers.contains(id)
-                    || matches!(job.state, JobState::Starting | JobState::Downloading)
+                    || matches!(
+                        job.state,
+                        JobState::Starting | JobState::Downloading | JobState::Seeding
+                    )
                 {
                     return Err(BackendError {
                         code: "INTERNAL_ERROR",
@@ -921,9 +1001,9 @@ impl SharedState {
                 )
             };
 
-            remove_file_if_exists(&target_path).map_err(internal_error)?;
+            remove_path_if_exists(&target_path).map_err(internal_error)?;
             if temp_path != target_path {
-                remove_file_if_exists(&temp_path).map_err(internal_error)?;
+                remove_path_if_exists(&temp_path).map_err(internal_error)?;
             }
         }
 
@@ -955,7 +1035,10 @@ impl SharedState {
                 })?;
 
             if state.active_workers.contains(id)
-                || matches!(job.state, JobState::Starting | JobState::Downloading)
+                || matches!(
+                    job.state,
+                    JobState::Starting | JobState::Downloading | JobState::Seeding
+                )
             {
                 return Err(BackendError {
                     code: "INTERNAL_ERROR",
@@ -1022,12 +1105,23 @@ impl SharedState {
     ) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
         let (snapshot, persisted, tasks) = {
             let mut state = self.inner.write().await;
+            let active_download_workers = state
+                .active_workers
+                .iter()
+                .filter(|id| {
+                    state
+                        .jobs
+                        .iter()
+                        .find(|job| &job.id == *id)
+                        .map(|job| job.state != JobState::Seeding)
+                        .unwrap_or(false)
+                })
+                .count() as u32;
             let available_slots = state
                 .settings
                 .max_concurrent_downloads
                 .max(1)
-                .saturating_sub(state.active_workers.len() as u32)
-                as usize;
+                .saturating_sub(active_download_workers) as usize;
 
             if available_slots == 0 {
                 return Ok((state.snapshot(), Vec::new()));
@@ -1252,6 +1346,103 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn update_torrent_progress(
+        &self,
+        id: &str,
+        update: TorrentRuntimeSnapshot,
+        persist: bool,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                return Err("Job not found.".into());
+            };
+
+            let was_seeding = job.state == JobState::Seeding;
+            job.state = if update.finished {
+                JobState::Seeding
+            } else {
+                JobState::Downloading
+            };
+            job.downloaded_bytes = update.downloaded_bytes;
+            job.total_bytes = update.total_bytes.max(update.downloaded_bytes);
+            job.speed = if update.finished {
+                0
+            } else {
+                update.download_speed
+            };
+            job.progress = if job.total_bytes == 0 {
+                0.0
+            } else {
+                (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+            };
+            job.eta = 0;
+            if let Some(name) = &update.name {
+                job.filename = sanitize_filename(name);
+            }
+            let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+            torrent.engine_id = Some(update.engine_id);
+            torrent.info_hash = Some(update.info_hash);
+            torrent.name = update.name;
+            torrent.total_files = update.total_files;
+            torrent.peers = update.peers;
+            torrent.seeds = update.seeds;
+            torrent.uploaded_bytes = update.uploaded_bytes;
+            torrent.ratio = if update.downloaded_bytes == 0 {
+                0.0
+            } else {
+                update.uploaded_bytes as f64 / update.downloaded_bytes as f64
+            };
+            if update.finished && torrent.seeding_started_at.is_none() {
+                torrent.seeding_started_at = Some(current_unix_timestamp_millis());
+            }
+            let started_seeding = update.finished && !was_seeding;
+            let event_message = started_seeding.then(|| format!("Seeding {}", job.filename));
+            if let Some(message) = event_message {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent".into(),
+                    message,
+                    Some(id.into()),
+                );
+            }
+
+            (state.snapshot(), state.persisted())
+        };
+
+        if persist {
+            persist_state(&self.storage_path, &persisted)?;
+        }
+        Ok(snapshot)
+    }
+
+    pub async fn complete_torrent_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+                job.state = JobState::Completed;
+                job.progress = 100.0;
+                job.speed = 0;
+                job.eta = 0;
+                job.filename.clone()
+            };
+            state.active_workers.remove(id);
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "torrent".into(),
+                format!("Completed torrent seeding for {filename}"),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn job_requires_sha256(&self, id: &str) -> bool {
         let state = self.inner.read().await;
         state
@@ -1467,7 +1658,7 @@ impl SharedState {
                 return Err("Job not found.".into());
             };
 
-            if job.state == JobState::Canceled {
+            if job.state == JobState::Canceled && job.transfer_kind != TransferKind::Torrent {
                 job.progress = 0.0;
                 job.total_bytes = 0;
                 job.downloaded_bytes = 0;
@@ -1619,7 +1810,7 @@ impl RuntimeState {
         for job in &mut self.jobs {
             if matches!(
                 job.state,
-                JobState::Queued | JobState::Starting | JobState::Downloading
+                JobState::Queued | JobState::Starting | JobState::Downloading | JobState::Seeding
             ) {
                 job.state = JobState::Paused;
                 job.speed = 0;
@@ -1668,6 +1859,7 @@ impl RuntimeState {
                         JobState::Queued
                             | JobState::Starting
                             | JobState::Downloading
+                            | JobState::Seeding
                             | JobState::Paused
                     )
                 })
@@ -1685,7 +1877,12 @@ impl RuntimeState {
             downloading: self
                 .jobs
                 .iter()
-                .filter(|job| matches!(job.state, JobState::Starting | JobState::Downloading))
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        JobState::Starting | JobState::Downloading | JobState::Seeding
+                    )
+                })
                 .count(),
             completed: self
                 .jobs
@@ -1714,7 +1911,10 @@ fn job_needs_attention(job: &DownloadJob) -> bool {
 fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
     if let Some(check) = &mut job.integrity_check {
         check.expected = check.expected.trim().to_ascii_lowercase();
-        check.actual = check.actual.as_ref().map(|value| value.trim().to_ascii_lowercase());
+        check.actual = check
+            .actual
+            .as_ref()
+            .map(|value| value.trim().to_ascii_lowercase());
     }
 
     if job.filename.trim().is_empty() {
@@ -1730,7 +1930,10 @@ fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
         job.temp_path = format!("{}.part", job.target_path);
     }
 
-    if matches!(job.state, JobState::Starting | JobState::Downloading) {
+    if matches!(
+        job.state,
+        JobState::Starting | JobState::Downloading | JobState::Seeding
+    ) {
         job.state = JobState::Queued;
         job.speed = 0;
         job.eta = 0;
@@ -1747,7 +1950,7 @@ fn normalize_job(mut job: DownloadJob, settings: &Settings) -> DownloadJob {
 
 fn add_artifact_existence(mut job: DownloadJob) -> DownloadJob {
     job.artifact_exists = if job.state == JobState::Completed {
-        Some(Path::new(&job.target_path).is_file())
+        Some(Path::new(&job.target_path).exists())
     } else {
         None
     };
@@ -1828,6 +2031,34 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
     settings.ignored_file_extensions = normalized_extensions;
 }
 
+fn normalize_torrent_settings(settings: &mut TorrentSettings) {
+    if !settings.seed_ratio_limit.is_finite() || settings.seed_ratio_limit < 0.1 {
+        settings.seed_ratio_limit = 0.1;
+    }
+
+    if settings.seed_time_limit_minutes == 0 {
+        settings.seed_time_limit_minutes = 1;
+    }
+}
+
+pub(crate) fn should_stop_seeding(
+    settings: &TorrentSettings,
+    ratio: f64,
+    elapsed_seconds: u64,
+) -> bool {
+    match settings.seed_mode {
+        TorrentSeedMode::Forever => false,
+        TorrentSeedMode::Ratio => ratio >= settings.seed_ratio_limit,
+        TorrentSeedMode::Time => {
+            elapsed_seconds >= u64::from(settings.seed_time_limit_minutes).saturating_mul(60)
+        }
+        TorrentSeedMode::RatioOrTime => {
+            ratio >= settings.seed_ratio_limit
+                || elapsed_seconds >= u64::from(settings.seed_time_limit_minutes).saturating_mul(60)
+        }
+    }
+}
+
 fn normalize_accent_color(settings: &mut Settings) {
     let accent_color = settings.accent_color.trim();
     let is_hex_color = accent_color.len() == 7
@@ -1896,12 +2127,136 @@ fn normalize_download_url(raw_url: &str) -> Result<String, BackendError> {
     })?;
 
     match parsed.scheme() {
-        "http" | "https" => Ok(parsed.to_string()),
+        "http" | "https" | "magnet" => Ok(parsed.to_string()),
         _ => Err(BackendError {
             code: "UNSUPPORTED_SCHEME",
-            message: "Only http and https URLs are supported.".into(),
+            message: "Only http, https, magnet, and HTTP(S) .torrent URLs are supported.".into(),
         }),
     }
+}
+
+fn normalize_download_input(
+    raw_input: &str,
+    explicit_transfer_kind: Option<TransferKind>,
+) -> Result<String, BackendError> {
+    match normalize_download_url(raw_input) {
+        Ok(url) => Ok(url),
+        Err(url_error) if explicit_transfer_kind == Some(TransferKind::Torrent) => {
+            normalize_local_torrent_file(raw_input).map_err(|_| url_error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn normalize_local_torrent_file(raw_path: &str) -> Result<String, BackendError> {
+    let trimmed_path = raw_path.trim();
+    if trimmed_path.is_empty() {
+        return Err(BackendError {
+            code: "INVALID_URL",
+            message: "Torrent file path is empty.".into(),
+        });
+    }
+
+    let path = PathBuf::from(trimmed_path);
+    let is_torrent_file = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"));
+
+    if !is_torrent_file || !path.is_file() {
+        return Err(BackendError {
+            code: "INVALID_TRANSFER_KIND",
+            message: "Choose an existing .torrent file.".into(),
+        });
+    }
+
+    Ok(path.display().to_string())
+}
+
+fn transfer_kind_for_url(url: &str) -> TransferKind {
+    if path_has_torrent_extension(Path::new(url)) {
+        return TransferKind::Torrent;
+    }
+
+    let Ok(parsed) = Url::parse(url) else {
+        return TransferKind::Http;
+    };
+
+    if parsed.scheme() == "magnet" || url_path_has_torrent_extension(&parsed) {
+        TransferKind::Torrent
+    } else {
+        TransferKind::Http
+    }
+}
+
+fn url_path_has_torrent_extension(url: &Url) -> bool {
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .map(|segment| segment.to_ascii_lowercase().ends_with(".torrent"))
+        .unwrap_or(false)
+}
+
+fn path_has_torrent_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
+}
+
+fn torrent_filename_from_url(raw_url: &str, filename_hint: Option<&str>) -> String {
+    if let Some(hint) = filename_hint {
+        let filename = sanitize_filename(hint);
+        if filename != "download.bin" {
+            return filename;
+        }
+    }
+
+    if let Some(filename) = torrent_filename_from_path(raw_url) {
+        return filename;
+    }
+
+    let Ok(parsed) = Url::parse(raw_url) else {
+        return "torrent".into();
+    };
+
+    if parsed.scheme() == "magnet" {
+        if let Some(display_name) = parsed
+            .query_pairs()
+            .find_map(|(key, value)| (key == "dn").then(|| sanitize_filename(&value)))
+            .filter(|value| value != "download.bin")
+        {
+            return display_name;
+        }
+
+        if let Some(hash) = parsed
+            .query_pairs()
+            .find_map(|(key, value)| (key == "xt").then_some(value.into_owned()))
+            .and_then(|value| value.rsplit(':').next().map(str::to_string))
+            .filter(|value| !value.is_empty())
+        {
+            let prefix = hash.chars().take(8).collect::<String>();
+            return format!("torrent-{prefix}");
+        }
+
+        return "torrent".into();
+    }
+
+    filename_from_hint(filename_hint, raw_url)
+}
+
+fn torrent_filename_from_path(raw_path: &str) -> Option<String> {
+    let path = Path::new(raw_path.trim());
+    if !path_has_torrent_extension(path) {
+        return None;
+    }
+
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .map(sanitize_filename)
+        .filter(|value| value != "download.bin")
+}
+
+fn torrent_state_path_for_job(download_dir: &Path, job_id: &str) -> PathBuf {
+    download_dir.join(".torrent-state").join(job_id)
 }
 
 fn verify_download_directory_writable(download_dir: &Path) -> Result<(), BackendError> {
@@ -2041,6 +2396,11 @@ fn allocate_target_paths(
     let fallback_target = download_dir.join(filename);
     let fallback_temp = download_dir.join(format!("{filename}.part"));
     (fallback_target, fallback_temp)
+}
+
+fn unique_target_path(download_dir: &Path, filename: &str, jobs: &[DownloadJob]) -> PathBuf {
+    let (target_path, _) = allocate_target_paths(download_dir, filename, jobs);
+    target_path
 }
 
 fn derive_filename(raw_url: &str) -> String {
@@ -2259,6 +2619,15 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
+fn remove_path_if_exists(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|error| format!("Could not remove download directory: {error}"))
+    } else {
+        remove_file_if_exists(path)
+    }
+}
+
 pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
     if settings.download_directory.trim().is_empty() {
         return Err("Download directory cannot be empty.".into());
@@ -2266,6 +2635,7 @@ pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
 
     normalize_accent_color(settings);
     normalize_extension_settings(&mut settings.extension_integration);
+    normalize_torrent_settings(&mut settings.torrent);
 
     std::fs::create_dir_all(&settings.download_directory)
         .map_err(|error| format!("Could not create download directory: {error}"))?;
@@ -2744,6 +3114,140 @@ mod tests {
     }
 
     #[test]
+    fn normalize_download_url_accepts_torrent_inputs() {
+        let magnet = " magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example ";
+        let torrent_url = "https://example.com/releases/example.torrent";
+
+        assert_eq!(
+            normalize_download_url(magnet).unwrap(),
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example"
+        );
+        assert_eq!(normalize_download_url(torrent_url).unwrap(), torrent_url);
+    }
+
+    #[test]
+    fn normalize_download_url_rejects_non_torrent_non_http_schemes() {
+        let error = normalize_download_url("ftp://example.com/file.torrent").unwrap_err();
+
+        assert_eq!(error.code, "UNSUPPORTED_SCHEME");
+        assert!(error.message.contains("http, https, magnet"));
+    }
+
+    #[test]
+    fn enqueue_download_in_memory_creates_torrent_job_for_magnet() {
+        let download_dir = test_runtime_dir("enqueue-torrent");
+        let mut state = runtime_state_with_jobs(Vec::new());
+        state.settings.download_directory = download_dir.display().to_string();
+        let result = state
+            .enqueue_download_in_memory(
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Fedora",
+                EnqueueOptions::default(),
+            )
+            .unwrap();
+
+        let job = result
+            .snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == result.job_id)
+            .expect("queued job");
+        assert_eq!(job.transfer_kind, TransferKind::Torrent);
+        assert_eq!(job.filename, "Fedora");
+        assert!(job.integrity_check.is_none());
+        assert!(job.target_path.ends_with("Fedora"));
+        assert!(job.temp_path.contains(".torrent-state"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_download_in_memory_creates_torrent_job_for_local_file() {
+        let download_dir = test_runtime_dir("enqueue-local-torrent");
+        let torrent_file = download_dir.join("fixture.torrent");
+        std::fs::create_dir_all(&download_dir).unwrap();
+        std::fs::write(
+            &torrent_file,
+            b"d4:infod4:name7:fixture12:piece lengthi16e6:pieces0:e",
+        )
+        .unwrap();
+        let mut state = runtime_state_with_jobs(Vec::new());
+        state.settings.download_directory = download_dir.display().to_string();
+
+        let result = state
+            .enqueue_download_in_memory(
+                &torrent_file.display().to_string(),
+                EnqueueOptions {
+                    transfer_kind: Some(TransferKind::Torrent),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let job = result
+            .snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == result.job_id)
+            .expect("queued job");
+        assert_eq!(job.transfer_kind, TransferKind::Torrent);
+        assert_eq!(job.filename, "fixture");
+        assert_eq!(job.url, torrent_file.display().to_string());
+        assert!(job.temp_path.contains(".torrent-state"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_download_rejects_mismatched_explicit_transfer_kind() {
+        let download_dir = test_runtime_dir("enqueue-torrent-mismatch");
+        let mut state = runtime_state_with_jobs(Vec::new());
+        state.settings.download_directory = download_dir.display().to_string();
+
+        let error = state
+            .enqueue_download_in_memory(
+                "https://example.com/plain-file.zip",
+                EnqueueOptions {
+                    transfer_kind: Some(TransferKind::Torrent),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, "INVALID_TRANSFER_KIND");
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn enqueue_downloads_keeps_batch_modes_http_only() {
+        let download_dir = test_runtime_dir("enqueue-batch-http-only");
+        let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+        state
+            .save_settings(Settings {
+                download_directory: download_dir.display().to_string(),
+                ..Settings::default()
+            })
+            .await
+            .unwrap();
+
+        let error = state
+            .enqueue_downloads(
+                vec![
+                    "https://example.com/file.zip".into(),
+                    "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "INVALID_TRANSFER_KIND");
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
     fn sanitize_filename_falls_back_for_dot_only_names() {
         assert_eq!(sanitize_filename("."), "download.bin");
         assert_eq!(sanitize_filename(".."), "download.bin");
@@ -2846,7 +3350,9 @@ mod tests {
         let mixed_case = "A".repeat(64);
 
         assert_eq!(
-            normalize_expected_sha256(Some(mixed_case)).unwrap().as_deref(),
+            normalize_expected_sha256(Some(mixed_case))
+                .unwrap()
+                .as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
 
@@ -2974,6 +3480,7 @@ mod tests {
             source: None,
             transfer_kind: TransferKind::Http,
             integrity_check: None,
+            torrent: None,
             state: JobState::Failed,
             created_at: 1,
             progress: 42.0,
@@ -3119,6 +3626,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(download_dir);
     }
 
+    #[tokio::test]
+    async fn seeding_jobs_release_download_scheduler_slots() {
+        let download_dir = test_runtime_dir("seeding-slots");
+        let mut seeding_job =
+            download_job("job_1", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        seeding_job.transfer_kind = TransferKind::Torrent;
+        seeding_job.progress = 100.0;
+        seeding_job.target_path = download_dir.join("seeded").display().to_string();
+        seeding_job.temp_path = download_dir
+            .join(".torrent-state")
+            .join("job_1")
+            .display()
+            .to_string();
+        let mut queued_job = download_job("job_2", JobState::Queued, ResumeSupport::Unknown, 0);
+        queued_job.target_path = download_dir.join("queued.zip").display().to_string();
+        queued_job.temp_path = download_dir.join("queued.zip.part").display().to_string();
+        let state = shared_state_with_jobs(
+            download_dir.join("state.json"),
+            vec![seeding_job, queued_job],
+        );
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.settings.max_concurrent_downloads = 1;
+            runtime.active_workers.insert("job_1".into());
+        }
+
+        let (_, tasks) = state
+            .claim_schedulable_jobs()
+            .await
+            .expect("claiming jobs should work");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "job_2");
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn seed_policy_defaults_to_forever_and_supports_limits() {
+        let mut settings = Settings::default();
+        assert!(!should_stop_seeding(&settings.torrent, 9.0, 24 * 60 * 60));
+
+        settings.torrent.seed_mode = TorrentSeedMode::Ratio;
+        settings.torrent.seed_ratio_limit = 1.5;
+        assert!(!should_stop_seeding(&settings.torrent, 1.49, 60));
+        assert!(should_stop_seeding(&settings.torrent, 1.5, 60));
+
+        settings.torrent.seed_mode = TorrentSeedMode::Time;
+        settings.torrent.seed_time_limit_minutes = 30;
+        assert!(!should_stop_seeding(&settings.torrent, 0.1, 29 * 60));
+        assert!(should_stop_seeding(&settings.torrent, 0.1, 30 * 60));
+
+        settings.torrent.seed_mode = TorrentSeedMode::RatioOrTime;
+        settings.torrent.seed_ratio_limit = 2.0;
+        settings.torrent.seed_time_limit_minutes = 120;
+        assert!(should_stop_seeding(&settings.torrent, 2.0, 10));
+        assert!(should_stop_seeding(&settings.torrent, 0.5, 120 * 60));
+    }
+
     fn download_job(
         id: &str,
         state: JobState,
@@ -3132,6 +3698,7 @@ mod tests {
             source: None,
             transfer_kind: TransferKind::Http,
             integrity_check: None,
+            torrent: None,
             state,
             created_at: 1,
             progress: 0.0,

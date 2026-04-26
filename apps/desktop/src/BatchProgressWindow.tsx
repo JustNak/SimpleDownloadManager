@@ -204,10 +204,10 @@ function BatchJobRow({ job }: { job: DownloadJob }) {
 
   return (
     <div className="grid grid-cols-[40px_minmax(0,1fr)_86px] items-center gap-2 px-3 py-2">
-      <FileBadge filename={job.filename} />
+      <FileBadge filename={job.filename} transferKind={job.transferKind} />
       <div className="min-w-0">
         <div className="truncate text-sm font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</div>
-        <div className="truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
+        <div className="truncate text-xs text-muted-foreground" title={job.url}>{job.transferKind === 'torrent' ? 'Torrent' : getHost(job.url)}</div>
         <div className="mt-1 h-1 overflow-hidden rounded-full bg-progress-track">
           <div className={`h-1 rounded-full transition-all duration-300 ${progressColor(job.state)}`} style={{ width: `${progress}%` }} />
         </div>
@@ -303,7 +303,7 @@ function filterBatchJobs(jobs: DownloadJob[], context: ProgressBatchContext | nu
 }
 
 function isPausable(job: DownloadJob) {
-  return [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
+  return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
 }
 
 function isResumable(job: DownloadJob) {
@@ -311,11 +311,13 @@ function isResumable(job: DownloadJob) {
 }
 
 function isCancelable(job: DownloadJob) {
-  return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Paused].includes(job.state);
+  return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused].includes(job.state);
 }
 
 function statusText(job: DownloadJob) {
   switch (job.state) {
+    case JobState.Seeding:
+      return 'Seeding';
     case JobState.Downloading:
       return 'Downloading';
     case JobState.Starting:

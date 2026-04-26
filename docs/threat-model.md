@@ -10,7 +10,8 @@ Sources:
 
 MVP rules:
 
-- accept only `http` and `https`
+- accept only `http`, `https`, and `magnet` where the request surface supports torrents
+- keep multi-download and bulk archive input HTTP(S)-only
 - reject local file paths
 - reject browser-internal URLs
 - do not accept save path from the extension
@@ -19,6 +20,7 @@ MVP rules:
 - sanitize filenames in the desktop app
 - log request origin fields
 - rate-limit native host requests
+- treat torrenting as P2P: peers can observe participation, seeding may continue after download completion, and cancel stops tracking without deleting downloaded files
 
 Security boundary:
 

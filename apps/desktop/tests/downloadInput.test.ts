@@ -44,6 +44,7 @@ assert.ok(batchUrlTextAreaClassName.includes('whitespace-pre'), 'batch URL input
 assert.ok(batchUrlTextAreaClassName.includes('overflow-x-auto'), 'batch URL inputs should scroll horizontally');
 
 assert.equal(downloadSubmitLabel('single', 1, true), 'Start Download');
+assert.equal(downloadSubmitLabel('torrent', 1, true), 'Add Torrent');
 assert.equal(downloadSubmitLabel('multi', 1, true), 'Queue 1 Download');
 assert.equal(downloadSubmitLabel('multi', 2, true), 'Queue 2 Downloads');
 assert.equal(downloadSubmitLabel('bulk', 1, true), 'Queue 1 Download and Combine');

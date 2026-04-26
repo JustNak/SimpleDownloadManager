@@ -18,6 +18,7 @@ pub enum JobState {
     Queued,
     Starting,
     Downloading,
+    Seeding,
     Paused,
     Completed,
     Failed,
@@ -34,6 +35,7 @@ pub enum FailureCategory {
     Permission,
     Resume,
     Integrity,
+    Torrent,
     Internal,
 }
 
@@ -51,6 +53,7 @@ pub enum ResumeSupport {
 pub enum TransferKind {
     #[default]
     Http,
+    Torrent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +78,29 @@ pub struct IntegrityCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual: Option<String>,
     pub status: IntegrityStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<u32>,
+    #[serde(default)]
+    pub uploaded_bytes: u64,
+    #[serde(default)]
+    pub ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeding_started_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +131,8 @@ pub struct DownloadJob {
     pub transfer_kind: TransferKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrity_check: Option<IntegrityCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torrent: Option<TorrentInfo>,
     pub state: JobState,
     #[serde(default)]
     pub created_at: u64,
@@ -210,6 +238,31 @@ pub enum DownloadPerformanceMode {
     Fast,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TorrentSeedMode {
+    #[default]
+    Forever,
+    Ratio,
+    Time,
+    RatioOrTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentSettings {
+    #[serde(default = "default_torrent_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub seed_mode: TorrentSeedMode,
+    #[serde(default = "default_seed_ratio_limit")]
+    pub seed_ratio_limit: f64,
+    #[serde(default = "default_seed_time_limit_minutes")]
+    pub seed_time_limit_minutes: u32,
+    #[serde(default)]
+    pub upload_limit_kib_per_second: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionIntegrationSettings {
@@ -236,6 +289,8 @@ pub struct Settings {
     pub speed_limit_kib_per_second: u32,
     #[serde(default)]
     pub download_performance_mode: DownloadPerformanceMode,
+    #[serde(default)]
+    pub torrent: TorrentSettings,
     pub notifications_enabled: bool,
     pub theme: Theme,
     #[serde(default = "default_accent_color")]
@@ -352,6 +407,7 @@ impl Default for Settings {
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
             download_performance_mode: DownloadPerformanceMode::Balanced,
+            torrent: TorrentSettings::default(),
             notifications_enabled: true,
             theme: Theme::System,
             accent_color: default_accent_color(),
@@ -377,8 +433,32 @@ impl Default for ExtensionIntegrationSettings {
     }
 }
 
+impl Default for TorrentSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_torrent_enabled(),
+            seed_mode: TorrentSeedMode::Forever,
+            seed_ratio_limit: default_seed_ratio_limit(),
+            seed_time_limit_minutes: default_seed_time_limit_minutes(),
+            upload_limit_kib_per_second: 0,
+        }
+    }
+}
+
 fn default_auto_retry_attempts() -> u32 {
     3
+}
+
+fn default_torrent_enabled() -> bool {
+    true
+}
+
+fn default_seed_ratio_limit() -> f64 {
+    1.0
+}
+
+fn default_seed_time_limit_minutes() -> u32 {
+    60
 }
 
 fn default_accent_color() -> String {
@@ -551,14 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn persisted_jobs_reject_unknown_transfer_kind() {
+    fn persisted_jobs_reject_unknown_future_transfer_kind() {
         let state = serde_json::from_str::<PersistedState>(
             r#"{
               "jobs": [{
                 "id": "job_1",
                 "url": "https://example.com/file.zip",
                 "filename": "file.zip",
-                "transferKind": "torrent",
+                "transferKind": "future_kind",
                 "state": "queued",
                 "progress": 0,
                 "totalBytes": 0,
@@ -577,7 +657,62 @@ mod tests {
             }"#,
         );
 
-        assert!(state.is_err(), "unknown transfer kinds should not silently run");
+        assert!(
+            state.is_err(),
+            "unknown transfer kinds should not silently run"
+        );
+    }
+
+    #[test]
+    fn torrent_jobs_persist_metadata_and_seeding_state() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_7",
+                "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example",
+                "filename": "Example",
+                "transferKind": "torrent",
+                "state": "seeding",
+                "progress": 100,
+                "totalBytes": 1024,
+                "downloadedBytes": 1024,
+                "speed": 0,
+                "eta": 0,
+                "targetPath": "C:/Downloads/Example",
+                "tempPath": "C:/Downloads/.torrent-state/job_7",
+                "torrent": {
+                  "infoHash": "0123456789abcdef0123456789abcdef01234567",
+                  "name": "Example",
+                  "totalFiles": 2,
+                  "peers": 3,
+                  "seeds": 4,
+                  "uploadedBytes": 2048,
+                  "ratio": 2.0,
+                  "seedingStartedAt": 123456
+                }
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("torrent job should parse");
+
+        let job = &state.jobs[0];
+        assert_eq!(job.transfer_kind, TransferKind::Torrent);
+        assert_eq!(job.state, JobState::Seeding);
+        let torrent = job.torrent.as_ref().expect("torrent metadata");
+        assert_eq!(
+            torrent.info_hash.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert_eq!(torrent.total_files, Some(2));
+        assert_eq!(torrent.uploaded_bytes, 2048);
+        assert_eq!(torrent.ratio, 2.0);
+        assert_eq!(torrent.seeding_started_at, Some(123456));
     }
 
     #[test]

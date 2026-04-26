@@ -70,7 +70,7 @@ export function calculateDownloadProgressMetricsByJobId(
 }
 
 export function shouldShowCompletedFileAction(job: DownloadJob): boolean {
-  return job.state === 'completed' && Boolean(job.targetPath);
+  return (job.state === 'completed' || job.state === 'seeding') && Boolean(job.targetPath);
 }
 
 function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): number {

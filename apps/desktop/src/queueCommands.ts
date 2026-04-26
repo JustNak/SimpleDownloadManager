@@ -3,6 +3,7 @@ import type { DownloadJob } from './types';
 const activeRemovalStates = new Set<string>([
   'starting',
   'downloading',
+  'seeding',
 ]);
 
 export function canRetryFailedDownloads(jobs: DownloadJob[]): boolean {

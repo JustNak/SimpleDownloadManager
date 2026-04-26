@@ -1,7 +1,7 @@
 import type { AddJobResult, AddJobsResult } from './backend';
 import type { DownloadJob } from './types';
 
-export type DownloadMode = 'single' | 'multi' | 'bulk';
+export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
 export type BulkPhase = 'downloading' | 'compressing' | 'ready' | 'failed';
 
@@ -82,7 +82,7 @@ export function progressPopupIntentForSubmission(
   result: AddJobResult | AddJobsResult,
   archiveName?: string,
 ): ProgressPopupIntent | null {
-  if (mode === 'single') {
+  if (mode === 'single' || mode === 'torrent') {
     const singleResult = result as AddJobResult;
     return singleResult.status === 'queued' ? { type: 'single', jobId: singleResult.jobId } : null;
   }

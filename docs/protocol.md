@@ -87,6 +87,12 @@ Supported request types:
 }
 ```
 
+URL handling is intentionally narrow:
+
+- Manual/context-menu/popup requests accept `http:`, `https:`, and `magnet:` URLs.
+- Browser download interception uses `http:`/`https:` download items and hands `.torrent` URLs or filenames to the desktop app as torrent jobs.
+- The envelope version stays `1`; torrent handoff uses the existing `url` field.
+
 `ignoredFileExtensions` applies only to automatic browser download capture.
 Manual sends, popup sends, and context-menu sends are still allowed.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
@@ -115,6 +121,7 @@ For automatic browser download capture, `status: "canceled"` means the desktop
 prompt was canceled and the extension should return control to the browser's
 original download flow. `status: "queued"` and `status: "duplicate_existing_job"`
 mean the extension should cancel and erase the original browser download item.
+Torrent cancel/remove requests stop app tracking but do not delete downloaded torrent data.
 
 Error:
 

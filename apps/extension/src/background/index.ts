@@ -14,6 +14,7 @@ import {
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
+import { shouldHandOffTorrentBrowserDownload } from './torrentHandoff';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const interceptedBrowserDownloadIds = new Set<number>();
@@ -336,10 +337,11 @@ function shouldHandleBrowserDownload(
   settings: ExtensionIntegrationSettings,
   filename?: string,
 ): boolean {
+  const isTorrentBrowserDownload = shouldHandOffTorrentBrowserDownload({ url, filename });
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
     && !isHostExcluded(url, settings.excludedHosts)
-    && !isFileExtensionIgnored(url, filename, settings.ignoredFileExtensions);
+    && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, filename, settings.ignoredFileExtensions));
 }
 
 function isHostExcluded(url: string, excludedHosts: string[]): boolean {

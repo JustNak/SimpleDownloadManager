@@ -7,17 +7,19 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  Magnet,
 } from 'lucide-react';
+import type { TransferKind } from './types';
 
-export function FileBadge({ filename, large = false }: { filename: string; large?: boolean }) {
+export function FileBadge({ filename, transferKind = 'http', large = false }: { filename: string; transferKind?: TransferKind; large?: boolean }) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const iconSize = large ? 32 : 22;
-  const label = ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
+  const label = transferKind === 'torrent' ? 'P2P' : ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
 
   return (
     <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[92px] w-[70px]' : 'h-12 w-10'}`}>
       <div className="absolute right-0 top-0 h-3 w-3 border-b border-l border-border bg-surface" />
-      <div className="text-primary">{fileIcon(ext, iconSize)}</div>
+      <div className="text-primary">{transferKind === 'torrent' ? <Magnet size={iconSize} /> : fileIcon(ext, iconSize)}</div>
       {large ? <div className="absolute bottom-2 text-[10px] font-semibold text-muted-foreground">{label}</div> : null}
     </div>
   );

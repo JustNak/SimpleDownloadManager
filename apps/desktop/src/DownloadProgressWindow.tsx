@@ -100,7 +100,7 @@ export function DownloadProgressWindow() {
   }
 
   const progress = Math.max(0, Math.min(100, job.progress));
-  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
+  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   const isPaused = job.state === JobState.Paused;
   const isCompleted = job.state === JobState.Completed;
   const isFailed = job.state === JobState.Failed;
@@ -123,10 +123,10 @@ export function DownloadProgressWindow() {
 
       <main className="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
         <section className="flex min-w-0 gap-3">
-          <FileBadge filename={job.filename} />
+          <FileBadge filename={job.filename} transferKind={job.transferKind} />
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</h1>
-            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.url}>{job.transferKind === 'torrent' ? torrentSummary(job) : getHost(job.url)}</div>
             <div className={`mt-2 inline-flex h-6 items-center gap-1.5 rounded border px-2 text-xs font-semibold ${statusClass(job.state)}`}>
               {isCompleted ? <CheckCircle2 size={13} /> : isFailed ? <X size={13} /> : <Download size={13} />}
               {statusText(job)}
@@ -147,8 +147,8 @@ export function DownloadProgressWindow() {
         </section>
 
         <section className="mt-3 grid grid-cols-3 gap-1 text-xs">
-          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
-          <Metric label="Time" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
+          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : job.state === JobState.Seeding ? `Up ${formatBytes(job.torrent?.uploadedBytes ?? 0)}` : '--'} />
+          <Metric label="Time" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : job.state === JobState.Seeding ? torrentRatio(job) : '--'} />
           <Metric label="State" value={statusText(job)} />
         </section>
 
@@ -241,6 +241,8 @@ function ActionButton({
 
 function statusText(job: DownloadJob) {
   switch (job.state) {
+    case JobState.Seeding:
+      return 'Seeding';
     case JobState.Downloading:
       return 'Downloading';
     case JobState.Starting:
@@ -258,6 +260,19 @@ function statusText(job: DownloadJob) {
     default:
       return job.state;
   }
+}
+
+function torrentRatio(job: DownloadJob) {
+  return typeof job.torrent?.ratio === 'number' ? `${job.torrent.ratio.toFixed(2)}x` : '--';
+}
+
+function torrentSummary(job: DownloadJob) {
+  const parts = ['Torrent'];
+  if (typeof job.torrent?.ratio === 'number') parts.push(torrentRatio(job));
+  if (typeof job.torrent?.uploadedBytes === 'number' && job.torrent.uploadedBytes > 0) {
+    parts.push(`Up ${formatBytes(job.torrent.uploadedBytes)}`);
+  }
+  return parts.join(' · ');
 }
 
 function statusClass(state: JobState) {

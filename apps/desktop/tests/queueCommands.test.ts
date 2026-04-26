@@ -54,6 +54,12 @@ assert.equal(
 );
 
 assert.equal(
+  canRemoveDownloadImmediately(job('job_1', 'seeding')),
+  false,
+  'seeding torrents should be canceled before they are removed',
+);
+
+assert.equal(
   canRemoveDownloadImmediately(job('job_1', 'queued')),
   true,
   'inactive queued downloads can be removed immediately',

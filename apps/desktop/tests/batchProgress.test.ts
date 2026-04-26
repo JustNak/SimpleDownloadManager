@@ -121,6 +121,12 @@ assert.deepEqual(
   'single queued downloads should open the existing per-file progress popup',
 );
 
+assert.deepEqual(
+  progressPopupIntentForSubmission('torrent', singleQueued),
+  { type: 'single', jobId: 'job_1' },
+  'torrent downloads should open the existing per-item progress popup',
+);
+
 assert.equal(
   progressPopupIntentForSubmission('single', singleDuplicate),
   null,

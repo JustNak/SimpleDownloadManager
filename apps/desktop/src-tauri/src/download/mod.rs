@@ -1,9 +1,10 @@
 use crate::commands::emit_snapshot;
-use crate::state::{BulkArchiveReady, SharedState, WorkerControl};
+use crate::state::{should_stop_seeding, BulkArchiveReady, SharedState, WorkerControl};
 use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, ResumeSupport,
     TransferKind,
 };
+use crate::torrent::TorrentEngine;
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
@@ -19,7 +20,7 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -109,11 +110,13 @@ enum DownloadOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransferDispatch {
     Http,
+    Torrent,
 }
 
 fn transfer_dispatch_for_kind(kind: TransferKind) -> Option<TransferDispatch> {
     match kind {
         TransferKind::Http => Some(TransferDispatch::Http),
+        TransferKind::Torrent => Some(TransferDispatch::Torrent),
     }
 }
 
@@ -325,8 +328,6 @@ async fn run_download(
 }
 
 fn download_client() -> Result<Client, DownloadError> {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-
     if let Some(client) = CLIENT.get() {
         return Ok(client.clone());
     }
@@ -350,6 +351,9 @@ fn download_client() -> Result<Client, DownloadError> {
     })
 }
 
+static CLIENT: OnceLock<Client> = OnceLock::new();
+static TORRENT_ENGINE: OnceCell<Arc<TorrentEngine>> = OnceCell::const_new();
+
 async fn run_transfer_attempt(
     app: &AppHandle,
     state: &SharedState,
@@ -357,12 +361,129 @@ async fn run_transfer_attempt(
 ) -> Result<DownloadOutcome, DownloadError> {
     match transfer_dispatch_for_kind(task.transfer_kind) {
         Some(TransferDispatch::Http) => run_http_download_attempt(app, state, task).await,
+        Some(TransferDispatch::Torrent) => run_torrent_download_attempt(app, state, task).await,
         None => Err(download_error(
             FailureCategory::Internal,
             "Unsupported transfer kind.".into(),
             false,
         )),
     }
+}
+
+async fn run_torrent_download_attempt(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+) -> Result<DownloadOutcome, DownloadError> {
+    let settings = state.settings().await;
+    if !settings.torrent.enabled {
+        return Err(download_error(
+            FailureCategory::Torrent,
+            "Torrent downloads are disabled in settings.".into(),
+            false,
+        ));
+    }
+
+    let engine = torrent_engine(state)
+        .await
+        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+    let output_folder = task.target_path.clone();
+    let engine_id = engine
+        .add_source(
+            &task.url,
+            &output_folder,
+            settings.torrent.upload_limit_kib_per_second,
+        )
+        .await
+        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+    engine
+        .unpause(engine_id)
+        .await
+        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+
+    let mut last_downloaded = 0;
+    let mut last_sample = Instant::now();
+    let mut seeding_started = None::<Instant>;
+    loop {
+        match state.worker_control(&task.id).await {
+            WorkerControl::Paused => {
+                engine
+                    .pause(engine_id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                return Ok(DownloadOutcome::Paused);
+            }
+            WorkerControl::Canceled | WorkerControl::Missing => {
+                engine
+                    .forget(engine_id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                return Ok(DownloadOutcome::Canceled);
+            }
+            WorkerControl::Continue => {}
+        }
+
+        let mut update = engine
+            .snapshot(engine_id)
+            .await
+            .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+        if let Some(error) = update.error.clone() {
+            return Err(download_error(FailureCategory::Torrent, error, false));
+        }
+        let elapsed = last_sample.elapsed().as_secs_f64();
+        update.download_speed = if elapsed > 0.0 {
+            ((update.downloaded_bytes.saturating_sub(last_downloaded) as f64) / elapsed) as u64
+        } else {
+            0
+        };
+        last_downloaded = update.downloaded_bytes;
+        last_sample = Instant::now();
+
+        let snapshot = state
+            .update_torrent_progress(&task.id, update.clone(), true)
+            .await
+            .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+        emit_snapshot(app, &snapshot);
+
+        if update.finished {
+            let started = seeding_started.get_or_insert_with(Instant::now);
+            let torrent_settings = state.settings().await.torrent;
+            let ratio = if update.downloaded_bytes == 0 {
+                0.0
+            } else {
+                update.uploaded_bytes as f64 / update.downloaded_bytes as f64
+            };
+            if should_stop_seeding(&torrent_settings, ratio, started.elapsed().as_secs()) {
+                engine
+                    .forget(engine_id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                let snapshot = state
+                    .complete_torrent_job(&task.id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                emit_snapshot(app, &snapshot);
+                notify_download_completed(app, state, &task.target_path).await;
+                return Ok(DownloadOutcome::Completed);
+            }
+        }
+
+        tokio::time::sleep(PROGRESS_UPDATE_INTERVAL).await;
+    }
+}
+
+async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
+    let settings = state.settings().await;
+    let default_output_folder = PathBuf::from(&settings.download_directory);
+    let data_dir = state.app_data_dir();
+    TORRENT_ENGINE
+        .get_or_try_init(|| async {
+            TorrentEngine::new(default_output_folder, data_dir)
+                .await
+                .map(Arc::new)
+        })
+        .await
+        .cloned()
 }
 
 async fn run_http_download_attempt(
@@ -2143,6 +2264,14 @@ mod tests {
         assert_eq!(
             transfer_dispatch_for_kind(TransferKind::Http),
             Some(TransferDispatch::Http)
+        );
+    }
+
+    #[test]
+    fn transfer_dispatch_accepts_torrent_jobs() {
+        assert_eq!(
+            transfer_dispatch_for_kind(TransferKind::Torrent),
+            Some(TransferDispatch::Torrent)
         );
     }
 

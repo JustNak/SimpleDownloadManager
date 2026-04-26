@@ -45,6 +45,7 @@ fn main() {
             commands::clear_completed_jobs,
             commands::save_settings,
             commands::browse_directory,
+            commands::browse_torrent_file,
             commands::get_current_download_prompt,
             commands::confirm_download_prompt,
             commands::show_existing_download_prompt,

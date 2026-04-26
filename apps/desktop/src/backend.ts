@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
 import type { ProgressBatchContext } from './batchProgress';
-import { buildAddJobCommandArgs } from './backendCommandArgs';
+import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -37,6 +37,13 @@ const defaultSettings: Settings = {
   autoRetryAttempts: 3,
   speedLimitKibPerSecond: 0,
   downloadPerformanceMode: 'balanced',
+  torrent: {
+    enabled: true,
+    seedMode: 'forever',
+    seedRatioLimit: 1,
+    seedTimeLimitMinutes: 60,
+    uploadLimitKibPerSecond: 0,
+  },
   notificationsEnabled: true,
   theme: 'system',
   accentColor: '#3b82f6',
@@ -98,6 +105,53 @@ let mockState: DesktopSnapshot = {
       speed: 3250585,
       eta: 581,
       targetPath: `${mockDownloadDirectory}\\Blender 4.1.1 Setup.exe`,
+    },
+    {
+      id: '9',
+      url: 'magnet:?xt=urn:btih:8f14e45fceea167a5a36dedd4bea2543deb12a91&dn=Debian%2012.5%20DVD%20Image',
+      filename: 'Debian 12.5 DVD Image',
+      transferKind: 'torrent',
+      state: JobState.Downloading,
+      createdAt: mockNow - 1000 * 60 * 28,
+      progress: 74,
+      totalBytes: 4705198080,
+      downloadedBytes: 3481846579,
+      speed: 6291456,
+      eta: 194,
+      targetPath: `${mockDownloadDirectory}\\Debian 12.5 DVD Image`,
+      torrent: {
+        infoHash: '8f14e45fceea167a5a36dedd4bea2543deb12a91',
+        name: 'Debian 12.5 DVD Image',
+        totalFiles: 4,
+        peers: 28,
+        seeds: 112,
+        uploadedBytes: 483183820,
+        ratio: 0.18,
+      },
+    },
+    {
+      id: '10',
+      url: 'https://example.com/torrents/open-movie-archive.torrent',
+      filename: 'Open Movie Archive',
+      transferKind: 'torrent',
+      state: JobState.Seeding,
+      createdAt: mockNow - 1000 * 60 * 56,
+      progress: 100,
+      totalBytes: 2362232012,
+      downloadedBytes: 2362232012,
+      speed: 0,
+      eta: 0,
+      targetPath: `${mockDownloadDirectory}\\Open Movie Archive`,
+      torrent: {
+        infoHash: 'c9f0f895fb98ab9159f51fd0297e236d7f1234ab',
+        name: 'Open Movie Archive',
+        totalFiles: 12,
+        peers: 9,
+        seeds: 46,
+        uploadedBytes: 3355443200,
+        ratio: 1.42,
+        seedingStartedAt: mockNow - 1000 * 60 * 18,
+      },
     },
     {
       id: '4',
@@ -222,6 +276,9 @@ function replacePathFilename(path: string | undefined, filename: string): string
 function filenameFromUrl(url: string): string {
   try {
     const parsed = new URL(url);
+    if (parsed.protocol === 'magnet:') {
+      return parsed.searchParams.get('dn')?.trim() || 'Torrent Download';
+    }
     const segment = parsed.pathname.split('/').filter(Boolean).pop();
     return segment ? decodeURIComponent(segment) : 'download';
   } catch {
@@ -279,10 +336,10 @@ export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {
       lastHostContactSecondsAgo: 2,
       queueSummary: {
         total: mockState.jobs.length,
-        active: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting, JobState.Queued, JobState.Paused].includes(job.state)).length,
+        active: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting, JobState.Queued, JobState.Paused, JobState.Seeding].includes(job.state)).length,
         attention: mockState.jobs.filter(jobNeedsAttention).length,
         queued: mockState.jobs.filter((job) => job.state === JobState.Queued).length,
-        downloading: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting].includes(job.state)).length,
+        downloading: mockState.jobs.filter((job) => [JobState.Downloading, JobState.Starting, JobState.Seeding].includes(job.state)).length,
         completed: mockState.jobs.filter((job) => [JobState.Completed, JobState.Canceled].includes(job.state)).length,
         failed: mockState.jobs.filter((job) => job.state === JobState.Failed).length,
       },
@@ -346,7 +403,7 @@ export async function resumeJob(id: string): Promise<void> {
 export async function pauseAllJobs(): Promise<void> {
   if (!isTauriRuntime()) {
     mockState.jobs = mockState.jobs.map((job) =>
-      [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state)
+      [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state)
         ? { ...job, state: JobState.Paused, speed: 0, eta: 0 }
         : job,
     );
@@ -518,8 +575,8 @@ export async function clearCompletedJobs(): Promise<void> {
   await invokeCommand('clear_completed_jobs');
 }
 
-export async function addJob(url: string, expectedSha256?: string | null): Promise<AddJobResult> {
-  const args = buildAddJobCommandArgs(url, expectedSha256);
+export async function addJob(url: string, options?: AddJobOptions): Promise<AddJobResult> {
+  const args = buildAddJobCommandArgs(url, options);
   if (!isTauriRuntime()) {
     const duplicateJob = mockState.jobs.find((job) => job.url === url);
     if (duplicateJob) {
@@ -536,12 +593,18 @@ export async function addJob(url: string, expectedSha256?: string | null): Promi
       id: jobId,
       url,
       filename,
-      transferKind: 'http',
+      transferKind: args.transferKind ?? 'http',
       integrityCheck: args.expectedSha256
         ? {
             algorithm: 'sha256',
             expected: args.expectedSha256,
             status: 'pending',
+          }
+        : undefined,
+      torrent: args.transferKind === 'torrent'
+        ? {
+            uploadedBytes: 0,
+            ratio: 0,
           }
         : undefined,
       state: JobState.Queued,
@@ -550,7 +613,8 @@ export async function addJob(url: string, expectedSha256?: string | null): Promi
       totalBytes: 0,
       downloadedBytes: 0,
       speed: 0,
-      eta: 0
+      eta: 0,
+      targetPath: replacePathFilename(`${mockState.settings.downloadDirectory}\\download`, filename),
     });
     emitMockState();
     return { jobId, filename, status: 'queued' };
@@ -626,6 +690,13 @@ export async function saveSettings(settings: Settings): Promise<Settings> {
 export async function browseDirectory(): Promise<string | null> {
   if (!isTauriRuntime()) return mockState.settings.downloadDirectory;
   return invokeCommand<string | null>('browse_directory');
+}
+
+export async function browseTorrentFile(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Imported%20Torrent';
+  }
+  return invokeCommand<string | null>('browse_torrent_file');
 }
 
 export async function getCurrentDownloadPrompt(): Promise<DownloadPrompt | null> {

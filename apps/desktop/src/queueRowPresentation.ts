@@ -1,12 +1,29 @@
 import type { DownloadJob } from './types';
 
 export const QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Speed', 'Time', 'Size', 'Actions'] as const;
+export const TORRENT_QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Seed', 'Ratio', 'Size', 'Actions'] as const;
 
 export type QueueStatusTone = 'primary' | 'success' | 'destructive' | 'warning' | 'muted';
 
 export interface QueueStatusPresentation {
   label: string;
   tone: QueueStatusTone;
+}
+
+export type TorrentDetailMetricKind = 'upload' | 'peers' | 'seeds';
+
+export interface TorrentDetailMetric {
+  kind: TorrentDetailMetricKind;
+  label: string;
+  value: number;
+}
+
+export function queueTableColumnsForView(view: string): readonly string[] {
+  return isTorrentQueueView(view) ? TORRENT_QUEUE_TABLE_COLUMNS : QUEUE_TABLE_COLUMNS;
+}
+
+export function isTorrentQueueView(view: string): boolean {
+  return view === 'torrents' || view.startsWith('torrent-');
 }
 
 export function shouldShowNameProgress(job: Pick<DownloadJob, 'state' | 'progress'>): boolean {
@@ -18,8 +35,13 @@ export function clampQueueProgress(progress: number): number {
   return Math.max(0, Math.min(100, progress));
 }
 
-export function queueStatusPresentation(job: Pick<DownloadJob, 'state'>): QueueStatusPresentation {
+export function queueStatusPresentation(job: Pick<DownloadJob, 'state' | 'torrent'>): QueueStatusPresentation {
   switch (job.state) {
+    case 'seeding':
+      return {
+        label: 'Seeding',
+        tone: 'primary',
+      };
     case 'completed':
       return { label: 'Done', tone: 'success' };
     case 'failed':
@@ -36,4 +58,31 @@ export function queueStatusPresentation(job: Pick<DownloadJob, 'state'>): QueueS
     default:
       return { label: String(job.state), tone: 'muted' };
   }
+}
+
+export function formatQueueSize(
+  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes'>,
+  formatBytes: (bytes: number) => string,
+): string {
+  if (job.totalBytes <= 0) return formatBytes(job.downloadedBytes);
+  if (job.state === 'completed') return formatBytes(job.totalBytes);
+  return `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}`;
+}
+
+export function torrentDetailMetrics(job: Pick<DownloadJob, 'torrent'>): TorrentDetailMetric[] {
+  const metrics: TorrentDetailMetric[] = [];
+
+  if (typeof job.torrent?.uploadedBytes === 'number' && job.torrent.uploadedBytes > 0) {
+    metrics.push({ kind: 'upload', label: 'Uploaded', value: job.torrent.uploadedBytes });
+  }
+
+  if (typeof job.torrent?.peers === 'number') {
+    metrics.push({ kind: 'peers', label: 'Peers', value: job.torrent.peers });
+  }
+
+  if (typeof job.torrent?.seeds === 'number') {
+    metrics.push({ kind: 'seeds', label: 'Seeds', value: job.torrent.seeds });
+  }
+
+  return metrics;
 }

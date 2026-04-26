@@ -10,14 +10,21 @@ import type { DownloadProgressMetrics } from './downloadProgressMetrics';
 import { canRemoveDownloadImmediately } from './queueCommands';
 import {
   clampQueueProgress,
-  QUEUE_TABLE_COLUMNS,
+  formatQueueSize,
+  queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
+  torrentDetailMetrics,
+  type TorrentDetailMetric,
+  type TorrentDetailMetricKind,
   type QueueStatusTone,
 } from './queueRowPresentation';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Box,
   Check,
   Clock3,
@@ -33,14 +40,18 @@ import {
   GripHorizontal,
   HardDrive,
   MoreHorizontal,
+  Magnet,
   Pause,
   Pencil,
   Play,
   RotateCcw,
   RotateCw,
   Trash2,
+  Upload,
+  Users,
   X,
 } from 'lucide-react';
+import { sortModeDirection, sortModeKey, type SortColumn, type SortMode } from './downloadSorting';
 
 const DETAILS_MIN_HEIGHT = 148;
 const DETAILS_CLOSE_THRESHOLD = 118;
@@ -52,6 +63,8 @@ const TABLE_MIN_HEIGHT = 180;
 interface QueueViewProps {
   jobs: DownloadJob[];
   view: string;
+  sortMode: SortMode;
+  onSortChange: (column: SortColumn) => void;
   progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
   selectedJobId: string | null;
   onSelect: (id: string) => void;
@@ -72,6 +85,8 @@ interface QueueViewProps {
 export function QueueView({
   jobs,
   view,
+  sortMode,
+  onSortChange,
   progressMetricsByJobId,
   selectedJobId,
   onSelect,
@@ -116,6 +131,8 @@ export function QueueView({
   const visibleJobIds = jobs.map((job) => job.id);
   const allVisibleSelected = jobs.length > 0 && jobs.every((job) => selectedJobIds.has(job.id));
   const hasVisibleSelection = jobs.some((job) => selectedJobIds.has(job.id));
+  const tableColumns = queueTableColumnsForView(view);
+  const isTorrentTable = tableColumns[2] === 'Seed';
 
   function selectSingleJob(jobId: string) {
     const next = new Set([jobId]);
@@ -361,13 +378,19 @@ export function QueueView({
                 title={allVisibleSelected ? 'Clear selection' : 'Select all downloads'}
                 onChange={setAllVisibleSelected}
               />
-              <span>{QUEUE_TABLE_COLUMNS[0]}</span>
+              <SortableColumnHeader column="name" sortMode={sortMode} onSortChange={onSortChange}>
+                {tableColumns[0]}
+              </SortableColumnHeader>
             </div>
-            <div>{QUEUE_TABLE_COLUMNS[1]}</div>
-            <div>{QUEUE_TABLE_COLUMNS[2]}</div>
-            <div>{QUEUE_TABLE_COLUMNS[3]}</div>
-            <div>{QUEUE_TABLE_COLUMNS[4]}</div>
-            <div className="text-right">{QUEUE_TABLE_COLUMNS[5]}</div>
+            <SortableColumnHeader column="date" sortMode={sortMode} onSortChange={onSortChange}>
+              {tableColumns[1]}
+            </SortableColumnHeader>
+            <div title={isTorrentTable ? 'Seed upload speed' : undefined}>{tableColumns[2]}</div>
+            <div title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
+            <SortableColumnHeader column="size" sortMode={sortMode} onSortChange={onSortChange}>
+              {tableColumns[4]}
+            </SortableColumnHeader>
+            <div className="text-right">{tableColumns[5]}</div>
           </div>
 
           <div className="divide-y divide-border/70">
@@ -422,6 +445,7 @@ export function QueueView({
                   <div className="flex min-w-0 items-center gap-3 pr-4">
                     <FileBadge
                       filename={job.filename}
+                      transferKind={job.transferKind}
                       selected={multiSelected}
                       selectionTitle={multiSelected ? `Deselect ${job.filename}` : `Select ${job.filename}`}
                       onSelectionChange={(checked) => setJobSelection(job.id, checked)}
@@ -442,13 +466,13 @@ export function QueueView({
                   </div>
 
                   <div className="tabular-nums text-muted-foreground">
-                    {job.state === JobState.Downloading ? `${formatBytes(averageSpeed)}/s` : '--'}
+                    {isTorrentTable ? formatTorrentSeedMetric(job) : formatQueueSpeed(job, averageSpeed)}
                   </div>
                   <div className="tabular-nums text-muted-foreground">
-                    {job.state === JobState.Downloading ? formatTime(timeRemaining) : '--'}
+                    {isTorrentTable ? formatTorrentRatio(job) : formatQueueTime(job, timeRemaining)}
                   </div>
                   <div className="tabular-nums text-muted-foreground">
-                    {job.totalBytes > 0 ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}` : formatBytes(job.downloadedBytes)}
+                    {formatQueueSize(job, formatBytes)}
                   </div>
 
                   <div
@@ -786,6 +810,38 @@ function DeletePrompt({
   );
 }
 
+function SortableColumnHeader({
+  column,
+  sortMode,
+  onSortChange,
+  align = 'left',
+  children,
+}: {
+  column: SortColumn;
+  sortMode: SortMode;
+  onSortChange: (column: SortColumn) => void;
+  align?: 'left' | 'right';
+  children: React.ReactNode;
+}) {
+  const active = sortModeKey(sortMode) === column;
+  const direction = sortModeDirection(sortMode);
+  const Icon = active ? direction === 'asc' ? ArrowUp : ArrowDown : ArrowUpDown;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSortChange(column)}
+      className={`inline-flex min-w-0 items-center gap-1.5 rounded-sm text-xs font-semibold transition hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/25 ${
+        active ? 'text-primary' : 'text-muted-foreground'
+      } ${align === 'right' ? 'justify-end' : 'justify-start'}`}
+      aria-label={`Sort by ${String(children)} ${active && direction === 'asc' ? 'descending' : 'ascending'}`}
+    >
+      <span className="truncate">{children}</span>
+      <Icon size={12} strokeWidth={2.4} aria-hidden="true" />
+    </button>
+  );
+}
+
 function splitFilename(filename: string) {
   const dotIndex = filename.lastIndexOf('.');
   if (dotIndex <= 0 || dotIndex === filename.length - 1) {
@@ -852,6 +908,13 @@ function DownloadDetailsPane({
     { icon: <Clock3 size={16} />, label: 'Remaining', value: job.state === JobState.Downloading ? formatTime(job.eta) : '--' },
     { icon: <Check size={16} />, label: 'Status:', value: statusText(job) },
     { icon: <RotateCw size={16} />, label: 'Resume:', value: formatResumeSupport(job.resumeSupport) },
+    ...(job.transferKind === 'torrent'
+      ? [
+          { icon: <Magnet size={16} />, label: 'Torrent:', value: job.torrent?.name || 'Metadata pending' },
+          { icon: <Upload size={16} />, label: 'Uploaded:', value: `${formatBytes(job.torrent?.uploadedBytes ?? 0)} (${formatTorrentRatio(job)})` },
+          { icon: <Users size={16} />, label: 'Peers:', value: formatTorrentPeers(job) },
+        ]
+      : []),
     ...(typeof job.retryAttempts === 'number' && job.retryAttempts > 0
       ? [{ icon: <RotateCw size={16} />, label: 'Retries:', value: `${job.retryAttempts} automatic ${job.retryAttempts === 1 ? 'retry' : 'retries'}` }]
       : []),
@@ -889,7 +952,7 @@ function DownloadDetailsPane({
 
       <div className={`${compact ? 'flex h-full min-w-0 items-center gap-4 px-6 py-4 pt-5' : 'flex min-w-0 gap-5 px-6 py-5 pt-6'}`}>
         <div className={`${compact ? 'flex w-16 shrink-0 justify-center' : 'flex w-20 shrink-0 justify-center'}`}>
-          <FileBadge filename={job.filename} large />
+          <FileBadge filename={job.filename} transferKind={job.transferKind} large />
         </div>
 
         <div className="min-w-0 flex-1 pr-9">
@@ -954,14 +1017,50 @@ function InlineNameProgress({
         </div>
         <QueueStatusBadge presentation={statusPresentation} />
       </div>
-      <div
-        className={`relative z-10 mt-0.5 truncate text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}
-        title={job.url}
-      >
-        {getHost(job.url)}
+      <div className={`relative z-10 mt-0.5 min-w-0 text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}>
+        {job.transferKind === 'torrent' ? (
+          <TorrentDetailLine job={job} />
+        ) : (
+          <div className="truncate" title={job.url}>
+            {getHost(job.url)}
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function TorrentDetailLine({ job }: { job: DownloadJob }) {
+  const metrics = torrentDetailMetrics(job);
+  const title = torrentDetailTitle(metrics);
+
+  if (!metrics.length) {
+    return (
+      <div className="truncate" title={job.url}>
+        Torrent metadata pending
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-center gap-2 overflow-hidden" title={title}>
+      {metrics.map((metric) => (
+        <span
+          key={metric.kind}
+          className={`inline-flex shrink-0 items-center gap-1 text-[11px] font-medium leading-4 ${torrentMetricTextClass(metric.kind)}`}
+        >
+          <TorrentMetricIcon kind={metric.kind} />
+          <span>{torrentMetricValue(metric)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function TorrentMetricIcon({ kind }: { kind: TorrentDetailMetricKind }) {
+  const Icon = kind === 'peers' ? Download : Upload;
+
+  return <Icon aria-hidden="true" size={12} strokeWidth={2.4} className={torrentMetricIconClass(kind)} />;
 }
 
 function QueueStatusBadge({ presentation }: { presentation: ReturnType<typeof queueStatusPresentation> }) {
@@ -997,7 +1096,7 @@ function RowActions({
   onRemove: (id: string) => void;
   onReveal: (id: string) => void;
 }) {
-  const canPause = [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
+  const canPause = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   const canResume = job.state === JobState.Paused;
   const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state);
   const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state);
@@ -1046,6 +1145,7 @@ function RowActions({
 
 function FileBadge({
   filename,
+  transferKind = 'http',
   large = false,
   selected = false,
   selectionTitle,
@@ -1055,6 +1155,7 @@ function FileBadge({
   blurred = false,
 }: {
   filename: string;
+  transferKind?: DownloadJob['transferKind'];
   large?: boolean;
   selected?: boolean;
   selectionTitle?: string;
@@ -1065,8 +1166,8 @@ function FileBadge({
 }) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
   const iconSize = large ? 28 : 18;
-  const icon = getFileIcon(ext, iconSize);
-  const label = ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
+  const icon = transferKind === 'torrent' ? <Magnet size={iconSize} /> : getFileIcon(ext, iconSize);
+  const label = transferKind === 'torrent' ? 'P2P' : ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
   const selectable = !large && onSelectionChange;
 
   return (
@@ -1219,6 +1320,18 @@ function emptyStateTitle(view: string) {
       return 'No queued downloads';
     case 'completed':
       return 'No completed downloads';
+    case 'torrents':
+      return 'No torrents';
+    case 'torrent-active':
+      return 'No active torrents';
+    case 'torrent-seeding':
+      return 'No seeding torrents';
+    case 'torrent-attention':
+      return 'No torrents need attention';
+    case 'torrent-queued':
+      return 'No queued torrents';
+    case 'torrent-completed':
+      return 'No completed torrents';
     default:
       return 'No downloads';
   }
@@ -1230,6 +1343,8 @@ function statusText(job: DownloadJob) {
   }
 
   switch (job.state) {
+    case JobState.Seeding:
+      return 'Seeding';
     case JobState.Downloading:
       return 'Downloading';
     case JobState.Paused:
@@ -1247,6 +1362,54 @@ function statusText(job: DownloadJob) {
     default:
       return job.state;
   }
+}
+
+function formatQueueSpeed(job: DownloadJob, averageSpeed: number) {
+  if (job.state === JobState.Downloading) return `${formatBytes(averageSpeed)}/s`;
+  if (job.state === JobState.Seeding && job.torrent) return `Up ${formatBytes(job.torrent.uploadedBytes)}`;
+  return '--';
+}
+
+function formatTorrentSeedMetric(job: DownloadJob) {
+  if (!job.torrent) return '--';
+  if (job.state === JobState.Seeding && job.speed > 0) return `${formatBytes(job.speed)}/s`;
+  if (job.torrent.uploadedBytes > 0) return `Up ${formatBytes(job.torrent.uploadedBytes)}`;
+  return '--';
+}
+
+function formatQueueTime(job: DownloadJob, timeRemaining: number) {
+  if (job.state === JobState.Downloading) return formatTime(timeRemaining);
+  if (job.state === JobState.Seeding && job.torrent) return formatTorrentRatio(job);
+  return '--';
+}
+
+function formatTorrentRatio(job: DownloadJob) {
+  return typeof job.torrent?.ratio === 'number' ? `${job.torrent.ratio.toFixed(2)}x` : '--';
+}
+
+function formatTorrentPeers(job: DownloadJob) {
+  const parts = [];
+  if (typeof job.torrent?.peers === 'number') parts.push(`${job.torrent.peers} peers`);
+  if (typeof job.torrent?.seeds === 'number') parts.push(`${job.torrent.seeds} seeds`);
+  return parts.length ? parts.join(' / ') : '--';
+}
+
+function torrentDetailTitle(metrics: TorrentDetailMetric[]) {
+  return metrics.map((metric) => `${metric.label}: ${torrentMetricValue(metric)}`).join(' / ');
+}
+
+function torrentMetricValue(metric: TorrentDetailMetric) {
+  if (metric.kind === 'upload') return `Up ${formatBytes(metric.value)}`;
+  if (metric.kind === 'peers') return `${metric.value} peers`;
+  return `${metric.value} seeds`;
+}
+
+function torrentMetricTextClass(kind: TorrentDetailMetricKind) {
+  return kind === 'peers' ? 'text-sky-300' : 'text-fuchsia-300';
+}
+
+function torrentMetricIconClass(kind: TorrentDetailMetricKind) {
+  return kind === 'peers' ? 'text-sky-400' : 'text-fuchsia-400';
 }
 
 function getHost(rawUrl: string) {

@@ -5,7 +5,7 @@ use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{validate_settings, EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{
     DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, HostRegistrationStatus,
-    Settings,
+    Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
@@ -204,12 +204,14 @@ pub async fn add_job(
     state: State<'_, SharedState>,
     url: String,
     expected_sha256: Option<String>,
+    transfer_kind: Option<TransferKind>,
 ) -> Result<AddJobResult, String> {
     let result = state
         .enqueue_download_with_options(
             url,
             crate::state::EnqueueOptions {
                 expected_sha256,
+                transfer_kind,
                 ..Default::default()
             },
         )
@@ -437,6 +439,22 @@ pub async fn browse_directory() -> Result<Option<String>, String> {
         .map_err(|error| format!("Could not open folder picker: {error}"))?;
 
     Ok(selected.map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn browse_torrent_file() -> Result<Option<String>, String> {
+    let selected = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .add_filter("Torrent or magnet", &["torrent", "magnet", "txt"])
+            .pick_file()
+    })
+    .await
+    .map_err(|error| format!("Could not open torrent picker: {error}"))?;
+
+    selected
+        .as_deref()
+        .map(torrent_import_value_from_path)
+        .transpose()
 }
 
 #[tauri::command]
@@ -932,6 +950,41 @@ fn should_register_native_host(status: HostRegistrationStatus) -> bool {
     !matches!(status, HostRegistrationStatus::Configured)
 }
 
+fn torrent_import_value_from_path(path: &Path) -> Result<String, String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "torrent" => Ok(path.display().to_string()),
+        "magnet" | "txt" => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|error| format!("Could not read torrent import file: {error}"))?;
+            torrent_import_value_from_text(&content)
+        }
+        _ => Err("Choose a .torrent file or a text file containing a magnet link.".into()),
+    }
+}
+
+fn torrent_import_value_from_text(content: &str) -> Result<String, String> {
+    let value = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| "The selected import file is empty.".to_string())?;
+
+    if value.starts_with("magnet:?")
+        || (value.starts_with("https://") || value.starts_with("http://"))
+            && value.to_ascii_lowercase().contains(".torrent")
+    {
+        Ok(value.to_string())
+    } else {
+        Err("The selected import file must contain a magnet link or HTTP(S) .torrent URL.".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::should_register_native_host;
@@ -963,6 +1016,44 @@ mod tests {
 
         assert_eq!(registry.get("batch_123"), Some(context));
         assert_eq!(registry.get("missing"), None);
+    }
+
+    #[test]
+    fn torrent_import_value_accepts_torrent_files() {
+        let dir = test_runtime_dir("torrent-import");
+        let path = dir.join("sample.torrent");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"d4:infode").unwrap();
+
+        assert_eq!(
+            super::torrent_import_value_from_path(&path).unwrap(),
+            path.display().to_string()
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn torrent_import_value_reads_magnet_files() {
+        let dir = test_runtime_dir("magnet-import");
+        let path = dir.join("sample.magnet");
+        let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Sample";
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, format!("  {magnet}\n")).unwrap();
+
+        assert_eq!(super::torrent_import_value_from_path(&path).unwrap(), magnet);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_runtime_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[cfg(windows)]

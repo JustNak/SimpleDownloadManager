@@ -11,6 +11,7 @@ export enum JobState {
   Queued = 'queued',
   Starting = 'starting',
   Downloading = 'downloading',
+  Seeding = 'seeding',
   Paused = 'paused',
   Completed = 'completed',
   Failed = 'failed',
@@ -25,16 +26,18 @@ export type FailureCategory =
   | 'permission'
   | 'resume'
   | 'integrity'
+  | 'torrent'
   | 'internal';
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
-export type TransferKind = 'http';
+export type TransferKind = 'http' | 'torrent';
 export type IntegrityAlgorithm = 'sha256';
 export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type StartupLaunchMode = 'open' | 'tray';
 export type BulkArchiveStatus = 'pending' | 'compressing' | 'completed' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
+export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
 
 export interface DownloadSource {
   entryPoint: string;
@@ -57,6 +60,17 @@ export interface DownloadJob {
     expected: string;
     actual?: string;
     status: IntegrityStatus;
+  };
+  torrent?: {
+    infoHash?: string;
+    engineId?: number;
+    name?: string;
+    totalFiles?: number;
+    peers?: number;
+    seeds?: number;
+    uploadedBytes: number;
+    ratio: number;
+    seedingStartedAt?: number;
   };
   state: JobState;
   createdAt?: number;
@@ -103,12 +117,21 @@ export interface ExtensionIntegrationSettings {
   ignoredFileExtensions: string[];
 }
 
+export interface TorrentSettings {
+  enabled: boolean;
+  seedMode: TorrentSeedMode;
+  seedRatioLimit: number;
+  seedTimeLimitMinutes: number;
+  uploadLimitKibPerSecond: number;
+}
+
 export interface Settings {
   downloadDirectory: string;
   maxConcurrentDownloads: number;
   autoRetryAttempts: number;
   speedLimitKibPerSecond: number;
   downloadPerformanceMode: DownloadPerformanceMode;
+  torrent: TorrentSettings;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;

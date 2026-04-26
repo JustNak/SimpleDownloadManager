@@ -3,7 +3,7 @@ export const HOST_NAME = 'com.myapp.download_manager';
 export const PIPE_NAME = '\\\\.\\pipe\\myapp.downloads.v1';
 export const MAX_URL_LENGTH = 2048;
 export const MAX_METADATA_LENGTH = 512;
-export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:'] as const;
+export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
@@ -235,7 +235,7 @@ export function validateHttpUrl(input: string): ValidationResult<string> {
   }
 
   if (!ALLOWED_URL_PROTOCOLS.includes(parsed.protocol as (typeof ALLOWED_URL_PROTOCOLS)[number])) {
-    return { ok: false, code: 'UNSUPPORTED_SCHEME', message: 'Only http and https URLs are supported.' };
+    return { ok: false, code: 'UNSUPPORTED_SCHEME', message: 'Only http, https, and magnet URLs are supported.' };
   }
 
   return { ok: true, value: parsed.toString() };
@@ -376,7 +376,7 @@ export function toUserFacingMessage(code: ErrorCode, fallback: string): string {
       return 'The browser extension and desktop app are out of date with each other. Update both components.';
     case 'INVALID_URL':
     case 'UNSUPPORTED_SCHEME':
-      return 'Enter a valid http or https URL.';
+      return 'Enter a valid http, https, or magnet URL.';
     default:
       return fallback;
   }

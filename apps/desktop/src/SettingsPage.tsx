@@ -17,6 +17,7 @@ import {
   Download,
   ExternalLink,
   FolderOpen,
+  Gauge,
   Globe,
   MousePointerClick,
   Palette,
@@ -34,6 +35,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
+import { normalizeTorrentSettings } from './torrentSettings';
 
 const ACCENT_COLOR_PRESETS = [
   { name: 'Blue', value: '#3b82f6' },
@@ -132,6 +134,16 @@ export function SettingsPage({
         ...prev.extensionIntegration,
         ...update,
       },
+    }));
+  };
+
+  const updateTorrentSettings = (update: Partial<Settings['torrent']>) => {
+    setFormData((prev) => ({
+      ...prev,
+      torrent: normalizeTorrentSettings({
+        ...prev.torrent,
+        ...update,
+      }),
     }));
   };
 
@@ -268,6 +280,77 @@ export function SettingsPage({
               <option value="balanced">Balanced</option>
               <option value="fast">Fast</option>
             </select>
+          </FieldRow>
+        </SettingsPanel>
+
+        <SettingsPanel icon={<Gauge size={20} />} title="Torrenting">
+          <FieldRow label="Torrent Downloads" description="Manual magnet and .torrent jobs." tooltip="Allows torrent jobs added from the desktop app or browser extension.">
+            <ToggleSwitch
+              id="torrentEnabled"
+              checked={formData.torrent.enabled}
+              onChange={(checked) => updateTorrentSettings({ enabled: checked })}
+            />
+          </FieldRow>
+
+          <FieldRow label="Seeding Policy" description="Stop condition." tooltip="Controls when completed torrent downloads stop seeding.">
+            <select
+              id="torrentSeedMode"
+              value={formData.torrent.seedMode}
+              onChange={(event) => updateTorrentSettings({ seedMode: event.target.value as Settings['torrent']['seedMode'] })}
+              disabled={!formData.torrent.enabled}
+              className="h-9 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="forever">Seed forever</option>
+              <option value="ratio">Stop at ratio</option>
+              <option value="time">Stop after time</option>
+              <option value="ratio_or_time">Ratio or time</option>
+            </select>
+          </FieldRow>
+
+          <FieldRow label="Ratio Limit" description="Upload/download target." tooltip="Used by ratio-based seeding policies.">
+            <input
+              type="number"
+              id="torrentSeedRatioLimit"
+              value={formData.torrent.seedRatioLimit}
+              onChange={(event) => updateTorrentSettings({ seedRatioLimit: normalizeNumber(event.target.value, 0.1) })}
+              min="0.1"
+              max="100"
+              step="0.1"
+              disabled={!formData.torrent.enabled || !usesTorrentRatioLimit(formData.torrent.seedMode)}
+              className="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+          </FieldRow>
+
+          <FieldRow label="Time Limit" description="Minutes after completion." tooltip="Used by time-based seeding policies.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                id="torrentSeedTimeLimitMinutes"
+                value={formData.torrent.seedTimeLimitMinutes}
+                onChange={(event) => updateTorrentSettings({ seedTimeLimitMinutes: normalizeInteger(event.target.value, 1) })}
+                min="1"
+                max="525600"
+                disabled={!formData.torrent.enabled || !usesTorrentTimeLimit(formData.torrent.seedMode)}
+                className="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className="text-sm text-muted-foreground">min</span>
+            </div>
+          </FieldRow>
+
+          <FieldRow label="Upload Limit" description="0 keeps upload uncapped." tooltip="Applies to new torrent sessions and jobs.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                id="torrentUploadLimitKibPerSecond"
+                value={formData.torrent.uploadLimitKibPerSecond}
+                onChange={(event) => updateTorrentSettings({ uploadLimitKibPerSecond: normalizeInteger(event.target.value, 0) })}
+                min="0"
+                max="1048576"
+                disabled={!formData.torrent.enabled}
+                className="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className="text-sm text-muted-foreground">KB/s</span>
+            </div>
           </FieldRow>
         </SettingsPanel>
 
@@ -1023,4 +1106,22 @@ function formatDiagnosticEventTime(timestamp: number) {
 function normalizeListenPort(value: string): number {
   const port = Number.parseInt(value, 10);
   return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+}
+
+function normalizeInteger(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeNumber(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function usesTorrentRatioLimit(mode: Settings['torrent']['seedMode']) {
+  return mode === 'ratio' || mode === 'ratio_or_time';
+}
+
+function usesTorrentTimeLimit(mode: Settings['torrent']['seedMode']) {
+  return mode === 'time' || mode === 'ratio_or_time';
 }
