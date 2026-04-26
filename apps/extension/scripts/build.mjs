@@ -3,6 +3,7 @@ import { cp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { extensionVersionsFromPackage } from './version.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,8 +12,10 @@ const distRoot = path.join(appRoot, 'dist');
 const releaseConfig = JSON.parse(
   readFileSync(path.resolve(appRoot, '..', '..', 'config', 'release.json'), 'utf8'),
 );
-const browserExtensionVersion = '0.2.4';
-const displayVersion = '0.2.4-a';
+const {
+  browserExtensionVersion,
+  displayVersion,
+} = extensionVersionsFromPackage(JSON.parse(readFileSync(path.resolve(appRoot, 'package.json'), 'utf8')));
 
 const targets = [
   {

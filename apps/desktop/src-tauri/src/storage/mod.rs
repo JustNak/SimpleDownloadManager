@@ -507,9 +507,11 @@ mod tests {
 
     #[test]
     fn settings_serialize_startup_preferences_as_camel_case() {
-        let mut settings = Settings::default();
-        settings.start_on_startup = true;
-        settings.startup_launch_mode = StartupLaunchMode::Tray;
+        let settings = Settings {
+            start_on_startup: true,
+            startup_launch_mode: StartupLaunchMode::Tray,
+            ..Settings::default()
+        };
 
         let value = serde_json::to_value(settings).expect("settings should serialize");
 

@@ -748,35 +748,35 @@ impl SharedState {
     }
 
     pub async fn remove_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let paths_to_cleanup = {
-            let state = self.inner.read().await;
-            state
+        let (snapshot, persisted, paths_to_cleanup) = {
+            let mut state = self.inner.write().await;
+            let job_index = state
                 .jobs
                 .iter()
-                .find(|job| job.id == id)
-                .map(|job| (PathBuf::from(&job.temp_path), job.state))
-        };
-
-        let (snapshot, persisted) = {
-            let mut state = self.inner.write().await;
-            let initial_len = state.jobs.len();
-            state.jobs.retain(|job| job.id != id);
-            state.active_workers.remove(id);
-
-            if state.jobs.len() == initial_len {
-                return Err(BackendError {
+                .position(|job| job.id == id)
+                .ok_or_else(|| BackendError {
                     code: "INTERNAL_ERROR",
                     message: "Job not found.".into(),
+                })?;
+            let is_active_worker = state.active_workers.contains(id);
+            let job = &state.jobs[job_index];
+
+            if is_active_worker || matches!(job.state, JobState::Starting | JobState::Downloading) {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Pause or cancel the active transfer before removing it.".into(),
                 });
             }
 
-            (state.snapshot(), state.persisted())
+            let paths_to_cleanup = (PathBuf::from(&job.temp_path), job.state);
+            state.jobs.remove(job_index);
+
+            (state.snapshot(), state.persisted(), paths_to_cleanup)
         };
 
-        if let Some((temp_path, job_state)) = paths_to_cleanup {
-            if job_state != JobState::Completed {
-                let _ = std::fs::remove_file(temp_path);
-            }
+        let (temp_path, job_state) = paths_to_cleanup;
+        if job_state != JobState::Completed {
+            let _ = std::fs::remove_file(temp_path);
         }
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
@@ -2699,6 +2699,44 @@ mod tests {
         assert!(archive_members
             .iter()
             .all(|archive| archive.error.is_none()));
+    }
+
+    #[tokio::test]
+    async fn remove_active_job_rejects_without_freeing_worker_slot() {
+        let download_dir = test_runtime_dir("remove-active-job");
+        let mut active_job =
+            download_job("job_1", JobState::Downloading, ResumeSupport::Supported, 10);
+        active_job.target_path = download_dir.join("active.zip").display().to_string();
+        active_job.temp_path = download_dir.join("active.zip.part").display().to_string();
+        let mut queued_job = download_job("job_2", JobState::Queued, ResumeSupport::Unknown, 0);
+        queued_job.target_path = download_dir.join("queued.zip").display().to_string();
+        queued_job.temp_path = download_dir.join("queued.zip.part").display().to_string();
+        let state = shared_state_with_jobs(
+            download_dir.join("state.json"),
+            vec![active_job, queued_job],
+        );
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.settings.max_concurrent_downloads = 1;
+            runtime.active_workers.insert("job_1".into());
+        }
+
+        let error = state.remove_job("job_1").await.unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error.message.contains("Pause or cancel"));
+        let runtime = state.inner.read().await;
+        assert!(runtime.active_workers.contains("job_1"));
+        assert_eq!(runtime.jobs.len(), 2);
+        drop(runtime);
+
+        let (_, tasks) = state
+            .claim_schedulable_jobs()
+            .await
+            .expect("claiming jobs should still work");
+        assert!(tasks.is_empty());
+
+        let _ = std::fs::remove_dir_all(download_dir);
     }
 
     fn download_job(

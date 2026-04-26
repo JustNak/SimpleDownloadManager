@@ -141,6 +141,31 @@ struct SegmentedProgressRuntime {
     last_persisted_at: Instant,
 }
 
+#[derive(Clone)]
+struct SegmentWorkerContext {
+    app: AppHandle,
+    state: SharedState,
+    client: Client,
+    job_id: String,
+    url: String,
+    temp_path: PathBuf,
+    total_bytes: u64,
+    profile: DownloadPerformanceProfile,
+    progress: Arc<Mutex<SegmentedProgressRuntime>>,
+    metadata: Arc<Mutex<SegmentedDownloadState>>,
+}
+
+struct SegmentProgressUpdate<'a> {
+    app: &'a AppHandle,
+    state: &'a SharedState,
+    job_id: &'a str,
+    progress: &'a Arc<Mutex<SegmentedProgressRuntime>>,
+    segment_index: usize,
+    segment_bytes: u64,
+    chunk_len: u64,
+    total_bytes: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DownloadPerformanceProfile {
     max_segments: usize,
@@ -737,6 +762,18 @@ async fn run_segmented_download_attempt(
         last_persisted_at: Instant::now(),
     }));
     let metadata = Arc::new(Mutex::new(segment_state));
+    let worker_context = SegmentWorkerContext {
+        app: app.clone(),
+        state: state.clone(),
+        client: client.clone(),
+        job_id: task.id.clone(),
+        url: task.url.clone(),
+        temp_path: task.temp_path.clone(),
+        total_bytes: plan.total_bytes,
+        profile,
+        progress: progress.clone(),
+        metadata: metadata.clone(),
+    };
 
     let mut handles = Vec::new();
     for segment in plan.segments.iter().copied().enumerate() {
@@ -746,21 +783,12 @@ async fn run_segmented_download_attempt(
         }
 
         handles.push(tauri::async_runtime::spawn(download_segment_worker(
-            app.clone(),
-            state.clone(),
-            client.clone(),
-            task.id.clone(),
-            task.url.clone(),
-            task.temp_path.clone(),
-            plan.total_bytes,
+            worker_context.clone(),
             SegmentProgress {
                 index,
                 range,
                 completed: false,
             },
-            profile,
-            progress.clone(),
-            metadata.clone(),
         )));
     }
 
@@ -811,27 +839,18 @@ async fn run_segmented_download_attempt(
 }
 
 async fn download_segment_worker(
-    app: AppHandle,
-    state: SharedState,
-    client: Client,
-    job_id: String,
-    url: String,
-    temp_path: PathBuf,
-    total_bytes: u64,
+    context: SegmentWorkerContext,
     segment: SegmentProgress,
-    profile: DownloadPerformanceProfile,
-    progress: Arc<Mutex<SegmentedProgressRuntime>>,
-    metadata: Arc<Mutex<SegmentedDownloadState>>,
 ) -> Result<DownloadOutcome, DownloadError> {
-    let segment_path = segment_path(&temp_path, segment.index);
+    let segment_path = segment_path(&context.temp_path, segment.index);
     let mut current_len = metadata_len(&segment_path)
         .await
         .unwrap_or(0)
         .min(segment.range.len());
-    let mut low_speed_monitor = LowSpeedMonitor::new(profile);
+    let mut low_speed_monitor = LowSpeedMonitor::new(context.profile);
 
     while current_len < segment.range.len() {
-        match state.worker_control(&job_id).await {
+        match context.state.worker_control(&context.job_id).await {
             WorkerControl::Paused => return Ok(DownloadOutcome::Paused),
             WorkerControl::Canceled | WorkerControl::Missing => {
                 return Ok(DownloadOutcome::Canceled)
@@ -843,8 +862,9 @@ async fn download_segment_worker(
             start: segment.range.start + current_len,
             end: segment.range.end,
         };
-        let response = client
-            .get(&url)
+        let response = context
+            .client
+            .get(&context.url)
             .header(
                 RANGE,
                 format!("bytes={}-{}", requested.start, requested.end),
@@ -865,7 +885,7 @@ async fn download_segment_worker(
             .headers()
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
-            .map(|value| content_range_matches(value, requested, total_bytes))
+            .map(|value| content_range_matches(value, requested, context.total_bytes))
             .unwrap_or(false);
 
         if !range_ok {
@@ -888,7 +908,7 @@ async fn download_segment_worker(
         let mut low_speed_started = Instant::now();
 
         while let Some(chunk_result) = stream.next().await {
-            match state.worker_control(&job_id).await {
+            match context.state.worker_control(&context.job_id).await {
                 WorkerControl::Paused => {
                     writer.flush().await.ok();
                     return Ok(DownloadOutcome::Paused);
@@ -911,19 +931,19 @@ async fn download_segment_worker(
                 .saturating_add(chunk_len)
                 .min(segment.range.len());
             low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
-            record_segment_progress(
-                &app,
-                &state,
-                &job_id,
-                &progress,
-                segment.index,
-                current_len,
+            record_segment_progress(SegmentProgressUpdate {
+                app: &context.app,
+                state: &context.state,
+                job_id: &context.job_id,
+                progress: &context.progress,
+                segment_index: segment.index,
+                segment_bytes: current_len,
                 chunk_len,
-                total_bytes,
-            )
+                total_bytes: context.total_bytes,
+            })
             .await?;
 
-            if low_speed_started.elapsed() >= profile.low_speed_window {
+            if low_speed_started.elapsed() >= context.profile.low_speed_window {
                 if low_speed_monitor.observe(low_speed_bytes, low_speed_started.elapsed(), false)
                     == LowSpeedDecision::Retry
                 {
@@ -945,11 +965,11 @@ async fn download_segment_worker(
             .map_err(|error| disk_error(format!("Could not flush segment file: {error}")))?;
 
         if current_len >= segment.range.len() {
-            mark_segment_completed(&temp_path, &metadata, segment.index).await?;
+            mark_segment_completed(&context.temp_path, &context.metadata, segment.index).await?;
             return Ok(DownloadOutcome::Completed);
         }
 
-        if low_speed_monitor.retries >= profile.max_low_speed_retries {
+        if low_speed_monitor.retries >= context.profile.max_low_speed_retries {
             return Err(download_error(
                 FailureCategory::Network,
                 "A segment stayed below the recovery speed threshold.".into(),
@@ -958,24 +978,15 @@ async fn download_segment_worker(
         }
     }
 
-    mark_segment_completed(&temp_path, &metadata, segment.index).await?;
+    mark_segment_completed(&context.temp_path, &context.metadata, segment.index).await?;
     Ok(DownloadOutcome::Completed)
 }
 
-async fn record_segment_progress(
-    app: &AppHandle,
-    state: &SharedState,
-    job_id: &str,
-    progress: &Arc<Mutex<SegmentedProgressRuntime>>,
-    segment_index: usize,
-    segment_bytes: u64,
-    chunk_len: u64,
-    total_bytes: u64,
-) -> Result<(), DownloadError> {
-    let update = {
-        let mut progress = progress.lock().await;
-        progress.segment_bytes[segment_index] = segment_bytes;
-        progress.sample_bytes = progress.sample_bytes.saturating_add(chunk_len);
+async fn record_segment_progress(update: SegmentProgressUpdate<'_>) -> Result<(), DownloadError> {
+    let persisted_update = {
+        let mut progress = update.progress.lock().await;
+        progress.segment_bytes[update.segment_index] = update.segment_bytes;
+        progress.sample_bytes = progress.sample_bytes.saturating_add(update.chunk_len);
         if progress.sample_started.elapsed() < PROGRESS_UPDATE_INTERVAL {
             None
         } else {
@@ -993,17 +1004,18 @@ async fn record_segment_progress(
         }
     };
 
-    if let Some((downloaded_bytes, speed, should_persist)) = update {
-        let snapshot = state
+    if let Some((downloaded_bytes, speed, should_persist)) = persisted_update {
+        let snapshot = update
+            .state
             .update_job_progress(
-                job_id,
+                update.job_id,
                 downloaded_bytes,
-                Some(total_bytes),
+                Some(update.total_bytes),
                 speed,
                 should_persist,
             )
             .await?;
-        emit_snapshot(app, &snapshot);
+        emit_snapshot(update.app, &snapshot);
     }
 
     Ok(())

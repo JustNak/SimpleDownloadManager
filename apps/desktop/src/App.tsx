@@ -24,6 +24,7 @@ import { loadInitialAppData } from './appBootstrap';
 import {
   browseDirectory,
   cancelJob,
+  clearCompletedJobs,
   deleteJob,
   deleteJobs,
   exportDiagnosticsReport,
@@ -41,6 +42,7 @@ import {
   resumeAllJobs,
   resumeJob,
   restartJob,
+  retryFailedJobs,
   retryJob,
   runHostRegistrationFix,
   saveSettings,
@@ -60,13 +62,20 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCw,
   Search,
   Settings as SettingsIcon,
+  Trash2,
   Wifi,
   WifiOff,
 } from 'lucide-react';
 import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
+import { canClearCompletedDownloads, canRetryFailedDownloads } from './queueCommands';
+import {
+  shouldNotifyDiagnosticsRefreshFailure,
+  type DiagnosticsRefreshOptions,
+} from './diagnosticsRefresh';
 
 type CategoryViewState = `category:${DownloadCategory}`;
 type ViewState = 'all' | 'attention' | 'active' | 'queued' | 'completed' | 'settings' | CategoryViewState;
@@ -141,7 +150,7 @@ export default function App() {
 
         dispose = await subscribeToStateChanged((nextSnapshot) => {
           applyDesktopSnapshot(nextSnapshot);
-          void refreshDiagnostics();
+          void refreshDiagnostics({ silent: true });
         });
       } catch (error) {
         if (isMounted) {
@@ -252,11 +261,13 @@ export default function App() {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }
 
-  async function refreshDiagnostics() {
+  async function refreshDiagnostics(options: DiagnosticsRefreshOptions = {}) {
     try {
       setDiagnostics(await getDiagnostics());
     } catch (error) {
-      addToast({ type: 'error', title: 'Diagnostics Failed', message: getErrorMessage(error) });
+      if (shouldNotifyDiagnosticsRefreshFailure(options)) {
+        addToast({ type: 'error', title: 'Diagnostics Failed', message: getErrorMessage(error) });
+      }
     }
   }
 
@@ -340,6 +351,24 @@ export default function App() {
       });
     } catch (error) {
       addToast({ type: 'error', title: 'Delete Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleRetryFailedJobs() {
+    try {
+      await retryFailedJobs();
+      addToast({ type: 'info', title: 'Retrying Failed Downloads', message: 'Failed downloads were added back to the queue.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Retry Failed Downloads Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleClearCompletedJobs() {
+    try {
+      await clearCompletedJobs();
+      addToast({ type: 'success', title: 'Finished Downloads Cleared', message: 'Completed and canceled downloads were removed from the list.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Clear Finished Downloads Failed', message: getErrorMessage(error) });
     }
   }
 
@@ -599,6 +628,8 @@ export default function App() {
 
   const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state));
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
+  const canRetryFailed = canRetryFailedDownloads(jobs);
+  const canClearCompleted = canClearCompletedDownloads(jobs);
   const totalDownloadSpeed = jobs
     .filter((job) => job.state === JobState.Downloading)
     .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0);
@@ -615,8 +646,12 @@ export default function App() {
             onAdd={() => setIsAddModalOpen(true)}
             onResumeAll={() => void handleResumeAll()}
             onPauseAll={() => void handlePauseAll()}
+            onRetryFailed={() => void handleRetryFailedJobs()}
+            onClearCompleted={() => void handleClearCompletedJobs()}
             canResumeAll={canResumeAny}
             canPauseAll={canPauseAny}
+            canRetryFailed={canRetryFailed}
+            canClearCompleted={canClearCompleted}
             onCycleFilter={() => requestViewChange(nextFilterView(view))}
           />
         ) : null}
@@ -779,8 +814,12 @@ function CommandBar({
   onAdd,
   onResumeAll,
   onPauseAll,
+  onRetryFailed,
+  onClearCompleted,
   canResumeAll,
   canPauseAll,
+  canRetryFailed,
+  canClearCompleted,
   onCycleFilter,
 }: {
   searchQuery: string;
@@ -790,8 +829,12 @@ function CommandBar({
   onAdd: () => void;
   onResumeAll: () => void;
   onPauseAll: () => void;
+  onRetryFailed: () => void;
+  onClearCompleted: () => void;
   canResumeAll: boolean;
   canPauseAll: boolean;
+  canRetryFailed: boolean;
+  canClearCompleted: boolean;
   onCycleFilter: () => void;
 }) {
   return (
@@ -801,6 +844,8 @@ function CommandBar({
         <div className="mx-1.5 h-5 w-px bg-border" />
         <ToolbarButton icon={<Play size={16} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
         <ToolbarButton icon={<Pause size={16} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
+        <ToolbarButton icon={<RotateCw size={16} />} label="Retry Failed" onClick={onRetryFailed} disabled={!canRetryFailed} />
+        <ToolbarButton icon={<Trash2 size={16} />} label="Clear Finished" onClick={onClearCompleted} disabled={!canClearCompleted} />
       </div>
 
       <div className="flex min-w-[320px] max-w-[620px] flex-1 items-center justify-end gap-2">

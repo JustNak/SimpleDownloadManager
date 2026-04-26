@@ -52,8 +52,8 @@ assert.deepEqual(
       timeRemaining: 20,
     },
     job_2: {
-      averageSpeed: 1_000,
-      timeRemaining: 21,
+      averageSpeed: 2_000,
+      timeRemaining: 11,
     },
   },
   'queue progress metrics should be available by job id for table rows',
@@ -66,6 +66,15 @@ assert.deepEqual(
     timeRemaining: 11,
   },
   'progress metrics should fall back to backend speed when no average sample is available',
+);
+
+assert.deepEqual(
+  calculateDownloadProgressMetrics({ ...baseJob, downloadedBytes: 10_000, speed: 80_000 }, [], 6_000),
+  {
+    averageSpeed: 80_000,
+    timeRemaining: 1,
+  },
+  'backend speed should be preferred over lifetime average when no observed sample is available',
 );
 
 assert.deepEqual(

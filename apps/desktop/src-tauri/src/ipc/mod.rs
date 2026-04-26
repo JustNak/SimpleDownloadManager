@@ -299,6 +299,10 @@ async fn handle_request(
         );
     }
 
+    if should_register_host_contact_before_response(&request.message_type) {
+        register_host_contact(&app, &state).await;
+    }
+
     match request.message_type.as_str() {
         "ping" | "get_status" => {
             let connection_state = register_host_contact(&app, &state).await;
@@ -698,8 +702,22 @@ fn map_backend_error(request_id: String, error: BackendError) -> HostResponse {
     HostResponse::error(request_id, message_type, error.code, error.message)
 }
 
+fn should_register_host_contact_before_response(message_type: &str) -> bool {
+    matches!(message_type, "prompt_download")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prompt_download_requests_register_host_contact_before_user_decision() {
+        assert!(super::should_register_host_contact_before_response(
+            "prompt_download"
+        ));
+        assert!(!super::should_register_host_contact_before_response(
+            "enqueue_download"
+        ));
+    }
+
     #[cfg(windows)]
     #[test]
     fn invalid_native_host_manifest_is_reported_as_broken_entry() {

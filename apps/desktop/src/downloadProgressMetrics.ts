@@ -43,8 +43,8 @@ export function calculateDownloadProgressMetrics(
   timestamp = Date.now(),
 ): DownloadProgressMetrics {
   const averageSpeed = observedAverageSpeed(job, samples) ||
-    lifetimeAverageSpeed(job, timestamp) ||
-    Math.max(0, job.speed || 0);
+    Math.max(0, job.speed || 0) ||
+    lifetimeAverageSpeed(job, timestamp);
   const remainingBytes = Math.max(0, (job.totalBytes || 0) - (job.downloadedBytes || 0));
   const timeRemaining = averageSpeed > 0 && remainingBytes > 0
     ? Math.ceil(remainingBytes / averageSpeed)

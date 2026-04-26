@@ -10,6 +10,11 @@
   "scripts": {
     "build:extension": "npm run build --workspace @myapp/extension",
     "build:desktop": "npm run build --workspace @myapp/desktop",
+    "test": "npm run test:ts && npm run test:rust",
+    "test:ts": "node ./scripts/run-ts-tests.mjs",
+    "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && cargo test --manifest-path apps/native-host/Cargo.toml",
+    "clippy": "cargo clippy --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/native-host/Cargo.toml -- -D warnings",
+    "check": "npm run typecheck && npm test && npm run build:extension && npm run build:desktop && npm run clippy",
     "prepare:release": "node ./scripts/prepare-release.mjs",
     "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
     "typecheck": "npm run typecheck --workspace @myapp/protocol && npm run typecheck --workspace @myapp/extension && npm run typecheck --workspace @myapp/desktop"

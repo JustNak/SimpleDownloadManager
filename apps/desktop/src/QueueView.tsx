@@ -7,6 +7,7 @@ import {
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
+import { canRemoveDownloadImmediately } from './queueCommands';
 import { JobState } from './types';
 import type { DownloadJob } from './types';
 import {
@@ -104,6 +105,7 @@ export function QueueView({
       ? jobs.filter((job) => selectedJobIds.has(job.id))
       : [contextMenuJob]
     : [];
+  const contextMenuRemovableJobs = contextMenuSelectionJobs.filter(canRemoveDownloadImmediately);
   const visibleJobIds = jobs.map((job) => job.id);
   const allVisibleSelected = jobs.length > 0 && jobs.every((job) => selectedJobIds.has(job.id));
   const hasVisibleSelection = jobs.some((job) => selectedJobIds.has(job.id));
@@ -179,8 +181,9 @@ export function QueueView({
   }
 
   function openDeletePromptForJobs(promptJobs: DownloadJob[]) {
-    if (promptJobs.length === 0) return;
-    setDeletePromptJobs(promptJobs);
+    const removableJobs = promptJobs.filter(canRemoveDownloadImmediately);
+    if (removableJobs.length === 0) return;
+    setDeletePromptJobs(removableJobs);
     setDeleteFromDisk(false);
   }
 
@@ -484,7 +487,7 @@ export function QueueView({
       {contextMenu && contextMenuJob ? (
         <FileContextMenu
           job={contextMenuJob}
-          deleteCount={contextMenuSelectionJobs.length}
+          deleteCount={contextMenuRemovableJobs.length}
           x={contextMenu.x}
           y={contextMenu.y}
           onOpen={(id) => {
@@ -599,6 +602,8 @@ function FileContextMenu({
   onRename: (job: DownloadJob) => void;
   onDelete: () => void;
 }) {
+  const canDelete = canRemoveDownloadImmediately(job);
+
   return (
     <div
       className="fixed z-[70] w-48 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl"
@@ -609,8 +614,12 @@ function FileContextMenu({
     >
       <MenuItem icon={<FileText size={16} />} label="Open File" onClick={() => onOpen(job.id)} />
       <MenuItem icon={<FolderOpen size={16} />} label="Open Folder" onClick={() => onReveal(job.id)} />
-      <MenuItem icon={<Pencil size={16} />} label="Rename" onClick={() => onRename(job)} />
-      <MenuItem icon={<Trash2 size={16} />} label={getDeleteContextMenuLabel(deleteCount)} onClick={onDelete} destructive />
+      {canDelete ? (
+        <>
+          <MenuItem icon={<Pencil size={16} />} label="Rename" onClick={() => onRename(job)} />
+          <MenuItem icon={<Trash2 size={16} />} label={getDeleteContextMenuLabel(deleteCount)} onClick={onDelete} destructive />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -947,6 +956,7 @@ function RowActions({
   const canResume = job.state === JobState.Paused;
   const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state);
   const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state);
+  const canRemove = canRemoveDownloadImmediately(job);
 
   const runMenuAction = (action: (id: string) => void) => {
     onCloseMenu();
@@ -980,7 +990,9 @@ function RowActions({
           {canCancel ? (
             <MenuItem icon={<X size={16} />} label="Cancel" onClick={() => runMenuAction(onCancel)} />
           ) : null}
-          <MenuItem icon={<Trash2 size={16} />} label="Remove" onClick={() => runMenuAction(onRemove)} destructive />
+          {canRemove ? (
+            <MenuItem icon={<Trash2 size={16} />} label="Remove" onClick={() => runMenuAction(onRemove)} destructive />
+          ) : null}
         </div>
       ) : null}
     </>
