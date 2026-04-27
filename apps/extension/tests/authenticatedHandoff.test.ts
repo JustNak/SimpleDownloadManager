@@ -14,7 +14,7 @@ import {
 const source: RequestSource = {
   entryPoint: 'browser_download',
   browser: 'chrome',
-  extensionVersion: '0.3.42',
+  extensionVersion: '0.3.43',
 };
 
 const settings: ExtensionIntegrationSettings = {

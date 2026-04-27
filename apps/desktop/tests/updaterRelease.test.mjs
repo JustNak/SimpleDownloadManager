@@ -10,6 +10,7 @@ try {
 
 const {
   createLatestAlphaJson,
+  githubReleaseAssetName,
   requireSigningEnvironment,
   updaterAssetUrl,
   updaterReleaseTag,
@@ -19,15 +20,27 @@ assert.equal(updaterReleaseTag, 'updater-alpha');
 
 const installerName = 'Simple Download Manager_0.3.5-alpha_x64-setup.exe';
 assert.equal(
-  updaterAssetUrl('JustNak/SimpleDownloadManager', updaterReleaseTag, installerName),
-  'https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-alpha/Simple%20Download%20Manager_0.3.5-alpha_x64-setup.exe',
+  githubReleaseAssetName(installerName),
+  'Simple.Download.Manager_0.3.5-alpha_x64-setup.exe',
+);
+assert.equal(
+  updaterAssetUrl(
+    'JustNak/SimpleDownloadManager',
+    updaterReleaseTag,
+    githubReleaseAssetName(installerName),
+  ),
+  'https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-alpha/Simple.Download.Manager_0.3.5-alpha_x64-setup.exe',
 );
 
 const latest = createLatestAlphaJson({
   version: '0.3.5-alpha',
   notes: 'Alpha update',
   pubDate: '2026-04-27T00:00:00.000Z',
-  url: updaterAssetUrl('JustNak/SimpleDownloadManager', updaterReleaseTag, installerName),
+  url: updaterAssetUrl(
+    'JustNak/SimpleDownloadManager',
+    updaterReleaseTag,
+    githubReleaseAssetName(installerName),
+  ),
   signature: 'signed-content',
 });
 
@@ -36,7 +49,7 @@ assert.equal(latest.notes, 'Alpha update');
 assert.equal(latest.pub_date, '2026-04-27T00:00:00.000Z');
 assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64']);
 assert.equal(latest.platforms['windows-x86_64'].signature, 'signed-content');
-assert.match(latest.platforms['windows-x86_64'].url, /Simple%20Download%20Manager_0\.3\.5-alpha_x64-setup\.exe$/);
+assert.match(latest.platforms['windows-x86_64'].url, /Simple\.Download\.Manager_0\.3\.5-alpha_x64-setup\.exe$/);
 
 assert.throws(
   () => requireSigningEnvironment({}),

@@ -20,6 +20,10 @@ export function updaterAssetUrl(repository, releaseTag, assetName) {
   return `https://github.com/${repository}/releases/download/${releaseTag}/${encodeURIComponent(assetName)}`;
 }
 
+export function githubReleaseAssetName(assetName) {
+  return assetName.replace(/\s+/g, '.');
+}
+
 export function createLatestAlphaJson({
   version,
   notes,
@@ -68,7 +72,7 @@ export async function writeLatestAlphaJson({
     version,
     notes,
     pubDate,
-    url: updaterAssetUrl(repository, releaseTag, paths.installerName),
+    url: updaterAssetUrl(repository, releaseTag, githubReleaseAssetName(paths.installerName)),
     signature,
   });
   await writeFile(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');

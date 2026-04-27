@@ -1,3 +1,4 @@
+use crate::lifecycle::show_main_window;
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
@@ -52,6 +53,12 @@ pub enum UpdateInstallProgressEvent {
     Started { content_length: Option<u64> },
     Progress { chunk_length: usize },
     Finished,
+}
+
+pub fn should_restore_main_window_after_install_event(
+    event: &UpdateInstallProgressEvent,
+) -> bool {
+    matches!(event, UpdateInstallProgressEvent::Finished)
 }
 
 #[derive(Default)]
@@ -112,32 +119,47 @@ pub async fn install_update(
 
     let progress_app = app.clone();
     let finished_app = app.clone();
+    let completion_app = app.clone();
     let mut emitted_started = false;
 
     update
         .download_and_install(
             move |chunk_length, content_length| {
                 if !emitted_started {
-                    let _ = progress_app.emit(
-                        UPDATE_INSTALL_PROGRESS_EVENT,
+                    emit_update_install_progress(
+                        &progress_app,
                         UpdateInstallProgressEvent::Started { content_length },
                     );
                     emitted_started = true;
                 }
-                let _ = progress_app.emit(
-                    UPDATE_INSTALL_PROGRESS_EVENT,
+                emit_update_install_progress(
+                    &progress_app,
                     UpdateInstallProgressEvent::Progress { chunk_length },
                 );
             },
             move || {
-                let _ = finished_app.emit(
-                    UPDATE_INSTALL_PROGRESS_EVENT,
-                    UpdateInstallProgressEvent::Finished,
-                );
+                emit_update_install_progress(&finished_app, UpdateInstallProgressEvent::Finished);
             },
         )
         .await
-        .map_err(UpdateCommandError::updater)
+        .map_err(UpdateCommandError::updater)?;
+
+    restore_main_window_after_update_install(&completion_app);
+    Ok(())
+}
+
+fn emit_update_install_progress(app: &AppHandle, event: UpdateInstallProgressEvent) {
+    let should_restore = should_restore_main_window_after_install_event(&event);
+    let _ = app.emit(UPDATE_INSTALL_PROGRESS_EVENT, event);
+    if should_restore {
+        restore_main_window_after_update_install(app);
+    }
+}
+
+fn restore_main_window_after_update_install(app: &AppHandle) {
+    if let Err(error) = show_main_window(app) {
+        eprintln!("failed to show main window after update install: {error}");
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +187,20 @@ mod tests {
 
         assert_eq!(serialized["code"], "UPDATER_ERROR");
         assert_eq!(serialized["message"], "network unavailable");
+    }
+
+    #[test]
+    fn update_install_finished_requests_main_window_restore() {
+        assert!(!should_restore_main_window_after_install_event(
+            &UpdateInstallProgressEvent::Started {
+                content_length: Some(100),
+            }
+        ));
+        assert!(!should_restore_main_window_after_install_event(
+            &UpdateInstallProgressEvent::Progress { chunk_length: 50 }
+        ));
+        assert!(should_restore_main_window_after_install_event(
+            &UpdateInstallProgressEvent::Finished
+        ));
     }
 }

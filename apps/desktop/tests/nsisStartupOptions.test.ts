@@ -30,8 +30,13 @@ assert.match(
 );
 assert.match(
   hooks,
-  /StrCmp\s+\$UpdateMode\s+1\s+done_startup_options/,
-  'updates should preserve existing startup settings without prompting',
+  /StrCmp\s+\$UpdateMode\s+1\s+relaunch_after_update/,
+  'updates should preserve existing startup settings and relaunch the app without prompting',
+);
+assert.match(
+  hooks,
+  /relaunch_after_update:\s+Exec\s+'"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"'/,
+  'updates should relaunch the installed app so the main window returns after completion',
 );
 assert.match(
   hooks,
