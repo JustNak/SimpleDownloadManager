@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "simple-download-manager-native-host"
-version = "0.3.4-alpha"
+version = "0.3.41-alpha"
 dependencies = [
  "serde",
  "serde_json",

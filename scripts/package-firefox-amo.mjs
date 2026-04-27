@@ -45,6 +45,7 @@ This directory contains the Firefox artifacts for unlisted Mozilla signing.
 - Upload ZIP: ${paths.uploadZipPath}
 - Source ZIP for review: ${paths.sourceZipPath}
 - Reviewer notes: ${paths.reviewerNotesPath}
+- Firefox guideline file: apps/extension/FIREFOX_GUIDELINES.md
 
 The upload ZIP contains extension files at the archive root. Do not use the temporary-test package for AMO upload.
 The Firefox manifest sets strict_min_version to Firefox 142.0 so required data transmission is disclosed through Firefox's built-in install consent flow without Firefox Android compatibility warnings.
@@ -64,7 +65,7 @@ web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=unlisted --ap
 ## AMO UI Flow
 
 Open AMO Developer Hub, submit a new add-on, choose "On your own", upload simple-download-manager-firefox-upload.zip, upload simple-download-manager-firefox-source.zip if source is requested, then download the signed XPI.
-Paste AMO_REVIEWER_NOTES.md into the reviewer notes field so reviewers can verify the native messaging, download interception, and data transmission behavior quickly.
+Paste AMO_REVIEWER_NOTES.md into the reviewer notes field so reviewers can verify the native messaging, download interception, and data transmission behavior quickly. Keep apps/extension/FIREFOX_GUIDELINES.md in the source package for reviewer context.
 `;
 }
 
@@ -72,6 +73,8 @@ export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
 Simple Download Manager is a companion extension for a local native desktop app. No remote code is used. The extension does not use remote configuration, analytics, advertising, or tracking.
+
+The source package includes apps/extension/FIREFOX_GUIDELINES.md with the Firefox-specific AMO review, manifest, permission, and packaging notes.
 
 ## Core Functionality
 
@@ -108,6 +111,7 @@ export function createFirefoxAmoSourceReadme() {
   return `# Simple Download Manager Firefox Source Package
 
 This source package contains the files required to reproduce the uploaded extension ZIP.
+Firefox-specific review and packaging guidance is in apps/extension/FIREFOX_GUIDELINES.md.
 
 ## Rebuild
 

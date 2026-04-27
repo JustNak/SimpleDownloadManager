@@ -371,7 +371,7 @@ export function QueueView({
     <section ref={queueRootRef} className="flex min-h-0 flex-1 flex-col bg-surface">
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="download-table min-w-[980px] overflow-visible border-b border-t border-border bg-card">
-          <div className="grid grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] border-b border-border bg-header px-4 py-1.5 text-xs font-medium text-muted-foreground">
+          <div className="grid grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-3">
               <SelectionCheckbox
                 checked={allVisibleSelected}
@@ -439,7 +439,7 @@ export function QueueView({
                   onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[50px] w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-4 py-1.5 text-left text-sm transition ${
+                  className={`grid min-h-[42px] w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-3 py-1 text-left text-sm transition ${
                     rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
                 >
@@ -1172,7 +1172,7 @@ function FileBadge({
   const selectable = !large && onSelectionChange;
 
   return (
-    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-8 w-8'}`}>
+    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-7 w-7'}`}>
       <div className={`absolute right-0 top-0 h-2 w-2 border-b border-l border-border bg-surface ${selectable ? 'opacity-0' : ''}`} />
       {selectable ? (
         <SelectionCheckbox

@@ -1,6 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use simple_download_manager_desktop_backend::{commands, download, ipc, lifecycle, prompts, state};
+use simple_download_manager_desktop_backend::{
+    commands, download, ipc, lifecycle, prompts, state, updates,
+};
 use tauri::Manager;
 
 fn main() {
@@ -22,6 +24,7 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(lifecycle::handle_window_event)
         .setup(move |app| {
@@ -39,6 +42,7 @@ fn main() {
             app.manage(shared_state);
             app.manage(prompt_registry);
             app.manage(progress_batch_registry);
+            app.manage(updates::PendingUpdateState::default());
             lifecycle::initialize_app_lifecycle(app, &state_for_lifecycle)?;
             Ok(())
         })
@@ -75,6 +79,8 @@ fn main() {
             commands::open_install_docs,
             commands::run_host_registration_fix,
             commands::test_extension_handoff,
+            updates::check_for_update,
+            updates::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri app");

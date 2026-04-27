@@ -6,4 +6,5 @@ pub mod prompts;
 pub mod state;
 pub mod storage;
 pub mod torrent;
+pub mod updates;
 pub mod windows;

@@ -14,3 +14,15 @@ assert.match(
   /<SortableColumnHeader column="size" sortMode=\{sortMode\} onSortChange=\{onSortChange\}>/,
   'the Size header should remain sortable while using the default column alignment',
 );
+
+assert.match(
+  source,
+  /grid min-h-\[42px\][\s\S]*px-3 py-1 text-left text-sm/,
+  'queue rows should use the slimmer density requested from the download table comment',
+);
+
+assert.doesNotMatch(
+  source,
+  /grid min-h-\[50px\]/,
+  'queue rows should not keep the previous taller default height',
+);

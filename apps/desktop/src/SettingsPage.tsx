@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
+import type { AppUpdateState } from './appUpdates';
 import { normalizeAccentColor } from './appearance';
 import { shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
 import {
@@ -61,6 +62,9 @@ interface SettingsPageProps {
   onTestExtensionHandoff: () => void;
   onCopyDiagnostics: () => void;
   onExportDiagnostics: () => void;
+  updateState: AppUpdateState;
+  onCheckForUpdates: () => void;
+  onInstallUpdate: () => void;
 }
 
 export function SettingsPage({
@@ -77,6 +81,9 @@ export function SettingsPage({
   onTestExtensionHandoff,
   onCopyDiagnostics,
   onExportDiagnostics,
+  updateState,
+  onCheckForUpdates,
+  onInstallUpdate,
 }: SettingsPageProps) {
   const [formData, setFormData] = useState<Settings>(settings);
   const formDataRef = useRef(formData);
@@ -199,8 +206,8 @@ export function SettingsPage({
 
   return (
     <>
-    <form onSubmit={handleSubmit} className="settings-surface mx-auto flex w-full max-w-3xl flex-col gap-3 p-4">
-      <header className="flex items-center justify-between border-b border-border pb-3">
+    <form onSubmit={handleSubmit} className="settings-surface mx-auto grid w-full max-w-6xl grid-cols-[220px_minmax(0,1fr)] gap-4 p-4">
+      <header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/95 pb-3 pt-4 backdrop-blur">
         <div>
           <h1 className="text-xl font-semibold tracking-normal text-foreground">Settings</h1>
           <p className="mt-0.5 text-xs text-muted-foreground">Configure downloads, appearance, notifications, and native host diagnostics.</p>
@@ -216,7 +223,17 @@ export function SettingsPage({
         </div>
       </header>
 
-      <div className="space-y-3">
+      <nav className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-2" aria-label="Settings sections">
+        <SettingsNavLink href="#settings-general" label="General" />
+        <SettingsNavLink href="#settings-updates" label="App Updates" />
+        <SettingsNavLink href="#settings-torrenting" label="Torrenting" />
+        <SettingsNavLink href="#settings-appearance" label="Appearance" />
+        <SettingsNavLink href="#settings-extension" label="Web Extension" />
+        <SettingsNavLink href="#settings-native-host" label="Native Host" />
+      </nav>
+
+      <div className="min-w-0 space-y-3">
+        <section id="settings-general" className="scroll-mt-4">
         <SettingsPanel icon={<Settings2 size={20} />} title="General">
           <FieldRow label="Download Directory" description="Default save path." tooltip="Files are saved here by default.">
             <div className="flex min-w-0 gap-2">
@@ -295,7 +312,69 @@ export function SettingsPage({
             </select>
           </FieldRow>
         </SettingsPanel>
+        </section>
 
+        <section id="settings-updates" className="scroll-mt-4">
+        <SettingsPanel icon={<Download size={20} />} title="App Updates">
+          <div className="rounded-md border border-border bg-surface p-4">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold text-foreground">Alpha channel updates</div>
+                <div className="mt-1 text-sm leading-6 text-muted-foreground">
+                  {renderUpdateStatus(updateState)}
+                </div>
+              </div>
+              {updateState.availableUpdate ? (
+                <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
+                  {updateState.availableUpdate.version}
+                </span>
+              ) : null}
+            </div>
+
+            {updateState.availableUpdate?.body ? (
+              <div className="mb-4 rounded border border-border bg-background px-3 py-2 text-sm leading-6 text-muted-foreground">
+                {updateState.availableUpdate.body}
+              </div>
+            ) : null}
+
+            {updateState.status === 'downloading' ? (
+              <div className="mb-4">
+                <div className="mb-1 flex justify-between text-xs tabular-nums text-muted-foreground">
+                  <span>Downloading update</span>
+                  <span>{formatUpdateProgress(updateState)}</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-progress-track">
+                  <div className="h-1.5 rounded-full bg-primary transition-all duration-300" style={{ width: `${updateProgressPercent(updateState)}%` }} />
+                </div>
+              </div>
+            ) : null}
+
+            {updateState.errorMessage ? (
+              <div className="mb-4 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {updateState.errorMessage}
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-2">
+              <UtilityButton
+                icon={<RefreshCw size={16} />}
+                label={updateState.status === 'checking' ? 'Checking...' : 'Check for Updates'}
+                onClick={onCheckForUpdates}
+                disabled={updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing'}
+              />
+              <UtilityButton
+                icon={<Download size={16} />}
+                label={updateState.status === 'installing' ? 'Installing...' : 'Install Update'}
+                onClick={onInstallUpdate}
+                disabled={!updateState.availableUpdate || updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing'}
+                primary={Boolean(updateState.availableUpdate)}
+              />
+            </div>
+          </div>
+        </SettingsPanel>
+        </section>
+
+        <section id="settings-torrenting" className="scroll-mt-4">
         <SettingsPanel icon={<Gauge size={20} />} title="Torrenting">
           <FieldRow label="Torrent Downloads" description="Manual magnet and .torrent jobs." tooltip="Allows torrent jobs added from the desktop app or browser extension.">
             <ToggleSwitch
@@ -366,7 +445,9 @@ export function SettingsPage({
             </div>
           </FieldRow>
         </SettingsPanel>
+        </section>
 
+        <section id="settings-appearance" className="scroll-mt-4">
         <SettingsPanel icon={<Palette size={20} />} title="Appearance & Behavior">
           <FieldRow label="Desktop Notifications" description="Native alerts." tooltip="Show a native notification when downloads finish or fail.">
             <label className="relative inline-flex cursor-pointer items-center">
@@ -469,7 +550,9 @@ export function SettingsPage({
             </div>
           </FieldRow>
         </SettingsPanel>
+        </section>
 
+        <section id="settings-extension" className="scroll-mt-4">
         <SettingsPanel icon={<PlugZap size={20} />} title="Web Extension">
           <FieldRow label="Extension Integration" description="Browser handoff." tooltip="Allow browsers to hand downloads to this app.">
             <ToggleSwitch
@@ -601,7 +684,9 @@ export function SettingsPage({
             </button>
           </FieldRow>
         </SettingsPanel>
+        </section>
 
+        <section id="settings-native-host" className="scroll-mt-4">
         <SettingsPanel
           icon={<Activity size={20} />}
           title="Native Host Registration"
@@ -688,6 +773,7 @@ export function SettingsPage({
             </div>
           </div>
         </SettingsPanel>
+        </section>
       </div>
     </form>
     {isExcludedSitesDialogOpen ? (
@@ -904,6 +990,17 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+function SettingsNavLink({ href, label }: { href: string; label: string }) {
+  return (
+    <a
+      href={href}
+      className="flex h-9 items-center rounded-md px-3 text-sm font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
+    >
+      {label}
+    </a>
+  );
+}
+
 function SettingsPanel({
   icon,
   title,
@@ -1014,26 +1111,63 @@ function UtilityButton({
   label,
   onClick,
   primary = false,
+  disabled = false,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition ${
         primary
-          ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-          : 'border border-input bg-background text-foreground hover:bg-muted'
+          ? 'bg-primary text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50'
+          : 'border border-input bg-background text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50'
       }`}
     >
       {icon}
       {label}
     </button>
   );
+}
+
+function renderUpdateStatus(updateState: AppUpdateState): string {
+  if (updateState.status === 'checking') return 'Checking GitHub Releases for a newer alpha build.';
+  if (updateState.status === 'available' && updateState.availableUpdate) {
+    return `Version ${updateState.availableUpdate.version} is available.`;
+  }
+  if (updateState.status === 'not_available') return 'You are running the latest alpha build.';
+  if (updateState.status === 'downloading') return 'Downloading the signed update package.';
+  if (updateState.status === 'installing') return 'Installing the update. The app may close automatically.';
+  if (updateState.status === 'error') return 'The last update action failed.';
+  return 'Checks the signed alpha feed hosted on GitHub Releases.';
+}
+
+function updateProgressPercent(updateState: AppUpdateState): number {
+  if (!updateState.totalBytes || updateState.totalBytes <= 0) return 0;
+  return Math.max(0, Math.min(100, (updateState.downloadedBytes / updateState.totalBytes) * 100));
+}
+
+function formatUpdateProgress(updateState: AppUpdateState): string {
+  if (!updateState.totalBytes) return `${formatCompactBytes(updateState.downloadedBytes)} downloaded`;
+  return `${formatCompactBytes(updateState.downloadedBytes)} / ${formatCompactBytes(updateState.totalBytes)}`;
+}
+
+function formatCompactBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB'];
+  let unitIndex = 0;
+  let nextValue = value;
+  while (nextValue >= 1024 && unitIndex < units.length - 1) {
+    nextValue /= 1024;
+    unitIndex += 1;
+  }
+  return `${nextValue >= 10 || unitIndex === 0 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function DiagnosticRow({ label, value, muted = false }: { label: string; value: string; muted?: boolean }) {

@@ -8,6 +8,14 @@ $hostRoot = Join-Path $workspaceRoot 'apps\native-host'
 $extensionRoot = Join-Path $workspaceRoot 'apps\extension'
 $releaseTempRoot = Join-Path $workspaceRoot '.tmp\release'
 
+if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+  throw 'TAURI_SIGNING_PRIVATE_KEY is required to build signed updater artifacts.'
+}
+
+if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+}
+
 function Invoke-ReleaseCommand {
   param(
     [Parameter(Mandatory = $true)]
@@ -60,6 +68,7 @@ try {
 
   Copy-Item -Path "$hostRoot\target\release\simple-download-manager-native-host.exe" -Destination $releaseRoot
   Copy-Item -Path "$workspaceRoot\config\release.json" -Destination $releaseRoot
+  Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @('.\scripts\updater-release.mjs')
 
   Write-Host "Release artifacts written to $releaseRoot"
 }

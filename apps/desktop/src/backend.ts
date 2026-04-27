@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
 import type { ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
+import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -27,6 +28,7 @@ export interface AddJobsResult {
 const STATE_CHANGED_EVENT = 'app://state-changed';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
+const UPDATE_INSTALL_PROGRESS_EVENT = 'app://update-install-progress';
 const PROGRESS_BATCH_STORAGE_PREFIX = 'sdm.progressBatch.';
 const mockDownloadDirectory = 'C:\\Users\\You\\Downloads';
 const mockNow = Date.now();
@@ -799,6 +801,16 @@ export async function exportDiagnosticsReport(): Promise<string | null> {
   return invokeCommand<string | null>('export_diagnostics_report');
 }
 
+export async function checkForUpdate(): Promise<AppUpdateMetadata | null> {
+  if (!isTauriRuntime()) return null;
+  return invokeCommand<AppUpdateMetadata | null>('check_for_update');
+}
+
+export async function installUpdate(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('install_update');
+}
+
 export async function subscribeToStateChanged(
   listener: (snapshot: DesktopSnapshot) => void,
 ): Promise<UnlistenFn> {
@@ -822,4 +834,11 @@ export async function subscribeToSelectedJobRequested(
 ): Promise<UnlistenFn> {
   if (!isTauriRuntime()) return async () => undefined;
   return listen<string>(SELECT_JOB_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToUpdateInstallProgress(
+  listener: (event: UpdateInstallProgressEvent) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<UpdateInstallProgressEvent>(UPDATE_INSTALL_PROGRESS_EVENT, (event) => listener(event.payload));
 }

@@ -31,11 +31,13 @@ import { loadInitialAppData } from './appBootstrap';
 import {
   browseDirectory,
   cancelJob,
+  checkForUpdate,
   deleteJob,
   deleteJobs,
   exportDiagnosticsReport,
   getDiagnostics,
   getAppSnapshot,
+  installUpdate,
   openBatchProgressWindow,
   openInstallDocs,
   openJobFile,
@@ -54,6 +56,7 @@ import {
   saveSettings,
   subscribeToStateChanged,
   subscribeToSelectedJobRequested,
+  subscribeToUpdateInstallProgress,
   testExtensionHandoff,
 } from './backend';
 import type { AddJobsResult } from './backend';
@@ -68,7 +71,6 @@ import {
   FileImage,
   FileText,
   FileVideo,
-  Filter,
   Folder,
   Gauge,
   Magnet,
@@ -90,6 +92,20 @@ import {
   type DiagnosticsRefreshOptions,
 } from './diagnosticsRefresh';
 import { formatDiagnosticsReport } from './diagnosticsReport';
+import {
+  applyInstallProgressEvent,
+  beginUpdateInstall,
+  failUpdateCheck,
+  failUpdateInstall,
+  finishUpdateCheck,
+  initialAppUpdateState,
+  shouldNotifyUpdateCheckFailure,
+  shouldRunStartupUpdateCheck,
+  startUpdateCheck,
+  type AppUpdateMetadata,
+  type AppUpdateState,
+  type UpdateCheckMode,
+} from './appUpdates';
 
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
@@ -140,7 +156,10 @@ export default function App() {
   const [pendingSettingsView, setPendingSettingsView] = useState<ViewState | null>(null);
   const [isUnsavedSettingsPromptOpen, setIsUnsavedSettingsPromptOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [updateState, setUpdateState] = useState<AppUpdateState>(initialAppUpdateState);
+  const [isUpdatePromptOpen, setIsUpdatePromptOpen] = useState(false);
   const progressSamplesRef = useRef<ProgressSample[]>([]);
+  const startupUpdateCheckStartedRef = useRef(false);
   const appearanceSettings = settingsDraft ?? settings;
 
   useEffect(() => {
@@ -171,6 +190,11 @@ export default function App() {
           applyDesktopSnapshot(nextSnapshot);
           void refreshDiagnostics({ silent: true });
         });
+
+        if (shouldRunStartupUpdateCheck(startupUpdateCheckStartedRef.current)) {
+          startupUpdateCheckStartedRef.current = true;
+          void handleCheckForUpdates('startup');
+        }
       } catch (error) {
         if (isMounted) {
           setConnectionState(ConnectionState.Error);
@@ -188,6 +212,21 @@ export default function App() {
 
     return () => {
       isMounted = false;
+      void dispose?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let dispose: (() => void | Promise<void>) | undefined;
+
+    async function subscribe() {
+      dispose = await subscribeToUpdateInstallProgress((event) => {
+        setUpdateState((current) => applyInstallProgressEvent(current, event));
+      });
+    }
+
+    void subscribe();
+    return () => {
       void dispose?.();
     };
   }, []);
@@ -287,6 +326,46 @@ export default function App() {
       if (shouldNotifyDiagnosticsRefreshFailure(options)) {
         addToast({ type: 'error', title: 'Diagnostics Failed', message: getErrorMessage(error) });
       }
+    }
+  }
+
+  async function handleCheckForUpdates(mode: UpdateCheckMode = 'manual') {
+    setUpdateState((current) => startUpdateCheck(current, mode));
+    try {
+      const update = await checkForUpdate();
+      setUpdateState((current) => finishUpdateCheck(current, update));
+
+      if (update) {
+        setIsUpdatePromptOpen(true);
+        addToast({
+          type: 'info',
+          title: 'Update Available',
+          message: `Simple Download Manager ${update.version} is ready to install.`,
+          autoClose: false,
+        });
+        return;
+      }
+
+      if (mode === 'manual') {
+        addToast({ type: 'success', title: 'No Update Available', message: 'You are running the latest alpha build.' });
+      }
+    } catch (error) {
+      const message = getErrorMessage(error, 'Could not check for updates.');
+      setUpdateState((current) => failUpdateCheck(current, message));
+      if (shouldNotifyUpdateCheckFailure(mode)) {
+        addToast({ type: 'error', title: 'Update Check Failed', message });
+      }
+    }
+  }
+
+  async function handleInstallUpdate() {
+    setUpdateState((current) => beginUpdateInstall(current));
+    try {
+      await installUpdate();
+    } catch (error) {
+      const message = getErrorMessage(error, 'Could not install the update.');
+      setUpdateState((current) => failUpdateInstall(current, message));
+      addToast({ type: 'error', title: 'Update Failed', message, autoClose: false });
     }
   }
 
@@ -644,7 +723,6 @@ export default function App() {
             canResumeAll={canResumeAny}
             canPauseAll={canPauseAny}
             canRetryFailed={canRetryFailed}
-            onCycleFilter={() => requestViewChange(nextFilterView(view))}
           />
         ) : null}
       </Titlebar>
@@ -730,6 +808,9 @@ export default function App() {
                 onTestExtensionHandoff={handleTestExtensionHandoff}
                 onCopyDiagnostics={handleCopyDiagnostics}
                 onExportDiagnostics={handleExportDiagnostics}
+                updateState={updateState}
+                onCheckForUpdates={() => void handleCheckForUpdates('manual')}
+                onInstallUpdate={() => void handleInstallUpdate()}
               />
             </div>
           ) : (
@@ -785,6 +866,72 @@ export default function App() {
           onSave={() => void saveSettingsAndLeave()}
         />
       )}
+
+      {isUpdatePromptOpen && updateState.availableUpdate ? (
+        <UpdateAvailablePrompt
+          update={updateState.availableUpdate}
+          updateState={updateState}
+          onDismiss={() => setIsUpdatePromptOpen(false)}
+          onInstall={() => void handleInstallUpdate()}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function UpdateAvailablePrompt({
+  update,
+  updateState,
+  onDismiss,
+  onInstall,
+}: {
+  update: AppUpdateMetadata;
+  updateState: AppUpdateState;
+  onDismiss: () => void;
+  onInstall: () => void;
+}) {
+  const isInstalling = updateState.status === 'downloading' || updateState.status === 'installing';
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="update-available-title"
+        className="w-full max-w-md rounded-md border border-border bg-card shadow-2xl"
+      >
+        <div className="border-b border-border bg-header px-5 py-4">
+          <h2 id="update-available-title" className="text-base font-semibold text-foreground">
+            Update Available
+          </h2>
+          <p className="mt-1 text-sm leading-5 text-muted-foreground">
+            Simple Download Manager {update.version} is ready to install.
+          </p>
+        </div>
+        {update.body ? (
+          <div className="border-b border-border px-5 py-4 text-sm leading-6 text-muted-foreground">
+            {update.body}
+          </div>
+        ) : null}
+        <div className="flex justify-end gap-2 px-5 py-4">
+          <button
+            type="button"
+            onClick={onDismiss}
+            disabled={isInstalling}
+            className="h-10 rounded-md border border-input bg-background px-4 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Later
+          </button>
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={isInstalling}
+            className="h-10 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isInstalling ? 'Installing...' : 'Install Update'}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -847,7 +994,6 @@ function CommandBar({
   canResumeAll,
   canPauseAll,
   canRetryFailed,
-  onCycleFilter,
 }: {
   searchQuery: string;
   onSearchChange: (value: string) => void;
@@ -858,7 +1004,6 @@ function CommandBar({
   canResumeAll: boolean;
   canPauseAll: boolean;
   canRetryFailed: boolean;
-  onCycleFilter: () => void;
 }) {
   return (
     <div className="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-3">
@@ -880,14 +1025,6 @@ function CommandBar({
             placeholder="Search downloads..."
           />
         </label>
-        <button
-          onClick={onCycleFilter}
-          className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition hover:border-input hover:bg-muted hover:text-foreground"
-          title="Cycle filter"
-          aria-label="Cycle filter"
-        >
-          <Filter size={18} />
-        </button>
       </div>
     </div>
   );
@@ -1042,16 +1179,6 @@ function StatusBar({
       </div>
     </footer>
   );
-}
-
-function nextFilterView(view: ViewState): ViewState {
-  if (view === 'torrents') return 'torrent-active';
-  if (view === 'torrent-active') return 'torrent-seeding';
-  if (view === 'torrent-seeding') return 'torrent-completed';
-  if (view === 'torrent-completed') return 'torrents';
-  if (view === 'all') return 'active';
-  if (view === 'active') return 'completed';
-  return 'all';
 }
 
 function categoryIcon(category: DownloadCategory, size: number): React.ReactNode {

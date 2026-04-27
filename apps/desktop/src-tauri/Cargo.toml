@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-desktop-backend"
-version = "0.3.4-alpha"
+version = "0.3.41-alpha"
 edition = "2021"
 build = "build.rs"
 
@@ -21,6 +21,7 @@ percent-encoding = "2.3.1"
 tauri-plugin-notification = "2"
 winreg = "0.52.0"
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+tauri-plugin-updater = "2"
 
 [build-dependencies]
 tauri-build = { version = "2.0.6", features = [] }

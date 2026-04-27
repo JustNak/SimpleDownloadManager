@@ -5,8 +5,46 @@ const source = readFileSync(new URL('../src/SettingsPage.tsx', import.meta.url),
 
 assert.match(
   source,
-  /settings-surface[\s\S]*max-w-3xl[\s\S]*gap-3[\s\S]*p-4/,
-  'settings surface should use the compact width, gap, and padding tokens',
+  /settings-surface[\s\S]*grid[\s\S]*max-w-6xl[\s\S]*grid-cols-\[220px_minmax\(0,1fr\)\][\s\S]*gap-4[\s\S]*p-4/,
+  'settings surface should use the two-column navigator layout tokens',
+);
+
+assert.match(
+  source,
+  /settings-nav/,
+  'settings should include a dedicated left-side navigator',
+);
+
+for (const sectionId of [
+  'settings-general',
+  'settings-updates',
+  'settings-torrenting',
+  'settings-appearance',
+  'settings-extension',
+  'settings-native-host',
+]) {
+  assert.match(
+    source,
+    new RegExp(`id="${sectionId}"`),
+    `settings navigator target ${sectionId} should exist`,
+  );
+  assert.match(
+    source,
+    new RegExp(`href="#${sectionId}"`),
+    `settings navigator should link to ${sectionId}`,
+  );
+}
+
+assert.match(
+  source,
+  /settings-nav sticky top-24/,
+  'settings navigator should stay visible below the sticky settings header while scrolling long settings pages',
+);
+
+assert.match(
+  source,
+  /<header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface\/95 pb-3 pt-4 backdrop-blur/,
+  'settings header actions should stay sticky while scrolling long settings pages',
 );
 
 assert.match(

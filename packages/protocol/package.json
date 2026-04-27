@@ -1,7 +1,7 @@
 {
   "name": "@myapp/protocol",
   "private": true,
-  "version": "0.3.4-alpha",
+  "version": "0.3.41-alpha",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

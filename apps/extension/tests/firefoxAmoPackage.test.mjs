@@ -56,6 +56,7 @@ assert.match(uploadReadme, /web-ext lint --source-dir apps\\extension\\dist\\fir
 assert.match(uploadReadme, /web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=unlisted/);
 assert.match(uploadReadme, /AMO_REVIEWER_NOTES\.md/);
 assert.match(uploadReadme, /Firefox 142/);
+assert.match(uploadReadme, /FIREFOX_GUIDELINES\.md/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
 assert.match(reviewerNotes, /Native messaging/);
@@ -67,12 +68,14 @@ assert.match(reviewerNotes, /websiteContent/);
 assert.match(reviewerNotes, /No remote code/);
 assert.match(reviewerNotes, /local native desktop app/);
 assert.match(reviewerNotes, /wildcard excluded host patterns/);
+assert.match(reviewerNotes, /FIREFOX_GUIDELINES\.md/);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);
 assert.match(sourceReadme, /npm run build --workspace @myapp\/extension/);
 assert.match(sourceReadme, /apps\/extension\/dist\/firefox/);
 assert.match(sourceReadme, /uploaded extension ZIP/);
+assert.match(sourceReadme, /FIREFOX_GUIDELINES\.md/);
 
 const rootPackage = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
 assert.equal(

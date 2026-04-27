@@ -1,7 +1,7 @@
 {
   "name": "simple-download-manager",
   "private": true,
-  "version": "0.3.4-alpha",
+  "version": "0.3.41-alpha",
   "workspaces": [
     "apps/desktop",
     "apps/extension",
@@ -19,6 +19,7 @@
     "package:firefox-amo": "npm run build:extension && node ./scripts/package-firefox-amo.mjs",
     "package:firefox-test": "npm run build:extension && node ./scripts/package-firefox-test.mjs",
     "prepare:release": "node ./scripts/prepare-release.mjs",
+    "publish:updater-alpha": "node ./scripts/publish-updater-alpha.mjs",
     "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
     "typecheck": "npm run typecheck --workspace @myapp/protocol && npm run typecheck --workspace @myapp/extension && npm run typecheck --workspace @myapp/desktop"
   },
