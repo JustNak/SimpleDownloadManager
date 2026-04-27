@@ -147,16 +147,12 @@ async function assertFirefoxBuildExists(sourceDir) {
   });
 }
 
-async function copyFirefoxExtensionFiles(sourceDir, extensionDir) {
+export async function copyFirefoxExtensionFiles(sourceDir, extensionDir) {
   await mkdir(extensionDir, { recursive: true });
   const entries = await readdir(sourceDir, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (!entry.isFile()) {
-      continue;
-    }
-
-    await cp(path.join(sourceDir, entry.name), path.join(extensionDir, entry.name));
+    await cp(path.join(sourceDir, entry.name), path.join(extensionDir, entry.name), { recursive: true });
   }
 }
 

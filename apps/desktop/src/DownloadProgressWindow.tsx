@@ -22,7 +22,7 @@ import {
   shouldShowCompletedFileAction,
   type ProgressSample,
 } from './downloadProgressMetrics';
-import { isTorrentMetadataPending } from './queueRowPresentation';
+import { isTorrentMetadataPending, torrentActivitySummary } from './queueRowPresentation';
 
 export function DownloadProgressWindow() {
   const [job, setJob] = useState<DownloadJob | null>(null);
@@ -276,12 +276,13 @@ function torrentRatio(job: DownloadJob) {
 function torrentSummary(job: DownloadJob) {
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
 
-  const parts = ['Torrent'];
+  const parts: string[] = [];
   if (typeof job.torrent?.ratio === 'number') parts.push(torrentRatio(job));
   if (typeof job.torrent?.uploadedBytes === 'number' && job.torrent.uploadedBytes > 0) {
     parts.push(`Up ${formatBytes(job.torrent.uploadedBytes)}`);
   }
-  return parts.join(' · ');
+  if (!parts.length) return torrentActivitySummary(job);
+  return parts.join(' - ');
 }
 
 function statusClass(state: JobState) {

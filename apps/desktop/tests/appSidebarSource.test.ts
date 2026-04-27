@@ -47,6 +47,18 @@ assert.match(
 
 assert.match(
   source,
+  /\{isDownloadSectionExpanded \? \([\s\S]*DOWNLOAD_CATEGORIES[\s\S]*\) : null\}\s*<NavItem icon=\{<Gauge size=\{18\} \/>\} label="Active"/,
+  'Active downloads should remain visible when the All Downloads category group is collapsed',
+);
+
+assert.match(
+  source,
+  /label="Active"[\s\S]*label="Completed"[\s\S]*<div className="mt-2 border-t border-border\/70 pt-2">/,
+  'Completed downloads should remain visible with Active above the torrent section',
+);
+
+assert.match(
+  source,
   /<div className="shrink-0 space-y-2">/,
   'the Settings footer should stay fixed below the scrollable sidebar navigation',
 );

@@ -6,7 +6,9 @@ import {
   queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
+  torrentActivitySummary,
   torrentDetailMetrics,
+  torrentDisplayName,
 } from '../src/queueRowPresentation.ts';
 import type { DownloadJob } from '../src/types.ts';
 
@@ -110,6 +112,73 @@ assert.deepEqual(
   }),
   { label: 'Finding', tone: 'warning' },
   'metadata-pending torrents should show a specific Finding badge instead of Downloading',
+);
+
+assert.equal(
+  torrentActivitySummary({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 0,
+    torrent: { uploadedBytes: 0, ratio: 0 },
+  }),
+  'Finding metadata',
+  'unresolved starting torrents should describe active metadata lookup',
+);
+
+assert.equal(
+  torrentActivitySummary({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'seeding',
+    totalBytes: 100,
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, ratio: 0 },
+  }),
+  'No peer activity yet',
+  'resolved seeding torrents without peer metrics should not be described as metadata pending',
+);
+
+assert.equal(
+  torrentDisplayName({
+    ...baseJob,
+    filename: 'fallback-name',
+    transferKind: 'torrent',
+    torrent: { name: 'Torrent Name', infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, ratio: 0 },
+  }),
+  'Torrent Name',
+);
+
+assert.equal(
+  torrentDisplayName({
+    ...baseJob,
+    filename: 'fallback-name',
+    transferKind: 'torrent',
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, ratio: 0 },
+  }),
+  'fallback-name',
+);
+
+assert.equal(
+  torrentDisplayName({
+    ...baseJob,
+    filename: 'magnet-fallback',
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 0,
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, ratio: 0 },
+  }),
+  'magnet-fallback',
+  'details should use the filename fallback even while metadata is still unresolved',
+);
+
+assert.equal(
+  torrentDisplayName({
+    ...baseJob,
+    filename: '',
+    transferKind: 'torrent',
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, ratio: 0 },
+  }),
+  'Torrent 420f3778a160',
 );
 
 assert.deepEqual(

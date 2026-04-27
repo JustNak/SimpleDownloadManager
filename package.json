@@ -1,7 +1,7 @@
 {
   "name": "simple-download-manager",
   "private": true,
-  "version": "0.3.45-alpha",
+  "version": "0.3.46-alpha",
   "workspaces": [
     "apps/desktop",
     "apps/extension",

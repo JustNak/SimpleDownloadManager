@@ -11,11 +11,12 @@ import { canRemoveDownloadImmediately } from './queueCommands';
 import {
   clampQueueProgress,
   formatQueueSize,
-  isTorrentMetadataPending,
   queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
+  torrentActivitySummary,
   torrentDetailMetrics,
+  torrentDisplayName,
   type TorrentDetailMetric,
   type TorrentDetailMetricKind,
   type QueueStatusTone,
@@ -54,11 +55,11 @@ import {
 } from 'lucide-react';
 import { sortModeDirection, sortModeKey, type SortColumn, type SortMode } from './downloadSorting';
 
-const DETAILS_MIN_HEIGHT = 148;
-const DETAILS_CLOSE_THRESHOLD = 118;
-const DETAILS_DEFAULT_HEIGHT = 204;
-const DETAILS_EXPANDED_HEIGHT = 320;
-const DETAILS_MAX_HEIGHT = 420;
+const DETAILS_MIN_HEIGHT = 104;
+const DETAILS_CLOSE_THRESHOLD = 84;
+const DETAILS_DEFAULT_HEIGHT = 128;
+const DETAILS_EXPANDED_HEIGHT = 220;
+const DETAILS_MAX_HEIGHT = 300;
 const TABLE_MIN_HEIGHT = 180;
 
 interface QueueViewProps {
@@ -900,7 +901,7 @@ function DownloadDetailsPane({
   const sourceLabel = job.source
     ? `${job.source.browser} ${job.source.entryPoint.replaceAll('_', ' ')}`
     : 'Manual URL';
-  const compact = height <= DETAILS_MIN_HEIGHT + 8;
+  const compact = height <= DETAILS_DEFAULT_HEIGHT + 8;
   const detailItems = [
     { icon: <Globe size={16} />, label: 'Source URL:', value: job.url, accent: true },
     { icon: <FolderOpen size={16} />, label: 'Destination:', value: job.targetPath || 'No destination recorded yet.' },
@@ -911,7 +912,7 @@ function DownloadDetailsPane({
     { icon: <RotateCw size={16} />, label: 'Resume:', value: formatResumeSupport(job.resumeSupport) },
     ...(job.transferKind === 'torrent'
       ? [
-          { icon: <Magnet size={16} />, label: 'Torrent:', value: job.torrent?.name || 'Metadata pending' },
+          { icon: <Magnet size={16} />, label: 'Torrent:', value: torrentDisplayName(job) },
           { icon: <Upload size={16} />, label: 'Uploaded:', value: `${formatBytes(job.torrent?.uploadedBytes ?? 0)} (${formatTorrentRatio(job)})` },
           { icon: <Users size={16} />, label: 'Peers:', value: formatTorrentPeers(job) },
         ]
@@ -944,25 +945,25 @@ function DownloadDetailsPane({
 
       <button
         onClick={onClose}
-        className="absolute right-3 top-4 z-20 flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+        className="absolute right-2 top-3 z-20 flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
         title="Hide details"
         aria-label="Hide details"
       >
-        <X size={16} />
+        <X size={14} />
       </button>
 
-      <div className={`${compact ? 'flex h-full min-w-0 items-center gap-4 px-6 py-4 pt-5' : 'flex min-w-0 gap-5 px-6 py-5 pt-6'}`}>
-        <div className={`${compact ? 'flex w-16 shrink-0 justify-center' : 'flex w-20 shrink-0 justify-center'}`}>
+      <div className={`${compact ? 'flex h-full min-w-0 items-center gap-3 px-4 py-3 pt-4' : 'flex min-w-0 gap-4 px-5 py-4 pt-5'}`}>
+        <div className={`${compact ? 'flex w-14 shrink-0 justify-center' : 'flex w-[72px] shrink-0 justify-center'}`}>
           <FileBadge filename={job.filename} transferKind={job.transferKind} large />
         </div>
 
-        <div className="min-w-0 flex-1 pr-9">
-          <h3 className={`${compact ? 'mb-2 text-sm' : 'mb-3 text-base'} truncate font-semibold text-foreground`} title={job.filename}>
+        <div className="min-w-0 flex-1 pr-8">
+          <h3 className={`${compact ? 'mb-1.5 text-sm' : 'mb-2.5 text-base'} truncate font-semibold text-foreground`} title={job.filename}>
             {job.filename}
           </h3>
           {compact ? (
             <div className="overflow-x-auto overflow-y-hidden pb-1">
-              <div className="grid min-w-[1180px] grid-flow-col grid-rows-2 gap-x-5 gap-y-2 text-sm">
+              <div className="grid min-w-[1080px] grid-flow-col grid-rows-2 gap-x-4 gap-y-1.5 text-xs">
                 {detailItems.map((item) => (
                   <CompactDetailItem key={item.label} icon={item.icon} label={item.label} value={item.value} accent={item.accent} />
                 ))}
@@ -1038,7 +1039,7 @@ function TorrentDetailLine({ job }: { job: DownloadJob }) {
   if (!metrics.length) {
     return (
       <div className="truncate" title={job.url}>
-        {isTorrentMetadataPending(job) ? 'Finding metadata' : 'Torrent metadata pending'}
+        {torrentActivitySummary(job)}
       </div>
     );
   }
@@ -1541,11 +1542,11 @@ function CompactDetailItem({
 }) {
   return (
     <div className="min-w-0">
-      <div className="mb-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+      <div className="mb-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&>svg]:h-3.5 [&>svg]:w-3.5">
         {icon}
         <span>{label}</span>
       </div>
-      <div className={`truncate text-sm ${accent ? 'text-primary' : 'text-foreground'}`} title={value}>
+      <div className={`truncate text-xs ${accent ? 'text-primary' : 'text-foreground'}`} title={value}>
         {value}
       </div>
     </div>

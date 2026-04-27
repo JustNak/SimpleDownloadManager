@@ -26,3 +26,21 @@ assert.doesNotMatch(
   /grid min-h-\[50px\]/,
   'queue rows should not keep the previous taller default height',
 );
+
+assert.match(
+  source,
+  /const DETAILS_MIN_HEIGHT = 104;/,
+  'the selected-download details pane should support a slimmer minimum height',
+);
+
+assert.match(
+  source,
+  /const DETAILS_DEFAULT_HEIGHT = 128;/,
+  'the selected-download details pane should open in a compact default height',
+);
+
+assert.match(
+  source,
+  /const compact = height <= DETAILS_DEFAULT_HEIGHT \+ 8;/,
+  'the selected-download details pane should use compact layout at its default height',
+);

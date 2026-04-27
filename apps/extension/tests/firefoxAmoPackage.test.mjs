@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 let amoPackaging;
@@ -13,6 +13,7 @@ const {
   createFirefoxAmoReadme,
   createFirefoxAmoReviewerNotes,
   createFirefoxAmoSourceReadme,
+  copyFirefoxExtensionFiles,
   firefoxAmoPackagePaths,
   firefoxAmoSourceEntries,
 } = amoPackaging;
@@ -92,3 +93,22 @@ assert.equal(
 const lintScript = await readFile(path.join(repoRoot, 'scripts', 'lint-firefox.mjs'), 'utf8');
 assert.match(lintScript, /NO_UPDATE_NOTIFIER/);
 assert.match(lintScript, /apps[\\/]extension[\\/]dist[\\/]firefox/);
+
+const tempParent = path.join(repoRoot, '.tmp');
+await mkdir(tempParent, { recursive: true });
+const tempRoot = await mkdtemp(path.join(tempParent, 'firefox-amo-package-'));
+try {
+  const sourceDir = path.join(tempRoot, 'source');
+  const uploadDir = path.join(tempRoot, 'upload');
+  await mkdir(path.join(sourceDir, 'icons'), { recursive: true });
+  await writeFile(path.join(sourceDir, 'manifest.json'), '{}', 'utf8');
+  await writeFile(path.join(sourceDir, 'background.js'), '', 'utf8');
+  await writeFile(path.join(sourceDir, 'icons', 'icon-16.png'), 'icon', 'utf8');
+
+  await copyFirefoxExtensionFiles(sourceDir, uploadDir);
+
+  assert.equal((await stat(path.join(uploadDir, 'manifest.json'))).isFile(), true);
+  assert.equal((await stat(path.join(uploadDir, 'icons', 'icon-16.png'))).isFile(), true);
+} finally {
+  await rm(tempRoot, { recursive: true, force: true });
+}

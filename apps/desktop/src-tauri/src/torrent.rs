@@ -153,6 +153,18 @@ impl TorrentEngine {
     ) -> Result<Option<usize>, String> {
         self.set_upload_limit(upload_limit_kib_per_second);
 
+        if let Some(engine_id) = engine_id {
+            let cached_handle = self.handles.lock().await.get(&engine_id).cloned();
+            if let Some(handle) = cached_handle {
+                let id = handle.id();
+                self.session
+                    .unpause(&handle)
+                    .await
+                    .map_err(|error| format!("Could not resume torrent: {error:#}"))?;
+                return Ok(Some(id));
+            }
+        }
+
         for candidate in torrent_resume_candidates(engine_id, info_hash) {
             let Some(handle) = self.session.get(candidate) else {
                 continue;
@@ -192,6 +204,23 @@ impl TorrentEngine {
             .delete(TorrentIdOrHash::Id(id), false)
             .await
             .map_err(|error| format!("Could not forget torrent: {error:#}"))
+    }
+
+    pub async fn forget_by_info_hash(&self, info_hash: &str) -> Result<bool, String> {
+        let Ok(candidate) = TorrentIdOrHash::parse(info_hash) else {
+            return Ok(false);
+        };
+        let Some(handle) = self.session.get(candidate) else {
+            return Ok(false);
+        };
+
+        let id = handle.id();
+        self.handles.lock().await.remove(&id);
+        self.session
+            .delete(TorrentIdOrHash::Id(id), false)
+            .await
+            .map_err(|error| format!("Could not forget torrent: {error:#}"))?;
+        Ok(true)
     }
 
     pub fn set_upload_limit(&self, upload_limit_kib_per_second: u32) {
@@ -242,6 +271,13 @@ pub fn prepare_torrent_source(source: &str) -> PreparedTorrentSource {
         fallback_trackers_added: fallback_trackers.len(),
         fallback_trackers_for_options: fallback_trackers,
     }
+}
+
+pub fn pending_torrent_cleanup_info_hash(source: &PreparedTorrentSource) -> Option<String> {
+    if source.source_kind != TorrentSourceKind::Magnet {
+        return None;
+    }
+    magnet_info_hash(&source.source)
 }
 
 pub(crate) fn torrent_session_options(persistence_dir: PathBuf) -> SessionOptions {
@@ -331,6 +367,21 @@ fn magnet_tracker_values(source: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn magnet_info_hash(source: &str) -> Option<String> {
+    let parsed = url::Url::parse(source).ok()?;
+    parsed.query_pairs().find_map(|(key, value)| {
+        if !key.eq_ignore_ascii_case("xt") {
+            return None;
+        }
+        let value = value.into_owned();
+        let (prefix, hash) = value.split_at(value.len().min("urn:btih:".len()));
+        if !prefix.eq_ignore_ascii_case("urn:btih:") || hash.is_empty() {
+            return None;
+        }
+        Some(hash.to_string())
+    })
 }
 
 fn missing_fallback_trackers<'a>(existing_trackers: impl Iterator<Item = &'a str>) -> Vec<String> {
@@ -500,5 +551,18 @@ mod tests {
 
         assert!(matches!(candidates[0], TorrentIdOrHash::Id(7)));
         assert!(matches!(candidates[1], TorrentIdOrHash::Hash(_)));
+    }
+
+    #[test]
+    fn pending_cleanup_hash_is_derived_from_magnet_only() {
+        let prepared =
+            prepare_torrent_source("magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6");
+        assert_eq!(
+            pending_torrent_cleanup_info_hash(&prepared).as_deref(),
+            Some("a634dc946d49989526058626caa3bbabba4607b6")
+        );
+
+        let torrent_file = prepare_torrent_source("https://example.com/releases/file.torrent");
+        assert_eq!(pending_torrent_cleanup_info_hash(&torrent_file), None);
     }
 }

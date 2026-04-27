@@ -40,11 +40,10 @@ export function recordProgressSample(
 export function calculateDownloadProgressMetrics(
   job: DownloadJob,
   samples: ProgressSample[],
-  timestamp = Date.now(),
+  _timestamp = Date.now(),
 ): DownloadProgressMetrics {
   const averageSpeed = observedAverageSpeed(job, samples) ||
-    Math.max(0, job.speed || 0) ||
-    lifetimeAverageSpeed(job, timestamp);
+    Math.max(0, job.speed || 0);
   const remainingBytes = Math.max(0, (job.totalBytes || 0) - (job.downloadedBytes || 0));
   const timeRemaining = averageSpeed > 0 && remainingBytes > 0
     ? Math.ceil(remainingBytes / averageSpeed)
@@ -86,14 +85,4 @@ function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): numb
   if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || byteDelta <= 0) return 0;
 
   return Math.round(byteDelta / (elapsedMs / 1000));
-}
-
-function lifetimeAverageSpeed(job: DownloadJob, timestamp: number): number {
-  const createdAt = job.createdAt;
-  if (!Number.isFinite(createdAt) || typeof createdAt !== 'number' || createdAt <= 0) return 0;
-
-  const elapsedMs = timestamp - createdAt;
-  if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || job.downloadedBytes <= 0) return 0;
-
-  return Math.round(job.downloadedBytes / (elapsedMs / 1000));
 }

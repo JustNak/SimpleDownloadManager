@@ -81,10 +81,10 @@ assert.deepEqual(
 assert.deepEqual(
   calculateDownloadProgressMetrics({ ...baseJob, downloadedBytes: 10_000, speed: 0 }, [], 6_000),
   {
-    averageSpeed: 2_000,
-    timeRemaining: 11,
+    averageSpeed: 0,
+    timeRemaining: 0,
   },
-  'progress metrics should use lifetime average when backend speed is unavailable',
+  'progress metrics should not invent active speed from createdAt when backend speed and observed samples are unavailable',
 );
 
 assert.equal(

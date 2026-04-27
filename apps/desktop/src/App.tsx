@@ -744,24 +744,22 @@ export default function App() {
               </div>
             </div>
             {isDownloadSectionExpanded ? (
-              <>
-                <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
-                  {DOWNLOAD_CATEGORIES.map((category) => (
-                    <NavItem
-                      key={category.id}
-                      icon={categoryIcon(category.iconName, 15)}
-                      label={category.label}
-                      count={counts.categories[category.id]}
-                      active={view === categoryView(category.id)}
-                      onClick={() => requestViewChange(categoryView(category.id))}
-                      branch
-                    />
-                  ))}
-                </div>
-                <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
-                <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
-              </>
+              <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+                {DOWNLOAD_CATEGORIES.map((category) => (
+                  <NavItem
+                    key={category.id}
+                    icon={categoryIcon(category.iconName, 15)}
+                    label={category.label}
+                    count={counts.categories[category.id]}
+                    active={view === categoryView(category.id)}
+                    onClick={() => requestViewChange(categoryView(category.id))}
+                    branch
+                  />
+                ))}
+              </div>
             ) : null}
+            <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
+            <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
             <div className="mt-2 border-t border-border/70 pt-2">
               <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                 Torrents

@@ -4,7 +4,7 @@ use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
     ResumeSupport, TransferKind,
 };
-use crate::torrent::{prepare_torrent_source, TorrentEngine};
+use crate::torrent::{pending_torrent_cleanup_info_hash, prepare_torrent_source, TorrentEngine};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
@@ -35,7 +35,7 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
-const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const DOWNLOAD_BUFFER_SIZE: usize = 512 * 1024;
 const SEGMENT_COMBINE_BUFFER_SIZE: usize = 1024 * 1024;
@@ -616,6 +616,7 @@ async fn run_torrent_download_attempt(
         }
         None => {
             let prepared_source = prepare_torrent_source(&task.url);
+            let pending_cleanup_info_hash = pending_torrent_cleanup_info_hash(&prepared_source);
             if prepared_source.fallback_trackers_added > 0 {
                 record_fallback_tracker_usage(
                     state,
@@ -644,10 +645,36 @@ async fn run_torrent_download_attempt(
                 TORRENT_METADATA_TIMEOUT,
                 TORRENT_METADATA_CONTROL_INTERVAL,
             )
-            .await?;
+            .await;
+            let add_outcome = match add_outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if is_torrent_metadata_timeout_error(&error) {
+                        cleanup_pending_torrent_metadata(
+                            engine.as_ref(),
+                            state,
+                            &task.id,
+                            pending_cleanup_info_hash.as_deref(),
+                        )
+                        .await;
+                    }
+                    return Err(error);
+                }
+            };
             match add_outcome {
                 TorrentAddOutcome::Added(engine_id) => engine_id,
-                TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                TorrentAddOutcome::Interrupted(outcome) => {
+                    if matches!(outcome, DownloadOutcome::Canceled) {
+                        cleanup_pending_torrent_metadata(
+                            engine.as_ref(),
+                            state,
+                            &task.id,
+                            pending_cleanup_info_hash.as_deref(),
+                        )
+                        .await;
+                    }
+                    return Ok(outcome);
+                }
             }
         }
     };
@@ -840,7 +867,7 @@ where
                         Some(job_id.to_string()),
                     )
                     .await;
-                return Err(download_error(FailureCategory::Torrent, message, true));
+                return Err(download_error(FailureCategory::Torrent, message, false));
             }
             _ = control_tick.tick() => {
                 match state.worker_control(job_id).await {
@@ -894,6 +921,48 @@ fn torrent_metadata_timeout_message() -> String {
         "Torrent metadata lookup timed out after {} seconds. Add trackers or retry later.",
         TORRENT_METADATA_TIMEOUT.as_secs()
     )
+}
+
+fn is_torrent_metadata_timeout_error(error: &DownloadError) -> bool {
+    error.category == FailureCategory::Torrent
+        && error
+            .message
+            .starts_with("Torrent metadata lookup timed out after ")
+}
+
+async fn cleanup_pending_torrent_metadata(
+    engine: &TorrentEngine,
+    state: &SharedState,
+    job_id: &str,
+    info_hash: Option<&str>,
+) {
+    let Some(info_hash) = info_hash else {
+        return;
+    };
+
+    match engine.forget_by_info_hash(info_hash).await {
+        Ok(true) => {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent",
+                    "Cleaned up pending torrent metadata session",
+                    Some(job_id.to_string()),
+                )
+                .await;
+        }
+        Ok(false) => {}
+        Err(message) => {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Warning,
+                    "torrent",
+                    format!("Could not clean up pending torrent metadata session: {message}"),
+                    Some(job_id.to_string()),
+                )
+                .await;
+        }
+    }
 }
 
 async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
@@ -1089,11 +1158,6 @@ async fn run_http_download_attempt(
         }
 
         let elapsed = sample_started.elapsed();
-        let speed = if elapsed.as_secs_f64() > 0.0 {
-            displayed_speed.record_sample(sample_bytes, elapsed)
-        } else {
-            0
-        };
 
         low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
         if low_speed_started.elapsed() >= profile.low_speed_window {
@@ -1116,6 +1180,7 @@ async fn run_http_download_attempt(
         }
 
         if elapsed >= PROGRESS_UPDATE_INTERVAL {
+            let speed = displayed_speed.record_sample(sample_bytes, elapsed);
             let should_persist = last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
             let snapshot = state
                 .update_job_progress(
@@ -2819,16 +2884,16 @@ mod tests {
         .expect_err("metadata timeout should fail");
 
         assert_eq!(error.category, FailureCategory::Torrent);
-        assert!(error.retryable);
+        assert!(!error.retryable);
         assert_eq!(
             error.message,
-            "Torrent metadata lookup timed out after 5 seconds. Add trackers or retry later."
+            "Torrent metadata lookup timed out after 60 seconds. Add trackers or retry later."
         );
     }
 
     #[test]
-    fn torrent_metadata_timeout_is_five_seconds() {
-        assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(5));
+    fn torrent_metadata_timeout_is_sixty_seconds() {
+        assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(60));
     }
 
     #[tokio::test]

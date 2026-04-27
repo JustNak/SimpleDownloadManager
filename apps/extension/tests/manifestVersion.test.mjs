@@ -4,23 +4,40 @@ import path from 'node:path';
 import {
   extensionDisplayVersion,
   extensionManifestVersion,
+  extensionVersionsFromPackage,
 } from '../scripts/version.mjs';
 
 assert.equal(extensionManifestVersion('0.2.9-alpha'), '0.2.9');
 assert.equal(extensionManifestVersion('1.4.7-beta.2'), '1.4.7');
 assert.equal(extensionManifestVersion('2.0.0'), '2.0.0');
 assert.equal(extensionDisplayVersion('0.2.9-alpha'), '0.2.9-alpha');
+assert.deepEqual(
+  extensionVersionsFromPackage({ version: '0.3.46-alpha' }),
+  {
+    browserExtensionVersion: '0.3.46',
+    displayVersion: '0.3.46-alpha',
+  },
+  'extension manifest versions should come from the extension package version, not the app package version',
+);
 
 const firefoxManifestPath = path.resolve('apps/extension/dist/firefox/manifest.json');
 const firefoxManifest = JSON.parse(await readFile(firefoxManifestPath, 'utf8'));
 const chromiumManifestPath = path.resolve('apps/extension/dist/chromium/manifest.json');
 const chromiumManifest = JSON.parse(await readFile(chromiumManifestPath, 'utf8'));
+const extensionPackage = JSON.parse(await readFile(path.resolve('apps/extension/package.json'), 'utf8'));
 const buildScript = await readFile(
   new URL('../scripts/build.mjs', import.meta.url),
   'utf8',
 );
 
 assert.equal(firefoxManifest.manifest_version, 2);
+assert.equal(
+  extensionPackage.version,
+  '0.3.46-alpha',
+  'extension package version should remain on its own release version even when the desktop app is bumped',
+);
+assert.equal(firefoxManifest.version_name, extensionPackage.version);
+assert.equal(chromiumManifest.version_name, extensionPackage.version);
 assert.deepEqual(firefoxManifest.background, { scripts: ['background.js'] });
 assert.equal(firefoxManifest.browser_action.default_title, 'Simple Download Manager');
 assert.deepEqual(firefoxManifest.icons, {

@@ -4054,6 +4054,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(download_dir);
     }
 
+    #[tokio::test]
+    async fn queued_torrent_task_preserves_resume_metadata() {
+        let download_dir = test_runtime_dir("torrent-task-resume-metadata");
+        let mut queued_job = download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0);
+        queued_job.transfer_kind = TransferKind::Torrent;
+        queued_job.target_path = download_dir.join("torrent-output").display().to_string();
+        queued_job.temp_path = download_dir
+            .join(".torrent-state")
+            .join("job_1")
+            .display()
+            .to_string();
+        queued_job.torrent = Some(TorrentInfo {
+            engine_id: Some(42),
+            info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+            seeding_started_at: Some(123_456),
+            ..TorrentInfo::default()
+        });
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![queued_job]);
+
+        let (_, tasks) = state
+            .claim_schedulable_jobs()
+            .await
+            .expect("claiming torrent job should work");
+
+        assert_eq!(tasks.len(), 1);
+        let torrent = tasks[0]
+            .torrent
+            .as_ref()
+            .expect("torrent resume metadata should be preserved");
+        assert_eq!(torrent.engine_id, Some(42));
+        assert_eq!(
+            torrent.info_hash.as_deref(),
+            Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8")
+        );
+        assert_eq!(torrent.seeding_started_at, Some(123_456));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
     #[test]
     fn seed_policy_defaults_to_forever_and_supports_limits() {
         let mut settings = Settings::default();

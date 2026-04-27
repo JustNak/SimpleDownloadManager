@@ -7,6 +7,7 @@ This file documents the Firefox-specific review and packaging rules for the Simp
 - Firefox uses the generated Manifest V2 output in `apps/extension/dist/firefox`.
 - Keep `manifest_version` at `2` for Firefox until the interception flow is intentionally migrated.
 - Alpha package versions must use a numeric `version` such as `0.3.45` and a human-readable `version_name` such as `0.3.45-alpha`.
+- The extension release version is sourced from `apps/extension/package.json` and may differ from the desktop/Tauri app version.
 - Keep `browser_specific_settings.gecko.strict_min_version` aligned with the AMO lint target used by the release scripts.
 - Declare `data_collection_permissions` when download URLs, referrer/page metadata, response headers, filename hints, content length, user download actions, or opt-in protected-download request headers are sent to the local native app.
 

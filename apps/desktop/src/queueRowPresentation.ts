@@ -36,13 +36,30 @@ export function clampQueueProgress(progress: number): number {
 }
 
 type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
-  Partial<Pick<DownloadJob, 'torrent' | 'transferKind' | 'totalBytes'>>;
+  Partial<Pick<DownloadJob, 'filename' | 'torrent' | 'transferKind' | 'totalBytes'>>;
 
 export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolean {
   if (job.transferKind !== 'torrent') return false;
   if (job.state !== 'starting' && job.state !== 'downloading') return false;
   if ((job.totalBytes ?? 0) > 0) return false;
-  return !job.torrent?.infoHash && !job.torrent?.name;
+  return !job.torrent?.name;
+}
+
+export function torrentActivitySummary(job: TorrentMetadataPendingJob): string {
+  return isTorrentMetadataPending(job) ? 'Finding metadata' : 'No peer activity yet';
+}
+
+export function torrentDisplayName(job: TorrentMetadataPendingJob): string {
+  const torrentName = job.torrent?.name?.trim();
+  if (torrentName) return torrentName;
+
+  const filename = job.filename?.trim();
+  if (filename) return filename;
+
+  const infoHash = job.torrent?.infoHash?.trim();
+  if (infoHash) return `Torrent ${infoHash.slice(0, 12)}`;
+
+  return 'Metadata pending';
 }
 
 export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueStatusPresentation {
