@@ -10,6 +10,23 @@
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -File "$INSTDIR\resources\install\register-native-host.ps1" -HostBinaryPath "$0" -InstallRoot "$INSTDIR"'
 
   done_postinstall:
+  StrCmp $PassiveMode 1 done_startup_options 0
+  IfSilent done_startup_options 0
+  StrCmp $UpdateMode 1 done_startup_options 0
+
+  MessageBox MB_YESNO|MB_ICONQUESTION "Start Simple Download Manager when Windows starts?" IDYES startup_options_yes IDNO done_startup_options
+
+  startup_options_yes:
+  MessageBox MB_YESNO|MB_ICONQUESTION "Start minimized to tray when Windows starts? This enables Tray Only startup mode." IDYES startup_options_tray IDNO startup_options_open
+
+  startup_options_open:
+  nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --installer-configure --installer-startup'
+  Goto done_startup_options
+
+  startup_options_tray:
+  nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --installer-configure --installer-startup --installer-tray'
+
+  done_startup_options:
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

@@ -351,6 +351,18 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub fn save_settings_sync(&self, mut settings: Settings) -> Result<(), String> {
+        validate_settings(&mut settings)?;
+
+        let persisted = {
+            let mut state = self.inner.blocking_write();
+            state.settings = settings;
+            state.persisted()
+        };
+
+        persist_state(&self.storage_path, &persisted)
+    }
+
     pub async fn settings(&self) -> Settings {
         let state = self.inner.read().await;
         state.settings.clone()
@@ -2719,6 +2731,30 @@ mod tests {
         let summary = state.queue_summary();
 
         assert_eq!(summary.attention, 2);
+    }
+
+    #[test]
+    fn save_settings_sync_persists_startup_preferences() {
+        let download_dir = test_runtime_dir("save-settings-sync");
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+        let mut settings = state.settings_sync();
+        settings.download_directory = download_dir.display().to_string();
+        settings.start_on_startup = true;
+        settings.startup_launch_mode = crate::storage::StartupLaunchMode::Tray;
+
+        state
+            .save_settings_sync(settings)
+            .expect("settings should persist synchronously");
+
+        let persisted = load_persisted_state(&download_dir.join("state.json"))
+            .expect("persisted state should load");
+        assert!(persisted.settings.start_on_startup);
+        assert_eq!(
+            persisted.settings.startup_launch_mode,
+            crate::storage::StartupLaunchMode::Tray
+        );
+
+        let _ = std::fs::remove_dir_all(download_dir);
     }
 
     #[test]

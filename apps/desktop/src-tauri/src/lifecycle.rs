@@ -14,6 +14,9 @@ use winreg::RegKey;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 const AUTOSTART_ARG: &str = "--autostart";
+const INSTALLER_CONFIGURE_ARG: &str = "--installer-configure";
+const INSTALLER_STARTUP_ARG: &str = "--installer-startup";
+const INSTALLER_TRAY_ARG: &str = "--installer-tray";
 const TRAY_MENU_OPEN: &str = "open";
 const TRAY_MENU_EXIT: &str = "exit";
 
@@ -23,6 +26,12 @@ pub struct MainWindowStatePolicy {
     pub position: bool,
     pub maximized: bool,
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallerLaunchOptions {
+    pub start_on_startup: bool,
+    pub startup_launch_mode: StartupLaunchMode,
 }
 
 pub fn initialize_app_lifecycle(app: &mut App, state: &SharedState) -> Result<(), String> {
@@ -56,6 +65,65 @@ where
 {
     args.into_iter()
         .any(|argument| argument.as_ref() == AUTOSTART_ARG)
+}
+
+pub fn installer_launch_options_from_args<I, S>(args: I) -> Option<InstallerLaunchOptions>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let arguments = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_string())
+        .collect::<Vec<_>>();
+
+    if !arguments
+        .iter()
+        .any(|argument| argument == INSTALLER_CONFIGURE_ARG)
+    {
+        return None;
+    }
+
+    let start_minimized = arguments
+        .iter()
+        .any(|argument| argument == INSTALLER_TRAY_ARG);
+    let start_on_startup = start_minimized
+        || arguments
+            .iter()
+            .any(|argument| argument == INSTALLER_STARTUP_ARG);
+
+    Some(InstallerLaunchOptions {
+        start_on_startup,
+        startup_launch_mode: if start_minimized {
+            StartupLaunchMode::Tray
+        } else {
+            StartupLaunchMode::Open
+        },
+    })
+}
+
+pub fn apply_installer_launch_options(settings: &mut Settings, options: InstallerLaunchOptions) {
+    settings.start_on_startup = options.start_on_startup;
+    settings.startup_launch_mode = options.startup_launch_mode;
+}
+
+pub fn apply_installer_launch_options_from_args<I, S>(
+    state: &SharedState,
+    args: I,
+) -> Result<bool, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let Some(options) = installer_launch_options_from_args(args) else {
+        return Ok(false);
+    };
+
+    let mut settings = state.settings_sync();
+    apply_installer_launch_options(&mut settings, options);
+    state.save_settings_sync(settings)?;
+    sync_autostart_setting(options.start_on_startup)?;
+    Ok(true)
 }
 
 pub fn should_show_main_window_on_startup(
@@ -317,6 +385,67 @@ mod tests {
             "simple-download-manager.exe",
             "--flag=--autostart",
         ]));
+    }
+
+    #[test]
+    fn ignores_installer_launch_options_without_configure_marker() {
+        assert_eq!(
+            super::installer_launch_options_from_args([
+                "simple-download-manager.exe",
+                "--installer-startup",
+                "--installer-tray",
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_installer_startup_launch_options() {
+        assert_eq!(
+            super::installer_launch_options_from_args([
+                "simple-download-manager.exe",
+                "--installer-configure",
+                "--installer-startup",
+            ]),
+            Some(super::InstallerLaunchOptions {
+                start_on_startup: true,
+                startup_launch_mode: crate::storage::StartupLaunchMode::Open,
+            })
+        );
+    }
+
+    #[test]
+    fn installer_tray_launch_option_implies_windows_startup() {
+        assert_eq!(
+            super::installer_launch_options_from_args([
+                "simple-download-manager.exe",
+                "--installer-configure",
+                "--installer-tray",
+            ]),
+            Some(super::InstallerLaunchOptions {
+                start_on_startup: true,
+                startup_launch_mode: crate::storage::StartupLaunchMode::Tray,
+            })
+        );
+    }
+
+    #[test]
+    fn applies_installer_launch_options_to_settings() {
+        let mut settings = crate::storage::Settings::default();
+
+        super::apply_installer_launch_options(
+            &mut settings,
+            super::InstallerLaunchOptions {
+                start_on_startup: true,
+                startup_launch_mode: crate::storage::StartupLaunchMode::Tray,
+            },
+        );
+
+        assert!(settings.start_on_startup);
+        assert_eq!(
+            settings.startup_launch_mode,
+            crate::storage::StartupLaunchMode::Tray
+        );
     }
 
     #[test]
