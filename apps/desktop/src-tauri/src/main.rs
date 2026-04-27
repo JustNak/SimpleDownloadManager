@@ -4,11 +4,28 @@ use simple_download_manager_desktop_backend::{commands, download, ipc, lifecycle
 use tauri::Manager;
 
 fn main() {
+    let shared_state = match state::SharedState::new() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("failed to initialize app state: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    match lifecycle::apply_installer_launch_options_from_args(&shared_state, std::env::args()) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("failed to apply installer startup options: {error}");
+            std::process::exit(1);
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .on_window_event(lifecycle::handle_window_event)
-        .setup(|app| {
-            let shared_state = state::SharedState::new()?;
+        .setup(move |app| {
+            let shared_state = shared_state.clone();
             let prompt_registry = prompts::PromptRegistry::default();
             let progress_batch_registry = commands::ProgressBatchRegistry::default();
             download::schedule_downloads(app.handle().clone(), shared_state.clone());
