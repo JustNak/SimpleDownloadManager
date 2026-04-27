@@ -11,6 +11,8 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
+  authenticatedHandoffEnabled: false,
+  authenticatedHandoffHosts: [],
 };
 
 export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
@@ -18,6 +20,7 @@ export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
     ...defaultExtensionSettings,
     excludedHosts: [...defaultExtensionSettings.excludedHosts],
     ignoredFileExtensions: [...defaultExtensionSettings.ignoredFileExtensions],
+    authenticatedHandoffHosts: [...defaultExtensionSettings.authenticatedHandoffHosts],
   };
 }
 
@@ -32,6 +35,13 @@ export function normalizeExtensionSettings(
     excludedHosts: Array.from(
       new Set(
         (settings?.excludedHosts ?? defaults.excludedHosts)
+          .map((host) => normalizeHost(host))
+          .filter(Boolean),
+      ),
+    ),
+    authenticatedHandoffHosts: Array.from(
+      new Set(
+        (settings?.authenticatedHandoffHosts ?? defaults.authenticatedHandoffHosts)
           .map((host) => normalizeHost(host))
           .filter(Boolean),
       ),

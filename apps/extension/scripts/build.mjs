@@ -34,7 +34,8 @@ const targets = [
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
       icons: extensionIcons,
-      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
+      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
+      host_permissions: ['<all_urls>'],
       background: {
         service_worker: 'background.js',
         type: 'module'

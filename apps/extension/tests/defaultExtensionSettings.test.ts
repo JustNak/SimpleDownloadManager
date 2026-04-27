@@ -8,6 +8,8 @@ import {
 
 assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, ['web.telegram.org']);
 assert.deepEqual(defaultExtensionSettings.excludedHosts, ['web.telegram.org']);
+assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, false);
+assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, []);
 assert.deepEqual(createDefaultExtensionSettings().excludedHosts, ['web.telegram.org']);
 
 assert.deepEqual(
@@ -28,4 +30,13 @@ assert.deepEqual(
   normalizeExtensionSettings({ excludedHosts: [] }).excludedHosts,
   [],
   'existing saved settings with an explicit empty list should not be migrated',
+);
+
+assert.deepEqual(
+  normalizeExtensionSettings({
+    authenticatedHandoffEnabled: true,
+    authenticatedHandoffHosts: [' https://ChatGPT.com/backend-api ', 'CHATGPT.COM', 'https://*.Example.com/downloads'],
+  }).authenticatedHandoffHosts,
+  ['chatgpt.com', '*.example.com'],
+  'authenticated handoff hosts should normalize URL input, wildcard patterns, and duplicates',
 );

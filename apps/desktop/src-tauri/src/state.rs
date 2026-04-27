@@ -2,13 +2,13 @@ use crate::storage::{
     default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
     BulkArchiveInfo, BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticEvent,
     DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt,
-    DownloadSource, ExtensionIntegrationSettings, FailureCategory, HostRegistrationDiagnostics,
-    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentSeedMode, TorrentSettings,
-    TransferKind,
+    DownloadSource, ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
+    HostRegistrationDiagnostics, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
+    MainWindowState, PersistedState, QueueSummary, ResumeSupport, Settings, TorrentInfo,
+    TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,6 +18,9 @@ use url::Url;
 const MAX_URL_LENGTH: usize = 2048;
 const SHA256_HEX_LENGTH: usize = 64;
 const DIAGNOSTIC_EVENT_LIMIT: usize = 100;
+const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
+const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
+const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -50,6 +53,7 @@ pub struct DownloadTask {
     pub url: String,
     pub transfer_kind: TransferKind,
     pub torrent: Option<TorrentInfo>,
+    pub handoff_auth: Option<HandoffAuth>,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
 }
@@ -114,6 +118,7 @@ pub struct EnqueueOptions {
     pub transfer_kind: Option<TransferKind>,
     pub duplicate_policy: DuplicatePolicy,
     pub bulk_archive: Option<BulkArchiveInfo>,
+    pub handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +145,7 @@ struct RuntimeState {
 pub struct SharedState {
     inner: Arc<RwLock<RuntimeState>>,
     storage_path: Arc<PathBuf>,
+    handoff_auth: Arc<RwLock<HashMap<String, HandoffAuth>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +209,7 @@ impl SharedState {
                 last_host_contact: None,
             })),
             storage_path: Arc::new(storage_path),
+            handoff_auth: Arc::new(RwLock::new(HashMap::new())),
         };
 
         state.persist_current_state_sync()?;
@@ -223,6 +230,7 @@ impl SharedState {
                 last_host_contact: None,
             })),
             storage_path: Arc::new(storage_path),
+            handoff_auth: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -500,6 +508,23 @@ impl SharedState {
         url: String,
         options: EnqueueOptions,
     ) -> Result<EnqueueResult, BackendError> {
+        let handoff_auth = options.handoff_auth.clone();
+        if let Some(auth) = handoff_auth.as_ref() {
+            if options
+                .source
+                .as_ref()
+                .map(|source| source.entry_point.as_str())
+                != Some("browser_download")
+            {
+                return Err(BackendError {
+                    code: "INVALID_PAYLOAD",
+                    message: "Authenticated handoff is only supported for browser downloads."
+                        .into(),
+                });
+            }
+            self.validate_handoff_auth_for_url(&url, auth).await?;
+        }
+
         let (result, persisted) = {
             let mut state = self.inner.write().await;
             let result = state.enqueue_download_in_memory(&url, options)?;
@@ -509,9 +534,34 @@ impl SharedState {
 
         if result.status == EnqueueStatus::Queued {
             persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+            if let Some(auth) = handoff_auth {
+                self.handoff_auth
+                    .write()
+                    .await
+                    .insert(result.job_id.clone(), auth);
+            }
         }
 
         Ok(result)
+    }
+
+    async fn validate_handoff_auth_for_url(
+        &self,
+        url: &str,
+        auth: &HandoffAuth,
+    ) -> Result<(), BackendError> {
+        validate_handoff_auth_headers(auth)?;
+        let settings = self.extension_integration_settings().await;
+        if !settings.authenticated_handoff_enabled
+            || !url_matches_host_patterns(url, &settings.authenticated_handoff_hosts)
+        {
+            return Err(BackendError {
+                code: "PERMISSION_DENIED",
+                message: "Authenticated handoff is not enabled for this host.".into(),
+            });
+        }
+
+        Ok(())
     }
 
     pub async fn prepare_download_prompt(
@@ -741,6 +791,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.clear_handoff_auth(id).await;
         Ok(snapshot)
     }
 
@@ -851,6 +902,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.clear_handoff_auth(id).await;
         Ok(snapshot)
     }
 
@@ -1135,6 +1187,7 @@ impl SharedState {
     pub async fn claim_schedulable_jobs(
         &self,
     ) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
+        let auth_by_job = self.handoff_auth.read().await.clone();
         let (snapshot, persisted, tasks) = {
             let mut state = self.inner.write().await;
             let active_download_workers = state
@@ -1182,6 +1235,7 @@ impl SharedState {
                         url: job.url.clone(),
                         transfer_kind: job.transfer_kind,
                         torrent: job.torrent.clone(),
+                        handoff_auth: auth_by_job.get(&job.id).cloned(),
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
                     };
@@ -1206,6 +1260,15 @@ impl SharedState {
         }
 
         Ok((snapshot, tasks))
+    }
+
+    pub async fn clear_handoff_auth(&self, id: &str) {
+        self.handoff_auth.write().await.remove(id);
+    }
+
+    #[cfg(test)]
+    async fn has_handoff_auth(&self, id: &str) -> bool {
+        self.handoff_auth.read().await.contains_key(id)
     }
 
     pub async fn worker_control(&self, id: &str) -> WorkerControl {
@@ -2028,31 +2091,9 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
         settings.listen_port = default_extension_listen_port();
     }
 
-    let mut normalized_hosts = Vec::new();
-    let mut seen_hosts = HashSet::new();
-
-    for host in &settings.excluded_hosts {
-        let mut host = host.trim().to_ascii_lowercase();
-        if let Some(stripped) = host.strip_prefix("http://") {
-            host = stripped.to_string();
-        } else if let Some(stripped) = host.strip_prefix("https://") {
-            host = stripped.to_string();
-        }
-        let host = host
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .trim_matches('/')
-            .to_string();
-
-        if host.is_empty() || !seen_hosts.insert(host.clone()) {
-            continue;
-        }
-
-        normalized_hosts.push(host);
-    }
-
-    settings.excluded_hosts = normalized_hosts;
+    settings.excluded_hosts = normalize_host_patterns(&settings.excluded_hosts);
+    settings.authenticated_handoff_hosts =
+        normalize_host_patterns(&settings.authenticated_handoff_hosts);
 
     let mut normalized_extensions = Vec::new();
     let mut seen_extensions = HashSet::new();
@@ -2071,6 +2112,169 @@ fn normalize_extension_settings(settings: &mut ExtensionIntegrationSettings) {
     }
 
     settings.ignored_file_extensions = normalized_extensions;
+}
+
+fn normalize_host_patterns(hosts: &[String]) -> Vec<String> {
+    let mut normalized_hosts = Vec::new();
+    let mut seen_hosts = HashSet::new();
+
+    for host in hosts {
+        let mut host = host.trim().to_ascii_lowercase();
+        if let Some(stripped) = host.strip_prefix("http://") {
+            host = stripped.to_string();
+        } else if let Some(stripped) = host.strip_prefix("https://") {
+            host = stripped.to_string();
+        }
+        let host = host
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_matches('/')
+            .trim_matches('.')
+            .to_string();
+
+        if host.is_empty()
+            || host.contains('\\')
+            || host.split_whitespace().count() > 1
+            || !host
+                .chars()
+                .any(|character| character.is_ascii_alphanumeric())
+            || !host.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '*' | '-')
+            })
+            || !seen_hosts.insert(host.clone())
+        {
+            continue;
+        }
+
+        normalized_hosts.push(host);
+    }
+
+    normalized_hosts
+}
+
+fn url_matches_host_patterns(url: &str, patterns: &[String]) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(hostname) = parsed.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    patterns.iter().any(|pattern| {
+        let normalized = normalize_host_patterns(&[pattern.clone()]);
+        let Some(pattern) = normalized.first() else {
+            return false;
+        };
+
+        if pattern.contains('*') {
+            wildcard_host_matches(&hostname, pattern)
+        } else {
+            hostname == *pattern || hostname.ends_with(&format!(".{pattern}"))
+        }
+    })
+}
+
+fn wildcard_host_matches(hostname: &str, pattern: &str) -> bool {
+    let host_labels = hostname.split('.').collect::<Vec<_>>();
+    let pattern_labels = pattern.split('.').collect::<Vec<_>>();
+    if host_labels.len() != pattern_labels.len() {
+        return false;
+    }
+
+    host_labels
+        .iter()
+        .zip(pattern_labels.iter())
+        .all(|(host_label, pattern_label)| wildcard_label_matches(host_label, pattern_label))
+}
+
+fn wildcard_label_matches(value: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    let mut remainder = value;
+    let mut first = true;
+    for part in pattern.split('*') {
+        if part.is_empty() {
+            first = false;
+            continue;
+        }
+
+        if first && !pattern.starts_with('*') {
+            let Some(stripped) = remainder.strip_prefix(part) else {
+                return false;
+            };
+            remainder = stripped;
+        } else if let Some(index) = remainder.find(part) {
+            remainder = &remainder[index + part.len()..];
+        } else {
+            return false;
+        }
+        first = false;
+    }
+
+    pattern.ends_with('*') || remainder.is_empty()
+}
+
+fn validate_handoff_auth_headers(auth: &HandoffAuth) -> Result<(), BackendError> {
+    if auth.headers.is_empty() || auth.headers.len() > MAX_HANDOFF_AUTH_HEADERS {
+        return Err(BackendError {
+            code: "INVALID_PAYLOAD",
+            message: "Authenticated handoff header count is not supported.".into(),
+        });
+    }
+
+    for header in &auth.headers {
+        validate_handoff_auth_header(header)?;
+    }
+
+    Ok(())
+}
+
+fn validate_handoff_auth_header(header: &HandoffAuthHeader) -> Result<(), BackendError> {
+    let name = header.name.trim();
+    if name.is_empty()
+        || name.len() > MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH
+        || header.value.len() > MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH
+        || name.contains(':')
+        || name.contains('\r')
+        || name.contains('\n')
+        || header.value.contains('\r')
+        || header.value.contains('\n')
+        || !is_allowed_handoff_auth_header(name)
+    {
+        return Err(BackendError {
+            code: "INVALID_PAYLOAD",
+            message: "Authenticated handoff header is not allowed.".into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_allowed_handoff_auth_header(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "cookie"
+            | "authorization"
+            | "referer"
+            | "origin"
+            | "user-agent"
+            | "accept"
+            | "accept-language"
+    ) || name.starts_with("sec-fetch-")
+        || name.starts_with("sec-ch-ua")
 }
 
 fn normalize_torrent_settings(settings: &mut TorrentSettings) {
@@ -2764,6 +2968,59 @@ mod tests {
             persisted.settings.startup_launch_mode,
             crate::storage::StartupLaunchMode::Tray
         );
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn authenticated_handoff_auth_is_memory_only_and_claimed_with_task() {
+        let download_dir = test_runtime_dir("auth-handoff-memory");
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+        let mut settings = state.settings().await;
+        settings.download_directory = download_dir.display().to_string();
+        settings.extension_integration.authenticated_handoff_enabled = true;
+        settings
+            .extension_integration
+            .authenticated_handoff_hosts
+            .push("chatgpt.com".into());
+        state.save_settings(settings).await.unwrap();
+
+        let auth = HandoffAuth {
+            headers: vec![HandoffAuthHeader {
+                name: "Cookie".into(),
+                value: "session=abc".into(),
+            }],
+        };
+        let result = state
+            .enqueue_download_with_options(
+                "https://chatgpt.com/backend-api/estuary/content?id=file_123".into(),
+                EnqueueOptions {
+                    source: Some(DownloadSource {
+                        entry_point: "browser_download".into(),
+                        browser: "chrome".into(),
+                        extension_version: "0.3.41".into(),
+                        page_url: None,
+                        page_title: None,
+                        referrer: None,
+                        incognito: Some(false),
+                    }),
+                    handoff_auth: Some(auth.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("allowlisted auth handoff should enqueue");
+
+        assert!(state.has_handoff_auth(&result.job_id).await);
+        let raw_state = std::fs::read_to_string(download_dir.join("state.json")).unwrap();
+        assert!(!raw_state.contains("session=abc"));
+
+        let (_snapshot, tasks) = state.claim_schedulable_jobs().await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].handoff_auth.as_ref(), Some(&auth));
+
+        state.clear_handoff_auth(&result.job_id).await;
+        assert!(!state.has_handoff_auth(&result.job_id).await);
 
         let _ = std::fs::remove_dir_all(download_dir);
     }
@@ -3938,6 +4195,7 @@ mod tests {
         SharedState {
             inner: Arc::new(RwLock::new(runtime_state_with_jobs(jobs))),
             storage_path: Arc::new(storage_path),
+            handoff_auth: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

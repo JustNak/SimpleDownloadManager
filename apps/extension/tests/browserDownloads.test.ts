@@ -25,6 +25,8 @@ async function main() {
     showBadgeStatus: true,
     excludedHosts: [],
     ignoredFileExtensions: [],
+    authenticatedHandoffEnabled: false,
+    authenticatedHandoffHosts: [],
   };
   assert.equal(
     browserDownloadUrl({

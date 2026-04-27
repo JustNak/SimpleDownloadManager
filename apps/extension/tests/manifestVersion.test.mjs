@@ -13,6 +13,8 @@ assert.equal(extensionDisplayVersion('0.2.9-alpha'), '0.2.9-alpha');
 
 const firefoxManifestPath = path.resolve('apps/extension/dist/firefox/manifest.json');
 const firefoxManifest = JSON.parse(await readFile(firefoxManifestPath, 'utf8'));
+const chromiumManifestPath = path.resolve('apps/extension/dist/chromium/manifest.json');
+const chromiumManifest = JSON.parse(await readFile(chromiumManifestPath, 'utf8'));
 const buildScript = await readFile(
   new URL('../scripts/build.mjs', import.meta.url),
   'utf8',
@@ -47,6 +49,16 @@ assert.deepEqual(
 assert.deepEqual(
   firefoxManifest.permissions,
   ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
+);
+assert.deepEqual(
+  chromiumManifest.permissions,
+  ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
+  'Chromium build should request webRequest for opt-in authenticated handoff header capture',
+);
+assert.deepEqual(
+  chromiumManifest.host_permissions,
+  ['<all_urls>'],
+  'Chromium webRequest header observation requires host permissions for download origins',
 );
 
 assert.match(

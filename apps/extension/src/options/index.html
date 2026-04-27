@@ -474,6 +474,32 @@
                   <div id="excluded-hosts" class="chips"></div>
                 </div>
               </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="label">Authenticated Handoff</div>
+                  <div class="description">For trusted hosts only, forward browser auth headers to the desktop app for protected downloads.</div>
+                </div>
+                <label class="switch" for="auth-handoff-toggle" aria-label="Authenticated Handoff">
+                  <input id="auth-handoff-toggle" type="checkbox" />
+                  <span class="track"></span>
+                  <span class="thumb"></span>
+                </label>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="label">Authenticated Hosts</div>
+                  <div class="description">Hostnames and wildcard patterns allowed to receive memory-only browser auth.</div>
+                </div>
+                <div>
+                  <div class="input-action">
+                    <input id="auth-host-input" type="text" placeholder="chatgpt.com or *.example.com" />
+                    <button id="add-auth-host-button" type="button" class="button">Add</button>
+                  </div>
+                  <div id="auth-hosts" class="chips"></div>
+                </div>
+              </div>
             </section>
 
             <section id="behavior" class="panel">

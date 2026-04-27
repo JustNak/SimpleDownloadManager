@@ -22,6 +22,11 @@ import {
   type FirefoxWebRequestDownloadCandidate,
   type FirefoxWebRequestDownloadDetails,
 } from './browserDownloads';
+import {
+  captureHandoffAuthHeaders,
+  takeCapturedHandoffAuth,
+  type HandoffAuthRequestDetails,
+} from './handoffAuth';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
@@ -30,9 +35,10 @@ const CONTEXT_MENU_ID = 'download-with-myapp';
 const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
 const activeBrowserDownloadIds = new Set<number>();
 const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
+let cachedExtensionSettings: ExtensionIntegrationSettings | null = null;
 
 async function ensureContextMenu() {
-  const settings = await getExtensionSettings();
+  const settings = await getCachedExtensionSettings();
   await browser.contextMenus.removeAll();
 
   if (!settings.enabled || !settings.contextMenuEnabled) {
@@ -55,14 +61,14 @@ async function refreshConnectionState() {
     return response;
   }
 
-  const state = await setLastResult('connected', response);
+  const state = rememberStateSettings(await setLastResult('connected', response));
   await ensureContextMenu();
   await updateBrowserBadge(state);
   return response;
 }
 
 async function handleContextMenuClick(info: browser.contextMenus.OnClickData, tab?: browser.tabs.Tab) {
-  const settings = await getExtensionSettings();
+  const settings = await getCachedExtensionSettings();
   if (!settings.enabled || !settings.contextMenuEnabled) {
     return;
   }
@@ -83,7 +89,7 @@ async function handleContextMenuClick(info: browser.contextMenus.OnClickData, ta
     return;
   }
 
-  const state = await setLastResult('connected', response);
+  const state = rememberStateSettings(await setLastResult('connected', response));
   await updateBrowserBadge(state);
 }
 
@@ -97,7 +103,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
     return;
   }
 
-  let settings = await getExtensionSettings();
+  let settings = await getCachedExtensionSettings();
   if (!shouldHandleBrowserDownload(item, settings)) {
     return;
   }
@@ -114,8 +120,8 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
       return;
     }
 
-    await setLastResult('connected', pingResponse);
-    settings = getSyncedSettings(pingResponse, settings);
+    rememberStateSettings(await setLastResult('connected', pingResponse));
+    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
       await restoreBrowserDownloadFallback(item);
       return;
@@ -131,12 +137,12 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
 
     if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
       await discardBrowserDownload(browser.downloads, item.id);
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
       return;
     }
 
-    const state = await setLastResult('connected', response);
+    const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
     await restoreBrowserDownloadFallback(item);
   } catch (error) {
@@ -167,7 +173,7 @@ async function handleBrowserDownloadDeterminingFilename(
     return;
   }
 
-  let settings = await getExtensionSettings();
+  let settings = await getCachedExtensionSettings();
   if (!shouldHandleBrowserDownload(item, settings)) {
     suggestBrowserDownload(item, suggest);
     return;
@@ -186,8 +192,8 @@ async function handleBrowserDownloadDeterminingFilename(
       return;
     }
 
-    await setLastResult('connected', pingResponse);
-    settings = getSyncedSettings(pingResponse, settings);
+    rememberStateSettings(await setLastResult('connected', pingResponse));
+    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
       await restoreBrowserDownloadFallback(item, releaseFilename);
       return;
@@ -205,12 +211,12 @@ async function handleBrowserDownloadDeterminingFilename(
       await discardBrowserDownloadBeforeFilenameRelease(browser.downloads, item.id, () => {
         releaseFilename();
       });
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
       return;
     }
 
-    const state = await setLastResult('connected', response);
+    const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
     await restoreBrowserDownloadFallback(item, releaseFilename);
   } catch (error) {
@@ -265,7 +271,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
       return getPopupState();
     }
     case 'extension_settings_update': {
-      const cachedSettings = await setExtensionSettings(message.settings);
+      const cachedSettings = rememberSettings(await setExtensionSettings(message.settings));
       await ensureContextMenu();
       const response = await saveExtensionSettings(cachedSettings);
       if (isErrorResponse(response)) {
@@ -275,7 +281,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
         return state;
       }
 
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await ensureContextMenu();
       await updateBrowserBadge(state);
       return state;
@@ -291,7 +297,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
         return response;
       }
 
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
       return response;
     }
@@ -309,7 +315,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
         return response;
       }
 
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
       return response;
     }
@@ -319,6 +325,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
 });
 
 void refreshConnectionState();
+registerHandoffAuthHeaderCapture();
 
 function shouldSkipBrowserDownloadInterception(item: browser.downloads.DownloadItem): boolean {
   return shouldBypassBrowserDownload(item, browserDownloadFallbackBypass)
@@ -336,14 +343,23 @@ async function handOffBrowserDownload(
     extensionVersion: browser.runtime.getManifest().version,
     incognito: item.incognito,
   };
+  const handoffAuth = takeCapturedHandoffAuth(
+    {
+      requestId: 'requestId' in item ? item.requestId : undefined,
+      url,
+      incognito: item.incognito,
+    },
+    settings,
+  );
 
   if (settings.downloadHandoffMode === 'auto') {
-    return enqueueDownload(url, source);
+    return enqueueDownload(url, source, handoffAuth);
   }
 
   return promptDownload(url, source, {
     suggestedFilename: basenameOnly(item.filename),
     totalBytes: item.totalBytes && item.totalBytes > 0 ? item.totalBytes : undefined,
+    handoffAuth,
   });
 }
 
@@ -382,7 +398,7 @@ async function handleFirefoxWebRequestDownload(
   candidate: FirefoxWebRequestDownloadCandidate,
   initialSettings: ExtensionIntegrationSettings,
 ): Promise<void> {
-  let settings = initialSettings;
+  let settings = rememberSettings(initialSettings);
 
   try {
     const pingResponse = await pingNativeHost();
@@ -392,8 +408,8 @@ async function handleFirefoxWebRequestDownload(
       return;
     }
 
-    await setLastResult('connected', pingResponse);
-    settings = getSyncedSettings(pingResponse, settings);
+    rememberStateSettings(await setLastResult('connected', pingResponse));
+    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload({ url: candidate.url, filename: candidate.filename }, settings)) {
       await restoreFirefoxWebRequestFallback(candidate);
       return;
@@ -408,13 +424,13 @@ async function handleFirefoxWebRequestDownload(
     }
 
     if (!shouldDiscardBrowserDownloadAfterHandoff(response)) {
-      const state = await setLastResult('connected', response);
+      const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
       await restoreFirefoxWebRequestFallback(candidate);
       return;
     }
 
-    const state = await setLastResult('connected', response);
+    const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
   } catch (error) {
     const state = await setHostError(
@@ -476,6 +492,26 @@ function getSyncedSettings(response: HostToExtensionResponse, fallback: Extensio
 
   const payload = response.payload as PongPayload;
   return payload.extensionSettings ?? fallback;
+}
+
+async function getCachedExtensionSettings(): Promise<ExtensionIntegrationSettings> {
+  if (cachedExtensionSettings) {
+    return cachedExtensionSettings;
+  }
+
+  return rememberSettings(await getExtensionSettings());
+}
+
+function rememberSettings(settings: ExtensionIntegrationSettings): ExtensionIntegrationSettings {
+  cachedExtensionSettings = settings;
+  return settings;
+}
+
+function rememberStateSettings<TState extends { extensionSettings?: ExtensionIntegrationSettings }>(state: TState): TState {
+  if (state.extensionSettings) {
+    rememberSettings(state.extensionSettings);
+  }
+  return state;
 }
 
 async function updateBrowserBadge(state: PopupStateResponse) {
@@ -544,6 +580,29 @@ function registerFirefoxWebRequestInterception(): void {
   );
 }
 
+function registerHandoffAuthHeaderCapture(): void {
+  const webRequest = getWebRequestApi();
+  if (!webRequest?.onBeforeSendHeaders) {
+    return;
+  }
+
+  const listener = (details: HandoffAuthRequestDetails): void => {
+    void Promise.resolve(getCachedExtensionSettings())
+      .then((settings) => captureHandoffAuthHeaders(details, settings))
+      .catch(() => undefined);
+  };
+  const filter = {
+    urls: ['http://*/*', 'https://*/*'],
+    types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other'],
+  };
+
+  try {
+    webRequest.onBeforeSendHeaders.addListener(listener, filter, ['requestHeaders', 'extraHeaders']);
+  } catch {
+    webRequest.onBeforeSendHeaders.addListener(listener, filter, ['requestHeaders']);
+  }
+}
+
 async function handleFirefoxWebRequestHeadersReceived(
   details: FirefoxWebRequestDownloadDetails,
 ): Promise<{ cancel?: boolean }> {
@@ -552,7 +611,7 @@ async function handleFirefoxWebRequestHeadersReceived(
       return {};
     }
 
-    const settings = await getExtensionSettings();
+    const settings = await getCachedExtensionSettings();
     const candidate = firefoxWebRequestDownloadCandidate(details, settings);
     if (!candidate) {
       return {};
@@ -594,6 +653,14 @@ function getFirefoxWebRequestApi(): FirefoxWebRequestApi | null {
   return runtimeBrowser.webRequest?.onHeadersReceived ? runtimeBrowser.webRequest : null;
 }
 
+function getWebRequestApi(): BrowserWebRequestApi | null {
+  const runtimeBrowser = browser as typeof browser & {
+    webRequest?: BrowserWebRequestApi;
+  };
+
+  return runtimeBrowser.webRequest ?? null;
+}
+
 function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: BrowserDownloadFilenameSuggest) {
   const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url);
   if (filename) {
@@ -624,6 +691,7 @@ async function openOptionsPage() {
 }
 
 type BrowserDownloadHandoffItem = {
+  requestId?: string;
   filename?: string;
   totalBytes?: number;
   incognito?: boolean;
@@ -635,6 +703,16 @@ type FirefoxWebRequestApi = {
       listener: (details: FirefoxWebRequestDownloadDetails) => Promise<{ cancel?: boolean }> | { cancel?: boolean },
       filter: { urls: string[]; types: string[] },
       extraInfoSpec: string[],
+    ): void;
+  };
+};
+
+type BrowserWebRequestApi = FirefoxWebRequestApi & {
+  onBeforeSendHeaders?: {
+    addListener(
+      listener: (details: HandoffAuthRequestDetails) => void,
+      filter: { urls: string[]; types?: string[] },
+      extraInfoSpec?: string[],
     ): void;
   };
 };

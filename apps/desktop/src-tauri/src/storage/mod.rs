@@ -122,6 +122,19 @@ pub struct DownloadSource {
     pub incognito: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffAuthHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffAuth {
+    pub headers: Vec<HandoffAuthHeader>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadJob {
@@ -279,6 +292,10 @@ pub struct ExtensionIntegrationSettings {
     pub excluded_hosts: Vec<String>,
     #[serde(default)]
     pub ignored_file_extensions: Vec<String>,
+    #[serde(default)]
+    pub authenticated_handoff_enabled: bool,
+    #[serde(default)]
+    pub authenticated_handoff_hosts: Vec<String>,
 }
 
 const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
@@ -437,6 +454,8 @@ impl Default for ExtensionIntegrationSettings {
                 .map(|host| (*host).to_string())
                 .collect(),
             ignored_file_extensions: Vec::new(),
+            authenticated_handoff_enabled: false,
+            authenticated_handoff_hosts: Vec::new(),
         }
     }
 }

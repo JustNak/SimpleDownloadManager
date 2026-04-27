@@ -64,6 +64,7 @@ export type FirefoxWebRequestHeader = {
   value?: string;
 };
 export type FirefoxWebRequestDownloadDetails = {
+  requestId?: string;
   url: string;
   method?: string;
   type?: string;
@@ -71,6 +72,7 @@ export type FirefoxWebRequestDownloadDetails = {
   incognito?: boolean;
 };
 export type FirefoxWebRequestDownloadCandidate = {
+  requestId?: string;
   url: string;
   filename?: string;
   totalBytes?: number;
@@ -187,6 +189,7 @@ export function firefoxWebRequestDownloadCandidate(
   }
 
   return {
+    ...(details.requestId ? { requestId: details.requestId } : {}),
     url,
     filename,
     totalBytes: positiveIntegerHeader(details.responseHeaders, 'content-length'),

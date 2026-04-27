@@ -115,6 +115,8 @@ export interface ExtensionIntegrationSettings {
   showBadgeStatus: boolean;
   excludedHosts: string[];
   ignoredFileExtensions: string[];
+  authenticatedHandoffEnabled: boolean;
+  authenticatedHandoffHosts: string[];
 }
 
 export interface TorrentSettings {

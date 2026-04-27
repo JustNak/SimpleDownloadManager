@@ -5,6 +5,9 @@ use url::Url;
 pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_URL_LENGTH: usize = 2048;
 const MAX_METADATA_LENGTH: usize = 512;
+const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
+const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
+const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
 
 type HostResult<T> = Result<T, Box<HostResponseEnvelope>>;
 
@@ -35,9 +38,22 @@ pub struct RequestSource {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HandoffAuthHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct HandoffAuth {
+    pub headers: Vec<HandoffAuthHeader>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnqueueDownloadPayload {
     pub url: String,
     pub source: RequestSource,
+    #[serde(rename = "handoffAuth")]
+    pub handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -48,6 +64,8 @@ pub struct PromptDownloadPayload {
     pub suggested_filename: Option<String>,
     #[serde(rename = "totalBytes")]
     pub total_bytes: Option<u64>,
+    #[serde(rename = "handoffAuth")]
+    pub handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -183,6 +201,11 @@ pub fn parse_enqueue_payload(
 
     payload.url = validate_http_url(&request.request_id, &payload.url)?;
     validate_request_source(&request.request_id, &payload.source)?;
+    validate_handoff_auth(
+        &request.request_id,
+        payload.handoff_auth.as_ref(),
+        &payload.source,
+    )?;
     Ok(payload)
 }
 
@@ -201,6 +224,11 @@ pub fn parse_prompt_download_payload(
 
     payload.url = validate_http_url(&request.request_id, &payload.url)?;
     validate_request_source(&request.request_id, &payload.source)?;
+    validate_handoff_auth(
+        &request.request_id,
+        payload.handoff_auth.as_ref(),
+        &payload.source,
+    )?;
     validate_metadata_field(
         &request.request_id,
         "suggestedFilename",
@@ -249,6 +277,65 @@ pub fn validate_http_url(request_id: &str, raw_url: &str) -> HostResult<String> 
             "Only http, https, and magnet URLs are supported.",
         ))),
     }
+}
+
+fn validate_handoff_auth(
+    request_id: &str,
+    auth: Option<&HandoffAuth>,
+    source: &RequestSource,
+) -> HostResult<()> {
+    let Some(auth) = auth else {
+        return Ok(());
+    };
+
+    if source.entry_point != "browser_download" {
+        return Err(invalid_payload(
+            request_id,
+            "Authenticated handoff is only supported for browser downloads.",
+        ));
+    }
+
+    if auth.headers.is_empty() || auth.headers.len() > MAX_HANDOFF_AUTH_HEADERS {
+        return Err(invalid_payload(
+            request_id,
+            "Authenticated handoff header count is not supported.",
+        ));
+    }
+
+    for header in &auth.headers {
+        if !is_allowed_handoff_auth_header(header.name.as_str())
+            || header.name.is_empty()
+            || header.name.len() > MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH
+            || header.value.len() > MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH
+            || header.name.contains(':')
+            || header.name.contains('\r')
+            || header.name.contains('\n')
+            || header.value.contains('\r')
+            || header.value.contains('\n')
+        {
+            return Err(invalid_payload(
+                request_id,
+                "Authenticated handoff header is not allowed.",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_allowed_handoff_auth_header(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "cookie"
+            | "authorization"
+            | "referer"
+            | "origin"
+            | "user-agent"
+            | "accept"
+            | "accept-language"
+    ) || name.starts_with("sec-fetch-")
+        || name.starts_with("sec-ch-ua")
 }
 
 fn validate_request_source(request_id: &str, source: &RequestSource) -> HostResult<()> {
@@ -449,6 +536,82 @@ mod tests {
 
         let error =
             parse_enqueue_payload(&request).expect_err("unknown entry point should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
+    }
+
+    #[test]
+    fn parse_enqueue_payload_accepts_allowed_handoff_auth_headers() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+                "source": {
+                    "entryPoint": "browser_download",
+                    "browser": "firefox",
+                    "extensionVersion": "0.3.42"
+                },
+                "handoffAuth": {
+                    "headers": [
+                        { "name": "Cookie", "value": "session=abc" },
+                        { "name": "Sec-Fetch-Site", "value": "same-origin" }
+                    ]
+                }
+            }),
+        );
+
+        let payload = parse_enqueue_payload(&request).expect("auth headers should be accepted");
+        let auth = payload
+            .handoff_auth
+            .expect("payload should carry validated auth headers");
+
+        assert_eq!(auth.headers.len(), 2);
+        assert_eq!(auth.headers[0].name, "Cookie");
+        assert_eq!(auth.headers[0].value, "session=abc");
+    }
+
+    #[test]
+    fn parse_enqueue_payload_rejects_disallowed_handoff_auth_headers() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+                "source": {
+                    "entryPoint": "browser_download",
+                    "browser": "firefox",
+                    "extensionVersion": "0.3.42"
+                },
+                "handoffAuth": {
+                    "headers": [
+                        { "name": "Range", "value": "bytes=0-" }
+                    ]
+                }
+            }),
+        );
+
+        let error =
+            parse_enqueue_payload(&request).expect_err("range auth header should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
+    }
+
+    #[test]
+    fn parse_enqueue_payload_rejects_handoff_auth_outside_browser_downloads() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+                "source": valid_source(),
+                "handoffAuth": {
+                    "headers": [
+                        { "name": "Cookie", "value": "session=abc" }
+                    ]
+                }
+            }),
+        );
+
+        let error =
+            parse_enqueue_payload(&request).expect_err("non-browser auth should be rejected");
 
         assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
     }

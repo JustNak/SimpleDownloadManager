@@ -15,7 +15,8 @@ MVP rules:
 - reject local file paths
 - reject browser-internal URLs
 - do not accept save path from the extension
-- do not accept cookies, headers, or session replay material
+- do not accept cookies, headers, or session replay material by default
+- accept bounded browser auth headers only for explicit authenticated handoff hosts; keep them memory-only, redact them from diagnostics, and never persist them
 - cap metadata sizes
 - sanitize filenames in the desktop app
 - log request origin fields

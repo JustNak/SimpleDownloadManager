@@ -31,6 +31,8 @@ function makeSettings(theme: Settings['theme']): Settings {
       showBadgeStatus: true,
       excludedHosts: [],
       ignoredFileExtensions: [],
+      authenticatedHandoffEnabled: false,
+      authenticatedHandoffHosts: [],
     },
   };
 }

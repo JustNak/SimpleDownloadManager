@@ -140,6 +140,8 @@ export default function App() {
       showBadgeStatus: true,
       excludedHosts: [],
       ignoredFileExtensions: [],
+      authenticatedHandoffEnabled: false,
+      authenticatedHandoffHosts: [],
     },
   });
   const [toasts, setToasts] = useState<ToastMessage[]>([]);

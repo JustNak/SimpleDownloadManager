@@ -5,7 +5,7 @@ use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
 use crate::storage::{
-    ConnectionState, DiagnosticLevel, DownloadSource, ExtensionIntegrationSettings,
+    ConnectionState, DiagnosticLevel, DownloadSource, ExtensionIntegrationSettings, HandoffAuth,
     HostRegistrationDiagnostics, HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
@@ -82,6 +82,7 @@ impl From<EnqueueSource> for DownloadSource {
 struct EnqueuePayload {
     url: String,
     source: EnqueueSource,
+    handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +92,7 @@ struct PromptDownloadPayload {
     source: EnqueueSource,
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
+    handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Serialize)]
@@ -443,6 +445,7 @@ async fn handle_request(
                                 source: prompt.source,
                                 directory_override,
                                 filename_hint: Some(prompt.filename),
+                                handoff_auth: payload.handoff_auth,
                                 duplicate_policy: if allow_duplicate {
                                     DuplicatePolicy::Allow
                                 } else {
@@ -484,7 +487,14 @@ async fn handle_request(
             };
 
             match state
-                .enqueue_download(payload.url, Some(payload.source.into()))
+                .enqueue_download_with_options(
+                    payload.url,
+                    EnqueueOptions {
+                        source: Some(payload.source.into()),
+                        handoff_auth: payload.handoff_auth,
+                        ..Default::default()
+                    },
+                )
                 .await
             {
                 Ok(result) => {

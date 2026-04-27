@@ -14,6 +14,8 @@ const defaultSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [],
   ignoredFileExtensions: [],
+  authenticatedHandoffEnabled: false,
+  authenticatedHandoffHosts: [],
 };
 
 function details(update: Partial<FirefoxWebRequestDownloadDetails>): FirefoxWebRequestDownloadDetails {

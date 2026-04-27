@@ -60,6 +60,8 @@ const defaultSettings: Settings = {
     showBadgeStatus: true,
     excludedHosts: [],
     ignoredFileExtensions: [],
+    authenticatedHandoffEnabled: false,
+    authenticatedHandoffHosts: [],
   },
 };
 

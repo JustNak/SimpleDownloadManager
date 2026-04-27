@@ -92,6 +92,7 @@ export function SettingsPage({
   const [excludedBulkInput, setExcludedBulkInput] = useState('');
   const [excludedSearchQuery, setExcludedSearchQuery] = useState('');
   const [isExcludedSitesDialogOpen, setIsExcludedSitesDialogOpen] = useState(false);
+  const [authHostInput, setAuthHostInput] = useState('');
   const [accentColorInput, setAccentColorInput] = useState(normalizeAccentColor(settings.accentColor));
 
   formDataRef.current = formData;
@@ -110,6 +111,7 @@ export function SettingsPage({
     setExcludedBulkInput('');
     setExcludedSearchQuery('');
     setIsExcludedSitesDialogOpen(false);
+    setAuthHostInput('');
     setAccentColorInput(normalizeAccentColor(settings.accentColor));
   }, [settings]);
 
@@ -201,6 +203,18 @@ export function SettingsPage({
   const handleRemoveExcludedHost = (host: string) => {
     updateExtensionIntegration({
       excludedHosts: removeExcludedHost(formData.extensionIntegration.excludedHosts, host),
+    });
+  };
+
+  const handleAddAuthHost = () => {
+    const nextHosts = addExcludedHosts(formData.extensionIntegration.authenticatedHandoffHosts, [authHostInput]).hosts;
+    updateExtensionIntegration({ authenticatedHandoffHosts: nextHosts });
+    setAuthHostInput('');
+  };
+
+  const handleRemoveAuthHost = (host: string) => {
+    updateExtensionIntegration({
+      authenticatedHandoffHosts: removeExcludedHost(formData.extensionIntegration.authenticatedHandoffHosts, host),
     });
   };
 
@@ -682,6 +696,59 @@ export function SettingsPage({
               <Ban size={15} />
               Configure Sites
             </button>
+          </FieldRow>
+          <FieldRow label="Authenticated Handoff" description="Forward memory-only browser auth for trusted hosts." tooltip="Use only for sites that require browser session cookies, such as protected generated files. Auth headers are not persisted or included in diagnostics.">
+            <ToggleSwitch
+              id="authenticatedHandoffEnabled"
+              checked={formData.extensionIntegration.authenticatedHandoffEnabled}
+              onChange={(checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked })}
+              disabled={!formData.extensionIntegration.enabled}
+            />
+          </FieldRow>
+          <FieldRow label="Authenticated Hosts" description="Trusted hostnames and wildcard patterns." tooltip="Only these hosts can receive captured browser auth headers during browser download handoff.">
+            <div className="min-w-0 space-y-2">
+              <div className="flex min-w-0 gap-2">
+                <input
+                  value={authHostInput}
+                  onChange={(event) => setAuthHostInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      handleAddAuthHost();
+                    }
+                  }}
+                  disabled={!formData.extensionIntegration.enabled || !formData.extensionIntegration.authenticatedHandoffEnabled}
+                  placeholder="chatgpt.com or *.example.com"
+                  className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddAuthHost}
+                  disabled={!formData.extensionIntegration.enabled || !formData.extensionIntegration.authenticatedHandoffEnabled}
+                  className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Plus size={15} />
+                  Add
+                </button>
+              </div>
+              <div className="flex max-w-xl flex-wrap gap-2">
+                {formData.extensionIntegration.authenticatedHandoffHosts.length === 0 ? (
+                  <span className="text-xs text-muted-foreground">No authenticated hosts configured.</span>
+                ) : (
+                  formData.extensionIntegration.authenticatedHandoffHosts.map((host) => (
+                    <button
+                      key={host}
+                      type="button"
+                      onClick={() => handleRemoveAuthHost(host)}
+                      className="max-w-full truncate rounded-md border border-border bg-surface px-2.5 py-1 text-xs font-medium text-foreground transition hover:border-danger hover:text-danger"
+                      title={`Remove ${host}`}
+                    >
+                      {host}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
           </FieldRow>
         </SettingsPanel>
         </section>

@@ -10,6 +10,7 @@ import {
   type EnqueueDownloadPayload,
   type ErrorCode,
   type ExtensionIntegrationSettings,
+  type HandoffAuth,
   type HostToExtensionResponse,
   type RequestSource,
 } from '@myapp/protocol';
@@ -106,8 +107,12 @@ export async function openApp(): Promise<HostToExtensionResponse> {
   return sendNativeMessage(createOpenAppRequest({ reason: 'user_request' }));
 }
 
-export async function enqueueDownload(url: string, source: Omit<RequestSource, 'browser'>): Promise<HostToExtensionResponse> {
-  const request = createEnqueueDownloadRequest(url, { ...source, browser: detectBrowser() });
+export async function enqueueDownload(
+  url: string,
+  source: Omit<RequestSource, 'browser'>,
+  handoffAuth?: HandoffAuth,
+): Promise<HostToExtensionResponse> {
+  const request = createEnqueueDownloadRequest(url, { ...source, browser: detectBrowser() }, undefined, handoffAuth);
   if (!request.ok) {
     return {
       ok: false,
@@ -124,7 +129,7 @@ export async function enqueueDownload(url: string, source: Omit<RequestSource, '
 export async function promptDownload(
   url: string,
   source: Omit<RequestSource, 'browser'>,
-  metadata: { suggestedFilename?: string; totalBytes?: number } = {},
+  metadata: { suggestedFilename?: string; totalBytes?: number; handoffAuth?: HandoffAuth } = {},
 ): Promise<HostToExtensionResponse> {
   const request = createPromptDownloadRequest(url, { ...source, browser: detectBrowser() }, metadata);
   if (!request.ok) {

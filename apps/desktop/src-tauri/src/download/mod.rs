@@ -1,13 +1,17 @@
 use crate::commands::emit_snapshot;
 use crate::state::{should_stop_seeding, BulkArchiveReady, SharedState, WorkerControl};
 use crate::storage::{
-    BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, ResumeSupport,
-    TransferKind,
+    BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
+    ResumeSupport, TransferKind,
 };
 use crate::torrent::{prepare_torrent_source, TorrentEngine};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
-use reqwest::header::{ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE, RANGE};
+use reqwest::header::{
+    HeaderName, HeaderValue, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE,
+    LOCATION, RANGE,
+};
+use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,6 +111,7 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
             }
         }
 
+        state.clear_handoff_auth(&task.id).await;
         schedule_downloads(app, state);
     });
 }
@@ -209,6 +214,7 @@ struct SegmentWorkerContext {
     client: Client,
     job_id: String,
     url: String,
+    handoff_auth: Option<HandoffAuth>,
     temp_path: PathBuf,
     total_bytes: u64,
     profile: DownloadPerformanceProfile,
@@ -372,6 +378,7 @@ fn download_client() -> Result<Client, DownloadError> {
         .pool_max_idle_per_host(16)
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .http2_adaptive_window(true)
+        .redirect(Policy::none())
         .user_agent("SimpleDownloadManager/0.2")
         .build()
         .map_err(|error| format!("Could not create download client: {error}"))?;
@@ -817,14 +824,16 @@ async fn run_http_download_attempt(
     let speed_limit = state.speed_limit_bytes_per_second().await;
     let profile = performance_profile(state.download_performance_mode().await);
 
-    let mut preflight_metadata = preflight_download(&client, &task.url).await;
+    let mut preflight_metadata =
+        preflight_download(&client, &task.url, task.handoff_auth.as_ref()).await;
 
     if existing_bytes == 0
         && speed_limit.is_none()
         && profile.max_segments >= 2
         && !range_backoffs().is_backed_off(&task.url, Instant::now())
     {
-        let probe_metadata = probe_range_metadata(&client, &task.url).await;
+        let probe_metadata =
+            probe_range_metadata(&client, &task.url, task.handoff_auth.as_ref()).await;
         match probe_metadata {
             Some(metadata) => {
                 preflight_metadata = Some(merge_preflight_metadata(preflight_metadata, metadata));
@@ -849,7 +858,13 @@ async fn run_http_download_attempt(
         }
     }
 
-    let mut response = send_request(&client, &task.url, existing_bytes).await?;
+    let mut response = send_request(
+        &client,
+        &task.url,
+        existing_bytes,
+        task.handoff_auth.as_ref(),
+    )
+    .await?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
 
     if existing_bytes > 0 && !supports_resume {
@@ -865,7 +880,7 @@ async fn run_http_download_attempt(
             )
             .await?;
         emit_snapshot(app, &snapshot);
-        response = send_request(&client, &task.url, 0).await?;
+        response = send_request(&client, &task.url, 0, task.handoff_auth.as_ref()).await?;
     }
 
     let total_bytes = derive_total_bytes(&response, existing_bytes).or_else(|| {
@@ -1225,8 +1240,12 @@ fn plan_segmented_ranges(
     })
 }
 
-async fn probe_range_metadata(client: &Client, url: &str) -> Option<PreflightMetadata> {
-    let response = send_range_request(client, url, ByteRange { start: 0, end: 0 })
+async fn probe_range_metadata(
+    client: &Client,
+    url: &str,
+    handoff_auth: Option<&HandoffAuth>,
+) -> Option<PreflightMetadata> {
+    let response = send_range_request(client, url, ByteRange { start: 0, end: 0 }, handoff_auth)
         .await
         .ok()?;
 
@@ -1320,6 +1339,7 @@ async fn run_segmented_download_attempt(
         client: client.clone(),
         job_id: task.id.clone(),
         url: task.url.clone(),
+        handoff_auth: task.handoff_auth.clone(),
         temp_path: task.temp_path.clone(),
         total_bytes: plan.total_bytes,
         profile,
@@ -1448,7 +1468,14 @@ async fn download_segment_worker(
             start: segment.range.start + current_len,
             end: segment.range.end,
         };
-        let response = match send_range_request(&context.client, &context.url, requested).await {
+        let response = match send_range_request(
+            &context.client,
+            &context.url,
+            requested,
+            context.handoff_auth.as_ref(),
+        )
+        .await
+        {
             Ok(response) => response,
             Err(error) => {
                 if error.category == FailureCategory::Resume {
@@ -1815,6 +1842,7 @@ async fn send_request(
     client: &Client,
     url: &str,
     existing_bytes: u64,
+    handoff_auth: Option<&HandoffAuth>,
 ) -> Result<reqwest::Response, DownloadError> {
     let range_header = if existing_bytes > 0 {
         Some(format!("bytes={existing_bytes}-"))
@@ -1822,18 +1850,20 @@ async fn send_request(
         None
     };
 
-    send_download_request(client, url, range_header).await
+    send_download_request(client, url, range_header, handoff_auth).await
 }
 
 async fn send_range_request(
     client: &Client,
     url: &str,
     range: ByteRange,
+    handoff_auth: Option<&HandoffAuth>,
 ) -> Result<reqwest::Response, DownloadError> {
     send_download_request(
         client,
         url,
         Some(format!("bytes={}-{}", range.start, range.end)),
+        handoff_auth,
     )
     .await
 }
@@ -1842,17 +1872,48 @@ async fn send_download_request(
     client: &Client,
     url: &str,
     range_header: Option<String>,
+    handoff_auth: Option<&HandoffAuth>,
 ) -> Result<reqwest::Response, DownloadError> {
     let mut next_retry = 0;
+    let mut current_url = url.to_string();
+    let mut redirects = 0;
 
     loop {
-        let mut request = client.get(url).header(ACCEPT_ENCODING, "identity");
+        let mut request = client.get(&current_url).header(ACCEPT_ENCODING, "identity");
         if let Some(range_header) = range_header.as_deref() {
             request = request.header(RANGE, range_header);
         }
+        request = apply_handoff_auth_headers(request, handoff_auth)?;
 
         match request.send().await {
             Ok(response) => {
+                if response.status().is_redirection() {
+                    let next_url = redirect_location(response.url().as_str(), &response)?;
+                    if handoff_auth.is_some()
+                        && !redirect_keeps_origin(response.url().as_str(), &next_url)
+                    {
+                        return Err(download_error(
+                            FailureCategory::Http,
+                            "Authenticated download redirected to another origin; refusing to forward browser credentials."
+                                .into(),
+                            false,
+                        ));
+                    }
+
+                    redirects += 1;
+                    if redirects > 10 {
+                        return Err(download_error(
+                            FailureCategory::Http,
+                            "Download redirected too many times.".into(),
+                            false,
+                        ));
+                    }
+
+                    current_url = next_url;
+                    next_retry = 0;
+                    continue;
+                }
+
                 if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                     return Err(download_error(
                         FailureCategory::Resume,
@@ -1873,7 +1934,7 @@ async fn send_download_request(
                     continue;
                 }
 
-                return Err(error_for_http_status(status));
+                return Err(error_for_http_status(status, handoff_auth.is_some()));
             }
             Err(error) => {
                 if should_retry_error(&error) && next_retry < REQUEST_RETRY_DELAYS.len() {
@@ -1888,13 +1949,114 @@ async fn send_download_request(
     }
 }
 
-async fn preflight_download(client: &Client, url: &str) -> Option<PreflightMetadata> {
-    let response = client
-        .head(url)
-        .timeout(PREFLIGHT_TIMEOUT)
-        .send()
-        .await
-        .ok()?;
+fn apply_handoff_auth_headers(
+    mut request: reqwest::RequestBuilder,
+    handoff_auth: Option<&HandoffAuth>,
+) -> Result<reqwest::RequestBuilder, DownloadError> {
+    let Some(auth) = handoff_auth else {
+        return Ok(request);
+    };
+
+    for header in &auth.headers {
+        let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|_| {
+            download_error(
+                FailureCategory::Internal,
+                "Authenticated handoff header name is invalid.".into(),
+                false,
+            )
+        })?;
+        let value = HeaderValue::from_str(&header.value).map_err(|_| {
+            download_error(
+                FailureCategory::Internal,
+                "Authenticated handoff header value is invalid.".into(),
+                false,
+            )
+        })?;
+        request = request.header(name, value);
+    }
+
+    Ok(request)
+}
+
+fn redirect_location(
+    current_url: &str,
+    response: &reqwest::Response,
+) -> Result<String, DownloadError> {
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            download_error(
+                FailureCategory::Http,
+                "Download redirected without a Location header.".into(),
+                false,
+            )
+        })?;
+    let base = reqwest::Url::parse(current_url).map_err(|_| {
+        download_error(
+            FailureCategory::Http,
+            "Download redirected from an invalid URL.".into(),
+            false,
+        )
+    })?;
+    let next_url = base.join(location).map_err(|_| {
+        download_error(
+            FailureCategory::Http,
+            "Download redirected to an invalid URL.".into(),
+            false,
+        )
+    })?;
+
+    match next_url.scheme() {
+        "http" | "https" => Ok(next_url.to_string()),
+        _ => Err(download_error(
+            FailureCategory::Http,
+            "Download redirected to an unsupported URL scheme.".into(),
+            false,
+        )),
+    }
+}
+
+fn redirect_keeps_origin(current_url: &str, next_url: &str) -> bool {
+    let Ok(current) = reqwest::Url::parse(current_url) else {
+        return false;
+    };
+    let Ok(next) = reqwest::Url::parse(next_url) else {
+        return false;
+    };
+
+    current.scheme() == next.scheme()
+        && current.host_str().map(str::to_ascii_lowercase)
+            == next.host_str().map(str::to_ascii_lowercase)
+        && current.port_or_known_default() == next.port_or_known_default()
+}
+
+async fn preflight_download(
+    client: &Client,
+    url: &str,
+    handoff_auth: Option<&HandoffAuth>,
+) -> Option<PreflightMetadata> {
+    let mut current_url = url.to_string();
+    let mut redirects = 0;
+    let response = loop {
+        let request = client.head(&current_url).timeout(PREFLIGHT_TIMEOUT);
+        let request = apply_handoff_auth_headers(request, handoff_auth).ok()?;
+        let response = request.send().await.ok()?;
+        if !response.status().is_redirection() {
+            break response;
+        }
+
+        let next_url = redirect_location(response.url().as_str(), &response).ok()?;
+        if handoff_auth.is_some() && !redirect_keeps_origin(response.url().as_str(), &next_url) {
+            return None;
+        }
+        redirects += 1;
+        if redirects > 10 {
+            return None;
+        }
+        current_url = next_url;
+    };
     if !response.status().is_success() {
         return None;
     }
@@ -2244,17 +2406,26 @@ fn download_error(category: FailureCategory, message: String, retryable: bool) -
     }
 }
 
-fn error_for_http_status(status: StatusCode) -> DownloadError {
+fn error_for_http_status(status: StatusCode, authenticated_handoff: bool) -> DownloadError {
     let retryable = should_retry_status(status);
     let category = if retryable {
         FailureCategory::Server
     } else {
         FailureCategory::Http
     };
+    let auth_context = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        if authenticated_handoff {
+            " Authenticated handoff was rejected; the browser session may have expired."
+        } else {
+            " This server may require browser session authentication."
+        }
+    } else {
+        ""
+    };
 
     download_error(
         category,
-        format!("Download request failed with HTTP {status}."),
+        format!("Download request failed with HTTP {status}.{auth_context}"),
         retryable,
     )
 }
@@ -2475,18 +2646,18 @@ async fn notify(app: &AppHandle, state: &SharedState, title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{DownloadJob, JobState, TorrentInfo};
+    use crate::storage::{DownloadJob, HandoffAuth, HandoffAuthHeader, JobState, TorrentInfo};
     use std::future::pending;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[test]
     fn http_status_errors_are_classified_by_recoverability() {
-        let unavailable = error_for_http_status(StatusCode::SERVICE_UNAVAILABLE);
+        let unavailable = error_for_http_status(StatusCode::SERVICE_UNAVAILABLE, false);
         assert_eq!(unavailable.category, FailureCategory::Server);
         assert!(unavailable.retryable);
 
-        let not_found = error_for_http_status(StatusCode::NOT_FOUND);
+        let not_found = error_for_http_status(StatusCode::NOT_FOUND, false);
         assert_eq!(not_found.category, FailureCategory::Http);
         assert!(!not_found.retryable);
     }
@@ -2960,7 +3131,7 @@ mod tests {
         let (url, request_handle) = spawn_one_response_server(response).await;
         let client = download_client().unwrap();
 
-        let metadata = probe_range_metadata(&client, &url)
+        let metadata = probe_range_metadata(&client, &url, None)
             .await
             .expect("range probe should derive metadata from partial content");
         let request = request_handle.await.unwrap();
@@ -2979,12 +3150,45 @@ mod tests {
         let (url, request_handle) = spawn_one_response_server(response).await;
         let client = download_client().unwrap();
 
-        let _response = send_request(&client, &url, 0).await.unwrap();
+        let _response = send_request(&client, &url, 0, None).await.unwrap();
         let request = request_handle.await.unwrap();
 
         assert!(request
             .to_ascii_lowercase()
             .contains("accept-encoding: identity"));
+    }
+
+    #[tokio::test]
+    async fn send_request_applies_authenticated_handoff_headers() {
+        let (url, request_handle) = spawn_cookie_required_server().await;
+        let client = download_client().unwrap();
+        let auth = HandoffAuth {
+            headers: vec![HandoffAuthHeader {
+                name: "Cookie".into(),
+                value: "session=abc".into(),
+            }],
+        };
+
+        let response = send_request(&client, &url, 0, Some(&auth)).await.unwrap();
+        let request = request_handle.await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(request.to_ascii_lowercase().contains("cookie: session=abc"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("accept-encoding: identity"));
+    }
+
+    #[test]
+    fn authenticated_redirect_policy_rejects_cross_origin_redirects() {
+        assert!(redirect_keeps_origin(
+            "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+            "https://chatgpt.com/backend-api/estuary/content?id=file_456",
+        ));
+        assert!(!redirect_keeps_origin(
+            "https://chatgpt.com/backend-api/estuary/content?id=file_123",
+            "https://cdn.example.com/file.pdf",
+        ));
     }
 
     #[test]
@@ -3010,6 +3214,26 @@ mod tests {
             let mut buffer = vec![0_u8; 4096];
             let read = socket.read(&mut buffer).await.unwrap();
             let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            socket.write_all(response.as_bytes()).await.unwrap();
+            request
+        });
+
+        (format!("http://{address}/download.bin"), handle)
+    }
+
+    async fn spawn_cookie_required_server() -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let read = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let response = if request.to_ascii_lowercase().contains("cookie: session=abc") {
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+            } else {
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+            };
             socket.write_all(response.as_bytes()).await.unwrap();
             request
         });

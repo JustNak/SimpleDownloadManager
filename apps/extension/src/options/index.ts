@@ -20,6 +20,10 @@ const ignoredExtensions = document.querySelector<HTMLDivElement>('#ignored-exten
 const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-host-input');
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
+const authHandoffToggle = document.querySelector<HTMLInputElement>('#auth-handoff-toggle');
+const authHostInput = document.querySelector<HTMLInputElement>('#auth-host-input');
+const addAuthHostButton = document.querySelector<HTMLButtonElement>('#add-auth-host-button');
+const authHosts = document.querySelector<HTMLDivElement>('#auth-hosts');
 const saveState = document.querySelector<HTMLDivElement>('#save-state');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh-button');
 
@@ -43,8 +47,10 @@ function renderState(state: PopupStateResponse) {
   if (contextMenuToggle) contextMenuToggle.checked = settings.contextMenuEnabled;
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
+  if (authHandoffToggle) authHandoffToggle.checked = settings.authenticatedHandoffEnabled;
   renderIgnoredExtensions(settings.ignoredFileExtensions ?? []);
   renderExcludedHosts(settings.excludedHosts ?? []);
+  renderAuthHosts(settings.authenticatedHandoffHosts ?? []);
   setControlsDisabled(isSaving, settings.enabled);
 
   if (saveState && !isSaving) {
@@ -120,6 +126,25 @@ function renderExcludedHosts(hosts: string[]) {
   }
 }
 
+function renderAuthHosts(hosts: string[]) {
+  if (!authHosts) return;
+  authHosts.textContent = '';
+
+  if (hosts.length === 0) {
+    authHosts.append(emptyState('No authenticated hosts.'));
+    return;
+  }
+
+  for (const host of hosts) {
+    authHosts.append(
+      removableChip(host, `Remove ${host}`, () => {
+        const nextHosts = currentState?.extensionSettings?.authenticatedHandoffHosts.filter((candidate) => candidate !== host) ?? [];
+        void updateSettings({ authenticatedHandoffHosts: nextHosts });
+      }),
+    );
+  }
+}
+
 function removableChip(label: string, removeLabel: string, onRemove: () => void): HTMLSpanElement {
   const chip = document.createElement('span');
   chip.className = 'chip';
@@ -157,6 +182,9 @@ function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
     addExtensionButton,
     excludedHostInput,
     addHostButton,
+    authHandoffToggle,
+    authHostInput,
+    addAuthHostButton,
   ];
 
   for (const control of extensionControls) {
@@ -220,6 +248,10 @@ badgeToggle?.addEventListener('change', () => {
   void updateSettings({ showBadgeStatus: badgeToggle.checked });
 });
 
+authHandoffToggle?.addEventListener('change', () => {
+  void updateSettings({ authenticatedHandoffEnabled: authHandoffToggle.checked });
+});
+
 addExtensionButton?.addEventListener('click', () => {
   addIgnoredExtensions();
 });
@@ -239,6 +271,17 @@ excludedHostInput?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
     addExcludedHost();
+  }
+});
+
+addAuthHostButton?.addEventListener('click', () => {
+  addAuthHost();
+});
+
+authHostInput?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addAuthHost();
   }
 });
 
@@ -274,6 +317,20 @@ function addExcludedHost() {
 
   if (excludedHostInput) excludedHostInput.value = '';
   void updateSettings({ excludedHosts: [...hosts, host] });
+}
+
+function addAuthHost() {
+  const host = normalizeHost(authHostInput?.value ?? '');
+  if (!host) return;
+
+  const hosts = currentState?.extensionSettings?.authenticatedHandoffHosts ?? [];
+  if (hosts.includes(host)) {
+    if (authHostInput) authHostInput.value = '';
+    return;
+  }
+
+  if (authHostInput) authHostInput.value = '';
+  void updateSettings({ authenticatedHandoffHosts: [...hosts, host] });
 }
 
 function parseFileExtensions(value: string): string[] {

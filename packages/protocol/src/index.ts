@@ -3,6 +3,9 @@ export const HOST_NAME = 'com.myapp.download_manager';
 export const PIPE_NAME = '\\\\.\\pipe\\myapp.downloads.v1';
 export const MAX_URL_LENGTH = 2048;
 export const MAX_METADATA_LENGTH = 512;
+export const MAX_HANDOFF_AUTH_HEADERS = 16;
+export const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH = 64;
+export const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH = 16 * 1024;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 
@@ -70,9 +73,19 @@ export interface RequestSource {
   incognito?: boolean;
 }
 
+export interface HandoffAuthHeader {
+  name: string;
+  value: string;
+}
+
+export interface HandoffAuth {
+  headers: HandoffAuthHeader[];
+}
+
 export interface EnqueueDownloadPayload {
   url: string;
   source: RequestSource;
+  handoffAuth?: HandoffAuth;
 }
 
 export interface PromptDownloadPayload {
@@ -80,6 +93,7 @@ export interface PromptDownloadPayload {
   source: RequestSource;
   suggestedFilename?: string;
   totalBytes?: number;
+  handoffAuth?: HandoffAuth;
 }
 
 export interface OpenAppPayload {
@@ -138,6 +152,8 @@ export interface ExtensionIntegrationSettings {
   showBadgeStatus: boolean;
   excludedHosts: string[];
   ignoredFileExtensions: string[];
+  authenticatedHandoffEnabled: boolean;
+  authenticatedHandoffHosts: string[];
 }
 
 export function normalizeExcludedHostPattern(value: string): string {
@@ -322,6 +338,49 @@ export function sanitizeSource(source: RequestSource): RequestSource {
   };
 }
 
+export function isAllowedHandoffAuthHeaderName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return normalized === 'cookie'
+    || normalized === 'authorization'
+    || normalized === 'referer'
+    || normalized === 'origin'
+    || normalized === 'user-agent'
+    || normalized === 'accept'
+    || normalized === 'accept-language'
+    || normalized.startsWith('sec-fetch-')
+    || normalized.startsWith('sec-ch-ua');
+}
+
+export function sanitizeHandoffAuth(auth: HandoffAuth | undefined): HandoffAuth | undefined {
+  if (!auth?.headers?.length) {
+    return undefined;
+  }
+
+  const headers: HandoffAuthHeader[] = [];
+  for (const header of auth.headers) {
+    if (headers.length >= MAX_HANDOFF_AUTH_HEADERS) {
+      break;
+    }
+
+    const name = header.name.trim();
+    const value = header.value;
+    if (
+      !name
+      || name.length > MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH
+      || value.length > MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH
+      || /[\r\n:]/.test(name)
+      || /[\r\n]/.test(value)
+      || !isAllowedHandoffAuthHeaderName(name)
+    ) {
+      continue;
+    }
+
+    headers.push({ name, value });
+  }
+
+  return headers.length > 0 ? { headers } : undefined;
+}
+
 export function createPingRequest(requestId = createRequestId()): RequestEnvelope<'ping', EmptyPayload> {
   return {
     protocolVersion: PROTOCOL_VERSION,
@@ -356,12 +415,14 @@ export function createEnqueueDownloadRequest(
   url: string,
   source: RequestSource,
   requestId = createRequestId(),
+  handoffAuth?: HandoffAuth,
 ): ValidationResult<RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>> {
   const validatedUrl = validateHttpUrl(url);
   if (!validatedUrl.ok) {
     return validatedUrl;
   }
 
+  const sanitizedAuth = sanitizeHandoffAuth(handoffAuth);
   return {
     ok: true,
     value: {
@@ -371,6 +432,7 @@ export function createEnqueueDownloadRequest(
       payload: {
         url: validatedUrl.value,
         source: sanitizeSource(source),
+        ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
       },
     },
   };
@@ -379,7 +441,7 @@ export function createEnqueueDownloadRequest(
 export function createPromptDownloadRequest(
   url: string,
   source: RequestSource,
-  metadata: { suggestedFilename?: string; totalBytes?: number } = {},
+  metadata: { suggestedFilename?: string; totalBytes?: number; handoffAuth?: HandoffAuth } = {},
   requestId = createRequestId(),
 ): ValidationResult<RequestEnvelope<'prompt_download', PromptDownloadPayload>> {
   const validatedUrl = validateHttpUrl(url);
@@ -392,6 +454,7 @@ export function createPromptDownloadRequest(
       ? Math.floor(metadata.totalBytes)
       : undefined;
 
+  const sanitizedAuth = sanitizeHandoffAuth(metadata.handoffAuth);
   return {
     ok: true,
     value: {
@@ -403,6 +466,7 @@ export function createPromptDownloadRequest(
         source: sanitizeSource(source),
         suggestedFilename: trimMetadata(metadata.suggestedFilename),
         totalBytes,
+        ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
       },
     },
   };
