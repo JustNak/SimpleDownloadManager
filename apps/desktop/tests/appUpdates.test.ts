@@ -18,12 +18,12 @@ assert.equal(checking.status, 'checking');
 assert.equal(checking.lastCheckMode, 'manual');
 
 const available = finishUpdateCheck(checking, {
-  version: '0.3.5-alpha',
+  version: '0.3.45-alpha',
   currentVersion: '0.3.4-alpha',
   body: 'Faster downloads',
 });
 assert.equal(available.status, 'available');
-assert.equal(available.availableUpdate?.version, '0.3.5-alpha');
+assert.equal(available.availableUpdate?.version, '0.3.45-alpha');
 assert.equal(available.errorMessage, null);
 
 const started = applyInstallProgressEvent(available, {

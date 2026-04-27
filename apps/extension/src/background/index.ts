@@ -24,6 +24,7 @@ import {
 } from './browserDownloads';
 import {
   captureHandoffAuthHeaders,
+  hasCapturedHandoffAuth,
   takeCapturedHandoffAuth,
   type HandoffAuthRequestDetails,
 } from './handoffAuth';
@@ -343,14 +344,22 @@ async function handOffBrowserDownload(
     extensionVersion: browser.runtime.getManifest().version,
     incognito: item.incognito,
   };
-  const handoffAuth = takeCapturedHandoffAuth(
-    {
-      requestId: 'requestId' in item ? item.requestId : undefined,
-      url,
-      incognito: item.incognito,
-    },
-    settings,
-  );
+  const handoffDetails = {
+    requestId: 'requestId' in item ? item.requestId : undefined,
+    url,
+    incognito: item.incognito,
+  };
+  if (!settings.authenticatedHandoffEnabled && hasCapturedHandoffAuth(handoffDetails)) {
+    return {
+      ok: false,
+      requestId: 'protected_downloads_disabled',
+      type: 'rejected',
+      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
+      message: 'This site requires your browser session. Enable Protected Downloads or let the browser handle this download.',
+    };
+  }
+
+  const handoffAuth = takeCapturedHandoffAuth(handoffDetails, settings);
 
   if (settings.downloadHandoffMode === 'auto') {
     return enqueueDownload(url, source, handoffAuth);
@@ -373,16 +382,16 @@ async function restoreBrowserDownloadFallback(
   item: browser.downloads.DownloadItem,
   releaseFilename?: () => void,
 ): Promise<void> {
+  if (releaseFilename) {
+    releaseFilename();
+    return;
+  }
+
   try {
-    if (releaseFilename) {
-      await discardBrowserDownloadBeforeFilenameRelease(browser.downloads, item.id, releaseFilename);
-    } else {
-      await discardBrowserDownload(browser.downloads, item.id);
-    }
+    await discardBrowserDownload(browser.downloads, item.id);
 
     await restartBrowserDownload(browser.downloads, item, browserDownloadFallbackBypass);
   } catch (error) {
-    releaseFilename?.();
     const state = await setHostError(
       'DOWNLOAD_FAILED',
       error instanceof Error
@@ -582,14 +591,13 @@ function registerFirefoxWebRequestInterception(): void {
 
 function registerHandoffAuthHeaderCapture(): void {
   const webRequest = getWebRequestApi();
-  if (!webRequest?.onBeforeSendHeaders) {
+  const headerEvent = webRequest?.onSendHeaders ?? webRequest?.onBeforeSendHeaders;
+  if (!headerEvent) {
     return;
   }
 
   const listener = (details: HandoffAuthRequestDetails): void => {
-    void Promise.resolve(getCachedExtensionSettings())
-      .then((settings) => captureHandoffAuthHeaders(details, settings))
-      .catch(() => undefined);
+    captureHandoffAuthHeaders(details);
   };
   const filter = {
     urls: ['http://*/*', 'https://*/*'],
@@ -597,9 +605,9 @@ function registerHandoffAuthHeaderCapture(): void {
   };
 
   try {
-    webRequest.onBeforeSendHeaders.addListener(listener, filter, ['requestHeaders', 'extraHeaders']);
+    headerEvent.addListener(listener, filter, ['requestHeaders', 'extraHeaders']);
   } catch {
-    webRequest.onBeforeSendHeaders.addListener(listener, filter, ['requestHeaders']);
+    headerEvent.addListener(listener, filter, ['requestHeaders']);
   }
 }
 
@@ -708,6 +716,13 @@ type FirefoxWebRequestApi = {
 };
 
 type BrowserWebRequestApi = FirefoxWebRequestApi & {
+  onSendHeaders?: {
+    addListener(
+      listener: (details: HandoffAuthRequestDetails) => void,
+      filter: { urls: string[]; types?: string[] },
+      extraInfoSpec?: string[],
+    ): void;
+  };
   onBeforeSendHeaders?: {
     addListener(
       listener: (details: HandoffAuthRequestDetails) => void,

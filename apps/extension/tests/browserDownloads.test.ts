@@ -11,6 +11,7 @@ import {
   shouldBypassBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
   shouldHandleBrowserDownload,
+  shouldRestoreBrowserDownloadAfterFailedProtectedHandoff,
 } from '../src/background/browserDownloads.ts';
 
 const calls: string[] = [];
@@ -184,6 +185,17 @@ async function main() {
     }),
     false,
     'failed extension handoffs should be passed back to the browser',
+  );
+  assert.equal(
+    shouldRestoreBrowserDownloadAfterFailedProtectedHandoff({
+      ok: false,
+      requestId: 'request_protected',
+      type: 'rejected',
+      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
+      message: 'This site requires your browser session.',
+    }),
+    true,
+    'protected-download auth failures should leave the browser fallback path active',
   );
 
   const suggestionCalls: Array<{ filename?: string; conflictAction?: 'uniquify' | 'overwrite' | 'prompt' } | undefined> = [];

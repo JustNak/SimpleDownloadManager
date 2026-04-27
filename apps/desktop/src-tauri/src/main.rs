@@ -24,7 +24,11 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .installer_arg(lifecycle::POST_UPDATE_ARG)
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .on_window_event(lifecycle::handle_window_event)
         .setup(move |app| {

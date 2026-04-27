@@ -547,17 +547,15 @@ impl SharedState {
 
     async fn validate_handoff_auth_for_url(
         &self,
-        url: &str,
+        _url: &str,
         auth: &HandoffAuth,
     ) -> Result<(), BackendError> {
         validate_handoff_auth_headers(auth)?;
         let settings = self.extension_integration_settings().await;
-        if !settings.authenticated_handoff_enabled
-            || !url_matches_host_patterns(url, &settings.authenticated_handoff_hosts)
-        {
+        if !settings.authenticated_handoff_enabled {
             return Err(BackendError {
                 code: "PERMISSION_DENIED",
-                message: "Authenticated handoff is not enabled for this host.".into(),
+                message: "Protected Downloads is disabled.".into(),
             });
         }
 
@@ -2162,70 +2160,6 @@ fn normalize_host_patterns(hosts: &[String]) -> Vec<String> {
     normalized_hosts
 }
 
-fn url_matches_host_patterns(url: &str, patterns: &[String]) -> bool {
-    let Ok(parsed) = Url::parse(url) else {
-        return false;
-    };
-    let Some(hostname) = parsed.host_str().map(|host| host.to_ascii_lowercase()) else {
-        return false;
-    };
-
-    patterns.iter().any(|pattern| {
-        let normalized = normalize_host_patterns(&[pattern.clone()]);
-        let Some(pattern) = normalized.first() else {
-            return false;
-        };
-
-        if pattern.contains('*') {
-            wildcard_host_matches(&hostname, pattern)
-        } else {
-            hostname == *pattern || hostname.ends_with(&format!(".{pattern}"))
-        }
-    })
-}
-
-fn wildcard_host_matches(hostname: &str, pattern: &str) -> bool {
-    let host_labels = hostname.split('.').collect::<Vec<_>>();
-    let pattern_labels = pattern.split('.').collect::<Vec<_>>();
-    if host_labels.len() != pattern_labels.len() {
-        return false;
-    }
-
-    host_labels
-        .iter()
-        .zip(pattern_labels.iter())
-        .all(|(host_label, pattern_label)| wildcard_label_matches(host_label, pattern_label))
-}
-
-fn wildcard_label_matches(value: &str, pattern: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-
-    let mut remainder = value;
-    let mut first = true;
-    for part in pattern.split('*') {
-        if part.is_empty() {
-            first = false;
-            continue;
-        }
-
-        if first && !pattern.starts_with('*') {
-            let Some(stripped) = remainder.strip_prefix(part) else {
-                return false;
-            };
-            remainder = stripped;
-        } else if let Some(index) = remainder.find(part) {
-            remainder = &remainder[index + part.len()..];
-        } else {
-            return false;
-        }
-        first = false;
-    }
-
-    pattern.ends_with('*') || remainder.is_empty()
-}
-
 fn validate_handoff_auth_headers(auth: &HandoffAuth) -> Result<(), BackendError> {
     if auth.headers.is_empty() || auth.headers.len() > MAX_HANDOFF_AUTH_HEADERS {
         return Err(BackendError {
@@ -2979,10 +2913,6 @@ mod tests {
         let mut settings = state.settings().await;
         settings.download_directory = download_dir.display().to_string();
         settings.extension_integration.authenticated_handoff_enabled = true;
-        settings
-            .extension_integration
-            .authenticated_handoff_hosts
-            .push("chatgpt.com".into());
         state.save_settings(settings).await.unwrap();
 
         let auth = HandoffAuth {
@@ -3009,7 +2939,7 @@ mod tests {
                 },
             )
             .await
-            .expect("allowlisted auth handoff should enqueue");
+            .expect("protected auth handoff should enqueue without a host allowlist");
 
         assert!(state.has_handoff_auth(&result.job_id).await);
         let raw_state = std::fs::read_to_string(download_dir.join("state.json")).unwrap();

@@ -59,6 +59,7 @@ export type ErrorCode =
   | 'DESTINATION_INVALID'
   | 'DUPLICATE_JOB'
   | 'PERMISSION_DENIED'
+  | 'PROTECTED_DOWNLOAD_AUTH_REQUIRED'
   | 'RATE_LIMITED'
   | 'DOWNLOAD_FAILED'
   | 'INTERNAL_ERROR';
@@ -502,6 +503,8 @@ export function toUserFacingMessage(code: ErrorCode, fallback: string): string {
     case 'INVALID_URL':
     case 'UNSUPPORTED_SCHEME':
       return 'Enter a valid http, https, or magnet URL.';
+    case 'PROTECTED_DOWNLOAD_AUTH_REQUIRED':
+      return 'This site requires your browser session. Enable Protected Downloads or let the browser handle this download.';
     default:
       return fallback;
   }

@@ -1041,7 +1041,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, format!("  {magnet}\n")).unwrap();
 
-        assert_eq!(super::torrent_import_value_from_path(&path).unwrap(), magnet);
+        assert_eq!(
+            super::torrent_import_value_from_path(&path).unwrap(),
+            magnet
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

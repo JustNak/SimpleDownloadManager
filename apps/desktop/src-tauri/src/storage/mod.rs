@@ -292,13 +292,17 @@ pub struct ExtensionIntegrationSettings {
     pub excluded_hosts: Vec<String>,
     #[serde(default)]
     pub ignored_file_extensions: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_authenticated_handoff_enabled")]
     pub authenticated_handoff_enabled: bool,
     #[serde(default)]
     pub authenticated_handoff_hosts: Vec<String>,
 }
 
 const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
+
+fn default_authenticated_handoff_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -454,7 +458,7 @@ impl Default for ExtensionIntegrationSettings {
                 .map(|host| (*host).to_string())
                 .collect(),
             ignored_file_extensions: Vec::new(),
-            authenticated_handoff_enabled: false,
+            authenticated_handoff_enabled: default_authenticated_handoff_enabled(),
             authenticated_handoff_hosts: Vec::new(),
         }
     }
@@ -849,6 +853,7 @@ mod tests {
         assert!(settings.extension_integration.context_menu_enabled);
         assert!(settings.extension_integration.show_progress_after_handoff);
         assert!(settings.extension_integration.show_badge_status);
+        assert!(settings.extension_integration.authenticated_handoff_enabled);
         assert_eq!(settings.extension_integration.listen_port, 1420);
         assert_eq!(
             settings.extension_integration.excluded_hosts,
@@ -890,6 +895,12 @@ mod tests {
                 .show_progress_after_handoff
         );
         assert!(state.settings.extension_integration.show_badge_status);
+        assert!(
+            state
+                .settings
+                .extension_integration
+                .authenticated_handoff_enabled
+        );
         assert_eq!(state.settings.extension_integration.listen_port, 1420);
         assert_eq!(
             state.settings.extension_integration.excluded_hosts,

@@ -1,5 +1,4 @@
 import {
-  isUrlHostExcludedByPatterns,
   sanitizeHandoffAuth,
   type ExtensionIntegrationSettings,
   type HandoffAuth,
@@ -45,7 +44,7 @@ export function buildHandoffAuthForUrl(
   headers: HandoffAuthRequestHeader[] | undefined,
   settings: ExtensionIntegrationSettings,
 ): HandoffAuth | undefined {
-  if (!shouldUseAuthenticatedHandoff(url, settings)) {
+  if (!settings.authenticatedHandoffEnabled || !isHttpUrl(url)) {
     return undefined;
   }
 
@@ -55,14 +54,18 @@ export function buildHandoffAuthForUrl(
 
 export function captureHandoffAuthHeaders(
   details: HandoffAuthRequestDetails,
-  settings: ExtensionIntegrationSettings,
   now = Date.now(),
 ): void {
   if (details.method && details.method.toUpperCase() !== 'GET') {
     return;
   }
 
-  const auth = buildHandoffAuthForUrl(details.url, details.requestHeaders, settings);
+  if (!isHttpUrl(details.url)) {
+    return;
+  }
+
+  const filteredHeaders = filterHandoffAuthHeaders(details.requestHeaders);
+  const auth = filteredHeaders.length > 0 ? { headers: filteredHeaders } : undefined;
   if (!auth) {
     return;
   }
@@ -90,17 +93,36 @@ export function takeCapturedHandoffAuth(
   settings: ExtensionIntegrationSettings,
   now = Date.now(),
 ): HandoffAuth | undefined {
-  if (!shouldUseAuthenticatedHandoff(details.url, settings)) {
+  if (!settings.authenticatedHandoffEnabled) {
     return undefined;
   }
 
+  const captured = findCapturedHandoffAuth(details, now);
+  if (!captured) {
+    return undefined;
+  }
+
+  deleteCaptured(captured);
+  return captured.auth;
+}
+
+export function hasCapturedHandoffAuth(
+  details: Pick<HandoffAuthRequestDetails, 'requestId' | 'url' | 'incognito'>,
+  now = Date.now(),
+): boolean {
+  return findCapturedHandoffAuth(details, now) !== undefined;
+}
+
+function findCapturedHandoffAuth(
+  details: Pick<HandoffAuthRequestDetails, 'requestId' | 'url' | 'incognito'>,
+  now: number,
+): CapturedAuth | undefined {
   pruneCapturedAuth(now);
   const incognito = details.incognito ?? false;
   if (details.requestId) {
     const captured = capturedByRequestId.get(details.requestId);
     if (captured && captured.incognito === incognito && isFresh(captured, now)) {
-      deleteCaptured(captured);
-      return captured.auth;
+      return captured;
     }
   }
 
@@ -109,17 +131,11 @@ export function takeCapturedHandoffAuth(
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const captured = candidates[index];
     if (captured.incognito === incognito && isFresh(captured, now)) {
-      deleteCaptured(captured);
-      return captured.auth;
+      return captured;
     }
   }
 
   return undefined;
-}
-
-function shouldUseAuthenticatedHandoff(url: string, settings: ExtensionIntegrationSettings): boolean {
-  return Boolean(settings.authenticatedHandoffEnabled)
-    && isUrlHostExcludedByPatterns(url, settings.authenticatedHandoffHosts ?? []);
 }
 
 function pruneCapturedAuth(now: number): void {
@@ -163,5 +179,14 @@ function normalizeUrlKey(url: string): string {
     return new URL(url).toString();
   } catch {
     return url;
+  }
+}
+
+function isHttpUrl(url: string): boolean {
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
   }
 }

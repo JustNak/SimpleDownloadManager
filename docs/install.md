@@ -66,6 +66,14 @@ The full Windows release pipeline is:
 npm run release:windows
 ```
 
+Signed updater artifacts require the Tauri updater private key. The release script reads it from the first available source:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `SDM_TAURI_SIGNING_PRIVATE_KEY_PATH`
+- `%USERPROFILE%\.simple-download-manager\tauri-updater.key`
+
+If the key has a password, set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` or `SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH`. Keep the private key outside the repository; only the public key belongs in app configuration.
+
 That command will:
 
 - build Chromium and Firefox extension bundles

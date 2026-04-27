@@ -84,7 +84,7 @@ Supported request types:
   "showBadgeStatus": true,
   "excludedHosts": ["example.com"],
   "ignoredFileExtensions": ["exe", "zip", "txt", "pdf"],
-  "authenticatedHandoffEnabled": false,
+  "authenticatedHandoffEnabled": true,
   "authenticatedHandoffHosts": ["chatgpt.com"]
 }
 ```
@@ -97,8 +97,8 @@ URL handling is intentionally narrow:
 
 `ignoredFileExtensions` applies only to automatic browser download capture.
 Manual sends, popup sends, and context-menu sends are still allowed.
-`authenticatedHandoffHosts` uses the same host wildcard semantics as `excludedHosts`.
-When enabled, browser downloads from those trusted hosts may include bounded, memory-only auth headers in `handoffAuth`; auth headers are never persisted or written to diagnostics.
+`authenticatedHandoffHosts` is retained for backward compatibility with older settings.
+When Protected Downloads is enabled, exact browser download handoffs may include bounded, memory-only request headers in `handoffAuth`; auth header values are never persisted or written to diagnostics.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
 
 ## Host -> Extension

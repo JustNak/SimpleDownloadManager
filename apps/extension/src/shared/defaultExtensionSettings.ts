@@ -11,7 +11,7 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
-  authenticatedHandoffEnabled: false,
+  authenticatedHandoffEnabled: true,
   authenticatedHandoffHosts: [],
 };
 

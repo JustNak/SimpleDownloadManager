@@ -10,7 +10,7 @@
   nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -ExecutionPolicy Bypass -File "$INSTDIR\resources\install\register-native-host.ps1" -HostBinaryPath "$0" -InstallRoot "$INSTDIR"'
 
   done_postinstall:
-  StrCmp $UpdateMode 1 relaunch_after_update 0
+  StrCmp $UpdateMode 1 done_startup_options 0
   StrCmp $PassiveMode 1 done_startup_options 0
   IfSilent done_startup_options 0
 
@@ -26,9 +26,6 @@
   startup_options_tray:
   nsExec::ExecToLog '"$INSTDIR\${MAINBINARYNAME}.exe" --installer-configure --installer-startup --installer-tray'
   Goto done_startup_options
-
-  relaunch_after_update:
-  Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
 
   done_startup_options:
 !macroend

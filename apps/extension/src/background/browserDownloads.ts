@@ -230,6 +230,10 @@ export function shouldDiscardBrowserDownloadAfterHandoff(response: HostToExtensi
     && response.payload.status !== 'canceled';
 }
 
+export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response: HostToExtensionResponse): boolean {
+  return isErrorResponse(response) && response.code === 'PROTECTED_DOWNLOAD_AUTH_REQUIRED';
+}
+
 export async function discardBrowserDownload(
   downloads: BrowserDownloadsCleanupApi,
   downloadId: number,

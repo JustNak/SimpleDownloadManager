@@ -8,13 +8,14 @@ import {
   buildHandoffAuthForUrl,
   captureHandoffAuthHeaders,
   filterHandoffAuthHeaders,
+  hasCapturedHandoffAuth,
   takeCapturedHandoffAuth,
 } from '../src/background/handoffAuth.ts';
 
 const source: RequestSource = {
   entryPoint: 'browser_download',
   browser: 'chrome',
-  extensionVersion: '0.3.43',
+  extensionVersion: '0.3.45',
 };
 
 const settings: ExtensionIntegrationSettings = {
@@ -27,7 +28,7 @@ const settings: ExtensionIntegrationSettings = {
   excludedHosts: [],
   ignoredFileExtensions: [],
   authenticatedHandoffEnabled: true,
-  authenticatedHandoffHosts: ['chatgpt.com', 'download*.example.com'],
+  authenticatedHandoffHosts: [],
 };
 
 assert.deepEqual(
@@ -54,17 +55,17 @@ assert.deepEqual(
     settings,
   ),
   { headers: [{ name: 'Cookie', value: 'oai-did=1' }] },
-  'allowlisted ChatGPT file URLs should receive captured browser auth',
+  'protected downloads should not require a host allowlist to receive captured browser auth',
 );
 
-assert.equal(
+assert.deepEqual(
   buildHandoffAuthForUrl(
     'https://example.org/file.pdf',
     [{ name: 'Cookie', value: 'session=abc' }],
     settings,
   ),
-  undefined,
-  'non-allowlisted hosts must not receive browser auth',
+  { headers: [{ name: 'Cookie', value: 'session=abc' }] },
+  'exact browser-download request auth should be controlled by the protected-download toggle, not by hosts',
 );
 
 assert.equal(
@@ -74,7 +75,7 @@ assert.equal(
     { ...settings, authenticatedHandoffEnabled: false },
   ),
   undefined,
-  'disabled authenticated handoff must not attach browser auth',
+  'disabled protected downloads must not attach browser auth',
 );
 
 captureHandoffAuthHeaders(
@@ -85,8 +86,32 @@ captureHandoffAuthHeaders(
     incognito: false,
     requestHeaders: [{ name: 'Cookie', value: 'session=abc' }],
   },
-  settings,
   1_000,
+);
+assert.equal(
+  hasCapturedHandoffAuth(
+    {
+      requestId: 'request-1',
+      url: 'https://download-cdn.example.com/file.zip',
+      incognito: false,
+    },
+    1_200,
+  ),
+  true,
+  'captured auth should be detectable without consuming it',
+);
+assert.equal(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'request-1',
+      url: 'https://download-cdn.example.com/file.zip',
+      incognito: false,
+    },
+    { ...settings, authenticatedHandoffEnabled: false },
+    1_225,
+  ),
+  undefined,
+  'disabled protected downloads should not forward captured auth',
 );
 assert.deepEqual(
   takeCapturedHandoffAuth(
@@ -99,7 +124,50 @@ assert.deepEqual(
     1_250,
   ),
   { headers: [{ name: 'Cookie', value: 'session=abc' }] },
-  'recent captured headers should be consumed by request id for a matching allowlisted host',
+  'recent captured headers should be consumed by request id for a matching browser download',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'stale-request',
+    url: 'https://chatgpt.com/backend-api/estuary/content?id=file_old',
+    method: 'GET',
+    requestHeaders: [{ name: 'Cookie', value: 'old=1' }],
+  },
+  10_000,
+);
+assert.equal(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'stale-request',
+      url: 'https://chatgpt.com/backend-api/estuary/content?id=file_old',
+    },
+    settings,
+    45_001,
+  ),
+  undefined,
+  'expired captured auth should not be forwarded',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'url-fallback-source',
+    url: 'https://chatgpt.com/backend-api/estuary/content?id=file_456',
+    method: 'GET',
+    requestHeaders: [{ name: 'Cookie', value: 'oai-did=2' }],
+  },
+  20_000,
+);
+assert.deepEqual(
+  takeCapturedHandoffAuth(
+    {
+      url: 'https://chatgpt.com/backend-api/estuary/content?id=file_456',
+    },
+    settings,
+    20_500,
+  ),
+  { headers: [{ name: 'Cookie', value: 'oai-did=2' }] },
+  'URL fallback should attach captured auth when the browser download lacks a request id',
 );
 
 const request = createEnqueueDownloadRequest(

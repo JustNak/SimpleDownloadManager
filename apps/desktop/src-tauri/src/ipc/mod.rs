@@ -1,5 +1,7 @@
 use crate::commands::emit_snapshot;
-use crate::download::schedule_downloads;
+use crate::download::{
+    probe_browser_handoff_access, schedule_downloads, PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE,
+};
 use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
@@ -395,12 +397,13 @@ async fn handle_request(
                     )
                 }
             };
+            let source: DownloadSource = payload.source.into();
 
             let prompt = match state
                 .prepare_download_prompt(
                     request.request_id.clone(),
                     &payload.url,
-                    Some(payload.source.into()),
+                    Some(source.clone()),
                     payload.suggested_filename,
                     payload.total_bytes,
                 )
@@ -438,11 +441,22 @@ async fn handle_request(
                     directory_override,
                     allow_duplicate,
                 } => {
+                    if let Err(error) = probe_browser_download_access(
+                        &state,
+                        &source,
+                        &prompt.url,
+                        payload.handoff_auth.as_ref(),
+                    )
+                    .await
+                    {
+                        return map_backend_error(request.request_id, error);
+                    }
+
                     let result = state
                         .enqueue_download_with_options(
                             prompt.url,
                             EnqueueOptions {
-                                source: prompt.source,
+                                source: Some(source),
                                 directory_override,
                                 filename_hint: Some(prompt.filename),
                                 handoff_auth: payload.handoff_auth,
@@ -486,11 +500,23 @@ async fn handle_request(
                 }
             };
 
+            let source: DownloadSource = payload.source.into();
+            if let Err(error) = probe_browser_download_access(
+                &state,
+                &source,
+                &payload.url,
+                payload.handoff_auth.as_ref(),
+            )
+            .await
+            {
+                return map_backend_error(request.request_id, error);
+            }
+
             match state
                 .enqueue_download_with_options(
                     payload.url,
                     EnqueueOptions {
-                        source: Some(payload.source.into()),
+                        source: Some(source),
                         handoff_auth: payload.handoff_auth,
                         ..Default::default()
                     },
@@ -712,6 +738,92 @@ impl From<HostRegistrationStatus> for HostRegistration {
             HostRegistrationStatus::Missing => HostRegistration::Missing,
             HostRegistrationStatus::Broken => HostRegistration::Broken,
         }
+    }
+}
+
+async fn probe_browser_download_access(
+    state: &SharedState,
+    source: &DownloadSource,
+    url: &str,
+    handoff_auth: Option<&HandoffAuth>,
+) -> Result<(), BackendError> {
+    if source.entry_point != "browser_download" {
+        return Ok(());
+    }
+
+    let (header_count, header_names) = handoff_auth_header_summary(handoff_auth);
+    let protected_auth_attached = handoff_auth.is_some();
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "extension",
+            format!(
+                "Protected download access probe started: protectedAuthAttached={protected_auth_attached} headerCount={header_count} headerNames={header_names}"
+            ),
+            None,
+        )
+        .await;
+
+    match probe_browser_handoff_access(url, handoff_auth).await {
+        Ok(probe) => {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "extension",
+                    format!(
+                        "Protected download access probe succeeded: accessProbeStatus={} protectedAuthAttached={protected_auth_attached} headerCount={header_count} headerNames={header_names}",
+                        probe.status
+                    ),
+                    None,
+                )
+                .await;
+            Ok(())
+        }
+        Err(error) => {
+            let access_probe_status = error
+                .status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "none".into());
+            let level = if error.code == PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE {
+                DiagnosticLevel::Warning
+            } else {
+                DiagnosticLevel::Error
+            };
+            let _ = state
+                .record_diagnostic_event(
+                    level,
+                    "extension",
+                    format!(
+                        "Protected download access probe failed: accessProbeStatus={access_probe_status} protectedAuthAttached={protected_auth_attached} headerCount={header_count} headerNames={header_names}"
+                    ),
+                    None,
+                )
+                .await;
+            Err(BackendError {
+                code: error.code,
+                message: error.message,
+            })
+        }
+    }
+}
+
+fn handoff_auth_header_summary(handoff_auth: Option<&HandoffAuth>) -> (usize, String) {
+    let Some(auth) = handoff_auth else {
+        return (0, "none".into());
+    };
+    let mut names: Vec<String> = auth
+        .headers
+        .iter()
+        .map(|header| header.name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+
+    if names.is_empty() {
+        (auth.headers.len(), "none".into())
+    } else {
+        (auth.headers.len(), names.join(","))
     }
 }
 

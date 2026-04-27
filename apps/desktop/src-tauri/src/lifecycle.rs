@@ -13,6 +13,7 @@ use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
+pub const POST_UPDATE_ARG: &str = "--post-update";
 const AUTOSTART_ARG: &str = "--autostart";
 const INSTALLER_CONFIGURE_ARG: &str = "--installer-configure";
 const INSTALLER_STARTUP_ARG: &str = "--installer-startup";
@@ -58,6 +59,10 @@ pub fn is_autostart_launch() -> bool {
     is_autostart_launch_from_args(std::env::args())
 }
 
+pub fn is_post_update_launch() -> bool {
+    is_post_update_launch_from_args(std::env::args())
+}
+
 pub fn is_autostart_launch_from_args<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -65,6 +70,15 @@ where
 {
     args.into_iter()
         .any(|argument| argument.as_ref() == AUTOSTART_ARG)
+}
+
+pub fn is_post_update_launch_from_args<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .any(|argument| argument.as_ref() == POST_UPDATE_ARG)
 }
 
 pub fn installer_launch_options_from_args<I, S>(args: I) -> Option<InstallerLaunchOptions>
@@ -128,8 +142,13 @@ where
 
 pub fn should_show_main_window_on_startup(
     is_autostart_launch: bool,
+    is_post_update_launch: bool,
     startup_launch_mode: StartupLaunchMode,
 ) -> bool {
+    if is_post_update_launch {
+        return true;
+    }
+
     !(is_autostart_launch && startup_launch_mode == StartupLaunchMode::Tray)
 }
 
@@ -183,7 +202,11 @@ pub fn initialize_main_window<R: Runtime>(
         restore_main_window_state(&window, &window_state);
     }
 
-    if should_show_main_window_on_startup(is_autostart_launch(), settings.startup_launch_mode) {
+    if should_show_main_window_on_startup(
+        is_autostart_launch(),
+        is_post_update_launch(),
+        settings.startup_launch_mode,
+    ) {
         show_main_window(app)
     } else {
         hide_main_window_to_tray(app)
@@ -388,6 +411,22 @@ mod tests {
     }
 
     #[test]
+    fn detects_post_update_launch_argument() {
+        assert!(super::is_post_update_launch_from_args([
+            "simple-download-manager.exe",
+            super::POST_UPDATE_ARG,
+        ]));
+        assert!(!super::is_post_update_launch_from_args([
+            "simple-download-manager.exe",
+            "--not-post-update",
+        ]));
+        assert!(!super::is_post_update_launch_from_args([
+            "simple-download-manager.exe",
+            "--flag=--post-update",
+        ]));
+    }
+
+    #[test]
     fn ignores_installer_launch_options_without_configure_marker() {
         assert_eq!(
             super::installer_launch_options_from_args([
@@ -452,15 +491,23 @@ mod tests {
     fn tray_startup_hides_only_autostart_launches() {
         assert!(super::should_show_main_window_on_startup(
             false,
+            false,
             crate::storage::StartupLaunchMode::Tray,
         ));
         assert!(!super::should_show_main_window_on_startup(
             true,
+            false,
             crate::storage::StartupLaunchMode::Tray,
         ));
         assert!(super::should_show_main_window_on_startup(
             true,
+            false,
             crate::storage::StartupLaunchMode::Open,
+        ));
+        assert!(super::should_show_main_window_on_startup(
+            true,
+            true,
+            crate::storage::StartupLaunchMode::Tray,
         ));
     }
 

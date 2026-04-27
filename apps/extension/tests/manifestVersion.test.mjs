@@ -53,7 +53,7 @@ assert.deepEqual(
 assert.deepEqual(
   chromiumManifest.permissions,
   ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
-  'Chromium build should request webRequest for opt-in authenticated handoff header capture',
+  'Chromium build should request webRequest for protected-download header capture',
 );
 assert.deepEqual(
   chromiumManifest.host_permissions,

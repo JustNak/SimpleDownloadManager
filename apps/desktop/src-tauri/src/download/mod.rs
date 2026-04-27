@@ -49,6 +49,21 @@ const REQUEST_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(2),
     Duration::from_secs(5),
 ];
+pub const PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE: &str = "PROTECTED_DOWNLOAD_AUTH_REQUIRED";
+pub const PROTECTED_DOWNLOAD_AUTH_REQUIRED_MESSAGE: &str =
+    "This site requires your browser session. Enable Protected Downloads or let the browser handle this download.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserHandoffAccessProbe {
+    pub status: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserHandoffAccessError {
+    pub code: &'static str,
+    pub message: String,
+    pub status: Option<u16>,
+}
 
 pub fn schedule_downloads(app: AppHandle, state: SharedState) {
     tauri::async_runtime::spawn(async move {
@@ -394,6 +409,91 @@ fn download_client() -> Result<Client, DownloadError> {
 static CLIENT: OnceLock<Client> = OnceLock::new();
 static TORRENT_ENGINE: OnceCell<Arc<TorrentEngine>> = OnceCell::const_new();
 static RANGE_BACKOFFS: OnceLock<RangeBackoffRegistry> = OnceLock::new();
+
+pub async fn probe_browser_handoff_access(
+    url: &str,
+    handoff_auth: Option<&HandoffAuth>,
+) -> Result<BrowserHandoffAccessProbe, BrowserHandoffAccessError> {
+    let client = download_client().map_err(|error| BrowserHandoffAccessError {
+        code: "DOWNLOAD_FAILED",
+        message: error.message,
+        status: None,
+    })?;
+    let mut current_url = url.to_string();
+    let mut redirects = 0;
+
+    loop {
+        let request = client
+            .get(&current_url)
+            .timeout(PREFLIGHT_TIMEOUT)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(RANGE, "bytes=0-0");
+        let request = apply_handoff_auth_headers(request, handoff_auth)
+            .map_err(access_probe_download_error)?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| BrowserHandoffAccessError {
+                code: "DOWNLOAD_FAILED",
+                message: format!("Could not access protected browser download: {error}"),
+                status: None,
+            })?;
+
+        if response.status().is_redirection() {
+            let next_url = redirect_location(response.url().as_str(), &response)
+                .map_err(access_probe_download_error)?;
+            if handoff_auth.is_some() && !redirect_keeps_origin(response.url().as_str(), &next_url)
+            {
+                return Err(BrowserHandoffAccessError {
+                    code: "DOWNLOAD_FAILED",
+                    message: "Authenticated download redirected to another origin; refusing to forward browser credentials."
+                        .into(),
+                    status: Some(response.status().as_u16()),
+                });
+            }
+            redirects += 1;
+            if redirects > 10 {
+                return Err(BrowserHandoffAccessError {
+                    code: "DOWNLOAD_FAILED",
+                    message: "Download access probe redirected too many times.".into(),
+                    status: Some(response.status().as_u16()),
+                });
+            }
+            current_url = next_url;
+            continue;
+        }
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(BrowserHandoffAccessProbe {
+                status: status.as_u16(),
+            });
+        }
+
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(BrowserHandoffAccessError {
+                code: PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE,
+                message: PROTECTED_DOWNLOAD_AUTH_REQUIRED_MESSAGE.into(),
+                status: Some(status.as_u16()),
+            });
+        }
+
+        return Err(BrowserHandoffAccessError {
+            code: "DOWNLOAD_FAILED",
+            message: format!("Download access probe failed with HTTP {status}."),
+            status: Some(status.as_u16()),
+        });
+    }
+}
+
+fn access_probe_download_error(error: DownloadError) -> BrowserHandoffAccessError {
+    BrowserHandoffAccessError {
+        code: "DOWNLOAD_FAILED",
+        message: error.message,
+        status: None,
+    }
+}
 
 #[derive(Default)]
 struct RangeBackoffRegistry {
@@ -2040,7 +2140,10 @@ async fn preflight_download(
     let mut current_url = url.to_string();
     let mut redirects = 0;
     let response = loop {
-        let request = client.head(&current_url).timeout(PREFLIGHT_TIMEOUT);
+        let request = client
+            .head(&current_url)
+            .timeout(PREFLIGHT_TIMEOUT)
+            .header(ACCEPT_ENCODING, "identity");
         let request = apply_handoff_auth_headers(request, handoff_auth).ok()?;
         let response = request.send().await.ok()?;
         if !response.status().is_redirection() {
@@ -3177,6 +3280,41 @@ mod tests {
         assert!(request
             .to_ascii_lowercase()
             .contains("accept-encoding: identity"));
+    }
+
+    #[tokio::test]
+    async fn protected_handoff_access_probe_rejects_missing_browser_auth() {
+        let (url, request_handle) = spawn_cookie_required_server().await;
+
+        let error = probe_browser_handoff_access(&url, None)
+            .await
+            .expect_err("missing browser auth should reject protected downloads before queuing");
+        let request = request_handle.await.unwrap();
+
+        assert_eq!(error.code, "PROTECTED_DOWNLOAD_AUTH_REQUIRED");
+        assert_eq!(error.status, Some(403));
+        assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("accept-encoding: identity"));
+    }
+
+    #[tokio::test]
+    async fn protected_handoff_access_probe_accepts_captured_browser_auth() {
+        let (url, request_handle) = spawn_cookie_required_server().await;
+        let auth = HandoffAuth {
+            headers: vec![HandoffAuthHeader {
+                name: "Cookie".into(),
+                value: "session=abc".into(),
+            }],
+        };
+
+        let result = probe_browser_handoff_access(&url, Some(&auth)).await;
+        let request = request_handle.await.unwrap();
+
+        assert!(result.is_ok());
+        assert!(request.to_ascii_lowercase().contains("cookie: session=abc"));
+        assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
     }
 
     #[test]

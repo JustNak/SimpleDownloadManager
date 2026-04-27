@@ -87,14 +87,14 @@ The source package includes apps/extension/FIREFOX_GUIDELINES.md with the Firefo
 
 - Native messaging: required to communicate with the local native desktop app.
 - downloads: required to observe, cancel, remove, erase, and restart browser downloads during managed handoff/fallback.
-- webRequest and webRequestBlocking: required in Firefox to intercept qualifying attachment/download responses before Firefox opens its default Save As dialog and to capture request headers for explicitly allowlisted authenticated handoff hosts.
-- <all_urls>: required because download links can originate from arbitrary HTTP(S) sites; filtering happens in extension code by scheme, excluded host list, wildcard excluded host patterns, authenticated handoff host patterns, ignored extension list, and user settings.
-- storage: required to store extension settings such as enabled state, handoff mode, excluded hosts, authenticated handoff hosts, ignored extensions, and badge preference.
+- webRequest and webRequestBlocking: required in Firefox to intercept qualifying attachment/download responses before Firefox opens its default Save As dialog and to capture request headers for exact protected-download handoff.
+- <all_urls>: required because download links can originate from arbitrary HTTP(S) sites; filtering happens in extension code by scheme, excluded host list, wildcard excluded host patterns, ignored extension list, protected-download handoff state, and user settings.
+- storage: required to store extension settings such as enabled state, handoff mode, excluded hosts, protected-download toggle state, ignored extensions, and badge preference.
 - contextMenus: required for the "Download with Simple Download Manager" link menu action.
 
 ## Data Collection Disclosure
 
-The manifest declares required data_collection_permissions for browsingActivity, websiteActivity, and websiteContent because download URLs, page/referrer metadata when available, filename hints, response headers, content length, download actions, and opt-in authenticated handoff headers are transmitted outside Firefox to the local native desktop app. This transmission is required for the extension to perform download handoff.
+The manifest declares required data_collection_permissions for browsingActivity, websiteActivity, and websiteContent because download URLs, page/referrer metadata when available, filename hints, response headers, content length, download actions, and opt-in protected-download request headers are transmitted outside Firefox to the local native desktop app. This transmission is required for the extension to perform download handoff.
 
 The data is sent to the local native desktop app only. The extension does not transmit this data to a remote server.
 
@@ -102,8 +102,8 @@ The data is sent to the local native desktop app only. The extension does not tr
 
 - Users can disable browser download interception.
 - Users can switch handoff mode between prompt and automatic queueing.
-- Users can add excluded hosts, wildcard excluded host patterns, authenticated handoff host patterns, and ignored file extensions.
-- Authenticated handoff is disabled by default, applies only to user-configured trusted hosts, and sends bounded request headers to the local native app only.
+- Users can add excluded hosts, wildcard excluded host patterns, and ignored file extensions.
+- Protected Downloads can be disabled by the user; when enabled, it sends bounded request headers only for the exact browser download being handed to the local native app.
 - web.telegram.org is excluded by default.
 `;
 }

@@ -68,8 +68,8 @@ assert.match(reviewerNotes, /websiteContent/);
 assert.match(reviewerNotes, /No remote code/);
 assert.match(reviewerNotes, /local native desktop app/);
 assert.match(reviewerNotes, /wildcard excluded host patterns/);
-assert.match(reviewerNotes, /authenticated handoff host patterns/);
-assert.match(reviewerNotes, /Authenticated handoff is disabled by default/);
+assert.match(reviewerNotes, /Protected Downloads/);
+assert.match(reviewerNotes, /exact browser download/);
 assert.match(reviewerNotes, /FIREFOX_GUIDELINES\.md/);
 
 const sourceReadme = createFirefoxAmoSourceReadme();

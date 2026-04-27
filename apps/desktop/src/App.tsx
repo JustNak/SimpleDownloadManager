@@ -140,7 +140,7 @@ export default function App() {
       showBadgeStatus: true,
       excludedHosts: [],
       ignoredFileExtensions: [],
-      authenticatedHandoffEnabled: false,
+      authenticatedHandoffEnabled: true,
       authenticatedHandoffHosts: [],
     },
   });

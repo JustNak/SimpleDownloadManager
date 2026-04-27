@@ -7,13 +7,27 @@ $desktopTauriRoot = Join-Path $desktopRoot 'src-tauri'
 $hostRoot = Join-Path $workspaceRoot 'apps\native-host'
 $extensionRoot = Join-Path $workspaceRoot 'apps\extension'
 $releaseTempRoot = Join-Path $workspaceRoot '.tmp\release'
+$defaultSigningKeyPath = Join-Path $env:USERPROFILE '.simple-download-manager\tauri-updater.key'
+$signingKeyPath = $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PATH
 
 if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-  throw 'TAURI_SIGNING_PRIVATE_KEY is required to build signed updater artifacts.'
+  if ([string]::IsNullOrWhiteSpace($signingKeyPath)) {
+    $signingKeyPath = $defaultSigningKeyPath
+  }
+
+  if (Test-Path -LiteralPath $signingKeyPath) {
+    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $signingKeyPath -Raw
+  } else {
+    throw "TAURI_SIGNING_PRIVATE_KEY is required to build signed updater artifacts. Set TAURI_SIGNING_PRIVATE_KEY, set SDM_TAURI_SIGNING_PRIVATE_KEY_PATH, or place the key at $defaultSigningKeyPath."
+  }
 }
 
 if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
-  $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+  if (![string]::IsNullOrWhiteSpace($env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH) -and (Test-Path -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH)) {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH -Raw).TrimEnd()
+  } else {
+    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+  }
 }
 
 function Invoke-ReleaseCommand {

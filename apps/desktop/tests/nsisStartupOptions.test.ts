@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(__filename), '..', '..', '..');
 const hooksPath = path.join(repoRoot, 'apps', 'desktop', 'src-tauri', 'windows', 'hooks.nsh');
+const mainPath = path.join(repoRoot, 'apps', 'desktop', 'src-tauri', 'src', 'main.rs');
 const hooks = await readFile(hooksPath, 'utf8');
+const mainSource = await readFile(mainPath, 'utf8');
 
 assert.match(
   hooks,
@@ -30,13 +32,18 @@ assert.match(
 );
 assert.match(
   hooks,
-  /StrCmp\s+\$UpdateMode\s+1\s+relaunch_after_update/,
-  'updates should preserve existing startup settings and relaunch the app without prompting',
+  /StrCmp\s+\$UpdateMode\s+1\s+done_startup_options/,
+  'updates should preserve existing startup settings and let the Tauri updater relaunch the app',
+);
+assert.doesNotMatch(
+  hooks,
+  /relaunch_after_update:|Exec\s+'"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"'/,
+  'postinstall hooks should not add a second updater relaunch that can race the built-in /R launch',
 );
 assert.match(
-  hooks,
-  /relaunch_after_update:\s+Exec\s+'"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe"'/,
-  'updates should relaunch the installed app so the main window returns after completion',
+  mainSource,
+  /tauri_plugin_updater::Builder::new\(\)\s*\.installer_arg\(lifecycle::POST_UPDATE_ARG\)\s*\.build\(\)/s,
+  'updater relaunches should include the post-update marker used to show the main window',
 );
 assert.match(
   hooks,
