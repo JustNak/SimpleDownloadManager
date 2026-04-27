@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const repoRoot = path.resolve();
-const expectedVersion = '0.3.46-alpha';
+const expectedVersion = '0.3.48-alpha';
 const expectedExtensionVersion = '0.3.46-alpha';
 
 for (const manifestPath of [

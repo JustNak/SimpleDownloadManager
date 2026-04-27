@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-desktop-backend"
-version = "0.3.46-alpha"
+version = "0.3.48-alpha"
 edition = "2021"
 build = "build.rs"
 
