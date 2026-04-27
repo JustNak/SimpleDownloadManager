@@ -14,8 +14,8 @@ import {
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, formatTime, getHost } from './popupShared';
-import { getErrorMessage } from './errors';
 import { applyAppearance } from './appearance';
+import { runPopupAction } from './popupActions';
 import {
   calculateDownloadProgressMetrics,
   recordProgressSample,
@@ -76,17 +76,21 @@ export function DownloadProgressWindow() {
     setIsConfirmingCancel(false);
   }, [job?.id]);
 
-  async function runAction(action: () => Promise<void>) {
+  async function runAction(
+    action: () => Promise<void>,
+    { closeOnSuccess = false }: { closeOnSuccess?: boolean } = {},
+  ) {
     setIsBusy(true);
     setIsConfirmingCancel(false);
     setErrorMessage('');
-    try {
-      await action();
-    } catch (error) {
-      setErrorMessage(getErrorMessage(error, 'Action failed.'));
-    } finally {
-      setIsBusy(false);
+    const result = await runPopupAction({
+      action,
+      close: closeOnSuccess && currentWindow ? () => currentWindow.close() : undefined,
+    });
+    if (!result.ok) {
+      setErrorMessage(result.message);
     }
+    setIsBusy(false);
   }
 
   if (!job) {
@@ -168,10 +172,10 @@ export function DownloadProgressWindow() {
 
         <div className="mt-auto flex justify-end gap-2 border-t border-border pt-3">
           {isCompleted ? (
-            <ActionButton label="Open" icon={<ExternalLink size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => openJobFile(job.id))} />
+            <ActionButton label="Open" icon={<ExternalLink size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => openJobFile(job.id), { closeOnSuccess: true })} />
           ) : null}
           {shouldShowCompletedFileAction(job) ? (
-            <ActionButton label="Show" icon={<FolderOpen size={16} />} disabled={isBusy} onClick={() => void runAction(() => revealJobInFolder(job.id))} />
+            <ActionButton label="Show" icon={<FolderOpen size={16} />} disabled={isBusy} onClick={() => void runAction(() => revealJobInFolder(job.id), { closeOnSuccess: true })} />
           ) : null}
           {isActive ? (
             <ActionButton label="Pause" icon={<Pause size={16} />} disabled={isBusy} onClick={() => void runAction(() => pauseJob(job.id))} />

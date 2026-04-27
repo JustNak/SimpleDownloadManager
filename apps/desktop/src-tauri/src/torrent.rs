@@ -1,5 +1,6 @@
 use crate::state::TorrentRuntimeSnapshot;
 use librqbit::api::TorrentIdOrHash;
+use librqbit::dht::PersistentDhtConfig;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
     AddTorrent, AddTorrentOptions, ManagedTorrent, PeerConnectionOptions, Session, SessionOptions,
@@ -17,6 +18,9 @@ use tokio::sync::Mutex;
 pub const TORRENT_LISTEN_PORT_RANGE: Range<u16> = 42000..42100;
 pub const TORRENT_PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 pub const TORRENT_PEER_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const TORRENT_DHT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+pub const TORRENT_DEFER_WRITES_MB: usize = 16;
+pub const TORRENT_CONCURRENT_INIT_LIMIT: usize = 2;
 pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.demonii.com:1337/announce",
@@ -141,6 +145,31 @@ impl TorrentEngine {
         Ok(id)
     }
 
+    pub async fn resume_existing(
+        &self,
+        engine_id: Option<usize>,
+        info_hash: Option<&str>,
+        upload_limit_kib_per_second: u32,
+    ) -> Result<Option<usize>, String> {
+        self.set_upload_limit(upload_limit_kib_per_second);
+
+        for candidate in torrent_resume_candidates(engine_id, info_hash) {
+            let Some(handle) = self.session.get(candidate) else {
+                continue;
+            };
+
+            let id = handle.id();
+            self.handles.lock().await.insert(id, handle.clone());
+            self.session
+                .unpause(&handle)
+                .await
+                .map_err(|error| format!("Could not resume torrent: {error:#}"))?;
+            return Ok(Some(id));
+        }
+
+        Ok(None)
+    }
+
     pub async fn pause(&self, id: usize) -> Result<(), String> {
         let handle = self.handle(id).await?;
         self.session
@@ -226,15 +255,21 @@ fn torrent_session_options_with_listener(
     SessionOptions {
         fastresume: true,
         persistence: Some(SessionPersistenceConfig::Json {
-            folder: Some(persistence_dir),
+            folder: Some(persistence_dir.clone()),
         }),
         peer_opts: Some(PeerConnectionOptions {
             connect_timeout: Some(TORRENT_PEER_CONNECT_TIMEOUT),
             read_write_timeout: Some(TORRENT_PEER_READ_WRITE_TIMEOUT),
             keep_alive_interval: None,
         }),
+        dht_config: Some(PersistentDhtConfig {
+            dump_interval: Some(TORRENT_DHT_PERSIST_INTERVAL),
+            config_filename: Some(persistence_dir.join("dht.json")),
+        }),
         listen_port_range,
         enable_upnp_port_forwarding: false,
+        defer_writes_up_to: Some(TORRENT_DEFER_WRITES_MB),
+        concurrent_init_limit: Some(TORRENT_CONCURRENT_INIT_LIMIT),
         ..Default::default()
     }
 }
@@ -333,6 +368,22 @@ fn upload_limit_bps(upload_limit_kib_per_second: u32) -> Option<NonZeroU32> {
         .and_then(NonZeroU32::new)
 }
 
+fn torrent_resume_candidates(
+    engine_id: Option<usize>,
+    info_hash: Option<&str>,
+) -> Vec<TorrentIdOrHash> {
+    let mut candidates = Vec::new();
+    if let Some(engine_id) = engine_id {
+        candidates.push(TorrentIdOrHash::Id(engine_id));
+    }
+
+    if let Some(info_hash) = info_hash.and_then(|hash| TorrentIdOrHash::parse(hash).ok()) {
+        candidates.push(info_hash);
+    }
+
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +476,29 @@ mod tests {
             peer_options.read_write_timeout,
             Some(TORRENT_PEER_READ_WRITE_TIMEOUT)
         );
+    }
+
+    #[test]
+    fn session_options_use_app_local_dht_persistence_and_deferred_writes() {
+        let persistence_dir = PathBuf::from("session");
+        let options = torrent_session_options(persistence_dir.clone());
+        let dht_config = options.dht_config.expect("app-local DHT config");
+
+        assert_eq!(
+            dht_config.config_filename,
+            Some(persistence_dir.join("dht.json"))
+        );
+        assert_eq!(dht_config.dump_interval, Some(Duration::from_secs(60)));
+        assert_eq!(options.defer_writes_up_to, Some(16));
+        assert_eq!(options.concurrent_init_limit, Some(2));
+    }
+
+    #[test]
+    fn resume_candidates_prefer_engine_id_then_info_hash() {
+        let candidates =
+            torrent_resume_candidates(Some(7), Some("a634dc946d49989526058626caa3bbabba4607b6"));
+
+        assert!(matches!(candidates[0], TorrentIdOrHash::Id(7)));
+        assert!(matches!(candidates[1], TorrentIdOrHash::Hash(_)));
     }
 }

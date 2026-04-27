@@ -57,6 +57,30 @@ async function main() {
   );
   assert.equal(
     shouldHandleBrowserDownload(
+      { url: 'https://downloads.example.com/file.zip' },
+      { ...defaultSettings, excludedHosts: ['*.example.com'] },
+    ),
+    false,
+    'wildcard host excludes should match subdomains',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://example.com/file.zip' },
+      { ...defaultSettings, excludedHosts: ['*.example.com'] },
+    ),
+    true,
+    'subdomain wildcard excludes should not match the root host',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      { url: 'https://download-cdn.example.com/file.zip' },
+      { ...defaultSettings, excludedHosts: ['download*.example.com'] },
+    ),
+    false,
+    'wildcards should match within host labels',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
       { url: 'https://example.com/file.zip' },
       { ...defaultSettings, ignoredFileExtensions: ['zip'] },
     ),

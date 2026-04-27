@@ -21,6 +21,7 @@ import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, getHost } from './popupShared';
 import { getErrorMessage } from './errors';
 import { applyAppearance } from './appearance';
+import { runPopupAction } from './popupActions';
 
 export function BatchProgressWindow() {
   const [context, setContext] = useState<ProgressBatchContext | null>(null);
@@ -73,16 +74,20 @@ export function BatchProgressWindow() {
     };
   }, [batchId]);
 
-  async function runAction(action: () => Promise<void>) {
+  async function runAction(
+    action: () => Promise<void>,
+    { closeOnSuccess = false }: { closeOnSuccess?: boolean } = {},
+  ) {
     setIsBusy(true);
     setErrorMessage('');
-    try {
-      await action();
-    } catch (error) {
-      setErrorMessage(getErrorMessage(error, 'Action failed.'));
-    } finally {
-      setIsBusy(false);
+    const result = await runPopupAction({
+      action,
+      close: closeOnSuccess && currentWindow ? () => currentWindow.close() : undefined,
+    });
+    if (!result.ok) {
+      setErrorMessage(result.message);
     }
+    setIsBusy(false);
   }
 
   if (!context) {
@@ -188,7 +193,7 @@ export function BatchProgressWindow() {
             label="Reveal completed"
             icon={<FolderOpen size={16} />}
             disabled={isBusy || !completedJob}
-            onClick={() => completedJob ? void runAction(() => revealJobInFolder(completedJob.id)) : undefined}
+            onClick={() => completedJob ? void runAction(() => revealJobInFolder(completedJob.id), { closeOnSuccess: true }) : undefined}
           />
           {summary.activeCount === 0 ? (
             <ActionButton label="Close" icon={<X size={16} />} disabled={isBusy} onClick={() => void currentWindow?.close()} />

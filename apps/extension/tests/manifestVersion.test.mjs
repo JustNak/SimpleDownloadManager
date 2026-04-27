@@ -21,6 +21,13 @@ const buildScript = await readFile(
 assert.equal(firefoxManifest.manifest_version, 2);
 assert.deepEqual(firefoxManifest.background, { scripts: ['background.js'] });
 assert.equal(firefoxManifest.browser_action.default_title, 'Simple Download Manager');
+assert.deepEqual(firefoxManifest.icons, {
+  16: 'icons/icon-16.png',
+  32: 'icons/icon-32.png',
+  48: 'icons/icon-48.png',
+  128: 'icons/icon-128.png',
+});
+assert.deepEqual(firefoxManifest.browser_action.default_icon, firefoxManifest.icons);
 assert.equal(
   firefoxManifest.browser_specific_settings.gecko.id,
   'simple-download-manager@example.com',

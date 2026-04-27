@@ -1,3 +1,5 @@
+import { normalizeExcludedHostPattern } from '@myapp/protocol';
+
 export interface AddExcludedHostsResult {
   hosts: string[];
   addedHosts: string[];
@@ -5,12 +7,7 @@ export interface AddExcludedHostsResult {
 }
 
 export function normalizeHostInput(value: string): string {
-  return value
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/^[^@/]+@/, '')
-    .replace(/[/?#].*$/, '')
-    .toLowerCase();
+  return normalizeExcludedHostPattern(value);
 }
 
 export function parseExcludedHostInput(value: string): string[] {

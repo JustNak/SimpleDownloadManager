@@ -1,4 +1,4 @@
-import type { ExtensionIntegrationSettings } from '@myapp/protocol';
+import { normalizeExcludedHostPattern, type ExtensionIntegrationSettings } from '@myapp/protocol';
 
 export const DEFAULT_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
@@ -55,11 +55,7 @@ function normalizeListenPort(value: unknown): number {
 }
 
 function normalizeHost(host: string): string {
-  return host
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/.*$/, '')
-    .toLowerCase();
+  return normalizeExcludedHostPattern(host);
 }
 
 function normalizeFileExtensions(values: string[]): string[] {

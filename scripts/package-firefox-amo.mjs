@@ -85,7 +85,7 @@ Simple Download Manager is a companion extension for a local native desktop app.
 - Native messaging: required to communicate with the local native desktop app.
 - downloads: required to observe, cancel, remove, erase, and restart browser downloads during managed handoff/fallback.
 - webRequest and webRequestBlocking: required in Firefox to intercept qualifying attachment/download responses before Firefox opens its default Save As dialog.
-- <all_urls>: required because download links can originate from arbitrary HTTP(S) sites; filtering happens in extension code by scheme, excluded host list, ignored extension list, and user settings.
+- <all_urls>: required because download links can originate from arbitrary HTTP(S) sites; filtering happens in extension code by scheme, excluded host list, wildcard excluded host patterns, ignored extension list, and user settings.
 - storage: required to store extension settings such as enabled state, handoff mode, excluded hosts, ignored extensions, and badge preference.
 - contextMenus: required for the "Download with Simple Download Manager" link menu action.
 
@@ -99,7 +99,7 @@ The data is sent to the local native desktop app only. The extension does not tr
 
 - Users can disable browser download interception.
 - Users can switch handoff mode between prompt and automatic queueing.
-- Users can add excluded hosts and ignored file extensions.
+- Users can add excluded hosts, wildcard excluded host patterns, and ignored file extensions.
 - web.telegram.org is excluded by default.
 `;
 }

@@ -18,10 +18,10 @@ assert.deepEqual(
 
 assert.deepEqual(
   normalizeExtensionSettings({
-    excludedHosts: ['https://web.telegram.org/', 'WEB.TELEGRAM.ORG', 'https://example.com/path'],
+    excludedHosts: ['https://web.telegram.org/', 'WEB.TELEGRAM.ORG', 'https://example.com/path', 'https://*.Example.com/downloads'],
   }).excludedHosts,
-  ['web.telegram.org', 'example.com'],
-  'excluded hosts should normalize URLs and deduplicate hosts',
+  ['web.telegram.org', 'example.com', '*.example.com'],
+  'excluded hosts should normalize URLs, wildcard host patterns, and deduplicate hosts',
 );
 
 assert.deepEqual(

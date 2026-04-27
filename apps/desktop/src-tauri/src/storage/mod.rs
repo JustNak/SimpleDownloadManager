@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+static PERSIST_STATE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -512,6 +515,9 @@ pub fn load_persisted_state(path: &Path) -> Result<PersistedState, String> {
 pub fn persist_state(path: &Path, state: &PersistedState) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(state)
         .map_err(|error| format!("Could not serialize persisted state: {error}"))?;
+    let _guard = persist_state_write_lock()
+        .lock()
+        .map_err(|error| format!("Could not lock persisted state writer: {error}"))?;
 
     let temp_path = state_temp_path(path);
     let backup_path = state_backup_path(path);
@@ -519,10 +525,7 @@ pub fn persist_state(path: &Path, state: &PersistedState) -> Result<(), String> 
     std::fs::write(&temp_path, serialized)
         .map_err(|error| format!("Could not write persisted state: {error}"))?;
 
-    if backup_path.exists() {
-        std::fs::remove_file(&backup_path)
-            .map_err(|error| format!("Could not clear persisted state backup: {error}"))?;
-    }
+    remove_file_if_exists(&backup_path, "Could not clear persisted state backup")?;
 
     if path.exists() {
         std::fs::rename(path, &backup_path)
@@ -537,12 +540,21 @@ pub fn persist_state(path: &Path, state: &PersistedState) -> Result<(), String> 
         return Err(format!("Could not finalize persisted state: {error}"));
     }
 
-    if backup_path.exists() {
-        std::fs::remove_file(&backup_path)
-            .map_err(|error| format!("Could not remove persisted state backup: {error}"))?;
-    }
+    remove_file_if_exists(&backup_path, "Could not remove persisted state backup")?;
 
     Ok(())
+}
+
+fn persist_state_write_lock() -> &'static Mutex<()> {
+    PERSIST_STATE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn remove_file_if_exists(path: &Path, context: &str) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{context}: {error}")),
+    }
 }
 
 fn state_temp_path(path: &Path) -> PathBuf {
@@ -591,6 +603,54 @@ fn recover_backup_state(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persist_state_serializes_concurrent_writes_to_same_path() {
+        let dir = test_runtime_dir("persist-concurrent");
+        let path = dir.join("state.json");
+        let workers = 8;
+        let iterations = 20;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+
+        let handles = (0..workers)
+            .map(|worker| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || -> Result<(), String> {
+                    barrier.wait();
+                    for iteration in 0..iterations {
+                        let mut state = PersistedState::default();
+                        state.settings.max_concurrent_downloads =
+                            1 + ((worker + iteration) % 12) as u32;
+                        persist_state(&path, &state)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("writer thread should not panic")
+                .unwrap();
+        }
+
+        load_persisted_state(&path).expect("final state should stay readable");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_file_if_exists_ignores_missing_backup_cleanup() {
+        let dir = test_runtime_dir("persist-missing-backup-cleanup");
+        let backup_path = dir.join("state.json.bak");
+
+        remove_file_if_exists(&backup_path, "Could not remove persisted state backup")
+            .expect("missing cleanup target should not be fatal");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn persisted_state_defaults_reliability_fields_for_existing_files() {
@@ -821,5 +881,15 @@ mod tests {
             .extension_integration
             .ignored_file_extensions
             .is_empty());
+    }
+
+    fn test_runtime_dir(name: &str) -> PathBuf {
+        let dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

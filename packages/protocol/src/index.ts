@@ -140,6 +140,67 @@ export interface ExtensionIntegrationSettings {
   ignoredFileExtensions: string[];
 }
 
+export function normalizeExcludedHostPattern(value: string): string {
+  let pattern = value
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^[^@/]+@/, '')
+    .replace(/[/?#].*$/, '')
+    .toLowerCase();
+
+  pattern = pattern.replace(/:\d+$/, '');
+  pattern = pattern.replace(/^\.+|\.+$/g, '');
+
+  if (
+    !pattern
+    || pattern.includes('/')
+    || pattern.includes('\\')
+    || /\s/.test(pattern)
+    || !/[a-z0-9]/.test(pattern)
+    || !/^[a-z0-9.*-]+$/.test(pattern)
+  ) {
+    return '';
+  }
+
+  return pattern;
+}
+
+export function isHostnameExcludedByPatterns(hostname: string, patterns: string[]): boolean {
+  const normalizedHostname = normalizeExcludedHostPattern(hostname);
+  if (!normalizedHostname) return false;
+
+  return patterns.some((pattern) => {
+    const normalizedPattern = normalizeExcludedHostPattern(pattern);
+    if (!normalizedPattern) return false;
+
+    if (normalizedPattern.includes('*')) {
+      return wildcardHostPatternRegex(normalizedPattern).test(normalizedHostname);
+    }
+
+    return normalizedHostname === normalizedPattern || normalizedHostname.endsWith(`.${normalizedPattern}`);
+  });
+}
+
+export function isUrlHostExcludedByPatterns(url: string, patterns: string[]): boolean {
+  try {
+    return isHostnameExcludedByPatterns(new URL(url).hostname, patterns);
+  } catch {
+    return false;
+  }
+}
+
+function wildcardHostPatternRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .split('*')
+    .map(escapeRegExp)
+    .join('[^.]*');
+  return new RegExp(`^${escaped}$`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+}
+
 export interface PongPayload {
   appState: 'running' | 'launched';
   extensionVersion?: string;

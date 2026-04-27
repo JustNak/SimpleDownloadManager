@@ -1,4 +1,8 @@
-import type { DownloadHandoffMode, ExtensionIntegrationSettings } from '@myapp/protocol';
+import {
+  normalizeExcludedHostPattern,
+  type DownloadHandoffMode,
+  type ExtensionIntegrationSettings,
+} from '@myapp/protocol';
 import browser from 'webextension-polyfill';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
@@ -293,11 +297,7 @@ function normalizeFileExtension(value: string): string {
 }
 
 function normalizeHost(value: string): string {
-  return value
-    .trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/\/.*$/, '')
-    .toLowerCase();
+  return normalizeExcludedHostPattern(value);
 }
 
 function normalizeListenPort(value: string): number {

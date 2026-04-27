@@ -81,6 +81,15 @@ assert.equal(
 assert.equal(
   firefoxWebRequestDownloadCandidate(details({}), {
     ...defaultSettings,
+    excludedHosts: ['*.example.com'],
+  }),
+  null,
+  'wildcard excluded hosts should bypass Firefox webRequest interception',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(details({}), {
+    ...defaultSettings,
     ignoredFileExtensions: ['zip'],
   }),
   null,

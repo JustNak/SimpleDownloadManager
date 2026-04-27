@@ -1,4 +1,9 @@
-import { isErrorResponse, type ExtensionIntegrationSettings, type HostToExtensionResponse } from '@myapp/protocol';
+import {
+  isErrorResponse,
+  isUrlHostExcludedByPatterns,
+  type ExtensionIntegrationSettings,
+  type HostToExtensionResponse,
+} from '@myapp/protocol';
 
 export type BrowserDownloadFilenameSuggestion = {
   filename?: string;
@@ -404,8 +409,7 @@ function isHttpUrl(url: string | undefined): url is string {
 }
 
 function isHostExcluded(url: string, excludedHosts: string[]): boolean {
-  const hostname = new URL(url).hostname.toLowerCase();
-  return excludedHosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+  return isUrlHostExcludedByPatterns(url, excludedHosts);
 }
 
 function isFileExtensionIgnored(url: string, filename: string | undefined, ignoredExtensions: string[] = []): boolean {

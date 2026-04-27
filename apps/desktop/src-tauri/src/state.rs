@@ -49,6 +49,7 @@ pub struct DownloadTask {
     pub id: String,
     pub url: String,
     pub transfer_kind: TransferKind,
+    pub torrent: Option<TorrentInfo>,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
 }
@@ -1180,6 +1181,7 @@ impl SharedState {
                         id: job.id.clone(),
                         url: job.url.clone(),
                         transfer_kind: job.transfer_kind,
+                        torrent: job.torrent.clone(),
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
                     };
@@ -1412,6 +1414,7 @@ impl SharedState {
                 job.filename = sanitize_filename(name);
             }
             let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+            let had_seeding_started = torrent.seeding_started_at.is_some();
             torrent.engine_id = Some(update.engine_id);
             torrent.info_hash = Some(update.info_hash);
             torrent.name = update.name;
@@ -1427,7 +1430,7 @@ impl SharedState {
             if update.finished && torrent.seeding_started_at.is_none() {
                 torrent.seeding_started_at = Some(current_unix_timestamp_millis());
             }
-            let started_seeding = update.finished && !was_seeding;
+            let started_seeding = update.finished && !was_seeding && !had_seeding_started;
             let event_message = started_seeding.then(|| format!("Seeding {}", job.filename));
             if let Some(message) = event_message {
                 state.push_diagnostic_event(
@@ -1706,7 +1709,7 @@ impl SharedState {
     }
 
     pub async fn resolve_openable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
-        let path = {
+        let (path, transfer_kind, job_state) = {
             let state = self.inner.read().await;
             let job = state
                 .jobs
@@ -1717,10 +1720,18 @@ impl SharedState {
                     message: "Job not found.".into(),
                 })?;
 
-            PathBuf::from(&job.target_path)
+            (
+                PathBuf::from(&job.target_path),
+                job.transfer_kind,
+                job.state,
+            )
         };
 
-        if path.is_file() {
+        if path.is_file()
+            || (transfer_kind == TransferKind::Torrent
+                && job_state == JobState::Completed
+                && path.is_dir())
+        {
             Ok(path)
         } else {
             Err(BackendError {
@@ -3044,6 +3055,64 @@ mod tests {
         let resolved = state.resolve_revealable_path("job_21").await.unwrap();
 
         assert_eq!(resolved, target_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn open_completed_torrent_directory_returns_target_directory() {
+        let download_dir = test_runtime_dir("open-completed-torrent-directory");
+        let target_path = download_dir.join("Example Torrent");
+        std::fs::create_dir_all(&target_path).unwrap();
+        let mut job = download_job("job_27", JobState::Completed, ResumeSupport::Supported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.target_path = target_path.display().to_string();
+        job.temp_path = download_dir.join(".torrent-state").display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let resolved = state.resolve_openable_path("job_27").await.unwrap();
+
+        assert_eq!(resolved, target_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn open_completed_http_directory_still_requires_file() {
+        let download_dir = test_runtime_dir("open-http-directory-rejected");
+        let target_path = download_dir.join("not-a-file");
+        std::fs::create_dir_all(&target_path).unwrap();
+        let mut job = download_job("job_28", JobState::Completed, ResumeSupport::Supported, 100);
+        job.target_path = target_path.display().to_string();
+        job.temp_path = format!("{}.part", job.target_path);
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let error = state.resolve_openable_path("job_28").await.unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error
+            .message
+            .contains("The downloaded file is not available on disk"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn open_missing_torrent_directory_returns_action_error() {
+        let download_dir = test_runtime_dir("open-missing-torrent-directory");
+        let target_path = download_dir.join("missing-torrent");
+        let mut job = download_job("job_29", JobState::Completed, ResumeSupport::Supported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.target_path = target_path.display().to_string();
+        job.temp_path = download_dir.join(".torrent-state").display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let error = state.resolve_openable_path("job_29").await.unwrap_err();
+
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error
+            .message
+            .contains("The downloaded file is not available on disk"));
 
         let _ = std::fs::remove_dir_all(download_dir);
     }

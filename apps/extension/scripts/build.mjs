@@ -16,6 +16,12 @@ const {
   browserExtensionVersion,
   displayVersion,
 } = extensionVersionsFromPackage(JSON.parse(readFileSync(path.resolve(appRoot, 'package.json'), 'utf8')));
+const extensionIcons = {
+  16: 'icons/icon-16.png',
+  32: 'icons/icon-32.png',
+  48: 'icons/icon-48.png',
+  128: 'icons/icon-128.png'
+};
 
 const targets = [
   {
@@ -27,6 +33,7 @@ const targets = [
       version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
+      icons: extensionIcons,
       permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage'],
       background: {
         service_worker: 'background.js',
@@ -34,7 +41,8 @@ const targets = [
       },
       action: {
         default_title: 'Simple Download Manager',
-        default_popup: 'popup.html'
+        default_popup: 'popup.html',
+        default_icon: extensionIcons
       },
       options_ui: {
         page: 'options.html',
@@ -50,13 +58,15 @@ const targets = [
       version: browserExtensionVersion,
       version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
+      icons: extensionIcons,
       permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
       background: {
         scripts: ['background.js']
       },
       browser_action: {
         default_title: 'Simple Download Manager',
-        default_popup: 'popup.html'
+        default_popup: 'popup.html',
+        default_icon: extensionIcons
       },
       options_ui: {
         page: 'options.html',
@@ -97,6 +107,7 @@ async function buildTarget(target) {
 
   await cp(path.join(appRoot, 'src', 'popup', 'index.html'), path.join(outdir, 'popup.html'));
   await cp(path.join(appRoot, 'src', 'options', 'index.html'), path.join(outdir, 'options.html'));
+  await cp(path.join(appRoot, 'src', 'icons'), path.join(outdir, 'icons'), { recursive: true });
   await writeFile(path.join(outdir, 'manifest.json'), JSON.stringify(target.manifest, null, 2));
 }
 

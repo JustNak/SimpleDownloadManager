@@ -589,7 +589,7 @@ export function SettingsPage({
             />
           </div>
 
-          <FieldRow label="Excluded Sites" description="Browser-only hosts." tooltip="Downloads from these hostnames stay in the browser.">
+          <FieldRow label="Excluded Sites" description="Browser-only hosts and wildcard host patterns." tooltip="Downloads from these hostnames stay in the browser. Wildcards match host labels, such as *.example.com.">
             <button
               type="button"
               onClick={() => setIsExcludedSitesDialogOpen(true)}
@@ -788,7 +788,7 @@ function ExcludedSitesDialog({
                   onAddSingle();
                 }
               }}
-              placeholder="example.com"
+              placeholder="*.example.com"
               disabled={!enabled}
               className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             />
@@ -808,18 +808,18 @@ function ExcludedSitesDialog({
               <label className="text-sm font-semibold text-foreground" htmlFor="excludedSitesBulk">
                 Bulk Add
               </label>
-              <span className="text-xs text-muted-foreground">One host or URL per line</span>
+              <span className="text-xs text-muted-foreground">One host, wildcard host, or URL per line</span>
             </div>
             <textarea
               id="excludedSitesBulk"
               value={bulkInput}
               onChange={(event) => onBulkInputChange(event.target.value)}
               disabled={!enabled}
-              placeholder={'cdn.example.com\nhttps://mirror.example.org/file.zip'}
+              placeholder={'cdn.example.com\n*.example.org\nhttps://mirror.example.org/file.zip'}
               className="h-24 w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             />
             <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-muted-foreground">{bulkCandidates.length} pending hosts</span>
+              <span className="text-xs text-muted-foreground">{bulkCandidates.length} pending host patterns</span>
               <button
                 type="button"
                 onClick={onAddBulk}

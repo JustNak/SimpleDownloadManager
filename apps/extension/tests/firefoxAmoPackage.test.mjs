@@ -66,6 +66,7 @@ assert.match(reviewerNotes, /websiteActivity/);
 assert.match(reviewerNotes, /websiteContent/);
 assert.match(reviewerNotes, /No remote code/);
 assert.match(reviewerNotes, /local native desktop app/);
+assert.match(reviewerNotes, /wildcard excluded host patterns/);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);

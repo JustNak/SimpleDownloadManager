@@ -486,39 +486,63 @@ async fn run_torrent_download_attempt(
     }
 
     let output_folder = task.target_path.clone();
-    let prepared_source = prepare_torrent_source(&task.url);
-    if prepared_source.fallback_trackers_added > 0 {
-        record_fallback_tracker_usage(
-            state,
-            &task.id,
-            prepared_source.fallback_trackers_added,
-            prepared_source.source_kind.label(),
-        )
-        .await;
-    }
-    let _ = state
-        .record_diagnostic_event(
-            DiagnosticLevel::Info,
-            "torrent",
-            "Finding torrent metadata",
-            Some(task.id.clone()),
-        )
-        .await;
-    let add_outcome = add_torrent_with_controls(
-        state,
-        &task.id,
-        engine.add_source(
-            &prepared_source,
-            &output_folder,
+    let existing_torrent = task.torrent.as_ref();
+    let engine_id = match engine
+        .resume_existing(
+            existing_torrent.and_then(|torrent| torrent.engine_id),
+            existing_torrent.and_then(|torrent| torrent.info_hash.as_deref()),
             settings.torrent.upload_limit_kib_per_second,
-        ),
-        TORRENT_METADATA_TIMEOUT,
-        TORRENT_METADATA_CONTROL_INTERVAL,
-    )
-    .await?;
-    let engine_id = match add_outcome {
-        TorrentAddOutcome::Added(engine_id) => engine_id,
-        TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+        )
+        .await
+        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?
+    {
+        Some(engine_id) => {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent",
+                    "Resumed torrent session",
+                    Some(task.id.clone()),
+                )
+                .await;
+            engine_id
+        }
+        None => {
+            let prepared_source = prepare_torrent_source(&task.url);
+            if prepared_source.fallback_trackers_added > 0 {
+                record_fallback_tracker_usage(
+                    state,
+                    &task.id,
+                    prepared_source.fallback_trackers_added,
+                    prepared_source.source_kind.label(),
+                )
+                .await;
+            }
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent",
+                    "Finding torrent metadata",
+                    Some(task.id.clone()),
+                )
+                .await;
+            let add_outcome = add_torrent_with_controls(
+                state,
+                &task.id,
+                engine.add_source(
+                    &prepared_source,
+                    &output_folder,
+                    settings.torrent.upload_limit_kib_per_second,
+                ),
+                TORRENT_METADATA_TIMEOUT,
+                TORRENT_METADATA_CONTROL_INTERVAL,
+            )
+            .await?;
+            match add_outcome {
+                TorrentAddOutcome::Added(engine_id) => engine_id,
+                TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+            }
+        }
     };
     let _ = state
         .record_diagnostic_event(
@@ -529,9 +553,16 @@ async fn run_torrent_download_attempt(
         )
         .await;
 
-    let mut last_downloaded = 0;
+    let profile = performance_profile(settings.download_performance_mode);
+    let mut displayed_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
+    let mut last_downloaded = None::<u64>;
     let mut last_sample = Instant::now();
     let mut seeding_started = None::<Instant>;
+    let mut persisted_seeding_started_at =
+        existing_torrent.and_then(|torrent| torrent.seeding_started_at);
+    let mut was_finished = persisted_seeding_started_at.is_some();
+    let mut first_snapshot = true;
+    let mut last_persisted_at = Instant::now();
     loop {
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
@@ -558,30 +589,59 @@ async fn run_torrent_download_attempt(
         if let Some(error) = update.error.clone() {
             return Err(download_error(FailureCategory::Torrent, error, false));
         }
-        let elapsed = last_sample.elapsed().as_secs_f64();
-        update.download_speed = if elapsed > 0.0 {
-            ((update.downloaded_bytes.saturating_sub(last_downloaded) as f64) / elapsed) as u64
-        } else {
-            0
+        let now = Instant::now();
+        update.download_speed = match last_downloaded {
+            Some(previous_downloaded) => displayed_speed.record_sample(
+                update.downloaded_bytes.saturating_sub(previous_downloaded),
+                now.saturating_duration_since(last_sample),
+            ),
+            None => 0,
         };
-        last_downloaded = update.downloaded_bytes;
-        last_sample = Instant::now();
+        last_downloaded = Some(update.downloaded_bytes);
+        last_sample = now;
+
+        let started_seeding = update.finished && !was_finished;
+        let should_persist = torrent_progress_should_persist(
+            first_snapshot,
+            started_seeding,
+            false,
+            last_persisted_at,
+            now,
+        );
+        if should_persist {
+            last_persisted_at = now;
+        }
 
         let snapshot = state
-            .update_torrent_progress(&task.id, update.clone(), true)
+            .update_torrent_progress(&task.id, update.clone(), should_persist)
             .await
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
         emit_snapshot(app, &snapshot);
+        first_snapshot = false;
 
         if update.finished {
             let started = seeding_started.get_or_insert_with(Instant::now);
+            if persisted_seeding_started_at.is_none() {
+                persisted_seeding_started_at = snapshot
+                    .jobs
+                    .iter()
+                    .find(|job| job.id == task.id)
+                    .and_then(|job| job.torrent.as_ref())
+                    .and_then(|torrent| torrent.seeding_started_at);
+            }
+            was_finished = true;
             let torrent_settings = state.settings().await.torrent;
             let ratio = if update.downloaded_bytes == 0 {
                 0.0
             } else {
                 update.uploaded_bytes as f64 / update.downloaded_bytes as f64
             };
-            if should_stop_seeding(&torrent_settings, ratio, started.elapsed().as_secs()) {
+            let seed_elapsed = torrent_seed_elapsed_seconds(
+                persisted_seeding_started_at,
+                current_unix_timestamp_millis(),
+                started.elapsed(),
+            );
+            if should_stop_seeding(&torrent_settings, ratio, seed_elapsed) {
                 engine
                     .forget(engine_id)
                     .await
@@ -598,6 +658,36 @@ async fn run_torrent_download_attempt(
 
         tokio::time::sleep(PROGRESS_UPDATE_INTERVAL).await;
     }
+}
+
+fn torrent_progress_should_persist(
+    first_snapshot: bool,
+    started_seeding: bool,
+    stopping: bool,
+    last_persisted_at: Instant,
+    now: Instant,
+) -> bool {
+    first_snapshot
+        || started_seeding
+        || stopping
+        || now.saturating_duration_since(last_persisted_at) >= PROGRESS_PERSIST_INTERVAL
+}
+
+fn torrent_seed_elapsed_seconds(
+    persisted_started_at_millis: Option<u64>,
+    now_millis: u64,
+    local_elapsed: Duration,
+) -> u64 {
+    persisted_started_at_millis
+        .map(|started_at| now_millis.saturating_sub(started_at) / 1000)
+        .unwrap_or_else(|| local_elapsed.as_secs())
+}
+
+fn current_unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn add_torrent_with_controls<F>(
@@ -2776,6 +2866,55 @@ mod tests {
         assert_eq!(
             monitor.observe(0, Duration::from_secs(30), true),
             LowSpeedDecision::Continue
+        );
+    }
+
+    #[test]
+    fn torrent_progress_persists_first_seed_stop_and_interval_ticks() {
+        let now = Instant::now();
+
+        assert!(torrent_progress_should_persist(
+            true, false, false, now, now,
+        ));
+        assert!(torrent_progress_should_persist(
+            false,
+            true,
+            false,
+            now,
+            now + Duration::from_secs(1),
+        ));
+        assert!(torrent_progress_should_persist(
+            false,
+            false,
+            true,
+            now,
+            now + Duration::from_millis(250),
+        ));
+        assert!(!torrent_progress_should_persist(
+            false,
+            false,
+            false,
+            now,
+            now + Duration::from_secs(4),
+        ));
+        assert!(torrent_progress_should_persist(
+            false,
+            false,
+            false,
+            now,
+            now + PROGRESS_PERSIST_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn torrent_seed_elapsed_prefers_persisted_start_time() {
+        assert_eq!(
+            torrent_seed_elapsed_seconds(Some(1_000), 91_000, Duration::from_secs(5)),
+            90
+        );
+        assert_eq!(
+            torrent_seed_elapsed_seconds(None, 91_000, Duration::from_secs(5)),
+            5
         );
     }
 
