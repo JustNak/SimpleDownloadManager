@@ -52,6 +52,17 @@ export function AddDownloadModal({ onClose, onAdded }: AddDownloadModalProps) {
     inputRef.current?.focus();
   }, [mode]);
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
+
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (activeUrls.length === 0) return;

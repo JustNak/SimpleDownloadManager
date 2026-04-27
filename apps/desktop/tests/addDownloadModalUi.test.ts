@@ -32,3 +32,21 @@ assert.match(
   /event\.target === event\.currentTarget/,
   'the modal should only close when the backdrop itself is clicked',
 );
+
+assert.match(
+  source,
+  /event\.key === 'Escape'/,
+  'the modal should close when Escape is pressed',
+);
+
+assert.match(
+  source,
+  /document\.addEventListener\('keydown', closeOnEscape\)/,
+  'the modal should register a document Escape listener while open',
+);
+
+assert.match(
+  source,
+  /document\.removeEventListener\('keydown', closeOnEscape\)/,
+  'the modal should remove its Escape listener on unmount',
+);

@@ -1,7 +1,7 @@
 {
   "name": "@myapp/desktop",
   "private": true,
-  "version": "0.3.2-alpha",
+  "version": "0.3.3-alpha",
   "type": "module",
   "scripts": {
     "build": "node ../../node_modules/vite/bin/vite.js build",

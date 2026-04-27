@@ -50,3 +50,27 @@ assert.match(
   /<div className="shrink-0 space-y-2">/,
   'the Settings footer should stay fixed below the scrollable sidebar navigation',
 );
+
+assert.doesNotMatch(
+  source,
+  /label="Needs Attention"/,
+  'the sidebar should not render separate Needs Attention filters',
+);
+
+assert.doesNotMatch(
+  source,
+  /label="Queued"/,
+  'the sidebar should not render separate Queued filters',
+);
+
+assert.doesNotMatch(
+  source,
+  /return '(?:attention|queued|torrent-attention|torrent-queued)'/,
+  'the toolbar filter cycle should skip filters that are no longer visible in the sidebar',
+);
+
+assert.doesNotMatch(
+  source,
+  /setView\(outcome\.mode === 'torrent' \? 'torrent-queued' : 'queued'\)|setView\('queued'\)/,
+  'new downloads should not navigate to removed queued-only views',
+);

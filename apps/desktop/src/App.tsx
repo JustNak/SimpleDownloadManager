@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConnectionState, JobState } from './types';
 import type { DownloadJob, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
@@ -58,12 +58,10 @@ import {
 } from './backend';
 import type { AddJobsResult } from './backend';
 import {
-  AlertTriangle,
   Box,
   ChevronDown,
   ChevronRight,
   CheckCircle2,
-  Clock3,
   Download,
   FileArchive,
   FileAudio,
@@ -278,9 +276,9 @@ export default function App() {
     setToasts((prev) => [...prev, { ...toast, id: crypto.randomUUID() }]);
   }
 
-  function removeToast(id: string) {
+  const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
-  }
+  }, []);
 
   async function refreshDiagnostics(options: DiagnosticsRefreshOptions = {}) {
     try {
@@ -539,7 +537,7 @@ export default function App() {
         return;
       }
 
-      setView(outcome.mode === 'torrent' ? 'torrent-queued' : 'queued');
+      setView(outcome.mode === 'torrent' ? 'torrents' : 'all');
       addToast({
         type: 'success',
         title: outcome.mode === 'torrent' ? 'Torrent Added' : 'Download Added',
@@ -559,7 +557,7 @@ export default function App() {
       return;
     }
 
-    setView('queued');
+    setView('all');
     addToast({
       type: 'success',
       title: outcome.mode === 'bulk' ? 'Bulk Download Added' : 'Downloads Added',
@@ -680,9 +678,7 @@ export default function App() {
                     />
                   ))}
                 </div>
-                <NavItem icon={<AlertTriangle size={18} />} label="Needs Attention" count={counts.attention} active={view === 'attention'} onClick={() => requestViewChange('attention')} />
                 <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
-                <NavItem icon={<Clock3 size={18} />} label="Queued" count={counts.queued} active={view === 'queued'} onClick={() => requestViewChange('queued')} />
                 <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
               </>
             ) : null}
@@ -705,8 +701,6 @@ export default function App() {
                 <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
                   <NavItem icon={<Gauge size={15} />} label="Active" count={counts.torrents.active} active={view === 'torrent-active'} onClick={() => requestViewChange('torrent-active')} branch />
                   <NavItem icon={<Upload size={15} />} label="Seeding" count={counts.torrents.seeding} active={view === 'torrent-seeding'} onClick={() => requestViewChange('torrent-seeding')} branch />
-                  <NavItem icon={<AlertTriangle size={15} />} label="Needs Attention" count={counts.torrents.attention} active={view === 'torrent-attention'} onClick={() => requestViewChange('torrent-attention')} branch />
-                  <NavItem icon={<Clock3 size={15} />} label="Queued" count={counts.torrents.queued} active={view === 'torrent-queued'} onClick={() => requestViewChange('torrent-queued')} branch />
                   <NavItem icon={<CheckCircle2 size={15} />} label="Completed" count={counts.torrents.completed} active={view === 'torrent-completed'} onClick={() => requestViewChange('torrent-completed')} branch />
                 </div>
               ) : null}
@@ -1053,14 +1047,10 @@ function StatusBar({
 function nextFilterView(view: ViewState): ViewState {
   if (view === 'torrents') return 'torrent-active';
   if (view === 'torrent-active') return 'torrent-seeding';
-  if (view === 'torrent-seeding') return 'torrent-attention';
-  if (view === 'torrent-attention') return 'torrent-queued';
-  if (view === 'torrent-queued') return 'torrent-completed';
+  if (view === 'torrent-seeding') return 'torrent-completed';
   if (view === 'torrent-completed') return 'torrents';
-  if (view === 'all') return 'attention';
-  if (view === 'attention') return 'active';
-  if (view === 'active') return 'queued';
-  if (view === 'queued') return 'completed';
+  if (view === 'all') return 'active';
+  if (view === 'active') return 'completed';
   return 'all';
 }
 

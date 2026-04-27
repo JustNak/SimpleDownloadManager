@@ -15,19 +15,19 @@ export function ToastArea({ toasts, onDismiss }: ToastAreaProps) {
   return (
     <div className="fixed bottom-20 right-6 z-50 flex flex-col gap-3 w-full max-w-sm pointer-events-none">
       {toasts.map((toast) => (
-        <ToastItem key={toast.id} toast={toast} onDismiss={() => onDismiss(toast.id)} />
+        <ToastItem key={toast.id} toast={toast} onDismiss={onDismiss} />
       ))}
     </div>
   );
 }
 
-function ToastItem({ toast, onDismiss }: { toast: ToastMessage, onDismiss: () => void }) {
+function ToastItem({ toast, onDismiss }: { toast: ToastMessage, onDismiss: (id: string) => void }) {
   useEffect(() => {
     if (toast.autoClose !== false) {
-      const timer = setTimeout(onDismiss, TOAST_AUTO_CLOSE_MS);
+      const timer = setTimeout(() => onDismiss(toast.id), TOAST_AUTO_CLOSE_MS);
       return () => clearTimeout(timer);
     }
-  }, [toast, onDismiss]);
+  }, [toast.id, toast.autoClose, onDismiss]);
 
   const typeConfig = {
     success: { icon: <CheckCircle size={20} className="text-green-500" />, border: 'border-green-500/20' },
@@ -48,7 +48,7 @@ function ToastItem({ toast, onDismiss }: { toast: ToastMessage, onDismiss: () =>
         <p className="text-sm text-muted-foreground leading-snug break-words">{toast.message}</p>
       </div>
       <button 
-        onClick={onDismiss} 
+        onClick={() => onDismiss(toast.id)} 
         className="flex-shrink-0 p-1 -mt-1 -mr-1 rounded-md text-muted-foreground hover:bg-muted transition-colors focus:outline-none focus:ring-2 focus:ring-primary"
       >
         <X size={16} />
