@@ -13,6 +13,9 @@ All browser requests use this envelope:
 }
 ```
 
+`requestId` is bounded to a short ASCII token and must be unique enough for the
+caller to match one response to one request.
+
 Supported request types:
 
 - `ping`
@@ -99,6 +102,7 @@ URL handling is intentionally narrow:
 Manual sends, popup sends, and context-menu sends are still allowed.
 `authenticatedHandoffHosts` is retained for backward compatibility with older settings.
 When Protected Downloads is enabled, exact browser download handoffs may include bounded, memory-only request headers in `handoffAuth`; auth header values are never persisted or written to diagnostics.
+Captured auth is globally capped in extension memory, cleared when Protected Downloads is disabled, and only matched by URL when exactly one fresh request capture exists.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
 
 ## Host -> Extension
@@ -146,6 +150,8 @@ Transport:
 - Windows named pipe
 - path: `\\.\pipe\myapp.downloads.v1`
 - one JSON line request, one JSON line response
+- local clients only; remote pipe clients are rejected
+- pipe instances, request line size, and read/write time are bounded
 
 Supported request types:
 
@@ -155,6 +161,11 @@ Supported request types:
 - `prompt_download`
 - `show_window`
 - `save_extension_settings`
+
+The desktop app validates protocol version, request id, request type, source
+metadata, open-app reason, URL shape, and authenticated handoff headers before
+any prompt, settings, or queue side effects. Excess side-effecting requests
+return `RATE_LIMITED`.
 
 ## App -> Host
 
@@ -173,5 +184,7 @@ Error codes:
 - `DESTINATION_INVALID`
 - `DUPLICATE_JOB`
 - `PERMISSION_DENIED`
+- `PROTECTED_DOWNLOAD_AUTH_REQUIRED`
+- `RATE_LIMITED`
 - `DOWNLOAD_FAILED`
 - `INTERNAL_ERROR`

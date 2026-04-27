@@ -27,8 +27,10 @@ type CapturedAuth = {
 };
 
 const CAPTURE_TTL_MS = 30_000;
+const MAX_CAPTURED_AUTH_ENTRIES = 64;
 const capturedByRequestId = new Map<string, CapturedAuth>();
 const capturedByUrl = new Map<string, CapturedAuth[]>();
+const capturedEntries: CapturedAuth[] = [];
 
 export function filterHandoffAuthHeaders(headers: HandoffAuthRequestHeader[] | undefined): HandoffAuthHeader[] {
   return sanitizeHandoffAuth({
@@ -80,12 +82,19 @@ export function captureHandoffAuthHeaders(
   };
 
   if (captured.requestId) {
+    const existing = capturedByRequestId.get(captured.requestId);
+    if (existing) {
+      deleteCaptured(existing);
+    }
+
     capturedByRequestId.set(captured.requestId, captured);
   }
 
   const byUrl = capturedByUrl.get(captured.url) ?? [];
   byUrl.push(captured);
   capturedByUrl.set(captured.url, byUrl.slice(-8));
+  capturedEntries.push(captured);
+  evictOldestCapturedAuth();
 }
 
 export function takeCapturedHandoffAuth(
@@ -94,6 +103,7 @@ export function takeCapturedHandoffAuth(
   now = Date.now(),
 ): HandoffAuth | undefined {
   if (!settings.authenticatedHandoffEnabled) {
+    clearCapturedHandoffAuth();
     return undefined;
   }
 
@@ -113,6 +123,12 @@ export function hasCapturedHandoffAuth(
   return findCapturedHandoffAuth(details, now) !== undefined;
 }
 
+export function clearCapturedHandoffAuth(): void {
+  capturedByRequestId.clear();
+  capturedByUrl.clear();
+  capturedEntries.splice(0, capturedEntries.length);
+}
+
 function findCapturedHandoffAuth(
   details: Pick<HandoffAuthRequestDetails, 'requestId' | 'url' | 'incognito'>,
   now: number,
@@ -127,37 +143,43 @@ function findCapturedHandoffAuth(
   }
 
   const urlKey = normalizeUrlKey(details.url);
-  const candidates = capturedByUrl.get(urlKey) ?? [];
-  for (let index = candidates.length - 1; index >= 0; index -= 1) {
-    const captured = candidates[index];
-    if (captured.incognito === incognito && isFresh(captured, now)) {
-      return captured;
-    }
+  const candidates = (capturedByUrl.get(urlKey) ?? []).filter(
+    (captured) => captured.incognito === incognito && isFresh(captured, now),
+  );
+  if (candidates.length === 1) {
+    return candidates[0];
   }
 
   return undefined;
 }
 
 function pruneCapturedAuth(now: number): void {
-  for (const captured of capturedByRequestId.values()) {
+  for (const captured of [...capturedEntries]) {
     if (!isFresh(captured, now)) {
       deleteCaptured(captured);
     }
   }
+}
 
-  for (const [url, entries] of capturedByUrl.entries()) {
-    const fresh = entries.filter((entry) => isFresh(entry, now));
-    if (fresh.length > 0) {
-      capturedByUrl.set(url, fresh);
-    } else {
-      capturedByUrl.delete(url);
+function evictOldestCapturedAuth(): void {
+  while (capturedEntries.length > MAX_CAPTURED_AUTH_ENTRIES) {
+    const captured = capturedEntries[0];
+    if (!captured) {
+      return;
     }
+
+    deleteCaptured(captured);
   }
 }
 
 function deleteCaptured(captured: CapturedAuth): void {
   if (captured.requestId) {
     capturedByRequestId.delete(captured.requestId);
+  }
+
+  const entryIndex = capturedEntries.indexOf(captured);
+  if (entryIndex >= 0) {
+    capturedEntries.splice(entryIndex, 1);
   }
 
   const entries = capturedByUrl.get(captured.url);

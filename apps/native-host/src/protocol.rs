@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use url::Url;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+const MAX_REQUEST_ID_LENGTH: usize = 128;
 const MAX_URL_LENGTH: usize = 2048;
 const MAX_METADATA_LENGTH: usize = 512;
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
@@ -183,6 +184,20 @@ pub fn validate_protocol(request: &NativeRequestEnvelope) -> HostResult<()> {
         )));
     }
 
+    if !is_valid_request_id(&request.request_id) {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Request id is not supported.",
+        ));
+    }
+
+    if !is_supported_request_type(&request.message_type) {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Unsupported request type.",
+        ));
+    }
+
     Ok(())
 }
 
@@ -238,14 +253,24 @@ pub fn parse_prompt_download_payload(
 }
 
 pub fn parse_open_app_payload(request: &NativeRequestEnvelope) -> HostResult<OpenAppPayload> {
-    serde_json::from_value::<OpenAppPayload>(request.payload.clone()).map_err(|error| {
-        Box::new(HostResponseEnvelope::rejected(
-            request.request_id.clone(),
-            "invalid_payload",
-            "INVALID_PAYLOAD",
-            format!("Payload could not be parsed: {error}"),
-        ))
-    })
+    let payload =
+        serde_json::from_value::<OpenAppPayload>(request.payload.clone()).map_err(|error| {
+            Box::new(HostResponseEnvelope::rejected(
+                request.request_id.clone(),
+                "invalid_payload",
+                "INVALID_PAYLOAD",
+                format!("Payload could not be parsed: {error}"),
+            ))
+        })?;
+
+    if !matches!(payload.reason.as_str(), "user_request" | "reconnect") {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Open app reason is not supported.",
+        ));
+    }
+
+    Ok(payload)
 }
 
 pub fn validate_http_url(request_id: &str, raw_url: &str) -> HostResult<String> {
@@ -391,6 +416,26 @@ fn invalid_payload(request_id: &str, message: &str) -> Box<HostResponseEnvelope>
     ))
 }
 
+fn is_valid_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= MAX_REQUEST_ID_LENGTH
+        && request_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+}
+
+fn is_supported_request_type(message_type: &str) -> bool {
+    matches!(
+        message_type,
+        "ping"
+            | "get_status"
+            | "open_app"
+            | "enqueue_download"
+            | "prompt_download"
+            | "save_extension_settings"
+    )
+}
+
 pub fn app_status_request(request_id: String) -> AppRequestEnvelope<Value> {
     AppRequestEnvelope {
         protocol_version: PROTOCOL_VERSION,
@@ -483,6 +528,20 @@ mod tests {
         let error = parse_enqueue_payload(&request).expect_err("long URL should be rejected");
 
         assert_eq!(error.code.as_deref(), Some("URL_TOO_LONG"));
+    }
+
+    #[test]
+    fn validate_protocol_rejects_oversized_request_ids() {
+        let request = NativeRequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "x".repeat(129),
+            message_type: "ping".into(),
+            payload: json!({}),
+        };
+
+        let error = validate_protocol(&request).expect_err("oversized request id should reject");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
     }
 
     #[test]
@@ -612,6 +671,16 @@ mod tests {
 
         let error =
             parse_enqueue_payload(&request).expect_err("non-browser auth should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
+    }
+
+    #[test]
+    fn parse_open_app_payload_rejects_unknown_reasons() {
+        let request = request("open_app", json!({ "reason": "scripted" }));
+
+        let error =
+            parse_open_app_payload(&request).expect_err("unknown open reason should reject");
 
         assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
     }

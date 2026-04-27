@@ -111,9 +111,9 @@ assert.equal(
     1_225,
   ),
   undefined,
-  'disabled protected downloads should not forward captured auth',
+  'disabled protected downloads should clear captured auth instead of retaining session headers',
 );
-assert.deepEqual(
+assert.equal(
   takeCapturedHandoffAuth(
     {
       requestId: 'request-1',
@@ -123,8 +123,8 @@ assert.deepEqual(
     settings,
     1_250,
   ),
-  { headers: [{ name: 'Cookie', value: 'session=abc' }] },
-  'recent captured headers should be consumed by request id for a matching browser download',
+  undefined,
+  'captured headers cleared while disabled should not become available after re-enabling',
 );
 
 captureHandoffAuthHeaders(
@@ -168,6 +168,88 @@ assert.deepEqual(
   ),
   { headers: [{ name: 'Cookie', value: 'oai-did=2' }] },
   'URL fallback should attach captured auth when the browser download lacks a request id',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'ambiguous-a',
+    url: 'https://download-cdn.example.com/ambiguous.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'a=1' }],
+  },
+  30_000,
+);
+captureHandoffAuthHeaders(
+  {
+    requestId: 'ambiguous-b',
+    url: 'https://download-cdn.example.com/ambiguous.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'b=1' }],
+  },
+  30_100,
+);
+assert.equal(
+  takeCapturedHandoffAuth(
+    {
+      url: 'https://download-cdn.example.com/ambiguous.zip',
+      incognito: false,
+    },
+    settings,
+    30_200,
+  ),
+  undefined,
+  'URL fallback should refuse ambiguous fresh captures for the same URL',
+);
+assert.deepEqual(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'ambiguous-b',
+      url: 'https://download-cdn.example.com/ambiguous.zip',
+      incognito: false,
+    },
+    settings,
+    30_250,
+  ),
+  { headers: [{ name: 'Cookie', value: 'b=1' }] },
+  'request id matching should still consume a specific capture when URL fallback is ambiguous',
+);
+
+for (let index = 0; index < 70; index += 1) {
+  captureHandoffAuthHeaders(
+    {
+      requestId: `eviction-${index}`,
+      url: `https://download-cdn.example.com/eviction-${index}.zip`,
+      method: 'GET',
+      requestHeaders: [{ name: 'Cookie', value: `session=${index}` }],
+    },
+    40_000 + index,
+  );
+}
+assert.equal(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'eviction-0',
+      url: 'https://download-cdn.example.com/eviction-0.zip',
+    },
+    settings,
+    40_100,
+  ),
+  undefined,
+  'old captured auth entries should be evicted by a global memory cap',
+);
+assert.deepEqual(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'eviction-69',
+      url: 'https://download-cdn.example.com/eviction-69.zip',
+    },
+    settings,
+    40_100,
+  ),
+  { headers: [{ name: 'Cookie', value: 'session=69' }] },
+  'newer captured auth entries should remain available after global eviction',
 );
 
 const request = createEnqueueDownloadRequest(
