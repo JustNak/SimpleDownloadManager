@@ -6,6 +6,8 @@ const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   seedRatioLimit: 1,
   seedTimeLimitMinutes: 60,
   uploadLimitKibPerSecond: 0,
+  portForwardingEnabled: false,
+  portForwardingPort: 42000,
 };
 
 export function normalizeTorrentSettings(value: Partial<TorrentSettings> | undefined): TorrentSettings {
@@ -19,7 +21,9 @@ export function normalizeTorrentSettings(value: Partial<TorrentSettings> | undef
       525600,
       DEFAULT_TORRENT_SETTINGS.seedTimeLimitMinutes,
     )),
-    uploadLimitKibPerSecond: Math.round(clampNumber(value?.uploadLimitKibPerSecond, 0, 10_000_000, 0)),
+    uploadLimitKibPerSecond: Math.round(clampNumber(value?.uploadLimitKibPerSecond, 0, 1_048_576, 0)),
+    portForwardingEnabled: value?.portForwardingEnabled ?? DEFAULT_TORRENT_SETTINGS.portForwardingEnabled,
+    portForwardingPort: normalizeForwardingPort(value?.portForwardingPort),
   };
 }
 
@@ -45,4 +49,10 @@ function isSeedMode(value: unknown): value is TorrentSettings['seedMode'] {
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeForwardingPort(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TORRENT_SETTINGS.portForwardingPort;
+  const port = Math.round(value);
+  return port >= 1024 && port <= 65534 ? port : DEFAULT_TORRENT_SETTINGS.portForwardingPort;
 }

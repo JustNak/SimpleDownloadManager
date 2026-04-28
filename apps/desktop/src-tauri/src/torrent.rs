@@ -1,10 +1,11 @@
 use crate::state::TorrentRuntimeSnapshot;
+use crate::storage::TorrentSettings;
 use librqbit::api::TorrentIdOrHash;
 use librqbit::dht::PersistentDhtConfig;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, ManagedTorrent, PeerConnectionOptions, Session, SessionOptions,
-    SessionPersistenceConfig,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, PeerConnectionOptions,
+    Session, SessionOptions, SessionPersistenceConfig,
 };
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
 pub const TORRENT_LISTEN_PORT_RANGE: Range<u16> = 42000..42100;
 pub const TORRENT_PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -21,6 +22,8 @@ pub const TORRENT_PEER_READ_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const TORRENT_DHT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 pub const TORRENT_DEFER_WRITES_MB: usize = 16;
 pub const TORRENT_CONCURRENT_INIT_LIMIT: usize = 2;
+pub const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
+pub const TORRENT_TRACKER_FIRST_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.demonii.com:1337/announce",
@@ -53,6 +56,20 @@ pub struct PreparedTorrentSource {
     pub source_kind: TorrentSourceKind,
     pub fallback_trackers_added: usize,
     pub fallback_trackers_for_options: Vec<String>,
+    pub tracker_first_metadata: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackerFirstMetadataOutcome {
+    Resolved,
+    TimedOut,
+    Failed(String),
+}
+
+impl TrackerFirstMetadataOutcome {
+    pub fn should_fallback_to_main_session(&self) -> bool {
+        !matches!(self, Self::Resolved)
+    }
 }
 
 pub struct TorrentEngine {
@@ -63,7 +80,11 @@ pub struct TorrentEngine {
 }
 
 impl TorrentEngine {
-    pub async fn new(default_output_folder: PathBuf, data_dir: PathBuf) -> Result<Self, String> {
+    pub async fn new(
+        default_output_folder: PathBuf,
+        data_dir: PathBuf,
+        settings: TorrentSettings,
+    ) -> Result<Self, String> {
         tokio::fs::create_dir_all(&default_output_folder)
             .await
             .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
@@ -74,18 +95,19 @@ impl TorrentEngine {
 
         let (session, listener_fallback_message) = match Session::new_with_opts(
             default_output_folder.clone(),
-            torrent_session_options(persistence_dir.clone()),
+            torrent_session_options(persistence_dir.clone(), &settings),
         )
         .await
         {
             Ok(session) => (session, None),
             Err(error) if is_listen_error(&format!("{error:#}")) => {
+                let listen_ports = torrent_listen_port_description(&settings);
                 let message = format!(
-                        "Torrent listen ports 42000-42099 are unavailable; continuing without inbound peer listener: {error:#}"
+                        "Torrent listen {listen_ports} unavailable; continuing without inbound peer listener: {error:#}"
                     );
                 let fallback_session = Session::new_with_opts(
                     default_output_folder,
-                    torrent_session_options_with_listener(persistence_dir, None),
+                    torrent_session_options_with_listener(persistence_dir, None, false),
                 )
                 .await
                 .map_err(|fallback_error| {
@@ -120,11 +142,31 @@ impl TorrentEngine {
         source: &PreparedTorrentSource,
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
+        tracker_first_diagnostics: Option<UnboundedSender<TrackerFirstMetadataOutcome>>,
     ) -> Result<usize, String> {
         tokio::fs::create_dir_all(output_folder)
             .await
             .map_err(|error| format!("Could not create torrent output directory: {error}"))?;
         self.set_upload_limit(upload_limit_kib_per_second);
+
+        if source.tracker_first_metadata {
+            match self
+                .try_add_tracker_first_metadata(source, output_folder, upload_limit_kib_per_second)
+                .await?
+            {
+                Ok(id) => {
+                    send_tracker_first_outcome(
+                        &tracker_first_diagnostics,
+                        TrackerFirstMetadataOutcome::Resolved,
+                    );
+                    return Ok(id);
+                }
+                Err(outcome) => {
+                    send_tracker_first_outcome(&tracker_first_diagnostics, outcome);
+                }
+            }
+        }
+
         let options = torrent_add_options(
             output_folder,
             upload_limit_kib_per_second,
@@ -132,6 +174,68 @@ impl TorrentEngine {
         );
         let add_torrent = AddTorrent::from_cli_argument(&source.source)
             .map_err(|error| format!("Could not read torrent source: {error:#}"))?;
+        self.add_to_main_session(add_torrent, options).await
+    }
+
+    async fn try_add_tracker_first_metadata(
+        &self,
+        source: &PreparedTorrentSource,
+        output_folder: &Path,
+        upload_limit_kib_per_second: u32,
+    ) -> Result<Result<usize, TrackerFirstMetadataOutcome>, String> {
+        let add_torrent = AddTorrent::from_cli_argument(&source.source)
+            .map_err(|error| format!("Could not read torrent source: {error:#}"))?;
+        let tracker_session = match Session::new_with_opts(
+            output_folder.to_path_buf(),
+            tracker_first_session_options(),
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                return Ok(Err(TrackerFirstMetadataOutcome::Failed(format!(
+                    "Could not initialize tracker-only metadata session: {error:#}"
+                ))));
+            }
+        };
+
+        let lookup = tracker_session
+            .add_torrent(add_torrent, Some(tracker_first_add_options(output_folder)));
+        let response =
+            match tokio::time::timeout(TORRENT_TRACKER_FIRST_METADATA_TIMEOUT, lookup).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    return Ok(Err(TrackerFirstMetadataOutcome::Failed(format!(
+                        "{error:#}"
+                    ))));
+                }
+                Err(_) => return Ok(Err(TrackerFirstMetadataOutcome::TimedOut)),
+            };
+
+        let torrent_bytes = match response {
+            AddTorrentResponse::ListOnly(list) => list.torrent_bytes,
+            AddTorrentResponse::AlreadyManaged(_, _) | AddTorrentResponse::Added(_, _) => {
+                return Ok(Err(TrackerFirstMetadataOutcome::Failed(
+                    "Tracker-only metadata lookup did not return list-only torrent bytes".into(),
+                )));
+            }
+        };
+        let options = torrent_add_options(
+            output_folder,
+            upload_limit_kib_per_second,
+            &source.fallback_trackers_for_options,
+        );
+        let id = self
+            .add_to_main_session(AddTorrent::from_bytes(torrent_bytes), options)
+            .await?;
+        Ok(Ok(id))
+    }
+
+    async fn add_to_main_session(
+        &self,
+        add_torrent: AddTorrent<'_>,
+        options: AddTorrentOptions,
+    ) -> Result<usize, String> {
         let handle = self
             .session
             .add_torrent(add_torrent, Some(options))
@@ -261,6 +365,7 @@ pub fn prepare_torrent_source(source: &str) -> PreparedTorrentSource {
             source_kind: TorrentSourceKind::Magnet,
             fallback_trackers_added: fallback_trackers.len(),
             fallback_trackers_for_options: Vec::new(),
+            tracker_first_metadata: true,
         };
     }
 
@@ -270,6 +375,7 @@ pub fn prepare_torrent_source(source: &str) -> PreparedTorrentSource {
         source_kind: TorrentSourceKind::TorrentFile,
         fallback_trackers_added: fallback_trackers.len(),
         fallback_trackers_for_options: fallback_trackers,
+        tracker_first_metadata: false,
     }
 }
 
@@ -280,14 +386,24 @@ pub fn pending_torrent_cleanup_info_hash(source: &PreparedTorrentSource) -> Opti
     magnet_info_hash(&source.source)
 }
 
-pub(crate) fn torrent_session_options(persistence_dir: PathBuf) -> SessionOptions {
-    torrent_session_options_with_listener(persistence_dir, Some(TORRENT_LISTEN_PORT_RANGE))
+pub(crate) fn torrent_session_options(
+    persistence_dir: PathBuf,
+    settings: &TorrentSettings,
+) -> SessionOptions {
+    torrent_session_options_with_listener(
+        persistence_dir,
+        Some(torrent_listen_port_range(settings)),
+        settings.port_forwarding_enabled,
+    )
 }
 
 fn torrent_session_options_with_listener(
     persistence_dir: PathBuf,
     listen_port_range: Option<Range<u16>>,
+    enable_upnp_port_forwarding: bool,
 ) -> SessionOptions {
+    let enable_upnp_port_forwarding = enable_upnp_port_forwarding && listen_port_range.is_some();
+
     SessionOptions {
         fastresume: true,
         persistence: Some(SessionPersistenceConfig::Json {
@@ -303,15 +419,78 @@ fn torrent_session_options_with_listener(
             config_filename: Some(persistence_dir.join("dht.json")),
         }),
         listen_port_range,
-        enable_upnp_port_forwarding: false,
+        enable_upnp_port_forwarding,
         defer_writes_up_to: Some(TORRENT_DEFER_WRITES_MB),
         concurrent_init_limit: Some(TORRENT_CONCURRENT_INIT_LIMIT),
         ..Default::default()
     }
 }
 
+fn tracker_first_session_options() -> SessionOptions {
+    SessionOptions {
+        disable_dht: true,
+        disable_dht_persistence: true,
+        dht_config: None,
+        persistence: None,
+        peer_opts: Some(PeerConnectionOptions {
+            connect_timeout: Some(TORRENT_PEER_CONNECT_TIMEOUT),
+            read_write_timeout: Some(TORRENT_PEER_READ_WRITE_TIMEOUT),
+            keep_alive_interval: None,
+        }),
+        listen_port_range: None,
+        enable_upnp_port_forwarding: false,
+        concurrent_init_limit: Some(1),
+        ..Default::default()
+    }
+}
+
+fn tracker_first_add_options(output_folder: &Path) -> AddTorrentOptions {
+    AddTorrentOptions {
+        list_only: true,
+        output_folder: Some(output_folder.display().to_string()),
+        ..Default::default()
+    }
+}
+
+fn torrent_listen_port_range(settings: &TorrentSettings) -> Range<u16> {
+    if settings.port_forwarding_enabled {
+        let port = torrent_forwarding_port(settings);
+        return port..port + 1;
+    }
+
+    TORRENT_LISTEN_PORT_RANGE
+}
+
+fn torrent_forwarding_port(settings: &TorrentSettings) -> u16 {
+    match u16::try_from(settings.port_forwarding_port) {
+        Ok(port) if (1024..=65534).contains(&settings.port_forwarding_port) => port,
+        _ => TORRENT_LISTEN_PORT_RANGE.start,
+    }
+}
+
+fn torrent_listen_port_description(settings: &TorrentSettings) -> String {
+    if settings.port_forwarding_enabled {
+        return format!("port {}", torrent_forwarding_port(settings));
+    }
+
+    format!(
+        "ports {}-{}",
+        TORRENT_LISTEN_PORT_RANGE.start,
+        TORRENT_LISTEN_PORT_RANGE.end - 1
+    )
+}
+
 fn is_listen_error(message: &str) -> bool {
     message.contains("error listening on TCP") || message.contains("no ports in range")
+}
+
+fn send_tracker_first_outcome(
+    diagnostics: &Option<UnboundedSender<TrackerFirstMetadataOutcome>>,
+    outcome: TrackerFirstMetadataOutcome,
+) {
+    if let Some(sender) = diagnostics {
+        let _ = sender.send(outcome);
+    }
 }
 
 fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
@@ -415,6 +594,7 @@ fn encode_query_value(value: &str) -> String {
 
 fn upload_limit_bps(upload_limit_kib_per_second: u32) -> Option<NonZeroU32> {
     upload_limit_kib_per_second
+        .min(MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND)
         .checked_mul(1024)
         .and_then(NonZeroU32::new)
 }
@@ -451,6 +631,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(prepared.source_kind, TorrentSourceKind::Magnet);
+        assert!(prepared.tracker_first_metadata);
         assert_eq!(
             prepared.fallback_trackers_added,
             FALLBACK_TORRENT_TRACKERS.len()
@@ -500,6 +681,7 @@ mod tests {
 
         assert_eq!(prepared.source, "https://example.com/releases/file.torrent");
         assert_eq!(prepared.source_kind, TorrentSourceKind::TorrentFile);
+        assert!(!prepared.tracker_first_metadata);
         assert_eq!(
             options
                 .trackers
@@ -514,7 +696,8 @@ mod tests {
 
     #[test]
     fn session_options_enable_listen_range_and_peer_timeouts() {
-        let options = torrent_session_options(PathBuf::from("session"));
+        let options =
+            torrent_session_options(PathBuf::from("session"), &TorrentSettings::default());
 
         assert_eq!(options.listen_port_range, Some(TORRENT_LISTEN_PORT_RANGE));
         assert!(!options.enable_upnp_port_forwarding);
@@ -532,7 +715,7 @@ mod tests {
     #[test]
     fn session_options_use_app_local_dht_persistence_and_deferred_writes() {
         let persistence_dir = PathBuf::from("session");
-        let options = torrent_session_options(persistence_dir.clone());
+        let options = torrent_session_options(persistence_dir.clone(), &TorrentSettings::default());
         let dht_config = options.dht_config.expect("app-local DHT config");
 
         assert_eq!(
@@ -542,6 +725,67 @@ mod tests {
         assert_eq!(dht_config.dump_interval, Some(Duration::from_secs(60)));
         assert_eq!(options.defer_writes_up_to, Some(16));
         assert_eq!(options.concurrent_init_limit, Some(2));
+    }
+
+    #[test]
+    fn session_options_use_exact_forwarded_port_when_opted_in() {
+        let settings = TorrentSettings {
+            port_forwarding_enabled: true,
+            port_forwarding_port: 43000,
+            ..TorrentSettings::default()
+        };
+        let options = torrent_session_options(PathBuf::from("session"), &settings);
+
+        assert_eq!(options.listen_port_range, Some(43000..43001));
+        assert!(options.enable_upnp_port_forwarding);
+    }
+
+    #[test]
+    fn tracker_first_session_options_disable_dht_persistence_and_listener() {
+        let options = tracker_first_session_options();
+
+        assert!(options.disable_dht);
+        assert!(options.disable_dht_persistence);
+        assert!(options.dht_config.is_none());
+        assert!(options.persistence.is_none());
+        assert!(options.listen_port_range.is_none());
+        assert!(!options.enable_upnp_port_forwarding);
+    }
+
+    #[test]
+    fn tracker_first_add_options_list_metadata_without_starting_managed_download() {
+        let options = tracker_first_add_options(Path::new("C:/Downloads/tracker-first"));
+
+        assert!(options.list_only);
+        assert!(!options.paused);
+        assert_eq!(
+            options.output_folder.as_deref(),
+            Some("C:/Downloads/tracker-first")
+        );
+    }
+
+    #[test]
+    fn tracker_first_fallback_outcomes_continue_with_main_dht_session() {
+        assert!(TrackerFirstMetadataOutcome::TimedOut.should_fallback_to_main_session());
+        assert!(TrackerFirstMetadataOutcome::Failed("tracker error".into())
+            .should_fallback_to_main_session());
+        assert!(!TrackerFirstMetadataOutcome::Resolved.should_fallback_to_main_session());
+    }
+
+    #[test]
+    fn tracker_first_timeout_is_shorter_than_outer_metadata_timeout() {
+        assert_eq!(
+            TORRENT_TRACKER_FIRST_METADATA_TIMEOUT,
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn upload_limit_bps_clamps_large_values_instead_of_disabling_limit() {
+        assert_eq!(
+            upload_limit_bps(10_000_000),
+            NonZeroU32::new(1_048_576 * 1024)
+        );
     }
 
     #[test]

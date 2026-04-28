@@ -1,10 +1,15 @@
 use crate::commands::emit_snapshot;
-use crate::state::{should_stop_seeding, BulkArchiveReady, SharedState, WorkerControl};
+use crate::state::{
+    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, WorkerControl,
+};
 use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
-    ResumeSupport, TorrentInfo, TransferKind,
+    ResumeSupport, TorrentInfo, TorrentSettings, TransferKind,
 };
-use crate::torrent::{pending_torrent_cleanup_info_hash, prepare_torrent_source, TorrentEngine};
+use crate::torrent::{
+    pending_torrent_cleanup_info_hash, prepare_torrent_source, TorrentEngine,
+    TrackerFirstMetadataOutcome,
+};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
@@ -27,7 +32,7 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -37,6 +42,7 @@ const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+pub const EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS: u64 = 60;
 const DOWNLOAD_BUFFER_SIZE: usize = 512 * 1024;
 const SEGMENT_COMBINE_BUFFER_SIZE: usize = 1024 * 1024;
 const BALANCED_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
@@ -82,6 +88,35 @@ pub fn schedule_downloads(app: AppHandle, state: SharedState) {
     });
 }
 
+pub fn apply_torrent_runtime_settings(settings: &TorrentSettings) {
+    if let Some(engine) = TORRENT_ENGINE.get() {
+        engine.set_upload_limit(settings.upload_limit_kib_per_second);
+    }
+}
+
+pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: String) {
+    state.begin_external_reseed(&id).await;
+
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)).await;
+
+            match state.queue_external_reseed_attempt(&id).await {
+                Ok(ExternalReseedAttempt::Queued(snapshot)) => {
+                    emit_snapshot(&app, &snapshot);
+                    schedule_downloads(app.clone(), state.clone());
+                }
+                Ok(ExternalReseedAttempt::Pending) => {}
+                Ok(ExternalReseedAttempt::Stop) => break,
+                Err(error) => {
+                    eprintln!("failed to queue automatic torrent reseed: {error}");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state::DownloadTask) {
     tauri::async_runtime::spawn(async move {
         let cleanup_temp_on_exit = matches!(
@@ -106,7 +141,12 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                 }
             }
             Err(error) => {
-                if let Ok(snapshot) = state
+                if let Ok(Some(snapshot)) = state
+                    .handle_external_reseed_failure(&task.id, error.message.clone(), error.category)
+                    .await
+                {
+                    emit_snapshot(&app, &snapshot);
+                } else if let Ok(snapshot) = state
                     .fail_job(&task.id, error.message.clone(), error.category)
                     .await
                 {
@@ -634,6 +674,8 @@ async fn run_torrent_download_attempt(
                     Some(task.id.clone()),
                 )
                 .await;
+            let tracker_first_diagnostics =
+                spawn_tracker_first_metadata_diagnostics(state.clone(), task.id.clone());
             let add_outcome = add_torrent_with_controls(
                 state,
                 &task.id,
@@ -641,6 +683,7 @@ async fn run_torrent_download_attempt(
                     &prepared_source,
                     &output_folder,
                     settings.torrent.upload_limit_kib_per_second,
+                    Some(tracker_first_diagnostics),
                 ),
                 TORRENT_METADATA_TIMEOUT,
                 TORRENT_METADATA_CONTROL_INTERVAL,
@@ -889,7 +932,7 @@ where
                         Some(job_id.to_string()),
                     )
                     .await;
-                return Err(download_error(FailureCategory::Torrent, message, false));
+                return Err(download_error(FailureCategory::Torrent, message, true));
             }
             _ = control_tick.tick() => {
                 match state.worker_control(job_id).await {
@@ -936,6 +979,47 @@ async fn record_fallback_tracker_usage(
             Some(job_id.to_string()),
         )
         .await;
+}
+
+fn spawn_tracker_first_metadata_diagnostics(
+    state: SharedState,
+    job_id: String,
+) -> mpsc::UnboundedSender<TrackerFirstMetadataOutcome> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tauri::async_runtime::spawn(async move {
+        while let Some(outcome) = rx.recv().await {
+            record_tracker_first_metadata_outcome(&state, &job_id, &outcome).await;
+        }
+    });
+    tx
+}
+
+async fn record_tracker_first_metadata_outcome(
+    state: &SharedState,
+    job_id: &str,
+    outcome: &TrackerFirstMetadataOutcome,
+) {
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "torrent",
+            tracker_first_metadata_diagnostic_message(outcome),
+            Some(job_id.to_string()),
+        )
+        .await;
+}
+
+fn tracker_first_metadata_diagnostic_message(outcome: &TrackerFirstMetadataOutcome) -> String {
+    match outcome {
+        TrackerFirstMetadataOutcome::Resolved => "Tracker-first torrent metadata resolved".into(),
+        TrackerFirstMetadataOutcome::TimedOut => format!(
+            "Tracker-first torrent metadata timed out after {} seconds; falling back to DHT",
+            crate::torrent::TORRENT_TRACKER_FIRST_METADATA_TIMEOUT.as_secs()
+        ),
+        TrackerFirstMetadataOutcome::Failed(message) => {
+            format!("Tracker-first torrent metadata failed; falling back to DHT: {message}")
+        }
+    }
 }
 
 fn torrent_metadata_timeout_message() -> String {
@@ -993,7 +1077,7 @@ async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, Strin
     let data_dir = state.app_data_dir();
     TORRENT_ENGINE
         .get_or_try_init(|| async {
-            TorrentEngine::new(default_output_folder, data_dir)
+            TorrentEngine::new(default_output_folder, data_dir, settings.torrent.clone())
                 .await
                 .map(Arc::new)
         })
@@ -2906,7 +2990,7 @@ mod tests {
         .expect_err("metadata timeout should fail");
 
         assert_eq!(error.category, FailureCategory::Torrent);
-        assert!(!error.retryable);
+        assert!(error.retryable);
         assert_eq!(
             error.message,
             "Torrent metadata lookup timed out after 60 seconds. Add trackers or retry later."
@@ -2916,6 +3000,70 @@ mod tests {
     #[test]
     fn torrent_metadata_timeout_is_sixty_seconds() {
         assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn torrent_metadata_timeout_cleanup_runs_before_retryable_error_returns() {
+        let source = include_str!("mod.rs");
+        let timeout_branch = source
+            .find("if is_torrent_metadata_timeout_error(&error)")
+            .expect("torrent metadata timeout branch should exist");
+        let cleanup_call = source[timeout_branch..]
+            .find("cleanup_pending_torrent_metadata(")
+            .expect("timeout branch should clean up pending metadata")
+            + timeout_branch;
+        let retryable_return = source[cleanup_call..]
+            .find("return Err(error);")
+            .expect("timeout branch should return the retryable error after cleanup")
+            + cleanup_call;
+
+        assert!(
+            cleanup_call < retryable_return,
+            "pending torrent metadata cleanup must run before the retryable timeout error is returned"
+        );
+    }
+
+    #[test]
+    fn tracker_first_metadata_outcomes_have_user_visible_diagnostics() {
+        assert_eq!(
+            tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::Resolved),
+            "Tracker-first torrent metadata resolved"
+        );
+        assert_eq!(
+            tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::TimedOut),
+            "Tracker-first torrent metadata timed out after 15 seconds; falling back to DHT"
+        );
+        assert_eq!(
+            tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::Failed(
+                "tracker unavailable".into()
+            )),
+            "Tracker-first torrent metadata failed; falling back to DHT: tracker unavailable"
+        );
+    }
+
+    #[test]
+    fn torrent_add_flow_wires_tracker_first_diagnostics_channel() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("download source should contain production code");
+        let channel = production_source
+            .find("spawn_tracker_first_metadata_diagnostics(")
+            .expect("torrent add flow should create a diagnostics channel");
+        let add_source = production_source[channel..]
+            .find("engine.add_source(")
+            .expect("torrent add flow should pass diagnostics to add_source")
+            + channel;
+        let argument = production_source[add_source..]
+            .find("Some(tracker_first_diagnostics)")
+            .expect("tracker-first diagnostics sender should be passed into add_source")
+            + add_source;
+
+        assert!(
+            channel < add_source && add_source < argument,
+            "tracker-first diagnostics should be wired before metadata resolution starts"
+        );
     }
 
     #[tokio::test]

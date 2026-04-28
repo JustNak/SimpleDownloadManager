@@ -22,6 +22,24 @@ const baseJob: DownloadJob = {
   targetPath: 'C:\\Downloads\\file.zip',
 };
 
+const metadataPendingTorrent: DownloadJob = {
+  ...baseJob,
+  id: 'torrent_1',
+  url: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Movie',
+  filename: 'Movie',
+  transferKind: 'torrent',
+  state: 'downloading',
+  progress: 0,
+  totalBytes: 0,
+  downloadedBytes: 0,
+  speed: 0,
+  eta: 0,
+  targetPath: 'C:\\Downloads\\Movie',
+  torrent: {
+    peers: 2,
+  },
+};
+
 const initialSamples = recordProgressSample([], baseJob, 1_000);
 const averageSamples = recordProgressSample(
   initialSamples,
@@ -85,6 +103,55 @@ assert.deepEqual(
     timeRemaining: 0,
   },
   'progress metrics should not invent active speed from createdAt when backend speed and observed samples are unavailable',
+);
+
+const metadataSamples = recordProgressSample(averageSamples, metadataPendingTorrent, 12_000);
+assert.deepEqual(
+  metadataSamples.filter((sample) => sample.jobId === metadataPendingTorrent.id),
+  [],
+  'metadata-pending torrents should not record download samples',
+);
+
+const resolvedTorrentSamples = recordProgressSample(
+  metadataSamples,
+  {
+    ...metadataPendingTorrent,
+    totalBytes: 100_000,
+    downloadedBytes: 50_000,
+    progress: 50,
+    speed: 0,
+    torrent: {
+      ...metadataPendingTorrent.torrent,
+      infoHash: '0123456789abcdef0123456789abcdef01234567',
+      name: 'Movie',
+      totalFiles: 1,
+    },
+  },
+  13_000,
+);
+assert.deepEqual(
+  calculateDownloadProgressMetrics(
+    {
+      ...metadataPendingTorrent,
+      totalBytes: 100_000,
+      downloadedBytes: 50_000,
+      progress: 50,
+      speed: 0,
+      torrent: {
+        ...metadataPendingTorrent.torrent,
+        infoHash: '0123456789abcdef0123456789abcdef01234567',
+        name: 'Movie',
+        totalFiles: 1,
+      },
+    },
+    resolvedTorrentSamples,
+    13_000,
+  ),
+  {
+    averageSpeed: 0,
+    timeRemaining: 0,
+  },
+  'first metadata-resolved torrent snapshot should become the baseline instead of fake download speed',
 );
 
 assert.equal(

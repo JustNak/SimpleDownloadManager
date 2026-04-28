@@ -16,6 +16,8 @@ function makeSettings(theme: Settings['theme']): Settings {
       seedRatioLimit: 1,
       seedTimeLimitMinutes: 60,
       uploadLimitKibPerSecond: 0,
+      portForwardingEnabled: false,
+      portForwardingPort: 42000,
     },
     notificationsEnabled: true,
     theme,

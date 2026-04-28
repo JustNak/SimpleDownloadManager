@@ -1,8 +1,9 @@
 use crate::storage::{
-    default_download_directory, default_extension_listen_port, load_persisted_state, persist_state,
-    BulkArchiveInfo, BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticEvent,
-    DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt,
-    DownloadSource, ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
+    default_download_directory, default_extension_listen_port,
+    default_torrent_port_forwarding_port, load_persisted_state, persist_state, BulkArchiveInfo,
+    BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel,
+    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
+    ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
     HostRegistrationDiagnostics, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
     MainWindowState, PersistedState, QueueSummary, ResumeSupport, Settings, TorrentInfo,
     TorrentSeedMode, TorrentSettings, TransferKind,
@@ -18,6 +19,9 @@ use url::Url;
 const MAX_URL_LENGTH: usize = 2048;
 const SHA256_HEX_LENGTH: usize = 64;
 const DIAGNOSTIC_EVENT_LIMIT: usize = 100;
+const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
+const MIN_TORRENT_FORWARDING_PORT: u32 = 1024;
+const MAX_TORRENT_FORWARDING_PORT: u32 = 65_534;
 const EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXTERNAL_USE_HANDLE_RELEASE_POLL: Duration = Duration::from_millis(50);
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
@@ -146,6 +150,7 @@ struct RuntimeState {
     diagnostic_events: Vec<DiagnosticEvent>,
     next_job_number: u64,
     active_workers: HashSet<String>,
+    external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
 }
 
@@ -162,6 +167,13 @@ pub enum WorkerControl {
     Paused,
     Canceled,
     Missing,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExternalReseedAttempt {
+    Queued(DesktopSnapshot),
+    Pending,
+    Stop,
 }
 
 impl SharedState {
@@ -214,6 +226,7 @@ impl SharedState {
                 diagnostic_events,
                 next_job_number,
                 active_workers: HashSet::new(),
+                external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
             })),
             storage_path: Arc::new(storage_path),
@@ -235,6 +248,7 @@ impl SharedState {
                 diagnostic_events: Vec::new(),
                 next_job_number: 99,
                 active_workers: HashSet::new(),
+                external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
             })),
             storage_path: Arc::new(storage_path),
@@ -768,6 +782,7 @@ impl SharedState {
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 if matches!(
@@ -804,6 +819,7 @@ impl SharedState {
     pub async fn resume_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 if matches!(
@@ -840,6 +856,7 @@ impl SharedState {
     pub async fn pause_all_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.clear();
             state.pause_all_jobs();
             (state.snapshot(), state.persisted())
         };
@@ -851,6 +868,7 @@ impl SharedState {
     pub async fn resume_all_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.clear();
             state.resume_all_jobs();
             (state.snapshot(), state.persisted())
         };
@@ -884,6 +902,7 @@ impl SharedState {
 
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 job.state = JobState::Canceled;
@@ -915,6 +934,7 @@ impl SharedState {
     pub async fn retry_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 job.state = JobState::Queued;
@@ -942,6 +962,7 @@ impl SharedState {
     pub async fn restart_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             if state.active_workers.contains(id) {
                 return Err(BackendError {
                     code: "INTERNAL_ERROR",
@@ -1013,6 +1034,7 @@ impl SharedState {
     pub async fn remove_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted, paths_to_cleanup) = {
             let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
             let job_index = state
                 .jobs
                 .iter()
@@ -1270,6 +1292,133 @@ impl SharedState {
 
     pub async fn clear_handoff_auth(&self, id: &str) {
         self.handoff_auth.write().await.remove(id);
+    }
+
+    pub async fn begin_external_reseed(&self, id: &str) {
+        let mut state = self.inner.write().await;
+        if state.jobs.iter().any(|job| {
+            job.id == id
+                && job.transfer_kind == TransferKind::Torrent
+                && job.state == JobState::Paused
+        }) {
+            state.external_reseed_jobs.insert(id.into());
+        }
+    }
+
+    pub async fn queue_external_reseed_attempt(
+        &self,
+        id: &str,
+    ) -> Result<ExternalReseedAttempt, String> {
+        let queued = {
+            let mut state = self.inner.write().await;
+            if !state.external_reseed_jobs.contains(id) {
+                return Ok(ExternalReseedAttempt::Stop);
+            }
+
+            let Some(job_index) = state.jobs.iter().position(|job| job.id == id) else {
+                state.external_reseed_jobs.remove(id);
+                return Ok(ExternalReseedAttempt::Stop);
+            };
+
+            let job_state = state.jobs[job_index].state;
+            let active = state.active_workers.contains(id);
+            match job_state {
+                JobState::Paused if !active => {
+                    let filename = {
+                        let job = &mut state.jobs[job_index];
+                        job.state = JobState::Queued;
+                        job.speed = 0;
+                        job.eta = 0;
+                        job.error = None;
+                        job.failure_category = None;
+                        job.retry_attempts = 0;
+                        reset_integrity_for_retry(job);
+                        job.filename.clone()
+                    };
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "torrent".into(),
+                        format!("Queued automatic reseed for {filename}"),
+                        Some(id.into()),
+                    );
+                    Some((state.snapshot(), state.persisted()))
+                }
+                JobState::Paused
+                | JobState::Queued
+                | JobState::Starting
+                | JobState::Downloading => {
+                    return Ok(ExternalReseedAttempt::Pending);
+                }
+                JobState::Seeding | JobState::Completed | JobState::Failed | JobState::Canceled => {
+                    state.external_reseed_jobs.remove(id);
+                    return Ok(ExternalReseedAttempt::Stop);
+                }
+            }
+        };
+
+        if let Some((snapshot, persisted)) = queued {
+            persist_state(&self.storage_path, &persisted)?;
+            return Ok(ExternalReseedAttempt::Queued(snapshot));
+        }
+
+        Ok(ExternalReseedAttempt::Stop)
+    }
+
+    pub async fn handle_external_reseed_failure(
+        &self,
+        id: &str,
+        message: impl Into<String>,
+        failure_category: FailureCategory,
+    ) -> Result<Option<DesktopSnapshot>, String> {
+        let message = message.into();
+        if failure_category != FailureCategory::Torrent
+            || !is_external_reseed_file_access_error(&message)
+        {
+            return Ok(None);
+        }
+
+        let handled = {
+            let mut state = self.inner.write().await;
+            if !state.external_reseed_jobs.contains(id) {
+                return Ok(None);
+            }
+
+            state.active_workers.remove(id);
+            let event_message = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    state.external_reseed_jobs.remove(id);
+                    return Ok(None);
+                };
+
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = Some(message.clone());
+                job.failure_category = None;
+                format!(
+                    "Automatic reseed for {} is waiting for external file access to finish: {message}",
+                    job.filename
+                )
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent".into(),
+                event_message,
+                Some(id.into()),
+            );
+            Some((state.snapshot(), state.persisted()))
+        };
+
+        let Some((snapshot, persisted)) = handled else {
+            return Ok(None);
+        };
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(Some(snapshot))
+    }
+
+    #[cfg(test)]
+    async fn is_external_reseed_pending(&self, id: &str) -> bool {
+        self.inner.read().await.external_reseed_jobs.contains(id)
     }
 
     pub async fn prepare_job_for_external_use(
@@ -1841,6 +1990,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.active_workers.remove(id);
+            state.external_reseed_jobs.remove(id);
             let event_message = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
                     return Err("Job not found.".into());
@@ -2339,6 +2489,16 @@ fn normalize_torrent_settings(settings: &mut TorrentSettings) {
 
     if settings.seed_time_limit_minutes == 0 {
         settings.seed_time_limit_minutes = 1;
+    }
+
+    settings.upload_limit_kib_per_second = settings
+        .upload_limit_kib_per_second
+        .min(MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND);
+
+    if settings.port_forwarding_port < MIN_TORRENT_FORWARDING_PORT
+        || settings.port_forwarding_port > MAX_TORRENT_FORWARDING_PORT
+    {
+        settings.port_forwarding_port = default_torrent_port_forwarding_port();
     }
 }
 
@@ -2896,6 +3056,25 @@ fn cumulative_torrent_uploaded_bytes(
     }
 }
 
+fn is_external_reseed_file_access_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "sharing violation",
+        "being used by another process",
+        "being used by another program",
+        "process cannot access the file",
+        "another program is currently using this file",
+        "access is denied",
+        "permission denied",
+        "os error 32",
+        "os error 5",
+        "failed to open",
+        "could not open",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+}
+
 fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {
     if job.state == JobState::Canceled {
         return false;
@@ -3010,6 +3189,7 @@ mod tests {
             diagnostic_events: Vec::new(),
             next_job_number: 6,
             active_workers: HashSet::new(),
+            external_reseed_jobs: HashSet::new(),
             last_host_contact: None,
         };
 
@@ -3106,6 +3286,7 @@ mod tests {
             diagnostic_events: Vec::new(),
             next_job_number: 10,
             active_workers: HashSet::new(),
+            external_reseed_jobs: HashSet::new(),
             last_host_contact: None,
         };
 
@@ -3525,6 +3706,99 @@ mod tests {
         assert!(error
             .message
             .contains("The downloaded file is not available on disk"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn external_reseed_attempt_queues_paused_torrent() {
+        let download_dir = test_runtime_dir("external-reseed-queues-paused");
+        let mut job = download_job("job_35a", JobState::Paused, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.progress = 100.0;
+        job.target_path = download_dir.join("torrent").display().to_string();
+        job.temp_path = download_dir.join(".torrent-state").display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state.begin_external_reseed("job_35a").await;
+        let attempt = state
+            .queue_external_reseed_attempt("job_35a")
+            .await
+            .expect("external reseed queue attempt should succeed");
+
+        assert!(matches!(attempt, ExternalReseedAttempt::Queued(_)));
+        let runtime = state.inner.read().await;
+        assert_eq!(runtime.jobs[0].state, JobState::Queued);
+        assert!(state.is_external_reseed_pending("job_35a").await);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn external_reseed_file_access_failure_restores_paused_for_retry() {
+        let download_dir = test_runtime_dir("external-reseed-file-lock-retry");
+        let mut job = download_job("job_35b", JobState::Paused, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.progress = 100.0;
+        job.target_path = download_dir.join("torrent").display().to_string();
+        job.temp_path = download_dir.join(".torrent-state").display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state.begin_external_reseed("job_35b").await;
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.jobs[0].state = JobState::Starting;
+            runtime.active_workers.insert("job_35b".into());
+        }
+
+        let snapshot = state
+            .handle_external_reseed_failure(
+                "job_35b",
+                "The process cannot access the file because it is being used by another process.",
+                FailureCategory::Torrent,
+            )
+            .await
+            .expect("external reseed failure handling should succeed")
+            .expect("file access failures should be retried");
+
+        assert_eq!(snapshot.jobs[0].state, JobState::Paused);
+        assert!(snapshot.jobs[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("being used"));
+        let runtime = state.inner.read().await;
+        assert!(!runtime.active_workers.contains("job_35b"));
+        drop(runtime);
+        assert!(state.is_external_reseed_pending("job_35b").await);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn external_reseed_non_file_access_failure_is_not_intercepted() {
+        let download_dir = test_runtime_dir("external-reseed-non-file-error");
+        let mut job = download_job("job_35c", JobState::Paused, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state.begin_external_reseed("job_35c").await;
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.jobs[0].state = JobState::Starting;
+            runtime.active_workers.insert("job_35c".into());
+        }
+        let handled = state
+            .handle_external_reseed_failure(
+                "job_35c",
+                "Torrent metadata is invalid.",
+                FailureCategory::Torrent,
+            )
+            .await
+            .expect("external reseed failure handling should succeed");
+
+        assert!(handled.is_none());
+        assert!(state.is_external_reseed_pending("job_35c").await);
 
         let _ = std::fs::remove_dir_all(download_dir);
     }
@@ -4024,6 +4298,26 @@ mod tests {
         normalize_extension_settings(&mut settings);
 
         assert_eq!(settings.listen_port, 1420);
+    }
+
+    #[test]
+    fn normalize_torrent_settings_clamps_upload_limit_and_forwarding_port() {
+        let mut settings = TorrentSettings {
+            seed_ratio_limit: 0.0,
+            seed_time_limit_minutes: 0,
+            upload_limit_kib_per_second: 10_000_000,
+            port_forwarding_enabled: true,
+            port_forwarding_port: 80,
+            ..TorrentSettings::default()
+        };
+
+        normalize_torrent_settings(&mut settings);
+
+        assert_eq!(settings.seed_ratio_limit, 0.1);
+        assert_eq!(settings.seed_time_limit_minutes, 1);
+        assert_eq!(settings.upload_limit_kib_per_second, 1_048_576);
+        assert!(settings.port_forwarding_enabled);
+        assert_eq!(settings.port_forwarding_port, 42000);
     }
 
     #[test]
@@ -4535,6 +4829,7 @@ mod tests {
             diagnostic_events: Vec::new(),
             next_job_number: 99,
             active_workers: HashSet::new(),
+            external_reseed_jobs: HashSet::new(),
             last_host_contact: None,
         }
     }

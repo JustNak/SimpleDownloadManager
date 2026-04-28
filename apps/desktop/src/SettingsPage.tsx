@@ -444,6 +444,33 @@ export function SettingsPage({
               <span className="text-sm text-muted-foreground">KB/s</span>
             </div>
           </FieldRow>
+
+          <FieldRow label="Port Forwarding" description="UPnP inbound peer access." tooltip="Allows the torrent engine to ask your router to forward the selected listen port.">
+            <ToggleSwitch
+              id="torrentPortForwardingEnabled"
+              checked={formData.torrent.portForwardingEnabled}
+              onChange={(checked) => updateTorrentSettings({ portForwardingEnabled: checked })}
+              disabled={!formData.torrent.enabled}
+            />
+          </FieldRow>
+
+          <FieldRow label="Listen Port" description="Forwarded torrent port." tooltip="Used when torrent port forwarding is enabled.">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                id="torrentPortForwardingPort"
+                value={formData.torrent.portForwardingPort}
+                onChange={(event) => updateTorrentSettings({ portForwardingPort: normalizeTorrentPort(event.target.value) })}
+                min="1024"
+                max="65534"
+                step="1"
+                inputMode="numeric"
+                disabled={!formData.torrent.enabled || !formData.torrent.portForwardingEnabled}
+                className="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className="text-sm text-muted-foreground">port</span>
+            </div>
+          </FieldRow>
         </SettingsPanel>
         </section>
 
@@ -1261,6 +1288,11 @@ function formatDiagnosticEventTime(timestamp: number) {
 function normalizeListenPort(value: string): number {
   const port = Number.parseInt(value, 10);
   return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+}
+
+function normalizeTorrentPort(value: string): number {
+  const port = Number.parseInt(value, 10);
+  return Number.isFinite(port) && port >= 1024 && port <= 65534 ? port : 42000;
 }
 
 function normalizeInteger(value: string, fallback: number): number {

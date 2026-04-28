@@ -12,8 +12,10 @@ assert.deepEqual(
     seedRatioLimit: 1,
     seedTimeLimitMinutes: 60,
     uploadLimitKibPerSecond: 0,
+    portForwardingEnabled: false,
+    portForwardingPort: 42000,
   },
-  'torrent settings should default to enabled unlimited seeding with upload cap disabled',
+  'torrent settings should default to enabled unlimited seeding with upload cap and port forwarding disabled',
 );
 
 assert.deepEqual(
@@ -23,6 +25,8 @@ assert.deepEqual(
     seedRatioLimit: 0,
     seedTimeLimitMinutes: -20,
     uploadLimitKibPerSecond: -1,
+    portForwardingEnabled: true,
+    portForwardingPort: 80,
   }),
   {
     enabled: true,
@@ -30,8 +34,29 @@ assert.deepEqual(
     seedRatioLimit: 0.1,
     seedTimeLimitMinutes: 1,
     uploadLimitKibPerSecond: 0,
+    portForwardingEnabled: true,
+    portForwardingPort: 42000,
   },
   'torrent settings should clamp invalid numeric limits',
+);
+
+assert.deepEqual(
+  normalizeTorrentSettings({
+    enabled: true,
+    uploadLimitKibPerSecond: 10_000_000,
+    portForwardingEnabled: true,
+    portForwardingPort: 43000,
+  }),
+  {
+    enabled: true,
+    seedMode: 'forever',
+    seedRatioLimit: 1,
+    seedTimeLimitMinutes: 60,
+    uploadLimitKibPerSecond: 1_048_576,
+    portForwardingEnabled: true,
+    portForwardingPort: 43000,
+  },
+  'torrent settings should keep valid forwarding ports and cap upload limit to a safe maximum',
 );
 
 const ratioPolicy: TorrentSettings = {

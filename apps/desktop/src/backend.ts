@@ -27,6 +27,7 @@ export interface AddJobsResult {
 
 export interface ExternalUseResult {
   pausedTorrent: boolean;
+  autoReseedRetrySeconds?: number;
 }
 
 const STATE_CHANGED_EVENT = 'app://state-changed';
@@ -49,6 +50,8 @@ const defaultSettings: Settings = {
     seedRatioLimit: 1,
     seedTimeLimitMinutes: 60,
     uploadLimitKibPerSecond: 0,
+    portForwardingEnabled: false,
+    portForwardingPort: 42000,
   },
   notificationsEnabled: true,
   theme: 'system',
@@ -288,7 +291,7 @@ function prepareMockExternalUse(id: string): ExternalUseResult {
     job.speed = 0;
     job.eta = 0;
     emitMockState();
-    return { pausedTorrent: true };
+    return { pausedTorrent: true, autoReseedRetrySeconds: 60 };
   }
 
   return { pausedTorrent: false };
@@ -766,7 +769,7 @@ export async function cancelDownloadPrompt(id: string): Promise<void> {
 
 export async function openProgressWindow(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=500,height=360');
+    window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=460,height=250');
     return;
   }
   await invokeCommand('open_progress_window', { id });

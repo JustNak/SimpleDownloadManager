@@ -1,5 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Clock3, Download, ExternalLink, FolderOpen, Pause, Play, RotateCw, X } from 'lucide-react';
+import {
+  ExternalLink,
+  FolderOpen,
+  Link2,
+  Pause,
+  Play,
+  RotateCw,
+  X,
+} from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { JobState, type DownloadJob } from './types';
 import {
@@ -20,9 +28,31 @@ import {
   calculateDownloadProgressMetrics,
   recordProgressSample,
   shouldShowCompletedFileAction,
+  type DownloadProgressMetrics,
   type ProgressSample,
 } from './downloadProgressMetrics';
-import { isTorrentMetadataPending, torrentActivitySummary } from './queueRowPresentation';
+import {
+  isTorrentMetadataPending,
+  torrentActivitySummary,
+  torrentDisplayName,
+} from './queueRowPresentation';
+
+type PopupActionRunner = (
+  action: () => Promise<void>,
+  options?: { closeOnSuccess?: boolean },
+) => Promise<void>;
+
+interface ProgressViewProps {
+  job: DownloadJob;
+  progress: number;
+  progressMetrics: DownloadProgressMetrics;
+  isBusy: boolean;
+  isConfirmingCancel: boolean;
+  errorMessage: string;
+  runAction: PopupActionRunner;
+  onCancelClick: () => void;
+  onClose: () => void;
+}
 
 export function DownloadProgressWindow() {
   const [job, setJob] = useState<DownloadJob | null>(null);
@@ -95,129 +125,308 @@ export function DownloadProgressWindow() {
 
   if (!job) {
     return (
-      <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
-        <PopupTitlebar title="Download progress" />
+      <ProgressShell title="Download progress">
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
           This download is no longer available.
         </div>
-      </div>
+      </ProgressShell>
     );
   }
 
-  const progress = Math.max(0, Math.min(100, job.progress));
-  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
-  const isPaused = job.state === JobState.Paused;
-  const isCompleted = job.state === JobState.Completed;
-  const isFailed = job.state === JobState.Failed;
+  const progress = clampProgress(job.progress);
   const progressMetrics = calculateDownloadProgressMetrics(job, progressSamplesRef.current);
   const activeJobId = job.id;
-  const cancelLabel = isConfirmingCancel ? 'Confirm' : 'Cancel';
+  const sharedProps = {
+    job,
+    progress,
+    progressMetrics,
+    isBusy,
+    isConfirmingCancel,
+    errorMessage,
+    runAction,
+    onCancelClick: () => {
+      if (!isConfirmingCancel) {
+        setIsConfirmingCancel(true);
+        return;
+      }
 
-  function handleCancelClick() {
-    if (!isConfirmingCancel) {
-      setIsConfirmingCancel(true);
-      return;
-    }
+      void runAction(() => cancelJob(activeJobId));
+    },
+    onClose: () => {
+      void currentWindow?.close();
+    },
+  };
 
-    void runAction(() => cancelJob(activeJobId));
-  }
+  return job.transferKind === 'torrent' ? <TorrentingProgressView {...sharedProps} /> : <CompactDownloadProgressView {...sharedProps} />;
+}
+
+function CompactDownloadProgressView({
+  job,
+  progress,
+  progressMetrics,
+  isBusy,
+  isConfirmingCancel,
+  errorMessage,
+  runAction,
+  onCancelClick,
+  onClose,
+}: ProgressViewProps) {
+  return (
+    <ProgressShell title="Download progress">
+      <CompactMain>
+        <HeaderStrip
+          job={job}
+          title={job.filename}
+          subtitle={getHost(job.url)}
+          status={statusText(job)}
+        />
+
+        <ProgressStrip
+          progress={progress}
+          bytesText={downloadedText(job)}
+          colorClass={progressColor(job)}
+        />
+
+        <MetricRail>
+          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
+          <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
+          <Metric label="Size" value={job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'} />
+        </MetricRail>
+
+        <DetailRows job={job} />
+        <ErrorMessage message={errorMessage} />
+        <ActionBar
+          job={job}
+          isBusy={isBusy}
+          isConfirmingCancel={isConfirmingCancel}
+          runAction={runAction}
+          onCancelClick={onCancelClick}
+          onClose={onClose}
+        />
+      </CompactMain>
+    </ProgressShell>
+  );
+}
+
+function TorrentingProgressView({
+  job,
+  progress,
+  progressMetrics,
+  isBusy,
+  isConfirmingCancel,
+  errorMessage,
+  runAction,
+  onCancelClick,
+  onClose,
+}: ProgressViewProps) {
+  const metadataPending = isTorrentMetadataPending(job);
 
   return (
-    <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
-      <PopupTitlebar title="Download progress" />
+    <ProgressShell title="Torrenting">
+      <CompactMain>
+        <HeaderStrip
+          job={job}
+          title={torrentDisplayName(job)}
+          subtitle={torrentStatusLine(job)}
+          status={statusText(job)}
+        />
 
-      <main className="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
-        <section className="flex min-w-0 gap-3">
-          <FileBadge filename={job.filename} transferKind={job.transferKind} />
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-base font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</h1>
-            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={job.url}>{job.transferKind === 'torrent' ? torrentSummary(job) : getHost(job.url)}</div>
-            <div className={`mt-2 inline-flex h-6 items-center gap-1.5 rounded border px-2 text-xs font-semibold ${statusClass(job.state)}`}>
-              {isCompleted ? <CheckCircle2 size={13} /> : isFailed ? <X size={13} /> : <Download size={13} />}
-              {statusText(job)}
-            </div>
-          </div>
-        </section>
+        {!metadataPending ? (
+          <>
+            <ProgressStrip
+              progress={progress}
+              bytesText={downloadedText(job)}
+              colorClass={progressColor(job)}
+            />
 
-        <section className="mt-4">
-          <div className="mb-1.5 flex items-baseline justify-between">
-            <span className="text-2xl font-semibold tabular-nums text-foreground">{progress.toFixed(0)}%</span>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {formatBytes(job.downloadedBytes)} / {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
-            </span>
-          </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-progress-track">
-            <div className={`h-1.5 rounded-full transition-all duration-300 ${progressColor(job.state)}`} style={{ width: `${progress}%` }} />
-          </div>
-        </section>
-
-        <section className="mt-3 grid grid-cols-3 gap-1 text-xs">
-          <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : job.state === JobState.Seeding ? `Up ${formatBytes(job.torrent?.uploadedBytes ?? 0)}` : '--'} />
-          <Metric label="Time" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : job.state === JobState.Seeding ? torrentRatio(job) : '--'} />
-          <Metric label="State" value={statusText(job)} />
-        </section>
-
-        <div className="mt-3 grid grid-cols-[76px_minmax(0,1fr)] gap-x-2 gap-y-1.5 text-xs">
-          <div className="flex items-center gap-1.5 text-muted-foreground"><FolderOpen size={14} /> Path</div>
-          <div className="truncate text-foreground" title={job.targetPath}>{job.targetPath || 'No destination recorded yet.'}</div>
-          <div className="flex items-center gap-1.5 text-muted-foreground"><Clock3 size={14} /> Source</div>
-          <div className="truncate text-primary" title={job.url}>{job.url}</div>
-        </div>
-
-        {errorMessage ? (
-          <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
-            {errorMessage}
-          </div>
+            <MetricRail>
+              <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
+              <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
+              <Metric label="Peers" value={torrentPeerCount(job)} />
+            </MetricRail>
+          </>
         ) : null}
 
-        <div className="mt-auto flex justify-end gap-2 border-t border-border pt-3">
-          {isCompleted ? (
-            <ActionButton
-              label="Open"
-              icon={<ExternalLink size={16} />}
-              disabled={isBusy}
-              primary
-              onClick={() => void runAction(async () => {
-                await openJobFile(job.id);
-              }, { closeOnSuccess: true })}
-            />
-          ) : null}
-          {shouldShowCompletedFileAction(job) ? (
-            <ActionButton
-              label="Show"
-              icon={<FolderOpen size={16} />}
-              disabled={isBusy}
-              onClick={() => void runAction(async () => {
-                await revealJobInFolder(job.id);
-              }, { closeOnSuccess: true })}
-            />
-          ) : null}
-          {isActive ? (
-            <ActionButton label="Pause" icon={<Pause size={16} />} disabled={isBusy} onClick={() => void runAction(() => pauseJob(job.id))} />
-          ) : null}
-          {isPaused ? (
-            <ActionButton label="Resume" icon={<Play size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => resumeJob(job.id))} />
-          ) : null}
-          {isFailed ? (
-            <ActionButton label="Retry" icon={<RotateCw size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => retryJob(job.id))} />
-          ) : null}
-          {(isActive || isPaused) ? (
-            <ActionButton label={cancelLabel} icon={<X size={16} />} disabled={isBusy} destructive={isConfirmingCancel} danger={!isConfirmingCancel} onClick={handleCancelClick} />
-          ) : null}
-          {(isCompleted || isFailed) ? (
-            <ActionButton label="Close" icon={<X size={16} />} disabled={isBusy} onClick={() => void currentWindow?.close()} />
-          ) : null}
-        </div>
-      </main>
+        <DetailRows job={job} />
+        <ErrorMessage message={errorMessage} />
+        <ActionBar
+          job={job}
+          isBusy={isBusy}
+          isConfirmingCancel={isConfirmingCancel}
+          runAction={runAction}
+          onCancelClick={onCancelClick}
+          onClose={onClose}
+        />
+      </CompactMain>
+    </ProgressShell>
+  );
+}
+
+function ProgressShell({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
+      <PopupTitlebar title={title} />
+      {children}
     </div>
+  );
+}
+
+function CompactMain({ children }: { children: React.ReactNode }) {
+  return (
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface px-3 py-1.5">
+      {children}
+    </main>
+  );
+}
+
+function HeaderStrip({
+  job,
+  title,
+  subtitle,
+  status,
+}: {
+  job: DownloadJob;
+  title: string;
+  subtitle: string;
+  status: string;
+}) {
+  return (
+    <section className="flex min-w-0 items-start gap-2">
+      <FileBadge filename={job.filename} transferKind={job.transferKind} />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold leading-5 text-foreground" title={title}>{title}</h1>
+            <div className="truncate text-[11px] text-muted-foreground" title={subtitle}>{subtitle}</div>
+          </div>
+          <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold leading-4 ${statusClass(job)}`}>
+            {status}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProgressStrip({
+  progress,
+  bytesText,
+  colorClass,
+}: {
+  progress: number;
+  bytesText: string;
+  colorClass: string;
+}) {
+  return (
+    <section className="mt-1.5">
+      <div className="mb-1 flex items-end justify-between gap-2">
+        <span className="text-xl font-semibold tabular-nums leading-none text-foreground">{progress.toFixed(0)}%</span>
+        <span className="truncate text-[11px] tabular-nums text-muted-foreground" title={bytesText}>{bytesText}</span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-progress-track">
+        <div className={`h-1.5 rounded-full transition-all duration-300 ${colorClass}`} style={{ width: `${progress}%` }} />
+      </div>
+    </section>
+  );
+}
+
+function MetricRail({ children }: { children: React.ReactNode }) {
+  return (
+    <section className="mt-1.5 grid grid-cols-3 gap-2 border-y border-border/70 py-1">
+      {children}
+    </section>
   );
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="min-w-0 px-2 py-1">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-0.5 truncate text-sm font-semibold tabular-nums text-foreground" title={value}>{value}</div>
+    <div className="min-w-0">
+      <div className="text-[10px] leading-3 text-muted-foreground">{label}</div>
+      <div className="truncate text-xs font-semibold tabular-nums leading-4 text-foreground" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function DetailRows({ job }: { job: DownloadJob }) {
+  return (
+    <div className="mt-1 grid grid-cols-[48px_minmax(0,1fr)] gap-x-1.5 gap-y-0 text-[10px] leading-4">
+      <div className="flex items-center gap-1 text-muted-foreground"><FolderOpen size={12} /> Path</div>
+      <div className="truncate text-foreground" title={job.targetPath}>{job.targetPath || 'No destination recorded yet.'}</div>
+      <div className="flex items-center gap-1 text-muted-foreground"><Link2 size={12} /> Source</div>
+      <div className="truncate text-primary" title={job.url}>{job.transferKind === 'torrent' ? torrentSourceText(job) : job.url}</div>
+    </div>
+  );
+}
+
+function ErrorMessage({ message }: { message: string }) {
+  if (!message) return null;
+
+  return (
+    <div className="mt-1.5 truncate rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive" title={message}>
+      {message}
+    </div>
+  );
+}
+
+function ActionBar({
+  job,
+  isBusy,
+  isConfirmingCancel,
+  runAction,
+  onCancelClick,
+  onClose,
+}: {
+  job: DownloadJob;
+  isBusy: boolean;
+  isConfirmingCancel: boolean;
+  runAction: PopupActionRunner;
+  onCancelClick: () => void;
+  onClose: () => void;
+}) {
+  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
+  const isPaused = job.state === JobState.Paused;
+  const isCompleted = job.state === JobState.Completed;
+  const isFailed = job.state === JobState.Failed;
+  const cancelLabel = isConfirmingCancel ? 'Confirm' : 'Cancel';
+
+  return (
+    <div className="mt-auto flex justify-end gap-1.5 border-t border-border pt-1.5">
+      {isCompleted ? (
+        <ActionButton
+          label="Open"
+          icon={<ExternalLink size={14} />}
+          disabled={isBusy}
+          primary
+          onClick={() => void runAction(async () => {
+            await openJobFile(job.id);
+          }, { closeOnSuccess: true })}
+        />
+      ) : null}
+      {shouldShowCompletedFileAction(job) ? (
+        <ActionButton
+          label="Show"
+          icon={<FolderOpen size={14} />}
+          disabled={isBusy}
+          onClick={() => void runAction(async () => {
+            await revealJobInFolder(job.id);
+          }, { closeOnSuccess: true })}
+        />
+      ) : null}
+      {isActive ? (
+        <ActionButton label="Pause" icon={<Pause size={14} />} disabled={isBusy} onClick={() => void runAction(() => pauseJob(job.id))} />
+      ) : null}
+      {isPaused ? (
+        <ActionButton label="Resume" icon={<Play size={14} />} disabled={isBusy} primary onClick={() => void runAction(() => resumeJob(job.id))} />
+      ) : null}
+      {isFailed ? (
+        <ActionButton label="Retry" icon={<RotateCw size={14} />} disabled={isBusy} primary onClick={() => void runAction(() => retryJob(job.id))} />
+      ) : null}
+      {(isActive || isPaused) ? (
+        <ActionButton label={cancelLabel} icon={<X size={14} />} disabled={isBusy} destructive={isConfirmingCancel} danger={!isConfirmingCancel} onClick={onCancelClick} />
+      ) : null}
+      {(isCompleted || isFailed) ? (
+        <ActionButton label="Close" icon={<X size={14} />} disabled={isBusy} onClick={onClose} />
+      ) : null}
     </div>
   );
 }
@@ -251,7 +460,7 @@ function ActionButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
+      className={`flex h-6 items-center gap-1 rounded px-1.5 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
     >
       {icon}
       {label}
@@ -284,34 +493,45 @@ function statusText(job: DownloadJob) {
   }
 }
 
-function torrentRatio(job: DownloadJob) {
-  return typeof job.torrent?.ratio === 'number' ? `${job.torrent.ratio.toFixed(2)}x` : '--';
-}
-
-function torrentSummary(job: DownloadJob) {
-  if (isTorrentMetadataPending(job)) return 'Finding metadata';
-
-  const parts: string[] = [];
-  if (typeof job.torrent?.ratio === 'number') parts.push(torrentRatio(job));
-  if (typeof job.torrent?.uploadedBytes === 'number' && job.torrent.uploadedBytes > 0) {
-    parts.push(`Up ${formatBytes(job.torrent.uploadedBytes)}`);
-  }
-  if (!parts.length) return torrentActivitySummary(job);
-  return parts.join(' - ');
-}
-
-function statusClass(state: JobState) {
-  if (state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
-  if (state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
-  if (state === JobState.Queued) return 'border-warning/40 bg-warning/10 text-warning';
+function statusClass(job: DownloadJob) {
+  if (job.state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
+  if (job.state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
+  if (job.state === JobState.Queued || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
+  if (job.state === JobState.Paused || job.state === JobState.Canceled) return 'border-border bg-muted text-muted-foreground';
   return 'border-primary/40 bg-primary/10 text-primary';
 }
 
-function progressColor(state: JobState) {
-  if (state === JobState.Completed) return 'bg-success';
-  if (state === JobState.Failed) return 'bg-destructive';
-  if (state === JobState.Queued) return 'bg-warning';
+function progressColor(job: DownloadJob) {
+  if (job.state === JobState.Completed) return 'bg-success';
+  if (job.state === JobState.Failed) return 'bg-destructive';
+  if (job.state === JobState.Queued || isTorrentMetadataPending(job)) return 'bg-warning';
+  if (job.transferKind === 'torrent') return 'bg-warning';
   return 'bg-primary';
+}
+
+function downloadedText(job: DownloadJob) {
+  return `${formatBytes(job.downloadedBytes)} / ${job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}`;
+}
+
+function torrentStatusLine(job: DownloadJob) {
+  if (isTorrentMetadataPending(job)) return 'Finding metadata';
+  if (job.state === JobState.Seeding) return `Seeding - ${downloadedText(job)}`;
+  const activity = torrentActivitySummary(job);
+  return activity === 'No peer activity yet' ? statusText(job) : `${statusText(job)} - ${activity}`;
+}
+
+function torrentPeerCount(job: DownloadJob) {
+  return typeof job.torrent?.peers === 'number' ? job.torrent.peers.toLocaleString() : '--';
+}
+
+function torrentSourceText(job: DownloadJob) {
+  if (job.url.startsWith('magnet:')) return 'Magnet link';
+  return job.url;
+}
+
+function clampProgress(progress: number) {
+  if (!Number.isFinite(progress)) return 0;
+  return Math.max(0, Math.min(100, progress));
 }
 
 function isTauriRuntime(): boolean {

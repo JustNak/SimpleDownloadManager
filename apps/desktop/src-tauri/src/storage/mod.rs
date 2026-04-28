@@ -279,6 +279,10 @@ pub struct TorrentSettings {
     pub seed_time_limit_minutes: u32,
     #[serde(default)]
     pub upload_limit_kib_per_second: u32,
+    #[serde(default)]
+    pub port_forwarding_enabled: bool,
+    #[serde(default = "default_torrent_port_forwarding_port")]
+    pub port_forwarding_port: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +478,8 @@ impl Default for TorrentSettings {
             seed_ratio_limit: default_seed_ratio_limit(),
             seed_time_limit_minutes: default_seed_time_limit_minutes(),
             upload_limit_kib_per_second: 0,
+            port_forwarding_enabled: false,
+            port_forwarding_port: default_torrent_port_forwarding_port(),
         }
     }
 }
@@ -492,6 +498,10 @@ fn default_seed_ratio_limit() -> f64 {
 
 fn default_seed_time_limit_minutes() -> u32 {
     60
+}
+
+pub fn default_torrent_port_forwarding_port() -> u32 {
+    42_000
 }
 
 fn default_accent_color() -> String {

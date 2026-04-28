@@ -176,10 +176,10 @@ fn batch_progress_window_label(batch_id: &str) -> String {
 
 fn progress_window_geometry() -> ProgressWindowGeometry {
     ProgressWindowGeometry {
-        width: 500.0,
-        height: 360.0,
-        min_width: 500.0,
-        min_height: 360.0,
+        width: 460.0,
+        height: 250.0,
+        min_width: 460.0,
+        min_height: 250.0,
     }
 }
 
@@ -255,8 +255,8 @@ mod tests {
     fn progress_window_minimum_matches_content_size() {
         let geometry = super::progress_window_geometry();
 
-        assert_eq!(geometry.width, 500.0);
-        assert_eq!(geometry.height, 360.0);
+        assert_eq!(geometry.width, 460.0);
+        assert_eq!(geometry.height, 250.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
     }

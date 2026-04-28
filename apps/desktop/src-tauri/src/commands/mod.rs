@@ -1,4 +1,7 @@
-use crate::download::schedule_downloads;
+use crate::download::{
+    apply_torrent_runtime_settings, schedule_downloads, schedule_external_reseed,
+    EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
+};
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
@@ -102,6 +105,8 @@ pub struct AddJobsResult {
 #[serde(rename_all = "camelCase")]
 pub struct ExternalUseResult {
     pub paused_torrent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_reseed_retry_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +439,7 @@ pub async fn save_settings(
     let snapshot = state.save_settings(settings).await?;
     let saved_settings = snapshot.settings.clone();
     emit_snapshot(&app, &snapshot);
+    apply_torrent_runtime_settings(&saved_settings.torrent);
     schedule_downloads(app, state.inner().clone());
     Ok(saved_settings)
 }
@@ -584,12 +590,20 @@ pub async fn open_job_file(
         .await
         .map_err(|error| error.message)?;
 
+    let auto_reseed_retry_seconds = if preparation.paused_torrent {
+        schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await;
+        Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)
+    } else {
+        None
+    };
+
     tauri::async_runtime::spawn_blocking(move || open_path(&path))
         .await
         .map_err(|error| format!("Could not open file: {error}"))??;
 
     Ok(ExternalUseResult {
         paused_torrent: preparation.paused_torrent,
+        auto_reseed_retry_seconds,
     })
 }
 
@@ -612,12 +626,20 @@ pub async fn reveal_job_in_folder(
         .await
         .map_err(|error| error.message)?;
 
+    let auto_reseed_retry_seconds = if preparation.paused_torrent {
+        schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await;
+        Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)
+    } else {
+        None
+    };
+
     tauri::async_runtime::spawn_blocking(move || reveal_path(&path))
         .await
         .map_err(|error| format!("Could not reveal file: {error}"))??;
 
     Ok(ExternalUseResult {
         paused_torrent: preparation.paused_torrent,
+        auto_reseed_retry_seconds,
     })
 }
 
@@ -1066,6 +1088,50 @@ mod tests {
 
         assert_eq!(registry.get("batch_123"), Some(context));
         assert_eq!(registry.get("missing"), None);
+    }
+
+    #[test]
+    fn external_use_commands_schedule_auto_reseed() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        assert!(production_source.contains("pub auto_reseed_retry_seconds: Option<u64>"));
+        assert_eq!(
+            production_source
+                .matches("schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await")
+                .count(),
+            2,
+            "open file and open folder should both schedule auto-reseed after pausing a torrent"
+        );
+        assert!(production_source.contains("Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)"));
+    }
+
+    #[test]
+    fn save_settings_applies_torrent_runtime_settings_before_rescheduling() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+        let save_settings = production_source
+            .find("pub async fn save_settings(")
+            .expect("save_settings command should exist");
+        let runtime_apply = production_source[save_settings..]
+            .find("apply_torrent_runtime_settings(&saved_settings.torrent);")
+            .expect("save_settings should apply torrent runtime settings")
+            + save_settings;
+        let schedule = production_source[save_settings..]
+            .find("schedule_downloads(app, state.inner().clone());")
+            .expect("save_settings should reschedule downloads")
+            + save_settings;
+
+        assert!(
+            runtime_apply < schedule,
+            "torrent upload limits should be applied to the live session before downloads are rescheduled"
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ export function recordProgressSample(
   job: DownloadJob,
   timestamp = Date.now(),
 ): ProgressSample[] {
-  if (job.state !== 'downloading') {
+  if (job.state !== 'downloading' || isTorrentMetadataPendingForProgress(job)) {
     return samples.filter((sample) => sample.jobId !== job.id);
   }
 
@@ -85,4 +85,11 @@ function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): numb
   if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || byteDelta <= 0) return 0;
 
   return Math.round(byteDelta / (elapsedMs / 1000));
+}
+
+function isTorrentMetadataPendingForProgress(job: DownloadJob): boolean {
+  if (job.transferKind !== 'torrent') return false;
+  if (job.state !== 'starting' && job.state !== 'downloading') return false;
+  if ((job.totalBytes ?? 0) > 0) return false;
+  return !job.torrent?.name;
 }

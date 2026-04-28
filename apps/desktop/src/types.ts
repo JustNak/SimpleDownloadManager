@@ -126,6 +126,8 @@ export interface TorrentSettings {
   seedRatioLimit: number;
   seedTimeLimitMinutes: number;
   uploadLimitKibPerSecond: number;
+  portForwardingEnabled: boolean;
+  portForwardingPort: number;
 }
 
 export interface Settings {

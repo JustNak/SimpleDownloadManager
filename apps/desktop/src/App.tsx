@@ -110,6 +110,14 @@ import {
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
 
+function externalUseAutoReseedMessage(target: 'file' | 'folder', retrySeconds: number): string {
+  if (retrySeconds === 60) {
+    return `Torrent paused so Windows can use the ${target}. The app will try to reseed every 60s while Windows is still using it.`;
+  }
+
+  return `Torrent paused so Windows can use the ${target}. The app will try to reseed every ${retrySeconds}s while Windows is still using it.`;
+}
+
 export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Checking);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -125,6 +133,8 @@ export default function App() {
       seedRatioLimit: 1,
       seedTimeLimitMinutes: 60,
       uploadLimitKibPerSecond: 0,
+      portForwardingEnabled: false,
+      portForwardingPort: 42000,
     },
     notificationsEnabled: true,
     theme: 'system',
@@ -495,10 +505,11 @@ export default function App() {
     try {
       const result = await openJobFile(id);
       if (result.pausedTorrent) {
+        const retrySeconds = result.autoReseedRetrySeconds ?? 60;
         addToast({
           type: 'info',
           title: 'Torrent Paused',
-          message: 'Torrent paused so Windows can use the file. Resume it when you are done.',
+          message: externalUseAutoReseedMessage('file', retrySeconds),
         });
       }
     } catch (error) {
@@ -510,10 +521,11 @@ export default function App() {
     try {
       const result = await revealJobInFolder(id);
       if (result.pausedTorrent) {
+        const retrySeconds = result.autoReseedRetrySeconds ?? 60;
         addToast({
           type: 'info',
           title: 'Torrent Paused',
-          message: 'Torrent paused so Windows can use the folder. Resume it when you are done.',
+          message: externalUseAutoReseedMessage('folder', retrySeconds),
         });
       }
     } catch (error) {
@@ -1145,7 +1157,8 @@ function StatusBar({
   connectionState: ConnectionState;
   connectionSlots: number;
 }) {
-  const isConnected = connectionState === ConnectionState.Connected;
+  const connectionPresentation = connectionStatusPresentation(connectionState);
+  const ConnectionIcon = connectionPresentation.icon;
   const seedDisplay = torrentStats.seedSpeed > 0
     ? `${formatBytes(torrentStats.seedSpeed)}/s`
     : `Up ${formatBytes(torrentStats.uploadedBytes)}`;
@@ -1185,14 +1198,40 @@ function StatusBar({
       </div>
 
       <div className="flex items-center gap-3">
-        <span className={`flex items-center gap-2 ${isConnected ? 'text-foreground' : 'text-destructive'}`}>
-          {isConnected ? <Wifi size={16} /> : <WifiOff size={16} />}
-          {formatConnectionState(connectionState)}
+        <span className={`flex items-center gap-2 ${connectionPresentation.className}`}>
+          <ConnectionIcon size={16} />
+          {connectionPresentation.label}
         </span>
         <span className="text-muted-foreground">Slots: {connectionSlots}</span>
       </div>
     </footer>
   );
+}
+
+function connectionStatusPresentation(state: ConnectionState) {
+  switch (state) {
+    case ConnectionState.Connected:
+      return {
+        label: 'Connected',
+        className: 'text-foreground',
+        icon: Wifi,
+      };
+    case ConnectionState.Checking:
+      return {
+        label: 'Checking',
+        className: 'text-muted-foreground',
+        icon: RotateCw,
+      };
+    case ConnectionState.HostMissing:
+    case ConnectionState.AppMissing:
+    case ConnectionState.AppUnreachable:
+    case ConnectionState.Error:
+      return {
+        label: formatConnectionState(state),
+        className: 'text-destructive',
+        icon: WifiOff,
+      };
+  }
 }
 
 function categoryIcon(category: DownloadCategory, size: number): React.ReactNode {

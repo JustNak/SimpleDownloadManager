@@ -7,8 +7,8 @@ const queueViewSource = readFileSync(new URL('../src/QueueView.tsx', import.meta
 
 assert.match(
   backendSource,
-  /export interface ExternalUseResult[\s\S]*pausedTorrent: boolean/,
-  'open and reveal commands should expose whether a torrent was paused for external file use',
+  /export interface ExternalUseResult[\s\S]*pausedTorrent: boolean[\s\S]*autoReseedRetrySeconds\?: number/,
+  'open and reveal commands should expose whether a torrent was paused plus automatic reseed timing',
 );
 
 assert.match(
@@ -25,14 +25,26 @@ assert.match(
 
 assert.match(
   appSource,
-  /result\.pausedTorrent[\s\S]*Torrent Paused[\s\S]*Windows can use the file/,
-  'opening a seeding torrent should show a paused-torrent toast',
+  /result\.pausedTorrent[\s\S]*Torrent Paused[\s\S]*externalUseAutoReseedMessage\('file', retrySeconds\)/,
+  'opening a seeding torrent should show a paused-torrent auto-reseed toast',
 );
 
 assert.match(
   appSource,
-  /result\.pausedTorrent[\s\S]*Torrent Paused[\s\S]*Windows can use the folder/,
-  'revealing a seeding torrent should show a paused-torrent toast',
+  /result\.pausedTorrent[\s\S]*Torrent Paused[\s\S]*externalUseAutoReseedMessage\('folder', retrySeconds\)/,
+  'revealing a seeding torrent should show a paused-torrent auto-reseed toast',
+);
+
+assert.match(
+  appSource,
+  /Windows can use the \$\{target\}[\s\S]*reseed every 60s/,
+  'external-use auto-reseed toast copy should mention the 60s retry cadence',
+);
+
+assert.match(
+  backendSource,
+  /return \{ pausedTorrent: true, autoReseedRetrySeconds: 60 \}/,
+  'mock external use should mirror the backend auto-reseed retry timing',
 );
 
 assert.match(
