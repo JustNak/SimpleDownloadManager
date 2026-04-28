@@ -28,6 +28,7 @@ mod torrent;
 mod types;
 use jobs::*;
 use paths::*;
+#[cfg(test)]
 use progress::*;
 use runtime::*;
 pub use settings::validate_settings;
