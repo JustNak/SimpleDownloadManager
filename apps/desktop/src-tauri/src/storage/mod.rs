@@ -103,6 +103,10 @@ pub struct TorrentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_runtime_uploaded_bytes: Option<u64>,
     #[serde(default)]
+    pub fetched_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_runtime_fetched_bytes: Option<u64>,
+    #[serde(default)]
     pub ratio: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeding_started_at: Option<u64>,
@@ -808,6 +812,7 @@ mod tests {
                   "peers": 3,
                   "seeds": 4,
                   "uploadedBytes": 2048,
+                  "fetchedBytes": 1536,
                   "ratio": 2.0,
                   "seedingStartedAt": 123456
                 }
@@ -833,12 +838,14 @@ mod tests {
         assert_eq!(torrent.total_files, Some(2));
         assert_eq!(torrent.uploaded_bytes, 2048);
         assert_eq!(torrent.last_runtime_uploaded_bytes, None);
+        assert_eq!(torrent.fetched_bytes, 1536);
+        assert_eq!(torrent.last_runtime_fetched_bytes, None);
         assert_eq!(torrent.ratio, 2.0);
         assert_eq!(torrent.seeding_started_at, Some(123456));
     }
 
     #[test]
-    fn torrent_jobs_round_trip_runtime_upload_counter() {
+    fn torrent_jobs_round_trip_runtime_transfer_counters() {
         let state = serde_json::from_str::<PersistedState>(
             r#"{
               "jobs": [{
@@ -858,6 +865,8 @@ mod tests {
                   "infoHash": "0123456789abcdef0123456789abcdef01234567",
                   "uploadedBytes": 2048,
                   "lastRuntimeUploadedBytes": 512,
+                  "fetchedBytes": 4096,
+                  "lastRuntimeFetchedBytes": 1024,
                   "ratio": 2.0
                 }
               }],
@@ -876,6 +885,14 @@ mod tests {
         assert_eq!(
             serialized["jobs"][0]["torrent"]["lastRuntimeUploadedBytes"],
             serde_json::json!(512)
+        );
+        assert_eq!(
+            serialized["jobs"][0]["torrent"]["fetchedBytes"],
+            serde_json::json!(4096)
+        );
+        assert_eq!(
+            serialized["jobs"][0]["torrent"]["lastRuntimeFetchedBytes"],
+            serde_json::json!(1024)
         );
     }
 

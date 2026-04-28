@@ -3,6 +3,9 @@ import {
   clampQueueProgress,
   fileBadgeActivityState,
   formatQueueSize,
+  formatQueueSizeTitle,
+  formatTorrentFetchedSize,
+  formatTorrentVerifiedSize,
   QUEUE_TABLE_COLUMNS,
   queueTableColumnsForView,
   queueStatusPresentation,
@@ -227,6 +230,42 @@ assert.equal(
   formatQueueSize({ ...baseJob, state: 'downloading', downloadedBytes: 40, totalBytes: 100 }, byteLabel),
   '40 B / 100 B',
   'active downloads should show downloaded and total size',
+);
+
+assert.equal(
+  formatQueueSize({ ...baseJob, transferKind: 'torrent', state: 'downloading', downloadedBytes: 40, totalBytes: 100 }, byteLabel),
+  '100 B',
+  'torrent size cells should show total size instead of verified bytes over total',
+);
+
+const torrentWithCheckedProgressJump: DownloadJob = {
+  ...baseJob,
+  transferKind: 'torrent',
+  downloadedBytes: 1_700_000_000,
+  totalBytes: 2_700_000_000,
+  torrent: {
+    uploadedBytes: 0,
+    fetchedBytes: 0,
+    ratio: 0,
+  },
+};
+
+assert.equal(
+  formatTorrentVerifiedSize(torrentWithCheckedProgressJump, byteLabel),
+  'Verified 1700000000 B / 2700000000 B',
+  'torrent verified size should label checked progress jumps explicitly',
+);
+
+assert.equal(
+  formatTorrentFetchedSize(torrentWithCheckedProgressJump, byteLabel),
+  '0 B / 2700000000 B from peers',
+  'torrent fetched size should not present checked progress jumps as peer downloads',
+);
+
+assert.equal(
+  formatQueueSizeTitle(torrentWithCheckedProgressJump, byteLabel),
+  'Verified 1700000000 B / 2700000000 B; Downloaded 0 B / 2700000000 B from peers',
+  'torrent size tooltip should expose verified progress separately from peer-fetched bytes',
 );
 
 assert.equal(

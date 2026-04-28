@@ -59,6 +59,36 @@ assert.match(
   'torrenting view should hide progress and metrics while metadata is pending',
 );
 
+assert.match(
+  progressSource,
+  /progressLabel=\{`Verified \$\{progress\.toFixed\(0\)\}%`\}[\s\S]*bytesText=\{verifiedTorrentText\(job\)\}/,
+  'torrenting progress strip should label checked torrent bytes as verified content',
+);
+
+assert.match(
+  progressSource,
+  /<TorrentDownloadedRow job=\{job\} \/>/,
+  'torrenting popup should show a separate peer-fetched downloaded byte row',
+);
+
+assert.match(
+  progressSource,
+  /function TorrentDownloadedRow[\s\S]*torrentFetchedText\(job\)[\s\S]*Downloaded/,
+  'torrent downloaded row should use the cumulative peer-fetched byte counter',
+);
+
+assert.match(
+  progressSource,
+  /function verifiedTorrentText[\s\S]*formatTorrentVerifiedSize\(job, formatBytes\)/,
+  'torrent verified text should make progress-byte semantics explicit',
+);
+
+assert.match(
+  progressSource,
+  /function torrentFetchedText[\s\S]*formatTorrentFetchedSize\(job, formatBytes\)/,
+  'torrent fetched text should show peer-downloaded bytes instead of checked progress bytes',
+);
+
 assert.doesNotMatch(
   progressSource,
   /label="Uploaded"|label="Ratio"/,

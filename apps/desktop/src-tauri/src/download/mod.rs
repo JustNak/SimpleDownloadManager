@@ -94,6 +94,21 @@ pub fn apply_torrent_runtime_settings(settings: &TorrentSettings) {
     }
 }
 
+pub async fn forget_torrent_session_for_restart(
+    state: &SharedState,
+    torrent: &TorrentInfo,
+) -> Result<(), String> {
+    if torrent.engine_id.is_none() && torrent.info_hash.is_none() {
+        return Ok(());
+    }
+
+    let engine = torrent_engine(state).await?;
+    engine
+        .forget_existing(torrent.engine_id, torrent.info_hash.as_deref())
+        .await?;
+    Ok(())
+}
+
 pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: String) {
     state.begin_external_reseed(&id).await;
 
