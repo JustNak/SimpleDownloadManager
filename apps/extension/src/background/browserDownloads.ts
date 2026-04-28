@@ -227,7 +227,11 @@ export function selectFilenameInterceptionApi<TItem>(
 export function shouldDiscardBrowserDownloadAfterHandoff(response: HostToExtensionResponse): boolean {
   return !isErrorResponse(response)
     && response.type === 'accepted'
-    && response.payload.status !== 'canceled';
+    && (
+      response.payload.status === 'queued'
+      || response.payload.status === 'duplicate_existing_job'
+      || response.payload.status === 'dismissed'
+    );
 }
 
 export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response: HostToExtensionResponse): boolean {

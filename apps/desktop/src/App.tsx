@@ -493,7 +493,14 @@ export default function App() {
 
   async function handleOpenFile(id: string) {
     try {
-      await openJobFile(id);
+      const result = await openJobFile(id);
+      if (result.pausedTorrent) {
+        addToast({
+          type: 'info',
+          title: 'Torrent Paused',
+          message: 'Torrent paused so Windows can use the file. Resume it when you are done.',
+        });
+      }
     } catch (error) {
       addToast({ type: 'error', title: 'Open Failed', message: getErrorMessage(error) });
     }
@@ -501,7 +508,14 @@ export default function App() {
 
   async function handleReveal(id: string) {
     try {
-      await revealJobInFolder(id);
+      const result = await revealJobInFolder(id);
+      if (result.pausedTorrent) {
+        addToast({
+          type: 'info',
+          title: 'Torrent Paused',
+          message: 'Torrent paused so Windows can use the folder. Resume it when you are done.',
+        });
+      }
     } catch (error) {
       addToast({ type: 'error', title: 'Reveal Failed', message: getErrorMessage(error) });
     }

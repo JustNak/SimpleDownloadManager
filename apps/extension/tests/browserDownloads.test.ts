@@ -152,6 +152,19 @@ async function main() {
   assert.equal(
     shouldDiscardBrowserDownloadAfterHandoff({
       ok: true,
+      requestId: 'request_dismissed',
+      type: 'accepted',
+      payload: {
+        appState: 'running',
+        status: 'dismissed',
+      },
+    }),
+    true,
+    'prompt-dismissed handoffs should cancel outright and discard the browser download',
+  );
+  assert.equal(
+    shouldDiscardBrowserDownloadAfterHandoff({
+      ok: true,
       requestId: 'request_queued',
       type: 'accepted',
       payload: {

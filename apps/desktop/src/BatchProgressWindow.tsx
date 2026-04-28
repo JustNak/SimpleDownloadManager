@@ -193,7 +193,12 @@ export function BatchProgressWindow() {
             label="Reveal completed"
             icon={<FolderOpen size={16} />}
             disabled={isBusy || !completedJob}
-            onClick={() => completedJob ? void runAction(() => revealJobInFolder(completedJob.id), { closeOnSuccess: true }) : undefined}
+            onClick={() => {
+              if (!completedJob) return;
+              void runAction(async () => {
+                await revealJobInFolder(completedJob.id);
+              }, { closeOnSuccess: true });
+            }}
           />
           {summary.activeCount === 0 ? (
             <ActionButton label="Close" icon={<X size={16} />} disabled={isBusy} onClick={() => void currentWindow?.close()} />

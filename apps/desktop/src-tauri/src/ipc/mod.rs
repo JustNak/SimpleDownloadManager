@@ -205,6 +205,19 @@ impl HostResponse {
         }
     }
 
+    fn prompt_dismissed(request_id: String) -> Self {
+        Self {
+            ok: true,
+            request_id,
+            message_type: "prompt_dismissed".into(),
+            payload: Some(json!({
+                "status": "dismissed",
+            })),
+            code: None,
+            message: None,
+        }
+    }
+
     fn error(request_id: String, message_type: &str, code: &'static str, message: String) -> Self {
         Self {
             ok: false,
@@ -517,14 +530,15 @@ async fn handle_request(
                 let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
             }
 
-            match receiver.await.unwrap_or(PromptDecision::Cancel) {
-                PromptDecision::Cancel => HostResponse::prompt_canceled(request.request_id),
+            match receiver.await.unwrap_or(PromptDecision::SwapToBrowser) {
+                PromptDecision::Cancel => HostResponse::prompt_dismissed(request.request_id),
+                PromptDecision::SwapToBrowser => HostResponse::prompt_canceled(request.request_id),
                 PromptDecision::ShowExisting => {
                     if let Some(job) = prompt.duplicate_job {
                         focus_job_in_main_window(&app, &job.id);
                         HostResponse::existing_job(request.request_id, job.id, job.filename)
                     } else {
-                        HostResponse::prompt_canceled(request.request_id)
+                        HostResponse::prompt_dismissed(request.request_id)
                     }
                 }
                 PromptDecision::Download {
@@ -1398,6 +1412,22 @@ mod tests {
             "enqueue_download",
             now + SIDE_EFFECT_RATE_LIMIT_WINDOW + Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn prompt_dismissed_response_uses_dismissed_status() {
+        let response = HostResponse::prompt_dismissed("request-1".into());
+
+        assert!(response.ok);
+        assert_eq!(response.message_type, "prompt_dismissed");
+        assert_eq!(
+            response
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("status"))
+                .and_then(|status| status.as_str()),
+            Some("dismissed")
+        );
     }
 
     #[cfg(windows)]

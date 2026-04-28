@@ -98,6 +98,12 @@ pub struct AddJobsResult {
     pub duplicate_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalUseResult {
+    pub paused_torrent: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressBatchKind {
@@ -512,6 +518,21 @@ pub async fn show_existing_download_prompt(
 }
 
 #[tauri::command]
+pub async fn swap_download_prompt(
+    app: AppHandle,
+    prompts: State<'_, PromptRegistry>,
+    id: String,
+) -> Result<(), String> {
+    complete_prompt_action(
+        &app,
+        prompts.inner().clone(),
+        &id,
+        PromptDecision::SwapToBrowser,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn cancel_download_prompt(
     app: AppHandle,
     prompts: State<'_, PromptRegistry>,
@@ -545,7 +566,19 @@ pub async fn get_progress_batch_context(
 }
 
 #[tauri::command]
-pub async fn open_job_file(state: State<'_, SharedState>, id: String) -> Result<(), String> {
+pub async fn open_job_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<ExternalUseResult, String> {
+    let preparation = state
+        .prepare_job_for_external_use(&id)
+        .await
+        .map_err(|error| error.message)?;
+    if let Some(snapshot) = &preparation.snapshot {
+        emit_snapshot(&app, snapshot);
+    }
+
     let path = state
         .resolve_openable_path(&id)
         .await
@@ -555,11 +588,25 @@ pub async fn open_job_file(state: State<'_, SharedState>, id: String) -> Result<
         .await
         .map_err(|error| format!("Could not open file: {error}"))??;
 
-    Ok(())
+    Ok(ExternalUseResult {
+        paused_torrent: preparation.paused_torrent,
+    })
 }
 
 #[tauri::command]
-pub async fn reveal_job_in_folder(state: State<'_, SharedState>, id: String) -> Result<(), String> {
+pub async fn reveal_job_in_folder(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<ExternalUseResult, String> {
+    let preparation = state
+        .prepare_job_for_external_use(&id)
+        .await
+        .map_err(|error| error.message)?;
+    if let Some(snapshot) = &preparation.snapshot {
+        emit_snapshot(&app, snapshot);
+    }
+
     let path = state
         .resolve_revealable_path(&id)
         .await
@@ -569,7 +616,9 @@ pub async fn reveal_job_in_folder(state: State<'_, SharedState>, id: String) -> 
         .await
         .map_err(|error| format!("Could not reveal file: {error}"))??;
 
-    Ok(())
+    Ok(ExternalUseResult {
+        paused_torrent: preparation.paused_torrent,
+    })
 }
 
 #[tauri::command]
@@ -644,9 +693,10 @@ pub async fn test_extension_handoff(
     let worker_app = app.clone();
     let worker_state = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let decision = receiver.await.unwrap_or(PromptDecision::Cancel);
+        let decision = receiver.await.unwrap_or(PromptDecision::SwapToBrowser);
         match decision {
             PromptDecision::Cancel => {}
+            PromptDecision::SwapToBrowser => {}
             PromptDecision::ShowExisting => {
                 if let Some(job) = prompt.duplicate_job {
                     focus_job_in_main_window(&worker_app, &job.id);

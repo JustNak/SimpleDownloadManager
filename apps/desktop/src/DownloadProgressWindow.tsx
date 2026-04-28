@@ -172,10 +172,25 @@ export function DownloadProgressWindow() {
 
         <div className="mt-auto flex justify-end gap-2 border-t border-border pt-3">
           {isCompleted ? (
-            <ActionButton label="Open" icon={<ExternalLink size={16} />} disabled={isBusy} primary onClick={() => void runAction(() => openJobFile(job.id), { closeOnSuccess: true })} />
+            <ActionButton
+              label="Open"
+              icon={<ExternalLink size={16} />}
+              disabled={isBusy}
+              primary
+              onClick={() => void runAction(async () => {
+                await openJobFile(job.id);
+              }, { closeOnSuccess: true })}
+            />
           ) : null}
           {shouldShowCompletedFileAction(job) ? (
-            <ActionButton label="Show" icon={<FolderOpen size={16} />} disabled={isBusy} onClick={() => void runAction(() => revealJobInFolder(job.id), { closeOnSuccess: true })} />
+            <ActionButton
+              label="Show"
+              icon={<FolderOpen size={16} />}
+              disabled={isBusy}
+              onClick={() => void runAction(async () => {
+                await revealJobInFolder(job.id);
+              }, { closeOnSuccess: true })}
+            />
           ) : null}
           {isActive ? (
             <ActionButton label="Pause" icon={<Pause size={16} />} disabled={isBusy} onClick={() => void runAction(() => pauseJob(job.id))} />

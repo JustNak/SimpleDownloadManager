@@ -124,7 +124,7 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
     if response.ok {
         if !matches!(
             response.message_type.as_str(),
-            "queued" | "duplicate_existing_job" | "prompt_canceled"
+            "queued" | "duplicate_existing_job" | "prompt_canceled" | "prompt_dismissed"
         ) {
             return HostResponseEnvelope::rejected(
                 response.request_id,
@@ -187,5 +187,34 @@ fn map_forwarder_error(request_id: String, error: ForwarderError) -> HostRespons
         ForwarderError::Serialization(message) | ForwarderError::Transport(message) => {
             HostResponseEnvelope::rejected(request_id, "rejected", "INTERNAL_ERROR", message)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prompt_dismissed_app_response_maps_to_dismissed_handoff_status() {
+        let response = map_app_response(AppResponseEnvelope {
+            ok: true,
+            request_id: "request-1".into(),
+            message_type: "prompt_dismissed".into(),
+            payload: Some(json!({ "status": "dismissed" })),
+            code: None,
+            message: None,
+        });
+
+        assert!(response.ok);
+        assert_eq!(response.message_type, "accepted");
+        assert_eq!(
+            response
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("status"))
+                .and_then(|status| status.as_str()),
+            Some("dismissed")
+        );
     }
 }

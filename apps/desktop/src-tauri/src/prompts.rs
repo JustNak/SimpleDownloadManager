@@ -12,6 +12,7 @@ pub enum PromptDecision {
         allow_duplicate: bool,
     },
     ShowExisting,
+    SwapToBrowser,
     Cancel,
 }
 
@@ -113,6 +114,28 @@ mod tests {
             registry.active_prompt().await.map(|prompt| prompt.id),
             Some("prompt_2".into())
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_cancel_and_browser_swap_resolve_as_distinct_decisions() {
+        let registry = PromptRegistry::default();
+        let cancel_receiver = registry.enqueue(prompt("prompt_cancel")).await;
+        registry
+            .resolve("prompt_cancel", PromptDecision::Cancel)
+            .await
+            .expect("cancel prompt should resolve");
+
+        let swap_receiver = registry.enqueue(prompt("prompt_swap")).await;
+        registry
+            .resolve("prompt_swap", PromptDecision::SwapToBrowser)
+            .await
+            .expect("swap prompt should resolve");
+
+        assert!(matches!(cancel_receiver.await, Ok(PromptDecision::Cancel)));
+        assert!(matches!(
+            swap_receiver.await,
+            Ok(PromptDecision::SwapToBrowser)
+        ));
     }
 
     fn prompt(id: &str) -> DownloadPrompt {

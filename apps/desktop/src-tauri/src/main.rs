@@ -74,6 +74,7 @@ fn main() {
             commands::get_current_download_prompt,
             commands::confirm_download_prompt,
             commands::show_existing_download_prompt,
+            commands::swap_download_prompt,
             commands::cancel_download_prompt,
             commands::open_progress_window,
             commands::open_batch_progress_window,

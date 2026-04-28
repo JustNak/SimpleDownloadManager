@@ -9,6 +9,7 @@ import {
   getAppSnapshot,
   getCurrentDownloadPrompt,
   showExistingDownloadPrompt,
+  swapDownloadPrompt,
   subscribeToDownloadPromptChanged,
   subscribeToStateChanged,
 } from './backend';
@@ -71,6 +72,7 @@ export function DownloadPromptWindow() {
   }, [directoryOverride, prompt]);
 
   const isDuplicate = Boolean(prompt?.duplicateJob);
+  const canSwapToBrowser = prompt?.source?.entryPoint === 'browser_download';
   const sourceLabel = prompt?.source
     ? `${prompt.source.browser} ${prompt.source.entryPoint.replaceAll('_', ' ')}`
     : 'Browser download';
@@ -170,10 +172,20 @@ export function DownloadPromptWindow() {
             <button
               onClick={() => void runAction(() => cancelDownloadPrompt(prompt.id))}
               disabled={isBusy}
-              className="h-9 rounded-md px-3 text-sm font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 rounded-md bg-destructive px-3 text-sm font-semibold text-destructive-foreground transition hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Cancel
             </button>
+            {canSwapToBrowser ? (
+              <button
+                onClick={() => void runAction(() => swapDownloadPrompt(prompt.id))}
+                disabled={isBusy}
+                className="flex h-9 items-center gap-2 rounded-md bg-foreground px-3 text-sm font-semibold text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <BrowserWindowIcon />
+                Swap
+              </button>
+            ) : null}
             <button
               onClick={() => void runAction(() => confirmDownloadPrompt(prompt.id, directoryOverride, isDuplicate))}
               disabled={isBusy}
@@ -186,6 +198,20 @@ export function DownloadPromptWindow() {
         </div>
       </main>
     </div>
+  );
+}
+
+function BrowserWindowIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18" />
+      <path d="M7 6.5h.01" />
+      <path d="M10 6.5h.01" />
+      <path d="M13 6.5h.01" />
+      <path d="M9 14h6" />
+      <path d="m13 12 2 2-2 2" />
+    </svg>
   );
 }
 

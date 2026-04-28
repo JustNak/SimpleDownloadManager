@@ -18,6 +18,8 @@ use url::Url;
 const MAX_URL_LENGTH: usize = 2048;
 const SHA256_HEX_LENGTH: usize = 64;
 const DIAGNOSTIC_EVENT_LIMIT: usize = 100;
+const EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTERNAL_USE_HANDLE_RELEASE_POLL: Duration = Duration::from_millis(50);
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
 const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
 const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
@@ -69,6 +71,12 @@ pub struct BulkArchiveReady {
 pub struct BulkArchiveEntry {
     pub source_path: PathBuf,
     pub archive_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalUsePreparation {
+    pub paused_torrent: bool,
+    pub snapshot: Option<DesktopSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -1264,6 +1272,114 @@ impl SharedState {
         self.handoff_auth.write().await.remove(id);
     }
 
+    pub async fn prepare_job_for_external_use(
+        &self,
+        id: &str,
+    ) -> Result<ExternalUsePreparation, BackendError> {
+        self.prepare_job_for_external_use_with_wait(
+            id,
+            EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT,
+            EXTERNAL_USE_HANDLE_RELEASE_POLL,
+        )
+        .await
+    }
+
+    pub async fn prepare_job_for_external_use_with_wait(
+        &self,
+        id: &str,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<ExternalUsePreparation, BackendError> {
+        let paused = {
+            let mut state = self.inner.write().await;
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id)?;
+                if job.transfer_kind == TransferKind::Torrent && job.state == JobState::Seeding {
+                    job.state = JobState::Paused;
+                    job.speed = 0;
+                    job.eta = 0;
+                    Some(format!("Paused {} for external file use", job.filename))
+                } else {
+                    None
+                }
+            };
+
+            if let Some(message) = event_message {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent".into(),
+                    message,
+                    Some(id.into()),
+                );
+                Some((state.snapshot(), state.persisted()))
+            } else {
+                None
+            }
+        };
+
+        let Some((snapshot, persisted)) = paused else {
+            return Ok(ExternalUsePreparation {
+                paused_torrent: false,
+                snapshot: None,
+            });
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.clear_handoff_auth(id).await;
+        self.wait_for_external_use_release(id, timeout, poll_interval)
+            .await?;
+
+        Ok(ExternalUsePreparation {
+            paused_torrent: true,
+            snapshot: Some(snapshot),
+        })
+    }
+
+    async fn wait_for_external_use_release(
+        &self,
+        id: &str,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), BackendError> {
+        let started_at = Instant::now();
+        let poll_interval = if poll_interval.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            poll_interval
+        };
+
+        loop {
+            let ready = {
+                let state = self.inner.read().await;
+                let job =
+                    state
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == id)
+                        .ok_or_else(|| BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        })?;
+
+                !state.active_workers.contains(id) && job.state != JobState::Seeding
+            };
+
+            if ready {
+                return Ok(());
+            }
+
+            let elapsed = started_at.elapsed();
+            if elapsed >= timeout {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "The torrent was paused, but its file handles are still being released. Try again in a moment.".into(),
+                });
+            }
+
+            tokio::time::sleep(poll_interval.min(timeout.saturating_sub(elapsed))).await;
+        }
+    }
+
     #[cfg(test)]
     async fn has_handoff_auth(&self, id: &str) -> bool {
         self.handoff_auth.read().await.contains_key(id)
@@ -1482,11 +1598,16 @@ impl SharedState {
             torrent.total_files = update.total_files;
             torrent.peers = update.peers;
             torrent.seeds = update.seeds;
-            torrent.uploaded_bytes = update.uploaded_bytes;
+            torrent.uploaded_bytes = cumulative_torrent_uploaded_bytes(
+                torrent.uploaded_bytes,
+                torrent.last_runtime_uploaded_bytes,
+                update.uploaded_bytes,
+            );
+            torrent.last_runtime_uploaded_bytes = Some(update.uploaded_bytes);
             torrent.ratio = if update.downloaded_bytes == 0 {
                 0.0
             } else {
-                update.uploaded_bytes as f64 / update.downloaded_bytes as f64
+                torrent.uploaded_bytes as f64 / update.downloaded_bytes as f64
             };
             if update.finished && torrent.seeding_started_at.is_none() {
                 torrent.seeding_started_at = Some(current_unix_timestamp_millis());
@@ -1788,11 +1909,11 @@ impl SharedState {
             )
         };
 
-        if path.is_file()
-            || (transfer_kind == TransferKind::Torrent
-                && job_state == JobState::Completed
-                && path.is_dir())
-        {
+        let openable_torrent_directory = transfer_kind == TransferKind::Torrent
+            && matches!(job_state, JobState::Completed | JobState::Paused)
+            && path.is_dir();
+
+        if path.is_file() || openable_torrent_directory {
             Ok(path)
         } else {
             Err(BackendError {
@@ -2760,6 +2881,21 @@ fn reset_integrity_for_retry(job: &mut DownloadJob) {
     }
 }
 
+fn cumulative_torrent_uploaded_bytes(
+    previous_total: u64,
+    previous_runtime: Option<u64>,
+    runtime_uploaded: u64,
+) -> u64 {
+    match previous_runtime {
+        Some(last_runtime) if runtime_uploaded >= last_runtime => {
+            previous_total.saturating_add(runtime_uploaded - last_runtime)
+        }
+        Some(_) => previous_total.saturating_add(runtime_uploaded),
+        None if previous_total == 0 => runtime_uploaded,
+        None => previous_total,
+    }
+}
+
 fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {
     if job.state == JobState::Canceled {
         return false;
@@ -3260,6 +3396,228 @@ mod tests {
         let resolved = state.resolve_openable_path("job_27").await.unwrap();
 
         assert_eq!(resolved, target_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn prepare_external_use_pauses_seeding_torrent_and_waits_for_worker_release() {
+        let download_dir = test_runtime_dir("prepare-seeding-external-use");
+        let target_path = download_dir.join("Example Torrent");
+        std::fs::create_dir_all(&target_path).unwrap();
+        let mut job = download_job("job_32", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.progress = 100.0;
+        job.target_path = target_path.display().to_string();
+        job.temp_path = download_dir
+            .join(".torrent-state")
+            .join("job_32")
+            .display()
+            .to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+        {
+            let mut runtime = state.inner.write().await;
+            runtime.active_workers.insert("job_32".into());
+        }
+
+        let release_state = state.clone();
+        let release_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut runtime = release_state.inner.write().await;
+            runtime.active_workers.remove("job_32");
+        });
+
+        let preparation = state
+            .prepare_job_for_external_use_with_wait(
+                "job_32",
+                Duration::from_secs(1),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect("seeding torrent should be prepared for external use");
+        release_handle.await.unwrap();
+
+        assert!(preparation.paused_torrent);
+        let runtime = state.inner.read().await;
+        let job = &runtime.jobs[0];
+        assert_eq!(job.state, JobState::Paused);
+        assert!(!runtime.active_workers.contains("job_32"));
+        drop(runtime);
+
+        let resolved = state.resolve_openable_path("job_32").await.unwrap();
+        assert_eq!(resolved, target_path);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn prepare_external_use_leaves_non_seeding_jobs_running_state_unchanged() {
+        let download_dir = test_runtime_dir("prepare-non-seeding-external-use");
+        let http_job = download_job(
+            "job_33",
+            JobState::Downloading,
+            ResumeSupport::Supported,
+            20,
+        );
+        let mut completed_torrent =
+            download_job("job_34", JobState::Completed, ResumeSupport::Supported, 100);
+        completed_torrent.transfer_kind = TransferKind::Torrent;
+        completed_torrent.target_path = download_dir.join("Done").display().to_string();
+        completed_torrent.temp_path = download_dir
+            .join(".torrent-state")
+            .join("job_34")
+            .display()
+            .to_string();
+        let state = shared_state_with_jobs(
+            download_dir.join("state.json"),
+            vec![http_job, completed_torrent],
+        );
+
+        let http_preparation = state
+            .prepare_job_for_external_use_with_wait(
+                "job_33",
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect("http job should not need torrent preparation");
+        let torrent_preparation = state
+            .prepare_job_for_external_use_with_wait(
+                "job_34",
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect("completed torrent should not need pausing");
+
+        assert!(!http_preparation.paused_torrent);
+        assert!(!torrent_preparation.paused_torrent);
+        let runtime = state.inner.read().await;
+        assert_eq!(runtime.jobs[0].state, JobState::Downloading);
+        assert_eq!(runtime.jobs[1].state, JobState::Completed);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn prepared_missing_torrent_directory_still_returns_open_error() {
+        let download_dir = test_runtime_dir("prepare-missing-torrent-external-use");
+        let target_path = download_dir.join("missing-torrent");
+        let mut job = download_job("job_35", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.progress = 100.0;
+        job.target_path = target_path.display().to_string();
+        job.temp_path = download_dir.join(".torrent-state").display().to_string();
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        let preparation = state
+            .prepare_job_for_external_use_with_wait(
+                "job_35",
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect("missing torrent should still pause before resolving the path");
+        let error = state.resolve_openable_path("job_35").await.unwrap_err();
+
+        assert!(preparation.paused_torrent);
+        assert_eq!(error.code, "INTERNAL_ERROR");
+        assert!(error
+            .message
+            .contains("The downloaded file is not available on disk"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn torrent_upload_counter_preserves_migrated_total_on_first_runtime_snapshot() {
+        let download_dir = test_runtime_dir("torrent-upload-migrated-total");
+        let mut job = download_job("job_36", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.downloaded_bytes = 1024;
+        job.total_bytes = 1024;
+        job.torrent = Some(TorrentInfo {
+            uploaded_bytes: 2048,
+            ratio: 2.0,
+            ..TorrentInfo::default()
+        });
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state
+            .update_torrent_progress("job_36", torrent_runtime_update(128, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+        let snapshot = state
+            .update_torrent_progress("job_36", torrent_runtime_update(384, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+
+        let torrent = snapshot.jobs[0].torrent.as_ref().expect("torrent metadata");
+        assert_eq!(torrent.uploaded_bytes, 2304);
+        assert_eq!(torrent.last_runtime_uploaded_bytes, Some(384));
+        assert_eq!(torrent.ratio, 2.25);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn torrent_upload_counter_adds_new_runtime_epoch_after_reset() {
+        let download_dir = test_runtime_dir("torrent-upload-runtime-reset");
+        let mut job = download_job("job_37", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.downloaded_bytes = 1024;
+        job.total_bytes = 1024;
+        job.torrent = Some(TorrentInfo {
+            uploaded_bytes: 2048,
+            ratio: 2.0,
+            ..TorrentInfo::default()
+        });
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state
+            .update_torrent_progress("job_37", torrent_runtime_update(700, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+        state
+            .update_torrent_progress("job_37", torrent_runtime_update(50, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+        let snapshot = state
+            .update_torrent_progress("job_37", torrent_runtime_update(80, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+
+        let torrent = snapshot.jobs[0].torrent.as_ref().expect("torrent metadata");
+        assert_eq!(torrent.uploaded_bytes, 2128);
+        assert_eq!(torrent.last_runtime_uploaded_bytes, Some(80));
+        assert_eq!(torrent.ratio, 2128.0 / 1024.0);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[tokio::test]
+    async fn torrent_upload_counter_tracks_deltas_without_double_counting_runtime_total() {
+        let download_dir = test_runtime_dir("torrent-upload-runtime-deltas");
+        let mut job = download_job("job_38", JobState::Seeding, ResumeSupport::Unsupported, 100);
+        job.transfer_kind = TransferKind::Torrent;
+        job.downloaded_bytes = 1024;
+        job.total_bytes = 1024;
+        job.torrent = Some(TorrentInfo::default());
+        let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+        state
+            .update_torrent_progress("job_38", torrent_runtime_update(100, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+        let snapshot = state
+            .update_torrent_progress("job_38", torrent_runtime_update(150, 1024, true), false)
+            .await
+            .expect("torrent progress should update");
+
+        let torrent = snapshot.jobs[0].torrent.as_ref().expect("torrent metadata");
+        assert_eq!(torrent.uploaded_bytes, 150);
+        assert_eq!(torrent.last_runtime_uploaded_bytes, Some(150));
+        assert_eq!(torrent.ratio, 150.0 / 1024.0);
 
         let _ = std::fs::remove_dir_all(download_dir);
     }
@@ -4144,6 +4502,27 @@ mod tests {
             temp_path: format!("C:/Downloads/{id}.zip.part"),
             artifact_exists: None,
             bulk_archive: None,
+        }
+    }
+
+    fn torrent_runtime_update(
+        uploaded_bytes: u64,
+        downloaded_bytes: u64,
+        finished: bool,
+    ) -> TorrentRuntimeSnapshot {
+        TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: None,
+            total_files: Some(1),
+            peers: Some(2),
+            seeds: Some(3),
+            downloaded_bytes,
+            total_bytes: downloaded_bytes,
+            uploaded_bytes,
+            download_speed: 0,
+            finished,
+            error: None,
         }
     }
 

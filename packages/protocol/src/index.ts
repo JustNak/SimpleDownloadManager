@@ -36,6 +36,7 @@ export type AppResponseType =
   | 'queued'
   | 'duplicate_existing_job'
   | 'prompt_canceled'
+  | 'prompt_dismissed'
   | 'invalid_url'
   | 'blocked_by_policy'
   | 'ready';
@@ -128,7 +129,7 @@ export interface ErrorResponse<TType extends HostResponseType = HostResponseType
 }
 
 export interface AcceptedPayload {
-  status: 'queued' | 'duplicate_existing_job' | 'canceled';
+  status: 'queued' | 'duplicate_existing_job' | 'canceled' | 'dismissed';
   jobId?: string;
   filename?: string;
   appState: 'running' | 'launched';
@@ -285,6 +286,7 @@ export type AppResponse =
       { jobId: string; filename?: string; status: 'duplicate_existing_job' }
     >
   | AppSuccessResponse<'prompt_canceled', { status: 'canceled' }>
+  | AppSuccessResponse<'prompt_dismissed', { status: 'dismissed' }>
   | AppErrorResponse;
 
 export type ValidationResult<T> =

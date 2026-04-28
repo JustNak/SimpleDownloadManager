@@ -25,6 +25,10 @@ export interface AddJobsResult {
   duplicateCount: number;
 }
 
+export interface ExternalUseResult {
+  pausedTorrent: boolean;
+}
+
 const STATE_CHANGED_EVENT = 'app://state-changed';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
@@ -275,6 +279,19 @@ function replacePathFilename(path: string | undefined, filename: string): string
   const lastSlash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   if (lastSlash < 0) return filename;
   return `${path.slice(0, lastSlash + 1)}${filename}`;
+}
+
+function prepareMockExternalUse(id: string): ExternalUseResult {
+  const job = mockState.jobs.find((candidate) => candidate.id === id);
+  if (job?.transferKind === 'torrent' && job.state === JobState.Seeding) {
+    job.state = JobState.Paused;
+    job.speed = 0;
+    job.eta = 0;
+    emitMockState();
+    return { pausedTorrent: true };
+  }
+
+  return { pausedTorrent: false };
 }
 
 function filenameFromUrl(url: string): string {
@@ -737,6 +754,11 @@ export async function showExistingDownloadPrompt(id: string): Promise<void> {
   await invokeCommand('show_existing_download_prompt', { id });
 }
 
+export async function swapDownloadPrompt(id: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('swap_download_prompt', { id });
+}
+
 export async function cancelDownloadPrompt(id: string): Promise<void> {
   if (!isTauriRuntime()) return;
   await invokeCommand('cancel_download_prompt', { id });
@@ -773,14 +795,14 @@ export async function getProgressBatchContext(batchId: string): Promise<Progress
   return invokeCommand<ProgressBatchContext | null>('get_progress_batch_context', { batchId });
 }
 
-export async function openJobFile(id: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invokeCommand('open_job_file', { id });
+export async function openJobFile(id: string): Promise<ExternalUseResult> {
+  if (!isTauriRuntime()) return prepareMockExternalUse(id);
+  return invokeCommand<ExternalUseResult>('open_job_file', { id });
 }
 
-export async function revealJobInFolder(id: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invokeCommand('reveal_job_in_folder', { id });
+export async function revealJobInFolder(id: string): Promise<ExternalUseResult> {
+  if (!isTauriRuntime()) return prepareMockExternalUse(id);
+  return invokeCommand<ExternalUseResult>('reveal_job_in_folder', { id });
 }
 
 export async function openInstallDocs(): Promise<void> {

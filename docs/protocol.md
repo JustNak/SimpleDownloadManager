@@ -125,10 +125,12 @@ Success:
 If the URL is already in the desktop queue, the host still returns `accepted` with
 `status: "duplicate_existing_job"` and the existing `jobId`.
 
-For automatic browser download capture, `status: "canceled"` means the desktop
-prompt was canceled and the extension should return control to the browser's
-original download flow. `status: "queued"` and `status: "duplicate_existing_job"`
-mean the extension should cancel and erase the original browser download item.
+For automatic browser download capture, `status: "canceled"` means the user chose
+Swap and the extension should return control to the browser's original download
+flow. `status: "dismissed"` means the user canceled outright and the extension
+should cancel and erase the original browser download item. `status: "queued"`
+and `status: "duplicate_existing_job"` also mean the extension should cancel and
+erase the original browser download item.
 Torrent cancel/remove requests stop app tracking but do not delete downloaded torrent data.
 
 Error:
@@ -175,6 +177,7 @@ Success types:
 - `queued`
 - `duplicate_existing_job`
 - `prompt_canceled`
+- `prompt_dismissed`
 
 Error codes:
 

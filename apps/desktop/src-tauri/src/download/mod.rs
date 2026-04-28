@@ -2,7 +2,7 @@ use crate::commands::emit_snapshot;
 use crate::state::{should_stop_seeding, BulkArchiveReady, SharedState, WorkerControl};
 use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
-    ResumeSupport, TransferKind,
+    ResumeSupport, TorrentInfo, TransferKind,
 };
 use crate::torrent::{pending_torrent_cleanup_info_hash, prepare_torrent_source, TorrentEngine};
 use futures_util::StreamExt;
@@ -765,11 +765,16 @@ async fn run_torrent_download_attempt(
             }
             was_finished = true;
             let torrent_settings = state.settings().await.torrent;
-            let ratio = if update.downloaded_bytes == 0 {
-                0.0
-            } else {
-                update.uploaded_bytes as f64 / update.downloaded_bytes as f64
-            };
+            let torrent = snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == task.id)
+                .and_then(|job| job.torrent.as_ref());
+            let ratio = torrent_seed_ratio_for_policy(
+                torrent,
+                update.downloaded_bytes,
+                update.uploaded_bytes,
+            );
             let seed_elapsed = torrent_seed_elapsed_seconds(
                 persisted_seeding_started_at,
                 current_unix_timestamp_millis(),
@@ -815,6 +820,23 @@ fn torrent_seed_elapsed_seconds(
     persisted_started_at_millis
         .map(|started_at| now_millis.saturating_sub(started_at) / 1000)
         .unwrap_or_else(|| local_elapsed.as_secs())
+}
+
+fn torrent_seed_ratio_for_policy(
+    torrent: Option<&TorrentInfo>,
+    downloaded_bytes: u64,
+    runtime_uploaded_bytes: u64,
+) -> f64 {
+    torrent
+        .map(|torrent| torrent.ratio)
+        .filter(|ratio| ratio.is_finite())
+        .unwrap_or_else(|| {
+            if downloaded_bytes == 0 {
+                0.0
+            } else {
+                runtime_uploaded_bytes as f64 / downloaded_bytes as f64
+            }
+        })
 }
 
 fn current_unix_timestamp_millis() -> u64 {
@@ -3254,6 +3276,20 @@ mod tests {
         assert_eq!(
             torrent_seed_elapsed_seconds(None, 91_000, Duration::from_secs(5)),
             5
+        );
+    }
+
+    #[test]
+    fn torrent_seed_policy_prefers_cumulative_ratio_from_state() {
+        let torrent = TorrentInfo {
+            uploaded_bytes: 2048,
+            ratio: 2.0,
+            ..TorrentInfo::default()
+        };
+
+        assert_eq!(
+            torrent_seed_ratio_for_policy(Some(&torrent), 1024, 128),
+            2.0
         );
     }
 
