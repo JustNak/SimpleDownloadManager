@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionState, JobState } from './types';
-import type { DownloadJob, Settings, ToastMessage } from './types';
+import type { DownloadJob, QueueRowSize, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
 import { SettingsPage } from './SettingsPage';
 import { ToastArea } from './ToastArea';
@@ -65,18 +66,20 @@ import {
   ChevronDown,
   ChevronRight,
   CheckCircle2,
+  Check,
   Download,
   FileArchive,
   FileAudio,
   FileImage,
+  FilePlus,
   FileText,
   FileVideo,
   Folder,
   Gauge,
   Magnet,
+  MoreHorizontal,
   Pause,
   Play,
-  Plus,
   RotateCw,
   Search,
   Settings as SettingsIcon,
@@ -139,6 +142,8 @@ export default function App() {
     notificationsEnabled: true,
     theme: 'system',
     accentColor: DEFAULT_ACCENT_COLOR,
+    showDetailsOnClick: true,
+    queueRowSize: 'medium',
     startOnStartup: false,
     startupLaunchMode: 'open',
     extensionIntegration: {
@@ -157,7 +162,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [view, setView] = useState<ViewState>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortMode, setSortMode] = useState<SortMode>('date:desc');
+  const [sortMode, setSortMode] = useState<SortMode>('date:asc');
   const [isDownloadSectionExpanded, setIsDownloadSectionExpanded] = useState(true);
   const [isTorrentSectionExpanded, setIsTorrentSectionExpanded] = useState(true);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -173,6 +178,7 @@ export default function App() {
   const progressSamplesRef = useRef<ProgressSample[]>([]);
   const startupUpdateCheckStartedRef = useRef(false);
   const appearanceSettings = settingsDraft ?? settings;
+  const mainWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
 
   useEffect(() => {
     let isMounted = true;
@@ -287,6 +293,31 @@ export default function App() {
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
   }, [appearanceSettings.accentColor, appearanceSettings.theme]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'F11') return;
+      if (!mainWindow) return;
+      event.preventDefault();
+      void mainWindow.toggleMaximize().catch(() => {
+        // Browser preview and restricted windows cannot toggle native maximize.
+      });
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mainWindow]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || view !== 'settings' || isUnsavedSettingsPromptOpen) return;
+      event.preventDefault();
+      requestViewChange('all');
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isUnsavedSettingsPromptOpen, settingsDirty, view]);
 
   function requestViewChange(nextView: ViewState) {
     if (nextView === view) return;
@@ -609,6 +640,20 @@ export default function App() {
     }
   }
 
+  async function handleQueueRowSizeChange(queueRowSize: QueueRowSize) {
+    if (settings.queueRowSize === queueRowSize) return;
+
+    try {
+      const savedSettings = await saveSettings({ ...settings, queueRowSize });
+      setSettings(savedSettings);
+      setSettingsDraft(null);
+      setSettingsDirty(false);
+      await refreshDiagnostics({ silent: true });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Row Size Failed', message: getErrorMessage(error, 'Could not update queue row size.') });
+    }
+  }
+
   function discardSettingsChanges() {
     const nextView = pendingSettingsView ?? 'all';
     setSettingsDraft(null);
@@ -751,6 +796,8 @@ export default function App() {
             canResumeAll={canResumeAny}
             canPauseAll={canPauseAny}
             canRetryFailed={canRetryFailed}
+            queueRowSize={settings.queueRowSize}
+            onQueueRowSizeChange={(queueRowSize) => void handleQueueRowSizeChange(queueRowSize)}
           />
         ) : null}
       </Titlebar>
@@ -845,6 +892,8 @@ export default function App() {
                 jobs={displayedJobs}
                 view={view}
                 sortMode={sortMode}
+                showDetailsOnClick={settings.showDetailsOnClick}
+                queueRowSize={settings.queueRowSize}
                 onSortChange={(column) => setSortMode((current) => nextSortModeForColumn(current, column))}
                 progressMetricsByJobId={progressMetricsByJobId}
                 selectedJobId={selectedJobId}
@@ -1020,6 +1069,8 @@ function CommandBar({
   canResumeAll,
   canPauseAll,
   canRetryFailed,
+  queueRowSize,
+  onQueueRowSizeChange,
 }: {
   searchQuery: string;
   onSearchChange: (value: string) => void;
@@ -1030,19 +1081,78 @@ function CommandBar({
   canResumeAll: boolean;
   canPauseAll: boolean;
   canRetryFailed: boolean;
+  queueRowSize: QueueRowSize;
+  onQueueRowSizeChange: (value: QueueRowSize) => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (menuRootRef.current?.contains(event.target as Node)) return;
+      setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMenuOpen(false);
+    };
+
+    document.addEventListener('pointerdown', closeOnPointerDown);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnPointerDown);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [menuOpen]);
+
+  const runAction = (action: () => void) => {
+    setMenuOpen(false);
+    action();
+  };
+
   return (
     <div className="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-3">
       <div className="flex min-w-0 shrink-0 items-center gap-1.5">
-        <ToolbarButton icon={<Plus size={17} />} label="New Download" onClick={onAdd} strong />
+        <ToolbarButton icon={<FilePlus size={17} strokeWidth={2.4} />} label="New Download" onClick={onAdd} strong />
         <div className="mx-1.5 h-5 w-px bg-border" />
-        <ToolbarButton icon={<Play size={16} />} label="Resume All" onClick={onResumeAll} disabled={!canResumeAll} />
-        <ToolbarButton icon={<Pause size={16} />} label="Pause All" onClick={onPauseAll} disabled={!canPauseAll} />
-        <ToolbarButton icon={<RotateCw size={16} />} label="Retry Failed" onClick={onRetryFailed} disabled={!canRetryFailed} />
+        <div ref={menuRootRef} className="relative">
+          <ToolbarButton
+            icon={<MoreHorizontal size={18} />}
+            label="More"
+            onClick={() => setMenuOpen((open) => !open)}
+            ariaLabel="Queue actions and row size"
+          />
+
+          {menuOpen ? (
+            <div
+              className="absolute left-0 top-9 z-[70] w-56 overflow-hidden rounded-md border border-border bg-popover py-1 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              role="menu"
+              aria-label="Queue actions and row size"
+            >
+              <CommandMenuItem icon={<Play size={16} />} label="Resume All" disabled={!canResumeAll} onClick={() => runAction(onResumeAll)} />
+              <CommandMenuItem icon={<Pause size={16} />} label="Pause All" disabled={!canPauseAll} onClick={() => runAction(onPauseAll)} />
+              <CommandMenuItem icon={<RotateCw size={16} />} label="Retry Failed" disabled={!canRetryFailed} onClick={() => runAction(onRetryFailed)} />
+              <div className="my-1 h-px bg-border" />
+              <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Row Size</div>
+              {QUEUE_ROW_SIZE_OPTIONS.map((option) => (
+                <CommandMenuItem
+                  key={option.value}
+                  icon={queueRowSize === option.value ? <Check size={16} /> : <span className="h-4 w-4" />}
+                  label={option.label}
+                  active={queueRowSize === option.value}
+                  onClick={() => runAction(() => onQueueRowSizeChange(option.value))}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
-      <div className="flex min-w-[320px] max-w-[620px] flex-1 items-center justify-end gap-2">
-        <label className="relative min-w-0 flex-1">
+      <div className="flex w-[310px] max-w-[42vw] shrink-0 items-center justify-end gap-2">
+        <label className="relative w-full min-w-0">
           <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             value={searchQuery}
@@ -1056,27 +1166,68 @@ function CommandBar({
   );
 }
 
+const QUEUE_ROW_SIZE_OPTIONS: { value: QueueRowSize; label: string }[] = [
+  { value: 'compact', label: 'Compact' },
+  { value: 'small', label: 'Small' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'large', label: 'Large' },
+  { value: 'damn', label: 'DAMN' },
+];
+
+function CommandMenuItem({
+  icon,
+  label,
+  onClick,
+  disabled = false,
+  active = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition ${
+        active ? 'text-primary' : 'text-foreground'
+      } ${disabled ? 'cursor-not-allowed opacity-40' : 'hover:bg-muted'}`}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">{icon}</span>
+      <span className="truncate">{label}</span>
+    </button>
+  );
+}
+
 function ToolbarButton({
   icon,
   label,
   onClick,
   disabled = false,
   strong = false,
+  ariaLabel,
 }: {
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
   disabled?: boolean;
   strong?: boolean;
+  ariaLabel?: string;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-label={ariaLabel}
       className={`flex h-8 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-sm font-medium transition ${
         strong
-          ? 'text-foreground hover:bg-muted'
-          : 'text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground'
+          ? 'border border-primary/60 bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 active:bg-primary/80 focus-visible:ring-2 focus-visible:ring-primary/30'
+          : 'border border-transparent text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground'
       }`}
     >
       {icon}
@@ -1270,3 +1421,6 @@ function formatConnectionState(state: ConnectionState) {
   return state.replaceAll('_', ' ').replace(/\b\w/g, (value) => value.toUpperCase());
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+}

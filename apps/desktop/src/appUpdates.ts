@@ -29,6 +29,14 @@ export interface AppUpdateState {
   totalBytes: number | null;
 }
 
+export type AppUpdateVersionTone = 'available' | 'current' | 'pending' | 'error';
+
+export interface AppUpdateVersionIndicator {
+  currentVersion: string;
+  newVersion: string;
+  newVersionTone: AppUpdateVersionTone;
+}
+
 export const initialAppUpdateState: AppUpdateState = {
   status: 'idle',
   availableUpdate: null,
@@ -44,6 +52,41 @@ export function shouldRunStartupUpdateCheck(hasChecked: boolean): boolean {
 
 export function shouldNotifyUpdateCheckFailure(mode: UpdateCheckMode): boolean {
   return mode === 'manual';
+}
+
+export function updateVersionIndicator(
+  state: AppUpdateState,
+  installedVersion: string,
+): AppUpdateVersionIndicator {
+  if (state.availableUpdate) {
+    return {
+      currentVersion: state.availableUpdate.currentVersion || installedVersion,
+      newVersion: state.availableUpdate.version,
+      newVersionTone: 'available',
+    };
+  }
+
+  if (state.status === 'not_available') {
+    return {
+      currentVersion: installedVersion,
+      newVersion: installedVersion,
+      newVersionTone: 'current',
+    };
+  }
+
+  if (state.status === 'error') {
+    return {
+      currentVersion: installedVersion,
+      newVersion: 'Unavailable',
+      newVersionTone: 'error',
+    };
+  }
+
+  return {
+    currentVersion: installedVersion,
+    newVersion: state.status === 'checking' ? 'Checking...' : 'Check pending',
+    newVersionTone: 'pending',
+  };
 }
 
 export function startUpdateCheck(

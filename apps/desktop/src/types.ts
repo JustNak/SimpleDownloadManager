@@ -38,6 +38,7 @@ export type StartupLaunchMode = 'open' | 'tray';
 export type BulkArchiveStatus = 'pending' | 'compressing' | 'completed' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
+export type QueueRowSize = 'compact' | 'small' | 'medium' | 'large' | 'damn';
 
 export interface DownloadSource {
   entryPoint: string;
@@ -140,6 +141,8 @@ export interface Settings {
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;
+  showDetailsOnClick: boolean;
+  queueRowSize: QueueRowSize;
   startOnStartup: boolean;
   startupLaunchMode: StartupLaunchMode;
   extensionIntegration: ExtensionIntegrationSettings;

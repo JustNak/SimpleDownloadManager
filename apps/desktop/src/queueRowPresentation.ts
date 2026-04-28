@@ -4,6 +4,7 @@ export const QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Speed', 'Time', 'Size', 'Ac
 export const TORRENT_QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Seed', 'Ratio', 'Size', 'Actions'] as const;
 
 export type QueueStatusTone = 'primary' | 'success' | 'destructive' | 'warning' | 'muted';
+export type FileBadgeActivityState = 'none' | 'buffering' | 'completed';
 
 export interface QueueStatusPresentation {
   label: string;
@@ -28,6 +29,15 @@ export function isTorrentQueueView(view: string): boolean {
 
 export function shouldShowNameProgress(job: Pick<DownloadJob, 'state' | 'progress'>): boolean {
   return job.state === 'downloading' && clampQueueProgress(job.progress) > 0;
+}
+
+export function fileBadgeActivityState(
+  job: Pick<DownloadJob, 'state'>,
+  recentlyCompleted: boolean,
+): FileBadgeActivityState {
+  if (recentlyCompleted) return 'completed';
+  if (job.state === 'starting' || job.state === 'downloading') return 'buffering';
+  return 'none';
 }
 
 export function clampQueueProgress(progress: number): number {

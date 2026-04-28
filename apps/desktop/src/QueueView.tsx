@@ -3,13 +3,14 @@ import {
   isJobArtifactMissing,
   selectJobRange,
   shouldBlurJobIdentity,
-  shouldRevealJobDirectoryOnDoubleClick,
+  shouldOpenJobFileOnDoubleClick,
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
 import { canRemoveDownloadImmediately } from './queueCommands';
 import {
   clampQueueProgress,
+  fileBadgeActivityState,
   formatQueueSize,
   queueTableColumnsForView,
   queueStatusPresentation,
@@ -17,6 +18,7 @@ import {
   torrentActivitySummary,
   torrentDetailMetrics,
   torrentDisplayName,
+  type FileBadgeActivityState,
   type TorrentDetailMetric,
   type TorrentDetailMetricKind,
   type QueueStatusTone,
@@ -41,6 +43,7 @@ import {
   Globe,
   GripHorizontal,
   HardDrive,
+  LoaderCircle,
   MoreHorizontal,
   Magnet,
   Pause,
@@ -54,6 +57,7 @@ import {
   X,
 } from 'lucide-react';
 import { sortModeDirection, sortModeKey, type SortColumn, type SortMode } from './downloadSorting';
+import type { QueueRowSize } from './types';
 
 const DETAILS_MIN_HEIGHT = 104;
 const DETAILS_CLOSE_THRESHOLD = 84;
@@ -61,11 +65,14 @@ const DETAILS_DEFAULT_HEIGHT = 128;
 const DETAILS_EXPANDED_HEIGHT = 220;
 const DETAILS_MAX_HEIGHT = 300;
 const TABLE_MIN_HEIGHT = 180;
+const COMPLETED_BADGE_DURATION_MS = 1200;
 
 interface QueueViewProps {
   jobs: DownloadJob[];
   view: string;
   sortMode: SortMode;
+  showDetailsOnClick: boolean;
+  queueRowSize: QueueRowSize;
   onSortChange: (column: SortColumn) => void;
   progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
   selectedJobId: string | null;
@@ -88,6 +95,8 @@ export function QueueView({
   jobs,
   view,
   sortMode,
+  showDetailsOnClick,
+  queueRowSize,
   onSortChange,
   progressMetricsByJobId,
   selectedJobId,
@@ -117,11 +126,14 @@ export function QueueView({
   const [isResizingDetails, setIsResizingDetails] = useState(false);
   const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(() => new Set());
   const [isSelectingByDrag, setIsSelectingByDrag] = useState(false);
+  const [recentlyCompletedJobIds, setRecentlyCompletedJobIds] = useState<Set<string>>(() => new Set());
   const queueRootRef = useRef<HTMLElement | null>(null);
   const resizeStart = useRef<{ y: number; height: number; containerHeight: number; proposedHeight: number } | null>(null);
   const selectedJobIdsRef = useRef(selectedJobIds);
   const visibleJobIdsRef = useRef<string[]>([]);
   const selectionDragRef = useRef<{ anchorId: string; selected: boolean; baseSelection: Set<string> } | null>(null);
+  const previousJobStatesRef = useRef<Map<string, DownloadJob['state']>>(new Map());
+  const completedBadgeTimersRef = useRef<Map<string, number>>(new Map());
 
   const contextMenuJob = contextMenu ? jobs.find((job) => job.id === contextMenu.jobId) ?? null : null;
   const contextMenuSelectionJobs = contextMenuJob
@@ -141,6 +153,24 @@ export function QueueView({
     selectedJobIdsRef.current = next;
     setSelectedJobIds(next);
     onSelect(jobId);
+  }
+
+  function clearJobSelection() {
+    const next = new Set<string>();
+    selectedJobIdsRef.current = next;
+    setSelectedJobIds(next);
+    onClearSelection();
+  }
+
+  function toggleSingleJobSelection(jobId: string) {
+    const selectedIds = selectedJobIdsRef.current;
+    const isOnlySelectedJob = selectedJobId === jobId && selectedIds.size === 1 && selectedIds.has(jobId);
+    if (isOnlySelectedJob) {
+      clearJobSelection();
+      return;
+    }
+
+    selectSingleJob(jobId);
   }
 
   function setJobSelection(jobId: string, selected: boolean) {
@@ -222,6 +252,69 @@ export function QueueView({
   useEffect(() => {
     selectedJobIdsRef.current = selectedJobIds;
   }, [selectedJobIds]);
+
+  useEffect(() => {
+    const previousStates = previousJobStatesRef.current;
+    const nextStates = new Map<string, DownloadJob['state']>();
+    const newlyCompletedIds: string[] = [];
+    const currentJobIds = new Set<string>();
+    const currentCompletedJobIds = new Set<string>();
+
+    for (const job of jobs) {
+      currentJobIds.add(job.id);
+      nextStates.set(job.id, job.state);
+      if (job.state === JobState.Completed) {
+        currentCompletedJobIds.add(job.id);
+      }
+      const previousState = previousStates.get(job.id);
+      if (previousState && previousState !== JobState.Completed && job.state === JobState.Completed) {
+        newlyCompletedIds.push(job.id);
+      }
+    }
+
+    previousJobStatesRef.current = nextStates;
+
+    setRecentlyCompletedJobIds((current) => {
+      const next = new Set([...current].filter((jobId) => currentCompletedJobIds.has(jobId)));
+      for (const jobId of newlyCompletedIds) {
+        next.add(jobId);
+      }
+      return setsEqual(current, next) ? current : next;
+    });
+
+    for (const [jobId, timer] of completedBadgeTimersRef.current) {
+      if (!currentCompletedJobIds.has(jobId)) {
+        window.clearTimeout(timer);
+        completedBadgeTimersRef.current.delete(jobId);
+      }
+    }
+
+    for (const jobId of newlyCompletedIds) {
+      const existingTimer = completedBadgeTimersRef.current.get(jobId);
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+      }
+
+      const timer = window.setTimeout(() => {
+        completedBadgeTimersRef.current.delete(jobId);
+        setRecentlyCompletedJobIds((current) => {
+          if (!current.has(jobId)) return current;
+          const next = new Set(current);
+          next.delete(jobId);
+          return next;
+        });
+      }, COMPLETED_BADGE_DURATION_MS);
+
+      completedBadgeTimersRef.current.set(jobId, timer);
+    }
+  }, [jobs]);
+
+  useEffect(() => () => {
+    for (const timer of completedBadgeTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    completedBadgeTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     visibleJobIdsRef.current = visibleJobIds;
@@ -410,17 +503,17 @@ export function QueueView({
                 <div
                   key={job.id}
                   onClick={() => {
-                    selectSingleJob(job.id);
+                    toggleSingleJobSelection(job.id);
                     setOpenMenuJobId(null);
                     setContextMenu(null);
                   }}
                   onDoubleClick={(event) => {
-                    if (!shouldRevealJobDirectoryOnDoubleClick(job, event.button)) return;
+                    if (!shouldOpenJobFileOnDoubleClick(job, event.button)) return;
                     event.preventDefault();
                     selectSingleJob(job.id);
                     setOpenMenuJobId(null);
                     setContextMenu(null);
-                    onReveal(job.id);
+                    onOpen(job.id);
                   }}
                   onContextMenu={(event) => {
                     event.preventDefault();
@@ -434,13 +527,13 @@ export function QueueView({
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault();
-                      selectSingleJob(job.id);
+                      toggleSingleJobSelection(job.id);
                     }
                   }}
                   onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
-                  className={`grid min-h-[42px] w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-3 py-1 text-left text-sm transition ${
+                  className={`grid w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-3 text-left transition ${queueRowSizeClass(queueRowSize)} ${
                     rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
                 >
@@ -454,12 +547,15 @@ export function QueueView({
                       onSelectionPointerDown={(event) => startSelectionDrag(job.id, event)}
                       muted={artifactMissing}
                       blurred={blurIdentity}
+                      rowSize={queueRowSize}
+                      activityState={fileBadgeActivityState(job, recentlyCompletedJobIds.has(job.id))}
                     />
                     <InlineNameProgress
                       job={job}
                       statusPresentation={statusPresentation}
                       artifactMissing={artifactMissing}
                       blurIdentity={blurIdentity}
+                      rowSize={queueRowSize}
                     />
                   </div>
 
@@ -531,7 +627,7 @@ export function QueueView({
         />
       ) : null}
 
-      {selectedJob ? (
+      {selectedJob && showDetailsOnClick ? (
         <DownloadDetailsPane
           job={selectedJob}
           onPause={onPause}
@@ -928,11 +1024,11 @@ function DownloadDetailsPane({
 
   return (
     <aside
-      className={`details-pane relative shrink-0 border-t border-border bg-card ${compact ? 'overflow-hidden' : 'overflow-auto'}`}
+      className={`details-pane relative shrink-0 border-t border-border bg-surface ${compact ? 'overflow-hidden' : 'overflow-auto'}`}
       style={{ height }}
     >
       <div
-        className="absolute left-0 right-0 top-0 z-10 flex h-3 cursor-ns-resize items-center justify-center bg-card/95 text-muted-foreground transition hover:text-foreground"
+        className="absolute left-0 right-0 top-0 z-10 flex h-3 cursor-ns-resize items-center justify-center bg-surface/95 text-muted-foreground transition hover:text-foreground"
         onPointerDown={onResizeStart}
         onMouseDown={onMouseResizeStart}
         onPointerUp={onResizeEnd}
@@ -963,7 +1059,7 @@ function DownloadDetailsPane({
           </h3>
           {compact ? (
             <div className="overflow-x-auto overflow-y-hidden pb-1">
-              <div className="grid min-w-[1080px] grid-flow-col grid-rows-2 gap-x-4 gap-y-1.5 text-xs">
+              <div className="grid min-w-[1080px] grid-flow-col auto-cols-[minmax(260px,1fr)] grid-rows-2 gap-x-3 gap-y-2 text-xs">
                 {detailItems.map((item) => (
                   <CompactDetailItem key={item.label} icon={item.icon} label={item.label} value={item.value} accent={item.accent} />
                 ))}
@@ -990,36 +1086,39 @@ function InlineNameProgress({
   statusPresentation,
   artifactMissing,
   blurIdentity,
+  rowSize,
 }: {
   job: DownloadJob;
   statusPresentation: ReturnType<typeof queueStatusPresentation>;
   artifactMissing: boolean;
   blurIdentity: boolean;
+  rowSize: QueueRowSize;
 }) {
   const showProgress = shouldShowNameProgress(job);
   const progress = clampQueueProgress(job.progress);
+  const density = inlineNameDensity(rowSize);
 
   return (
-    <div className="relative -ml-2 min-w-0 flex-1 overflow-hidden rounded-sm px-2 py-1">
+    <div className={`relative -ml-2 min-w-0 flex-1 overflow-hidden rounded-sm ${density.container}`}>
       {showProgress ? (
         <div
-          className={`pointer-events-none absolute left-0 top-0 z-20 h-[3px] rounded-full ${nameProgressClass(statusPresentation.tone)}`}
+          className={`pointer-events-none absolute ${density.progressInset} left-0 z-0 rounded-[inherit] blur-md ${nameProgressClass(statusPresentation.tone)}`}
           style={{ width: `${progress}%` }}
           aria-hidden="true"
         />
       ) : null}
-      <div className="relative z-10 flex min-w-0 items-center gap-2">
+      <div className={`relative z-10 flex min-w-0 items-center ${density.titleGap}`}>
         <div
-          className={`truncate text-sm font-semibold text-foreground ${artifactMissing ? 'text-muted-foreground' : ''} ${
+          className={`truncate font-semibold text-foreground ${density.titleText} ${artifactMissing ? 'text-muted-foreground' : ''} ${
             blurIdentity ? 'opacity-70 blur-[0.7px]' : ''
           }`}
           title={job.filename}
         >
           {job.filename}
         </div>
-        <QueueStatusBadge presentation={statusPresentation} />
+        <QueueStatusBadge presentation={statusPresentation} rowSize={rowSize} />
       </div>
-      <div className={`relative z-10 mt-0.5 min-w-0 text-xs text-muted-foreground ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}>
+      <div className={`relative z-10 min-w-0 text-muted-foreground ${density.metaText} ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}>
         {job.transferKind === 'torrent' ? (
           <TorrentDetailLine job={job} />
         ) : (
@@ -1065,9 +1164,17 @@ function TorrentMetricIcon({ kind }: { kind: TorrentDetailMetricKind }) {
   return <Icon aria-hidden="true" size={12} strokeWidth={2.4} className={torrentMetricIconClass(kind)} />;
 }
 
-function QueueStatusBadge({ presentation }: { presentation: ReturnType<typeof queueStatusPresentation> }) {
+function QueueStatusBadge({
+  presentation,
+  rowSize,
+}: {
+  presentation: ReturnType<typeof queueStatusPresentation>;
+  rowSize: QueueRowSize;
+}) {
+  const density = statusBadgeDensity(rowSize);
+
   return (
-    <span className={`shrink-0 rounded border px-1.5 py-[1px] text-[10px] font-semibold leading-4 ${statusBadgeClass(presentation.tone)}`}>
+    <span className={`shrink-0 rounded border font-semibold ${density} ${statusBadgeClass(presentation.tone)}`}>
       {presentation.label}
     </span>
   );
@@ -1149,31 +1256,36 @@ function FileBadge({
   filename,
   transferKind = 'http',
   large = false,
+  rowSize = 'medium',
   selected = false,
   selectionTitle,
   onSelectionChange,
   onSelectionPointerDown,
   muted = false,
   blurred = false,
+  activityState = 'none',
 }: {
   filename: string;
   transferKind?: DownloadJob['transferKind'];
   large?: boolean;
+  rowSize?: QueueRowSize;
   selected?: boolean;
   selectionTitle?: string;
   onSelectionChange?: (checked: boolean) => void;
   onSelectionPointerDown?: (event: React.PointerEvent<HTMLInputElement>) => void;
   muted?: boolean;
   blurred?: boolean;
+  activityState?: FileBadgeActivityState;
 }) {
   const ext = filename.split('.').pop()?.toLowerCase() || '';
-  const iconSize = large ? 28 : 18;
+  const density = fileBadgeDensity(rowSize);
+  const iconSize = large ? 28 : density.iconSize;
   const icon = transferKind === 'torrent' ? <Magnet size={iconSize} /> : getFileIcon(ext, iconSize);
   const label = transferKind === 'torrent' ? 'P2P' : ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
   const selectable = !large && onSelectionChange;
 
   return (
-    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : 'h-7 w-7'}`}>
+    <div className={`file-badge relative flex shrink-0 items-center justify-center rounded-sm border border-border bg-background ${large ? 'h-[76px] w-14' : density.className}`}>
       <div className={`absolute right-0 top-0 h-2 w-2 border-b border-l border-border bg-surface ${selectable ? 'opacity-0' : ''}`} />
       {selectable ? (
         <SelectionCheckbox
@@ -1185,6 +1297,22 @@ function FileBadge({
         />
       ) : null}
       <div className={`${muted ? 'text-muted-foreground' : 'text-primary'} ${blurred ? 'opacity-70 blur-[0.7px]' : ''}`}>{icon}</div>
+      {activityState !== 'none' ? (
+        <div
+          className={`pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-sm ${
+            activityState === 'completed'
+              ? 'animate-[queue-complete-check_1.2s_ease-out_forwards] bg-success/15 text-success'
+              : 'bg-background/45 text-primary'
+          }`}
+          aria-hidden="true"
+        >
+          {activityState === 'buffering' ? (
+            <LoaderCircle size={large ? 20 : 14} strokeWidth={2.4} className="animate-spin" />
+          ) : (
+            <Check size={large ? 20 : 14} strokeWidth={2.6} />
+          )}
+        </div>
+      ) : null}
       {large ? <div className="absolute bottom-1.5 text-[10px] font-semibold text-muted-foreground">{label}</div> : null}
     </div>
   );
@@ -1514,7 +1642,107 @@ function nameProgressClass(tone: QueueStatusTone) {
     case 'muted':
       return 'bg-muted';
     default:
-      return 'bg-primary';
+      return 'bg-primary/30';
+  }
+}
+
+function queueRowSizeClass(size: QueueRowSize): string {
+  switch (size) {
+    case 'compact':
+      return 'min-h-[28px] py-0 text-xs';
+    case 'small':
+      return 'min-h-[34px] py-0.5 text-xs';
+    case 'large':
+      return 'min-h-[54px] py-1.5 text-sm';
+    case 'damn':
+      return 'min-h-[68px] py-2.5 text-base';
+    case 'medium':
+    default:
+      return 'min-h-[42px] py-1 text-sm';
+  }
+}
+
+function fileBadgeDensity(size: QueueRowSize): { className: string; iconSize: number } {
+  switch (size) {
+    case 'compact':
+      return { className: 'h-5 w-5', iconSize: 13 };
+    case 'small':
+      return { className: 'h-6 w-6', iconSize: 15 };
+    case 'large':
+      return { className: 'h-10 w-10', iconSize: 23 };
+    case 'damn':
+      return { className: 'h-12 w-12', iconSize: 28 };
+    case 'medium':
+    default:
+      return { className: 'h-7 w-7', iconSize: 18 };
+  }
+}
+
+function inlineNameDensity(size: QueueRowSize): {
+  container: string;
+  progressInset: string;
+  titleGap: string;
+  titleText: string;
+  metaText: string;
+} {
+  switch (size) {
+    case 'compact':
+      return {
+        container: 'px-2 py-0',
+        progressInset: 'inset-y-0.5',
+        titleGap: 'gap-1.5',
+        titleText: 'text-xs leading-4',
+        metaText: 'mt-0 text-[10px] leading-3',
+      };
+    case 'small':
+      return {
+        container: 'px-2 py-0.5',
+        progressInset: 'inset-y-0.5',
+        titleGap: 'gap-1.5',
+        titleText: 'text-xs leading-4',
+        metaText: 'mt-0 text-[11px] leading-3',
+      };
+    case 'large':
+      return {
+        container: 'px-2 py-1.5',
+        progressInset: 'inset-y-1',
+        titleGap: 'gap-2',
+        titleText: 'text-sm leading-5',
+        metaText: 'mt-0.5 text-xs leading-4',
+      };
+    case 'damn':
+      return {
+        container: 'px-2 py-2',
+        progressInset: 'inset-y-1',
+        titleGap: 'gap-2',
+        titleText: 'text-base leading-6',
+        metaText: 'mt-0.5 text-sm leading-5',
+      };
+    case 'medium':
+    default:
+      return {
+        container: 'px-2 py-1',
+        progressInset: 'inset-y-1',
+        titleGap: 'gap-2',
+        titleText: 'text-sm leading-5',
+        metaText: 'mt-0.5 text-xs leading-4',
+      };
+  }
+}
+
+function statusBadgeDensity(size: QueueRowSize): string {
+  switch (size) {
+    case 'compact':
+      return 'px-1 py-0 text-[9px] leading-3';
+    case 'small':
+      return 'px-1 py-0 text-[9px] leading-3';
+    case 'large':
+      return 'px-1.5 py-[1px] text-[10px] leading-4';
+    case 'damn':
+      return 'px-2 py-[2px] text-[11px] leading-4';
+    case 'medium':
+    default:
+      return 'px-1.5 py-[1px] text-[10px] leading-4';
   }
 }
 
@@ -1541,10 +1769,10 @@ function CompactDetailItem({
   accent?: boolean;
 }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 px-1 py-1">
       <div className="mb-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&>svg]:h-3.5 [&>svg]:w-3.5">
         {icon}
-        <span>{label}</span>
+        <span className="truncate">{label}</span>
       </div>
       <div className={`truncate text-xs ${accent ? 'text-primary' : 'text-foreground'}`} title={value}>
         {value}

@@ -37,6 +37,8 @@ const snapshot: DesktopSnapshot = {
     notificationsEnabled: true,
     theme: 'system',
     accentColor: '#3b82f6',
+    showDetailsOnClick: true,
+    queueRowSize: 'medium',
     startOnStartup: true,
     startupLaunchMode: 'tray',
     extensionIntegration: {

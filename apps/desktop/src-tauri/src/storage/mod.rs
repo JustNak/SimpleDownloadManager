@@ -258,6 +258,17 @@ pub enum DownloadPerformanceMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum QueueRowSize {
+    Compact,
+    Small,
+    #[default]
+    Medium,
+    Large,
+    Damn,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TorrentSeedMode {
     #[default]
     Forever,
@@ -327,6 +338,10 @@ pub struct Settings {
     pub theme: Theme,
     #[serde(default = "default_accent_color")]
     pub accent_color: String,
+    #[serde(default = "default_show_details_on_click")]
+    pub show_details_on_click: bool,
+    #[serde(default)]
+    pub queue_row_size: QueueRowSize,
     #[serde(default)]
     pub start_on_startup: bool,
     #[serde(default)]
@@ -443,6 +458,8 @@ impl Default for Settings {
             notifications_enabled: true,
             theme: Theme::System,
             accent_color: default_accent_color(),
+            show_details_on_click: default_show_details_on_click(),
+            queue_row_size: QueueRowSize::Medium,
             start_on_startup: false,
             startup_launch_mode: StartupLaunchMode::Open,
             extension_integration: ExtensionIntegrationSettings::default(),
@@ -506,6 +523,10 @@ pub fn default_torrent_port_forwarding_port() -> u32 {
 
 fn default_accent_color() -> String {
     "#3b82f6".into()
+}
+
+fn default_show_details_on_click() -> bool {
+    true
 }
 
 pub fn default_extension_listen_port() -> u32 {
@@ -870,6 +891,8 @@ mod tests {
             DownloadPerformanceMode::Balanced
         );
         assert_eq!(settings.accent_color, "#3b82f6");
+        assert!(settings.show_details_on_click);
+        assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
         assert!(!settings.start_on_startup);
         assert_eq!(settings.startup_launch_mode, StartupLaunchMode::Open);
     }
@@ -887,6 +910,24 @@ mod tests {
         assert_eq!(value["startOnStartup"], true);
         assert_eq!(value["startupLaunchMode"], "tray");
         assert_eq!(value["downloadPerformanceMode"], "balanced");
+        assert_eq!(value["showDetailsOnClick"], true);
+        assert_eq!(value["queueRowSize"], "medium");
+    }
+
+    #[test]
+    fn missing_view_settings_default_for_existing_users() {
+        let settings = serde_json::from_str::<Settings>(
+            r#"{
+              "downloadDirectory": "C:/Downloads",
+              "maxConcurrentDownloads": 3,
+              "notificationsEnabled": true,
+              "theme": "system"
+            }"#,
+        )
+        .expect("legacy settings should parse");
+
+        assert!(settings.show_details_on_click);
+        assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
     }
 
     #[test]

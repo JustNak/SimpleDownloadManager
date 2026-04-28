@@ -158,6 +158,24 @@
   }
 }
 
+@keyframes queue-complete-check {
+  0% {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+
+  16%,
+  76% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+}
+
 ::-webkit-scrollbar {
   width: 9px;
   height: 9px;

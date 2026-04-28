@@ -22,6 +22,8 @@ function makeSettings(theme: Settings['theme']): Settings {
     notificationsEnabled: true,
     theme,
     accentColor: '#3b82f6',
+    showDetailsOnClick: true,
+    queueRowSize: 'medium',
     startOnStartup: false,
     startupLaunchMode: 'open',
     extensionIntegration: {

@@ -24,6 +24,7 @@ pub const TORRENT_DEFER_WRITES_MB: usize = 16;
 pub const TORRENT_CONCURRENT_INIT_LIMIT: usize = 2;
 pub const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
 pub const TORRENT_TRACKER_FIRST_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
+const BYTES_PER_MEBIBYTE: f64 = 1024.0 * 1024.0;
 pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.demonii.com:1337/announce",
@@ -509,9 +510,30 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
         downloaded_bytes: stats.progress_bytes,
         total_bytes: stats.total_bytes,
         uploaded_bytes: stats.uploaded_bytes,
-        download_speed: 0,
+        download_speed: torrent_download_speed_bytes_per_second(&stats),
         finished: stats.finished,
         error: stats.error,
+    }
+}
+
+fn torrent_download_speed_bytes_per_second(stats: &librqbit::TorrentStats) -> u64 {
+    stats
+        .live
+        .as_ref()
+        .map(|live| mib_per_second_to_bytes_per_second(live.download_speed.mbps))
+        .unwrap_or(0)
+}
+
+fn mib_per_second_to_bytes_per_second(mib_per_second: f64) -> u64 {
+    if !mib_per_second.is_finite() || mib_per_second <= 0.0 {
+        return 0;
+    }
+
+    let bytes_per_second = mib_per_second * BYTES_PER_MEBIBYTE;
+    if bytes_per_second >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        bytes_per_second.round() as u64
     }
 }
 
@@ -786,6 +808,40 @@ mod tests {
             upload_limit_bps(10_000_000),
             NonZeroU32::new(1_048_576 * 1024)
         );
+    }
+
+    #[test]
+    fn runtime_download_speed_uses_live_estimator_not_progress_bytes() {
+        let mut live = librqbit::api::LiveStats::default();
+        live.download_speed = 1.5.into();
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Live,
+            file_progress: vec![10 * 1024 * 1024 * 1024],
+            error: None,
+            progress_bytes: 10 * 1024 * 1024 * 1024,
+            uploaded_bytes: 0,
+            total_bytes: 20 * 1024 * 1024 * 1024,
+            finished: false,
+            live: Some(live),
+        };
+
+        assert_eq!(torrent_download_speed_bytes_per_second(&stats), 1_572_864);
+    }
+
+    #[test]
+    fn runtime_download_speed_is_zero_without_live_estimator() {
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Paused,
+            file_progress: vec![10 * 1024 * 1024 * 1024],
+            error: None,
+            progress_bytes: 10 * 1024 * 1024 * 1024,
+            uploaded_bytes: 0,
+            total_bytes: 20 * 1024 * 1024 * 1024,
+            finished: false,
+            live: None,
+        };
+
+        assert_eq!(torrent_download_speed_bytes_per_second(&stats), 0);
     }
 
     #[test]

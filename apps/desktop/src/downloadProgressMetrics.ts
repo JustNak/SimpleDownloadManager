@@ -42,8 +42,10 @@ export function calculateDownloadProgressMetrics(
   samples: ProgressSample[],
   _timestamp = Date.now(),
 ): DownloadProgressMetrics {
-  const averageSpeed = observedAverageSpeed(job, samples) ||
-    Math.max(0, job.speed || 0);
+  const backendSpeed = Math.max(0, job.speed || 0);
+  const averageSpeed = job.transferKind === 'torrent'
+    ? backendSpeed
+    : observedAverageSpeed(job, samples) || backendSpeed;
   const remainingBytes = Math.max(0, (job.totalBytes || 0) - (job.downloadedBytes || 0));
   const timeRemaining = averageSpeed > 0 && remainingBytes > 0
     ? Math.ceil(remainingBytes / averageSpeed)

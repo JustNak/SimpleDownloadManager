@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { DiagnosticsSnapshot, Settings } from './types';
-import type { AppUpdateState } from './appUpdates';
+import type { AppUpdateState, AppUpdateVersionTone } from './appUpdates';
+import { updateVersionIndicator } from './appUpdates';
+import desktopPackage from '../package.json';
 import { normalizeAccentColor } from './appearance';
 import { shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
 import {
@@ -47,6 +49,8 @@ const ACCENT_COLOR_PRESETS = [
   { name: 'Rose', value: '#f43f5e' },
   { name: 'Violet', value: '#8b5cf6' },
 ];
+
+const DESKTOP_APP_VERSION = desktopPackage.version;
 
 interface SettingsPageProps {
   settings: Settings;
@@ -204,6 +208,8 @@ export function SettingsPage({
     });
   };
 
+  const updateVersion = updateVersionIndicator(updateState, DESKTOP_APP_VERSION);
+
   return (
     <>
     <form onSubmit={handleSubmit} className="settings-surface mx-auto grid w-full max-w-6xl grid-cols-[220px_minmax(0,1fr)] gap-4 p-4">
@@ -331,6 +337,11 @@ export function SettingsPage({
               ) : null}
             </div>
 
+            <div className="mb-4 grid gap-2 sm:grid-cols-2">
+              <VersionIndicator label="Current" value={updateVersion.currentVersion} />
+              <VersionIndicator label="New" value={updateVersion.newVersion} tone={updateVersion.newVersionTone} />
+            </div>
+
             {updateState.availableUpdate?.body ? (
               <div className="mb-4 rounded border border-border bg-background px-3 py-2 text-sm leading-6 text-muted-foreground">
                 {updateState.availableUpdate.body}
@@ -390,7 +401,7 @@ export function SettingsPage({
               value={formData.torrent.seedMode}
               onChange={(event) => updateTorrentSettings({ seedMode: event.target.value as Settings['torrent']['seedMode'] })}
               disabled={!formData.torrent.enabled}
-              className="h-9 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <option value="forever">Seed forever</option>
               <option value="ratio">Stop at ratio</option>
@@ -489,6 +500,14 @@ export function SettingsPage({
               <span className="h-6 w-11 rounded-full bg-muted transition peer-checked:bg-primary" />
               <span className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full border border-border bg-white transition peer-checked:translate-x-5" />
             </label>
+          </FieldRow>
+
+          <FieldRow label="Click Opens Details" description="Show selected-download details on row click." tooltip="When enabled, clicking a download opens the bottom details pane. Turn it off to keep row clicks selection-only.">
+            <ToggleSwitch
+              id="showDetailsOnClick"
+              checked={formData.showDetailsOnClick}
+              onChange={(checked) => setFormData((prev) => ({ ...prev, showDetailsOnClick: checked }))}
+            />
           </FieldRow>
 
           <FieldRow label="Start with Windows" description="Auto-launch app." tooltip="Register this application to launch when you sign in to Windows.">
@@ -1181,6 +1200,39 @@ function renderUpdateStatus(updateState: AppUpdateState): string {
   if (updateState.status === 'installing') return 'Installing the update. The app may close automatically.';
   if (updateState.status === 'error') return 'The last update action failed.';
   return 'Checks the signed alpha feed hosted on GitHub Releases.';
+}
+
+function VersionIndicator({
+  label,
+  value,
+  tone = 'current',
+}: {
+  label: string;
+  value: string;
+  tone?: AppUpdateVersionTone;
+}) {
+  return (
+    <div className="min-w-0 border-l border-border pl-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{label}</div>
+      <div className={`mt-1 truncate text-sm font-semibold tabular-nums ${versionIndicatorToneClass(tone)}`} title={value}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function versionIndicatorToneClass(tone: AppUpdateVersionTone): string {
+  switch (tone) {
+    case 'available':
+      return 'text-primary';
+    case 'error':
+      return 'text-destructive';
+    case 'pending':
+      return 'text-muted-foreground';
+    case 'current':
+    default:
+      return 'text-foreground';
+  }
 }
 
 function updateProgressPercent(updateState: AppUpdateState): number {

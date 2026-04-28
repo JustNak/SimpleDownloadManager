@@ -6,6 +6,7 @@ import {
   shouldNotifyUpdateCheckFailure,
   shouldRunStartupUpdateCheck,
   startUpdateCheck,
+  updateVersionIndicator,
 } from '../src/appUpdates.ts';
 
 assert.equal(shouldRunStartupUpdateCheck(false), true, 'startup update check should run before the first attempt');
@@ -25,6 +26,36 @@ const available = finishUpdateCheck(checking, {
 assert.equal(available.status, 'available');
 assert.equal(available.availableUpdate?.version, '0.3.45-alpha');
 assert.equal(available.errorMessage, null);
+
+assert.deepEqual(
+  updateVersionIndicator(available, '0.3.44-alpha'),
+  {
+    currentVersion: '0.3.4-alpha',
+    newVersion: '0.3.45-alpha',
+    newVersionTone: 'available',
+  },
+  'available updates should expose current and new version indicators from updater metadata',
+);
+
+assert.deepEqual(
+  updateVersionIndicator(finishUpdateCheck(checking, null), '0.3.49-alpha'),
+  {
+    currentVersion: '0.3.49-alpha',
+    newVersion: '0.3.49-alpha',
+    newVersionTone: 'current',
+  },
+  'latest builds should show the installed version as both current and new',
+);
+
+assert.deepEqual(
+  updateVersionIndicator(checking, '0.3.49-alpha'),
+  {
+    currentVersion: '0.3.49-alpha',
+    newVersion: 'Checking...',
+    newVersionTone: 'pending',
+  },
+  'checking state should show a pending new-version indicator',
+);
 
 const started = applyInstallProgressEvent(available, {
   event: 'started',

@@ -56,6 +56,8 @@ const defaultSettings: Settings = {
   notificationsEnabled: true,
   theme: 'system',
   accentColor: '#3b82f6',
+  showDetailsOnClick: true,
+  queueRowSize: 'medium',
   startOnStartup: false,
   startupLaunchMode: 'open',
   extensionIntegration: {

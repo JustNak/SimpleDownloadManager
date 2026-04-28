@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   clampQueueProgress,
+  fileBadgeActivityState,
   formatQueueSize,
   QUEUE_TABLE_COLUMNS,
   queueTableColumnsForView,
@@ -71,6 +72,30 @@ assert.equal(
   shouldShowNameProgress({ ...baseJob, state: 'queued', progress: 10 }),
   false,
   'queued downloads should not show a progress overlay',
+);
+
+assert.equal(
+  fileBadgeActivityState({ ...baseJob, state: 'downloading' }, false),
+  'buffering',
+  'active downloading rows should show the buffering file badge overlay',
+);
+
+assert.equal(
+  fileBadgeActivityState({ ...baseJob, state: 'starting' }, false),
+  'buffering',
+  'starting rows should show the buffering file badge overlay',
+);
+
+assert.equal(
+  fileBadgeActivityState({ ...baseJob, state: 'completed' }, true),
+  'completed',
+  'rows that just completed should show a transient completed file badge overlay',
+);
+
+assert.equal(
+  fileBadgeActivityState({ ...baseJob, state: 'completed' }, false),
+  'none',
+  'historically completed rows should not keep a file badge overlay',
 );
 
 assert.equal(clampQueueProgress(-20), 0);

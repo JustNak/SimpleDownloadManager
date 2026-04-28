@@ -3,7 +3,7 @@ import {
   isJobArtifactMissing,
   selectJobRange,
   shouldBlurJobIdentity,
-  shouldRevealJobDirectoryOnDoubleClick,
+  shouldOpenJobFileOnDoubleClick,
 } from '../src/queueInteractions.ts';
 
 const completedJob = {
@@ -18,24 +18,24 @@ const completedJob = {
   speed: 0,
   eta: 0,
   targetPath: 'C:\\Users\\Alice\\Downloads\\file.zip',
-} as Parameters<typeof shouldRevealJobDirectoryOnDoubleClick>[0];
+} as Parameters<typeof shouldOpenJobFileOnDoubleClick>[0];
 
 assert.equal(
-  shouldRevealJobDirectoryOnDoubleClick(completedJob, 0),
+  shouldOpenJobFileOnDoubleClick(completedJob, 0),
   true,
-  'left-button double click should reveal a job with a target path',
+  'left-button double click should open a job file with a target path',
 );
 
 assert.equal(
-  shouldRevealJobDirectoryOnDoubleClick({ ...completedJob, targetPath: '' }, 0),
+  shouldOpenJobFileOnDoubleClick({ ...completedJob, targetPath: '' }, 0),
   false,
-  'double click should not reveal when no target path is recorded',
+  'double click should not open when no target path is recorded',
 );
 
 assert.equal(
-  shouldRevealJobDirectoryOnDoubleClick(completedJob, 2),
+  shouldOpenJobFileOnDoubleClick(completedJob, 2),
   false,
-  'non-left double click should not reveal a job directory',
+  'non-left double click should not open a job file',
 );
 
 assert.equal(

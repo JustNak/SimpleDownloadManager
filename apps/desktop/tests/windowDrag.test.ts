@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { shouldStartWindowDrag } from '../src/windowDrag.ts';
 
 function makeTarget(matchesInteractive: boolean): EventTarget {
@@ -59,4 +60,24 @@ assert.equal(
   }),
   false,
   'non-primary pointer buttons should not start a window drag',
+);
+
+const popupTitlebarSource = readFileSync(new URL('../src/PopupTitlebar.tsx', import.meta.url), 'utf8');
+
+assert.match(
+  popupTitlebarSource,
+  /const handlePointerDown = async \(event: React\.PointerEvent<HTMLDivElement>\)/,
+  'popup titlebars should use pointer-down based dragging like the main window titlebar',
+);
+
+assert.match(
+  popupTitlebarSource,
+  /onPointerDown=\{\(event\) => void handlePointerDown\(event\)\}/,
+  'popup titlebar drag handler should be wired to pointer events',
+);
+
+assert.doesNotMatch(
+  popupTitlebarSource,
+  /onMouseDown=\{handleMouseDown\}/,
+  'popup titlebar should not rely on the previous mouse-only drag path',
 );

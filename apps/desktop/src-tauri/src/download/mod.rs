@@ -730,10 +730,6 @@ async fn run_torrent_download_attempt(
         )
         .await;
 
-    let profile = performance_profile(settings.download_performance_mode);
-    let mut displayed_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
-    let mut last_downloaded = None::<u64>;
-    let mut last_sample = Instant::now();
     let mut seeding_started = None::<Instant>;
     let mut persisted_seeding_started_at =
         existing_torrent.and_then(|torrent| torrent.seeding_started_at);
@@ -759,7 +755,7 @@ async fn run_torrent_download_attempt(
             WorkerControl::Continue => {}
         }
 
-        let mut update = engine
+        let update = engine
             .snapshot(engine_id)
             .await
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
@@ -767,15 +763,6 @@ async fn run_torrent_download_attempt(
             return Err(download_error(FailureCategory::Torrent, error, false));
         }
         let now = Instant::now();
-        update.download_speed = match last_downloaded {
-            Some(previous_downloaded) => displayed_speed.record_sample(
-                update.downloaded_bytes.saturating_sub(previous_downloaded),
-                now.saturating_duration_since(last_sample),
-            ),
-            None => 0,
-        };
-        last_downloaded = Some(update.downloaded_bytes);
-        last_sample = now;
 
         let started_seeding = update.finished && !was_finished;
         let should_persist = torrent_progress_should_persist(

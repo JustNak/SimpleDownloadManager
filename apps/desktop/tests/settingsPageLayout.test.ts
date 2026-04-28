@@ -70,3 +70,39 @@ assert.doesNotMatch(
   /FieldRow label="Excluded Sites"[\s\S]*value=\{excludedHostInput\}/,
   'excluded-site row should not keep the full inline add/list editor',
 );
+
+assert.match(
+  source,
+  /FieldRow label="Click Opens Details" description="Show selected-download details on row click\."/,
+  'appearance settings should expose the click-to-show details pane toggle with clear copy',
+);
+
+assert.match(
+  source,
+  /id="showDetailsOnClick"[\s\S]*checked=\{formData\.showDetailsOnClick\}/,
+  'click-to-show details setting should be wired to the settings draft',
+);
+
+assert.match(
+  source,
+  /id="torrentSeedMode"[\s\S]*className="h-9 w-44/,
+  'torrent seeding policy select should use the shorter field width',
+);
+
+assert.match(
+  source,
+  /import desktopPackage from '\.\.\/package\.json';/,
+  'settings update panel should read the installed desktop version from the desktop package manifest',
+);
+
+assert.match(
+  source,
+  /const updateVersion = updateVersionIndicator\(updateState, DESKTOP_APP_VERSION\);/,
+  'settings update panel should derive current and new version indicators from update state',
+);
+
+assert.match(
+  source,
+  /<VersionIndicator label="Current" value=\{updateVersion\.currentVersion\} \/>[\s\S]*<VersionIndicator label="New" value=\{updateVersion\.newVersion\} tone=\{updateVersion\.newVersionTone\} \/>/,
+  'app updates section should show both current and new version indicators',
+);

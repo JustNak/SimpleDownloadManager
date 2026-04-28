@@ -23,6 +23,16 @@ fn main() {
         }
     }
 
+    #[cfg(windows)]
+    let _single_instance_guard = match lifecycle::acquire_single_instance_or_notify() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("failed to initialize single-instance guard: {error}");
+            std::process::exit(1);
+        }
+    };
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_updater::Builder::new()

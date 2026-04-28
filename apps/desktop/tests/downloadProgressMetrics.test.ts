@@ -154,6 +154,44 @@ assert.deepEqual(
   'first metadata-resolved torrent snapshot should become the baseline instead of fake download speed',
 );
 
+const torrentWithResolvedMetadata: DownloadJob = {
+  ...metadataPendingTorrent,
+  totalBytes: 2_147_483_648,
+  downloadedBytes: 1_000,
+  progress: 0.01,
+  speed: 262_144,
+  torrent: {
+    ...metadataPendingTorrent.torrent,
+    infoHash: '0123456789abcdef0123456789abcdef01234567',
+    name: 'Movie',
+    totalFiles: 1,
+  },
+};
+const torrentBaselineSamples = recordProgressSample(
+  metadataSamples,
+  torrentWithResolvedMetadata,
+  14_000,
+);
+const torrentAfterProgressJump = {
+  ...torrentWithResolvedMetadata,
+  downloadedBytes: 1_073_742_824,
+  progress: 50,
+  speed: 262_144,
+};
+const torrentJumpSamples = recordProgressSample(
+  torrentBaselineSamples,
+  torrentAfterProgressJump,
+  15_000,
+);
+assert.deepEqual(
+  calculateDownloadProgressMetrics(torrentAfterProgressJump, torrentJumpSamples, 15_000),
+  {
+    averageSpeed: 262_144,
+    timeRemaining: 4_096,
+  },
+  'torrent metrics should use backend live speed instead of treating metadata progress jumps as throughput',
+);
+
 assert.equal(
   shouldShowCompletedFileAction({ ...baseJob, state: 'downloading' }),
   false,
