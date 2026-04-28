@@ -71,6 +71,8 @@ export interface DownloadJob {
     seeds?: number;
     uploadedBytes: number;
     lastRuntimeUploadedBytes?: number;
+    fetchedBytes?: number;
+    lastRuntimeFetchedBytes?: number;
     ratio: number;
     seedingStartedAt?: number;
   };

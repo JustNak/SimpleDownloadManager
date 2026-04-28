@@ -211,6 +211,33 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn torrent_restart_cleanup_info(
+        &self,
+        id: &str,
+    ) -> Result<Option<TorrentInfo>, BackendError> {
+        let state = self.inner.read().await;
+        if state.active_workers.contains(id) {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Pause or cancel the active transfer before restarting it.".into(),
+            });
+        }
+
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Job not found.".into(),
+            })?;
+        if job.transfer_kind != TransferKind::Torrent {
+            return Ok(None);
+        }
+
+        Ok(job.torrent.clone())
+    }
+
     pub async fn retry_failed_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -459,6 +486,9 @@ pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
     job.resume_support = ResumeSupport::Unknown;
     job.retry_attempts = 0;
     reset_integrity_for_retry(job);
+    if job.transfer_kind == TransferKind::Torrent {
+        job.torrent = Some(TorrentInfo::default());
+    }
 }
 
 pub(super) fn reset_integrity_for_retry(job: &mut DownloadJob) {

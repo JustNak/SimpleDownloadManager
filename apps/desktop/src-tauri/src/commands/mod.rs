@@ -1,6 +1,6 @@
 use crate::download::{
-    apply_torrent_runtime_settings, schedule_downloads, schedule_external_reseed,
-    EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
+    apply_torrent_runtime_settings, forget_torrent_session_for_restart, schedule_downloads,
+    schedule_external_reseed, EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
 };
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
@@ -348,6 +348,14 @@ pub async fn restart_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
+    if let Some(torrent) = state
+        .torrent_restart_cleanup_info(&id)
+        .await
+        .map_err(|error| error.message)?
+    {
+        forget_torrent_session_for_restart(state.inner(), &torrent).await?;
+    }
+
     let snapshot = state
         .restart_job(&id)
         .await

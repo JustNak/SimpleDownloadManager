@@ -50,7 +50,9 @@ pub struct TorrentRuntimeSnapshot {
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
     pub uploaded_bytes: u64,
+    pub fetched_bytes: u64,
     pub download_speed: u64,
+    pub upload_speed: u64,
     pub finished: bool,
     pub error: Option<String>,
 }

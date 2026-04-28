@@ -12,6 +12,7 @@ import {
   clampQueueProgress,
   fileBadgeActivityState,
   formatQueueSize,
+  formatQueueSizeTitle,
   queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
@@ -569,7 +570,7 @@ export function QueueView({
                   <div className="tabular-nums text-muted-foreground">
                     {isTorrentTable ? formatTorrentRatio(job) : formatQueueTime(job, timeRemaining)}
                   </div>
-                  <div className="tabular-nums text-muted-foreground">
+                  <div className="tabular-nums text-muted-foreground" title={formatQueueSizeTitle(job, formatBytes)}>
                     {formatQueueSize(job, formatBytes)}
                   </div>
 

@@ -102,12 +102,37 @@ export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueSt
 }
 
 export function formatQueueSize(
-  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes'>,
+  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes'> & Partial<Pick<DownloadJob, 'transferKind'>>,
   formatBytes: (bytes: number) => string,
 ): string {
   if (job.totalBytes <= 0) return formatBytes(job.downloadedBytes);
+  if (job.transferKind === 'torrent') return formatBytes(job.totalBytes);
   if (job.state === 'completed') return formatBytes(job.totalBytes);
   return `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}`;
+}
+
+export function formatTorrentVerifiedSize(
+  job: Pick<DownloadJob, 'downloadedBytes' | 'totalBytes'>,
+  formatBytes: (bytes: number) => string,
+): string {
+  return `Verified ${formatBytes(job.downloadedBytes)} / ${job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}`;
+}
+
+export function formatTorrentFetchedSize(
+  job: Pick<DownloadJob, 'torrent' | 'totalBytes'>,
+  formatBytes: (bytes: number) => string,
+): string {
+  const fetched = formatBytes(job.torrent?.fetchedBytes ?? 0);
+  if (job.totalBytes <= 0) return `${fetched} from peers`;
+  return `${fetched} / ${formatBytes(job.totalBytes)} from peers`;
+}
+
+export function formatQueueSizeTitle(
+  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes' | 'torrent'> & Partial<Pick<DownloadJob, 'transferKind'>>,
+  formatBytes: (bytes: number) => string,
+): string {
+  if (job.transferKind !== 'torrent') return formatQueueSize(job, formatBytes);
+  return `${formatTorrentVerifiedSize(job, formatBytes)}; Downloaded ${formatTorrentFetchedSize(job, formatBytes)}`;
 }
 
 export function torrentDetailMetrics(job: Pick<DownloadJob, 'torrent'>): TorrentDetailMetric[] {

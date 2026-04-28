@@ -311,21 +311,30 @@ impl TorrentEngine {
             .map_err(|error| format!("Could not forget torrent: {error:#}"))
     }
 
-    pub async fn forget_by_info_hash(&self, info_hash: &str) -> Result<bool, String> {
-        let Ok(candidate) = TorrentIdOrHash::parse(info_hash) else {
-            return Ok(false);
-        };
-        let Some(handle) = self.session.get(candidate) else {
-            return Ok(false);
-        };
+    pub async fn forget_existing(
+        &self,
+        engine_id: Option<usize>,
+        info_hash: Option<&str>,
+    ) -> Result<bool, String> {
+        for candidate in torrent_resume_candidates(engine_id, info_hash) {
+            let Some(handle) = self.session.get(candidate) else {
+                continue;
+            };
 
-        let id = handle.id();
-        self.handles.lock().await.remove(&id);
-        self.session
-            .delete(TorrentIdOrHash::Id(id), false)
-            .await
-            .map_err(|error| format!("Could not forget torrent: {error:#}"))?;
-        Ok(true)
+            let id = handle.id();
+            self.handles.lock().await.remove(&id);
+            self.session
+                .delete(TorrentIdOrHash::Id(id), false)
+                .await
+                .map_err(|error| format!("Could not forget torrent: {error:#}"))?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    pub async fn forget_by_info_hash(&self, info_hash: &str) -> Result<bool, String> {
+        self.forget_existing(None, Some(info_hash)).await
     }
 
     pub fn set_upload_limit(&self, upload_limit_kib_per_second: u32) {
@@ -510,10 +519,20 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
         downloaded_bytes: stats.progress_bytes,
         total_bytes: stats.total_bytes,
         uploaded_bytes: stats.uploaded_bytes,
+        fetched_bytes: torrent_fetched_bytes(&stats),
         download_speed: torrent_download_speed_bytes_per_second(&stats),
+        upload_speed: torrent_upload_speed_bytes_per_second(&stats),
         finished: stats.finished,
         error: stats.error,
     }
+}
+
+fn torrent_fetched_bytes(stats: &librqbit::TorrentStats) -> u64 {
+    stats
+        .live
+        .as_ref()
+        .map(|live| live.snapshot.fetched_bytes)
+        .unwrap_or(0)
 }
 
 fn torrent_download_speed_bytes_per_second(stats: &librqbit::TorrentStats) -> u64 {
@@ -521,6 +540,14 @@ fn torrent_download_speed_bytes_per_second(stats: &librqbit::TorrentStats) -> u6
         .live
         .as_ref()
         .map(|live| mib_per_second_to_bytes_per_second(live.download_speed.mbps))
+        .unwrap_or(0)
+}
+
+fn torrent_upload_speed_bytes_per_second(stats: &librqbit::TorrentStats) -> u64 {
+    stats
+        .live
+        .as_ref()
+        .map(|live| mib_per_second_to_bytes_per_second(live.upload_speed.mbps))
         .unwrap_or(0)
 }
 
@@ -842,6 +869,42 @@ mod tests {
         };
 
         assert_eq!(torrent_download_speed_bytes_per_second(&stats), 0);
+    }
+
+    #[test]
+    fn runtime_upload_speed_uses_live_estimator() {
+        let mut live = librqbit::api::LiveStats::default();
+        live.upload_speed = 0.75.into();
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Live,
+            file_progress: vec![],
+            error: None,
+            progress_bytes: 1024,
+            uploaded_bytes: 0,
+            total_bytes: 1024,
+            finished: true,
+            live: Some(live),
+        };
+
+        assert_eq!(torrent_upload_speed_bytes_per_second(&stats), 786_432);
+    }
+
+    #[test]
+    fn runtime_fetched_bytes_uses_live_snapshot_not_progress_bytes() {
+        let mut live = librqbit::api::LiveStats::default();
+        live.snapshot.fetched_bytes = 512 * 1024;
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Live,
+            file_progress: vec![10 * 1024 * 1024 * 1024],
+            error: None,
+            progress_bytes: 10 * 1024 * 1024 * 1024,
+            uploaded_bytes: 0,
+            total_bytes: 20 * 1024 * 1024 * 1024,
+            finished: false,
+            live: Some(live),
+        };
+
+        assert_eq!(torrent_fetched_bytes(&stats), 512 * 1024);
     }
 
     #[test]

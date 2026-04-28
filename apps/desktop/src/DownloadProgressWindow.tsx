@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Download,
   ExternalLink,
   FolderOpen,
   Link2,
@@ -33,6 +34,8 @@ import {
 } from './downloadProgressMetrics';
 import {
   isTorrentMetadataPending,
+  formatTorrentFetchedSize,
+  formatTorrentVerifiedSize,
   torrentActivitySummary,
   torrentDisplayName,
 } from './queueRowPresentation';
@@ -235,7 +238,8 @@ function TorrentingProgressView({
           <>
             <ProgressStrip
               progress={progress}
-              bytesText={downloadedText(job)}
+              progressLabel={`Verified ${progress.toFixed(0)}%`}
+              bytesText={verifiedTorrentText(job)}
               colorClass={progressColor(job)}
             />
 
@@ -244,6 +248,8 @@ function TorrentingProgressView({
               <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
               <Metric label="Peers" value={torrentPeerCount(job)} />
             </MetricRail>
+
+            <TorrentDownloadedRow job={job} />
           </>
         ) : null}
 
@@ -310,23 +316,35 @@ function HeaderStrip({
 
 function ProgressStrip({
   progress,
+  progressLabel = `${progress.toFixed(0)}%`,
   bytesText,
   colorClass,
 }: {
   progress: number;
+  progressLabel?: string;
   bytesText: string;
   colorClass: string;
 }) {
   return (
     <section className="mt-1.5">
       <div className="mb-1 flex items-end justify-between gap-2">
-        <span className="text-xl font-semibold tabular-nums leading-none text-foreground">{progress.toFixed(0)}%</span>
+        <span className="text-xl font-semibold tabular-nums leading-none text-foreground">{progressLabel}</span>
         <span className="truncate text-[11px] tabular-nums text-muted-foreground" title={bytesText}>{bytesText}</span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-progress-track">
         <div className={`h-1.5 rounded-full transition-all duration-300 ${colorClass}`} style={{ width: `${progress}%` }} />
       </div>
     </section>
+  );
+}
+
+function TorrentDownloadedRow({ job }: { job: DownloadJob }) {
+  const value = torrentFetchedText(job);
+  return (
+    <div className="mt-1 grid grid-cols-[70px_minmax(0,1fr)] gap-x-1.5 text-[10px] leading-4">
+      <div className="flex items-center gap-1 text-muted-foreground"><Download size={12} /> Downloaded</div>
+      <div className="truncate text-foreground" title={value}>{value}</div>
+    </div>
   );
 }
 
@@ -513,9 +531,17 @@ function downloadedText(job: DownloadJob) {
   return `${formatBytes(job.downloadedBytes)} / ${job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}`;
 }
 
+function verifiedTorrentText(job: DownloadJob) {
+  return formatTorrentVerifiedSize(job, formatBytes);
+}
+
+function torrentFetchedText(job: DownloadJob) {
+  return formatTorrentFetchedSize(job, formatBytes);
+}
+
 function torrentStatusLine(job: DownloadJob) {
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
-  if (job.state === JobState.Seeding) return `Seeding - ${downloadedText(job)}`;
+  if (job.state === JobState.Seeding) return `Seeding - ${verifiedTorrentText(job)}`;
   const activity = torrentActivitySummary(job);
   return activity === 'No peer activity yet' ? statusText(job) : `${statusText(job)} - ${activity}`;
 }

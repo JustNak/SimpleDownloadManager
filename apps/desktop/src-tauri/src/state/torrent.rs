@@ -18,17 +18,17 @@ pub(crate) fn should_stop_seeding(
     }
 }
 
-pub(super) fn cumulative_torrent_uploaded_bytes(
+pub(super) fn cumulative_torrent_runtime_bytes(
     previous_total: u64,
     previous_runtime: Option<u64>,
-    runtime_uploaded: u64,
+    runtime_value: u64,
 ) -> u64 {
     match previous_runtime {
-        Some(last_runtime) if runtime_uploaded >= last_runtime => {
-            previous_total.saturating_add(runtime_uploaded - last_runtime)
+        Some(last_runtime) if runtime_value >= last_runtime => {
+            previous_total.saturating_add(runtime_value - last_runtime)
         }
-        Some(_) => previous_total.saturating_add(runtime_uploaded),
-        None if previous_total == 0 => runtime_uploaded,
+        Some(_) => previous_total.saturating_add(runtime_value),
+        None if previous_total == 0 => runtime_value,
         None => previous_total,
     }
 }
@@ -309,7 +309,7 @@ impl SharedState {
             job.downloaded_bytes = update.downloaded_bytes;
             job.total_bytes = update.total_bytes.max(update.downloaded_bytes);
             job.speed = if update.finished {
-                0
+                update.upload_speed
             } else {
                 update.download_speed
             };
@@ -330,12 +330,18 @@ impl SharedState {
             torrent.total_files = update.total_files;
             torrent.peers = update.peers;
             torrent.seeds = update.seeds;
-            torrent.uploaded_bytes = cumulative_torrent_uploaded_bytes(
+            torrent.uploaded_bytes = cumulative_torrent_runtime_bytes(
                 torrent.uploaded_bytes,
                 torrent.last_runtime_uploaded_bytes,
                 update.uploaded_bytes,
             );
             torrent.last_runtime_uploaded_bytes = Some(update.uploaded_bytes);
+            torrent.fetched_bytes = cumulative_torrent_runtime_bytes(
+                torrent.fetched_bytes,
+                torrent.last_runtime_fetched_bytes,
+                update.fetched_bytes,
+            );
+            torrent.last_runtime_fetched_bytes = Some(update.fetched_bytes);
             torrent.ratio = if update.downloaded_bytes == 0 {
                 0.0
             } else {
