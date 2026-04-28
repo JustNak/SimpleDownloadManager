@@ -71,6 +71,18 @@ assert.doesNotMatch(
   'progress popup metrics should be flat instead of boxed cards',
 );
 
+assert.doesNotMatch(
+  progressSource,
+  /border-y border-border\/70/,
+  'progress popup metric rail should avoid strong hairline separators around the metrics',
+);
+
+assert.match(
+  progressSource,
+  /function MetricRail[\s\S]*bg-background\/30[\s\S]*border-t border-border\/35/,
+  'progress popup metric rail should use softer boxed-in shading and a muted top separator',
+);
+
 assert.match(
   progressSource,
   /torrentDisplayName\(job\)/,

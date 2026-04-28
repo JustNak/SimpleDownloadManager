@@ -2,6 +2,7 @@ import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings
 import browser from './browser';
 import {
   browserDownloadUrl,
+  cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
   discardBrowserDownload,
@@ -9,6 +10,7 @@ import {
   firefoxWebRequestDownloadCandidate,
   markBrowserDownloadBypassUrl,
   restartBrowserDownload,
+  restoreBrowserDownloadAfterPromptFallback,
   revokeBrowserDownloadBypassUrl,
   selectFilenameInterceptionApi,
   shouldBypassBrowserDownload,
@@ -184,6 +186,7 @@ async function handleBrowserDownloadDeterminingFilename(
   const releaseFilename = () => {
     suggestBrowserDownload(item, suggest);
   };
+  await cancelBrowserDownloadForDesktopPrompt(browser.downloads, item.id);
 
   try {
     const pingResponse = await pingNativeHost();
@@ -382,14 +385,18 @@ async function restoreBrowserDownloadFallback(
   item: browser.downloads.DownloadItem,
   releaseFilename?: () => void,
 ): Promise<void> {
-  if (releaseFilename) {
-    releaseFilename();
-    return;
-  }
-
   try {
-    await discardBrowserDownload(browser.downloads, item.id);
+    if (releaseFilename) {
+      await restoreBrowserDownloadAfterPromptFallback(
+        browser.downloads,
+        item,
+        browserDownloadFallbackBypass,
+        releaseFilename,
+      );
+      return;
+    }
 
+    await discardBrowserDownload(browser.downloads, item.id);
     await restartBrowserDownload(browser.downloads, item, browserDownloadFallbackBypass);
   } catch (error) {
     const state = await setHostError(

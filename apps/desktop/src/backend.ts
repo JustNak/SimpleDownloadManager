@@ -743,13 +743,25 @@ export async function getCurrentDownloadPrompt(): Promise<DownloadPrompt | null>
   return invokeCommand<DownloadPrompt | null>('get_current_download_prompt');
 }
 
+export type PromptDuplicateAction = 'return_existing' | 'download_anyway' | 'overwrite' | 'rename';
+
+export interface ConfirmDownloadPromptOptions {
+  duplicateAction?: PromptDuplicateAction;
+  renamedFilename?: string | null;
+}
+
 export async function confirmDownloadPrompt(
   id: string,
   directoryOverride: string | null,
-  allowDuplicate: boolean,
+  options: ConfirmDownloadPromptOptions = {},
 ): Promise<void> {
   if (!isTauriRuntime()) return;
-  await invokeCommand('confirm_download_prompt', { id, directoryOverride, allowDuplicate });
+  await invokeCommand('confirm_download_prompt', {
+    id,
+    directoryOverride,
+    duplicateAction: options.duplicateAction ?? 'return_existing',
+    renamedFilename: options.renamedFilename ?? null,
+  });
 }
 
 export async function showExistingDownloadPrompt(id: string): Promise<void> {

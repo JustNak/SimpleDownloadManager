@@ -247,6 +247,13 @@ export async function discardBrowserDownload(
   await downloads.erase({ id: downloadId }).catch(() => undefined);
 }
 
+export async function cancelBrowserDownloadForDesktopPrompt(
+  downloads: Pick<BrowserDownloadsCleanupApi, 'cancel'>,
+  downloadId: number,
+): Promise<void> {
+  await downloads.cancel(downloadId).catch(() => undefined);
+}
+
 export async function discardBrowserDownloadBeforeFilenameRelease(
   downloads: BrowserDownloadsCleanupApi,
   downloadId: number,
@@ -269,6 +276,17 @@ export async function discardBrowserDownloadBeforeFilenameRelease(
 
   await removeCompletedBrowserDownloadFile(downloads, downloadId);
   await downloads.erase({ id: downloadId }).catch(() => undefined);
+}
+
+export async function restoreBrowserDownloadAfterPromptFallback(
+  downloads: BrowserDownloadsCleanupApi & BrowserDownloadsRestartApi,
+  item: BrowserDownloadReplayItem,
+  bypass: BrowserDownloadBypassState,
+  releaseFilename?: () => void,
+): Promise<number> {
+  releaseFilename?.();
+  await discardBrowserDownload(downloads, item.id);
+  return restartBrowserDownload(downloads, item, bypass);
 }
 
 export async function restartBrowserDownload(

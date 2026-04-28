@@ -1,15 +1,27 @@
 use crate::storage::DownloadPrompt;
+use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 pub const PROMPT_CHANGED_EVENT: &str = "app://download-prompt-changed";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptDuplicateAction {
+    #[default]
+    ReturnExisting,
+    DownloadAnyway,
+    Overwrite,
+    Rename,
+}
+
 #[derive(Debug)]
 pub enum PromptDecision {
     Download {
         directory_override: Option<String>,
-        allow_duplicate: bool,
+        duplicate_action: PromptDuplicateAction,
+        renamed_filename: Option<String>,
     },
     ShowExisting,
     SwapToBrowser,

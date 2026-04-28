@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
   browserDownloadUrl,
+  cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
   discardBrowserDownloadBeforeFilenameRelease,
   discardBrowserDownload,
   restartBrowserDownload,
+  restoreBrowserDownloadAfterPromptFallback,
   selectFilenameInterceptionApi,
   shouldBypassBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
@@ -284,6 +286,21 @@ async function main() {
     'accepted handoffs should retry cancel after release if Chrome rejects pre-release cancellation',
   );
 
+  const promptCaptureOrder: string[] = [];
+  await cancelBrowserDownloadForDesktopPrompt(
+    {
+      async cancel(downloadId: number) {
+        promptCaptureOrder.push(`cancel:${downloadId}`);
+      },
+    },
+    101,
+  );
+  assert.deepEqual(
+    promptCaptureOrder,
+    ['cancel:101'],
+    'filename-interception handoffs should cancel the browser item before waiting on the desktop prompt',
+  );
+
   let restartedWith: unknown;
   const bypass = createBrowserDownloadBypassState();
   const restartedId = await restartBrowserDownload(
@@ -324,6 +341,52 @@ async function main() {
     false,
     'fallback bypass should be one-shot',
   );
+
+  const promptFallbackBypass = createBrowserDownloadBypassState();
+  const promptFallbackOrder: string[] = [];
+  let promptFallbackRestartedWith: unknown;
+  const promptFallbackId = await restoreBrowserDownloadAfterPromptFallback(
+    {
+      async cancel(downloadId: number) {
+        promptFallbackOrder.push(`cancel:${downloadId}`);
+      },
+      async search(query: { id: number }) {
+        promptFallbackOrder.push(`search:${query.id}`);
+        return [];
+      },
+      async erase(query: { id: number }) {
+        promptFallbackOrder.push(`erase:${query.id}`);
+      },
+      async download(options) {
+        promptFallbackRestartedWith = options;
+        promptFallbackOrder.push(`download:${options.url}`);
+        return 777;
+      },
+    },
+    {
+      id: 111,
+      url: 'https://example.com/prompt',
+      finalUrl: 'https://cdn.example.com/prompt.zip',
+      filename: 'C:\\Users\\Downloads\\prompt.zip',
+    },
+    promptFallbackBypass,
+    () => {
+      promptFallbackOrder.push('suggest');
+    },
+  );
+
+  assert.equal(promptFallbackId, 777);
+  assert.deepEqual(
+    promptFallbackOrder,
+    ['suggest', 'cancel:111', 'search:111', 'erase:111', 'download:https://cdn.example.com/prompt.zip'],
+    'prompt fallback should release the filename callback, discard the captured item, and restart through the bypass path',
+  );
+  assert.deepEqual(promptFallbackRestartedWith, {
+    url: 'https://cdn.example.com/prompt.zip',
+    filename: 'prompt.zip',
+    conflictAction: 'uniquify',
+    saveAs: false,
+  });
 
   const rawFilenameApi = {
     onDeterminingFilename: {

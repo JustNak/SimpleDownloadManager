@@ -148,19 +148,7 @@ export function BatchProgressWindow() {
 
         {bulkPhase ? <BulkPhaseStrip phase={bulkPhase} jobs={jobs} /> : null}
 
-        <section className="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border bg-background">
-          {jobs.length === 0 ? (
-            <div className="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
-              Waiting for queued files to appear.
-            </div>
-          ) : (
-            <div className="divide-y divide-border">
-              {jobs.map((job) => (
-                <BatchJobRow key={job.id} job={job} />
-              ))}
-            </div>
-          )}
-        </section>
+        <BatchJobList jobs={jobs} />
 
         {errorMessage ? (
           <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
@@ -206,6 +194,24 @@ export function BatchProgressWindow() {
         </div>
       </main>
     </div>
+  );
+}
+
+function BatchJobList({ jobs }: { jobs: DownloadJob[] }) {
+  return (
+    <section className="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
+      {jobs.length === 0 ? (
+        <div className="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
+          Waiting for queued files to appear.
+        </div>
+      ) : (
+        <div className="divide-y divide-border/60">
+          {jobs.map((job) => (
+            <BatchJobRow key={job.id} job={job} />
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

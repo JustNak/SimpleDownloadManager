@@ -2,7 +2,7 @@ use crate::commands::emit_snapshot;
 use crate::download::{
     probe_browser_handoff_access, schedule_downloads, PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE,
 };
-use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
+use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
@@ -543,7 +543,8 @@ async fn handle_request(
                 }
                 PromptDecision::Download {
                     directory_override,
-                    allow_duplicate,
+                    duplicate_action,
+                    renamed_filename,
                 } => {
                     if let Err(error) = probe_browser_download_access(
                         &state,
@@ -555,6 +556,14 @@ async fn handle_request(
                     {
                         return map_backend_error(request.request_id, error);
                     }
+                    let (filename_hint, duplicate_policy) = match prompt_enqueue_details(
+                        prompt.filename,
+                        duplicate_action,
+                        renamed_filename,
+                    ) {
+                        Ok(details) => details,
+                        Err(error) => return map_backend_error(request.request_id, error),
+                    };
 
                     let result = state
                         .enqueue_download_with_options(
@@ -562,13 +571,9 @@ async fn handle_request(
                             EnqueueOptions {
                                 source: Some(source),
                                 directory_override,
-                                filename_hint: Some(prompt.filename),
+                                filename_hint: Some(filename_hint),
                                 handoff_auth: payload.handoff_auth,
-                                duplicate_policy: if allow_duplicate {
-                                    DuplicatePolicy::Allow
-                                } else {
-                                    DuplicatePolicy::ReturnExisting
-                                },
+                                duplicate_policy,
                                 ..Default::default()
                             },
                         )
@@ -1275,6 +1280,32 @@ fn handoff_auth_header_summary(handoff_auth: Option<&HandoffAuth>) -> (usize, St
         (auth.headers.len(), "none".into())
     } else {
         (auth.headers.len(), names.join(","))
+    }
+}
+
+fn prompt_enqueue_details(
+    default_filename: String,
+    duplicate_action: PromptDuplicateAction,
+    renamed_filename: Option<String>,
+) -> Result<(String, DuplicatePolicy), BackendError> {
+    match duplicate_action {
+        PromptDuplicateAction::ReturnExisting => {
+            Ok((default_filename, DuplicatePolicy::ReturnExisting))
+        }
+        PromptDuplicateAction::DownloadAnyway => Ok((default_filename, DuplicatePolicy::Allow)),
+        PromptDuplicateAction::Overwrite => {
+            Ok((default_filename, DuplicatePolicy::ReplaceExisting))
+        }
+        PromptDuplicateAction::Rename => {
+            let filename = renamed_filename.unwrap_or_default();
+            if filename.trim().is_empty() {
+                return Err(BackendError {
+                    code: "INVALID_PAYLOAD",
+                    message: "Filename cannot be empty.".into(),
+                });
+            }
+            Ok((filename, DuplicatePolicy::Allow))
+        }
     }
 }
 

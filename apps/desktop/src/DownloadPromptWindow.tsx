@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Download, FolderOpen, Globe, HardDrive, MousePointerClick } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Download, FolderOpen, Globe, HardDrive, MousePointerClick } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { DownloadPrompt } from './types';
 import {
@@ -8,7 +8,6 @@ import {
   confirmDownloadPrompt,
   getAppSnapshot,
   getCurrentDownloadPrompt,
-  showExistingDownloadPrompt,
   swapDownloadPrompt,
   subscribeToDownloadPromptChanged,
   subscribeToStateChanged,
@@ -22,6 +21,9 @@ import { categoryFolderForFilename } from './downloadCategories';
 export function DownloadPromptWindow() {
   const [prompt, setPrompt] = useState<DownloadPrompt | null>(null);
   const [directoryOverride, setDirectoryOverride] = useState<string | null>(null);
+  const [duplicateMenuOpen, setDuplicateMenuOpen] = useState(false);
+  const [isRenamingDuplicate, setIsRenamingDuplicate] = useState(false);
+  const [renamedFilename, setRenamedFilename] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
@@ -47,6 +49,9 @@ export function DownloadPromptWindow() {
       setPrompt(await getCurrentDownloadPrompt());
       promptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
         setDirectoryOverride(null);
+        setDuplicateMenuOpen(false);
+        setIsRenamingDuplicate(false);
+        setRenamedFilename('');
         setErrorMessage('');
         setIsBusy(false);
         setPrompt(nextPrompt);
@@ -72,10 +77,11 @@ export function DownloadPromptWindow() {
   }, [directoryOverride, prompt]);
 
   const isDuplicate = Boolean(prompt?.duplicateJob);
-  const canSwapToBrowser = prompt?.source?.entryPoint === 'browser_download';
+  const canSwapToBrowser = prompt?.source?.entryPoint === 'browser_download' && !isDuplicate;
   const sourceLabel = prompt?.source
     ? `${prompt.source.browser} ${prompt.source.entryPoint.replaceAll('_', ' ')}`
     : 'Browser download';
+  const trimmedRenamedFilename = renamedFilename.trim();
 
   async function runAction(action: () => Promise<void>) {
     setIsBusy(true);
@@ -101,6 +107,27 @@ export function DownloadPromptWindow() {
     await currentWindow?.close();
   }
 
+  function startDuplicateRename() {
+    if (!prompt) return;
+    setRenamedFilename(prompt.filename);
+    setDuplicateMenuOpen(false);
+    setIsRenamingDuplicate(true);
+  }
+
+  async function confirmDuplicateAction(duplicateAction: 'download_anyway' | 'overwrite') {
+    if (!prompt) return;
+    setDuplicateMenuOpen(false);
+    await runAction(() => confirmDownloadPrompt(prompt.id, directoryOverride, { duplicateAction }));
+  }
+
+  async function confirmDuplicateRename() {
+    if (!prompt || !trimmedRenamedFilename) return;
+    await runAction(() => confirmDownloadPrompt(prompt.id, directoryOverride, {
+      duplicateAction: 'rename',
+      renamedFilename: trimmedRenamedFilename,
+    }));
+  }
+
   if (!prompt) {
     return (
       <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
@@ -114,10 +141,10 @@ export function DownloadPromptWindow() {
     <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
       <PopupTitlebar title={isDuplicate ? 'Duplicate download detected' : 'New download detected'} onClose={() => void handleClose()} />
 
-      <main className="flex min-h-0 flex-1 flex-col bg-surface px-5 py-4">
+      <main className="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
         {isDuplicate ? (
-          <div className="mb-4 flex items-start gap-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2.5 text-sm text-warning">
-            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          <div className="mb-3 flex items-start gap-2 rounded border border-warning/45 bg-warning/10 px-2.5 py-2 text-xs text-warning">
+            <AlertTriangle size={15} className="mt-0.5 shrink-0" />
             <div className="min-w-0">
               <div className="font-semibold text-foreground">This URL is already in the queue.</div>
               <div className="mt-0.5 truncate text-warning/90">{prompt.duplicateJob?.filename}</div>
@@ -125,12 +152,12 @@ export function DownloadPromptWindow() {
           </div>
         ) : null}
 
-        <section className="flex min-w-0 gap-4">
-          <FileBadge filename={prompt.filename} large />
+        <section className="flex min-w-0 gap-3">
+          <FileBadge filename={prompt.filename} />
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-lg font-semibold text-foreground" title={prompt.filename}>{prompt.filename}</h1>
-            <div className="mt-1 truncate text-sm text-muted-foreground" title={prompt.url}>{getHost(prompt.url)}</div>
-            <div className="mt-4 grid grid-cols-[116px_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
+            <h1 className="truncate text-base font-semibold leading-5 text-foreground" title={prompt.filename}>{prompt.filename}</h1>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={prompt.url}>{getHost(prompt.url)}</div>
+            <div className="mt-3 grid grid-cols-[92px_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
               <MetaLabel icon={<Globe size={15} />} label="Source" />
               <MetaValue value={prompt.url} accent />
               <MetaLabel icon={<FolderOpen size={15} />} label="Destination" />
@@ -149,52 +176,115 @@ export function DownloadPromptWindow() {
           </div>
         ) : null}
 
-        <div className="mt-auto flex items-center justify-between gap-3 border-t border-border pt-4">
+        <div className="mt-auto flex items-center justify-between gap-3 border-t border-border pt-3">
           <button
             onClick={() => void handleChangeDirectory()}
             disabled={isBusy}
-            className="flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-8 items-center gap-2 rounded border border-input px-3 text-xs font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
           >
             <FolderOpen size={16} />
             Change
           </button>
 
-          <div className="flex items-center gap-2">
-            {isDuplicate ? (
+          {isDuplicate && isRenamingDuplicate ? (
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+              <input
+                value={renamedFilename}
+                onChange={(event) => setRenamedFilename(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') void confirmDuplicateRename();
+                  if (event.key === 'Escape') setIsRenamingDuplicate(false);
+                }}
+                autoFocus
+                className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2.5 text-xs text-foreground outline-none transition focus:border-primary"
+                aria-label="Renamed filename"
+              />
               <button
-                onClick={() => void runAction(() => showExistingDownloadPrompt(prompt.id))}
+                onClick={() => {
+                  setIsRenamingDuplicate(false);
+                  setRenamedFilename('');
+                }}
                 disabled={isBusy}
-                className="h-9 rounded-md border border-input px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-8 rounded bg-destructive px-3 text-xs font-semibold text-destructive-foreground transition hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Show Existing
+                Cancel
               </button>
-            ) : null}
-            <button
-              onClick={() => void runAction(() => cancelDownloadPrompt(prompt.id))}
-              disabled={isBusy}
-              className="h-9 rounded-md bg-destructive px-3 text-sm font-semibold text-destructive-foreground transition hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            {canSwapToBrowser ? (
               <button
-                onClick={() => void runAction(() => swapDownloadPrompt(prompt.id))}
-                disabled={isBusy}
-                className="flex h-9 items-center gap-2 rounded-md bg-foreground px-3 text-sm font-semibold text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void confirmDuplicateRename()}
+                disabled={isBusy || !trimmedRenamedFilename}
+                className="h-8 rounded bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <BrowserWindowIcon />
-                Swap
+                Rename
               </button>
-            ) : null}
-            <button
-              onClick={() => void runAction(() => confirmDownloadPrompt(prompt.id, directoryOverride, isDuplicate))}
-              disabled={isBusy}
-              className="flex h-9 items-center gap-2 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Download size={16} />
-              {isDuplicate ? 'Download Anyway' : 'Download'}
-            </button>
-          </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void runAction(() => cancelDownloadPrompt(prompt.id))}
+                disabled={isBusy}
+                className="h-8 rounded bg-destructive px-3 text-xs font-semibold text-destructive-foreground transition hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              {canSwapToBrowser ? (
+                <button
+                  onClick={() => void runAction(() => swapDownloadPrompt(prompt.id))}
+                  disabled={isBusy}
+                  className="flex h-8 items-center gap-2 rounded bg-foreground px-3 text-xs font-semibold text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <BrowserWindowIcon />
+                  Swap
+                </button>
+              ) : null}
+              {isDuplicate ? (
+                <div className="relative">
+                  <button
+                    onClick={() => setDuplicateMenuOpen((open) => !open)}
+                    disabled={isBusy}
+                    className="flex h-8 min-w-[126px] items-center justify-center gap-1.5 rounded bg-primary px-3 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Download size={14} />
+                    Choose Action
+                    <ChevronDown size={13} />
+                  </button>
+                  {duplicateMenuOpen ? (
+                    <div className="absolute bottom-full right-0 z-10 mb-1 w-52 overflow-hidden rounded border border-border bg-popover text-xs text-popover-foreground shadow-xl">
+                      <button
+                        onClick={() => void confirmDuplicateAction('overwrite')}
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left font-semibold text-warning hover:bg-muted"
+                      >
+                        <span>Overwrite</span>
+                        <span className="text-[10px] font-medium text-muted-foreground">replace queue</span>
+                      </button>
+                      <button
+                        onClick={startDuplicateRename}
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left font-semibold text-foreground hover:bg-muted"
+                      >
+                        <span>Rename</span>
+                        <span className="text-[10px] font-medium text-muted-foreground">edit name</span>
+                      </button>
+                      <button
+                        onClick={() => void confirmDuplicateAction('download_anyway')}
+                        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left font-semibold text-foreground hover:bg-muted"
+                      >
+                        <span>Download Anyway</span>
+                        <span className="text-[10px] font-medium text-muted-foreground">copy</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <button
+                  onClick={() => void runAction(() => confirmDownloadPrompt(prompt.id, directoryOverride))}
+                  disabled={isBusy}
+                  className="flex h-8 min-w-[92px] items-center justify-center gap-2 rounded bg-primary px-4 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Download size={15} />
+                  Download
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </main>
     </div>

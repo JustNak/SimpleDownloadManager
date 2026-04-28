@@ -4,8 +4,8 @@ use crate::download::{
 };
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
-use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
-use crate::state::{validate_settings, EnqueueResult, EnqueueStatus, SharedState};
+use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
+use crate::state::{validate_settings, DuplicatePolicy, EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{
     DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, HostRegistrationStatus,
     Settings, TransferKind,
@@ -482,18 +482,51 @@ pub async fn confirm_download_prompt(
     prompts: State<'_, PromptRegistry>,
     id: String,
     directory_override: Option<String>,
-    allow_duplicate: bool,
+    allow_duplicate: Option<bool>,
+    duplicate_action: Option<PromptDuplicateAction>,
+    renamed_filename: Option<String>,
 ) -> Result<(), String> {
+    let duplicate_action = duplicate_action.unwrap_or_else(|| {
+        if allow_duplicate.unwrap_or(false) {
+            PromptDuplicateAction::DownloadAnyway
+        } else {
+            PromptDuplicateAction::ReturnExisting
+        }
+    });
     complete_prompt_action(
         &app,
         prompts.inner().clone(),
         &id,
         PromptDecision::Download {
             directory_override,
-            allow_duplicate,
+            duplicate_action,
+            renamed_filename,
         },
     )
     .await
+}
+
+fn prompt_enqueue_details(
+    default_filename: String,
+    duplicate_action: PromptDuplicateAction,
+    renamed_filename: Option<String>,
+) -> Result<(String, DuplicatePolicy), String> {
+    match duplicate_action {
+        PromptDuplicateAction::ReturnExisting => {
+            Ok((default_filename, DuplicatePolicy::ReturnExisting))
+        }
+        PromptDuplicateAction::DownloadAnyway => Ok((default_filename, DuplicatePolicy::Allow)),
+        PromptDuplicateAction::Overwrite => {
+            Ok((default_filename, DuplicatePolicy::ReplaceExisting))
+        }
+        PromptDuplicateAction::Rename => {
+            let filename = renamed_filename.unwrap_or_default();
+            if filename.trim().is_empty() {
+                return Err("Filename cannot be empty.".into());
+            }
+            Ok((filename, DuplicatePolicy::Allow))
+        }
+    }
 }
 
 #[tauri::command]
@@ -726,20 +759,28 @@ pub async fn test_extension_handoff(
             }
             PromptDecision::Download {
                 directory_override,
-                allow_duplicate,
+                duplicate_action,
+                renamed_filename,
             } => {
+                let (filename_hint, duplicate_policy) = match prompt_enqueue_details(
+                    prompt.filename.clone(),
+                    duplicate_action,
+                    renamed_filename,
+                ) {
+                    Ok(details) => details,
+                    Err(message) => {
+                        eprintln!("test extension handoff failed: {message}");
+                        return;
+                    }
+                };
                 let result = worker_state
                     .enqueue_download_with_options(
                         prompt.url,
                         crate::state::EnqueueOptions {
                             source: prompt.source,
                             directory_override,
-                            filename_hint: Some(prompt.filename),
-                            duplicate_policy: if allow_duplicate {
-                                crate::state::DuplicatePolicy::Allow
-                            } else {
-                                crate::state::DuplicatePolicy::ReturnExisting
-                            },
+                            filename_hint: Some(filename_hint),
+                            duplicate_policy,
                             ..Default::default()
                         },
                     )

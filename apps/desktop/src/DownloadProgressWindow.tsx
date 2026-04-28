@@ -332,7 +332,7 @@ function ProgressStrip({
 
 function MetricRail({ children }: { children: React.ReactNode }) {
   return (
-    <section className="mt-1.5 grid grid-cols-3 gap-2 border-y border-border/70 py-1">
+    <section className="mt-1.5 grid grid-cols-3 gap-2 bg-background/30 border-t border-border/35 px-2 py-1">
       {children}
     </section>
   );

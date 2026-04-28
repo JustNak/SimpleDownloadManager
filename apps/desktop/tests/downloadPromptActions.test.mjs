@@ -20,22 +20,72 @@ assert.match(
   /swap_download_prompt/,
   'swapDownloadPrompt should call the swap_download_prompt Tauri command',
 );
+assert.match(
+  backendSource,
+  /duplicateAction/,
+  'confirmDownloadPrompt should send an explicit duplicate action instead of a boolean allowDuplicate flag',
+);
+assert.match(
+  backendSource,
+  /renamedFilename/,
+  'confirmDownloadPrompt should support an explicit renamed filename for duplicate prompts',
+);
 assert.match(promptSource, /function BrowserWindowIcon/, 'prompt should include a generic browser SVG icon');
-assert.match(promptSource, />\s*Swap\s*</, 'prompt should render a Swap button');
+assert.match(promptSource, />\s*Swap\s*</, 'prompt should still render a Swap button for non-duplicate browser prompts');
 assert.match(
   promptSource,
-  /bg-foreground px-3 text-sm font-semibold text-background/,
+  /bg-foreground px-3 text-xs font-semibold text-background/,
   'Swap button should use inverse high-contrast foreground/background styling',
 );
 assert.match(
   promptSource,
-  /bg-destructive px-3 text-sm font-semibold text-destructive-foreground/,
+  /bg-destructive px-3 text-xs font-semibold text-destructive-foreground/,
   'Cancel button should use destructive red styling',
 );
 assert.match(
   promptSource,
-  /prompt\?\.source\?\.entryPoint === 'browser_download'/,
-  'Swap button should only be shown for browser download prompts',
+  /prompt\?\.source\?\.entryPoint === 'browser_download' && !isDuplicate/,
+  'Swap button should only be shown for non-duplicate browser download prompts',
+);
+assert.match(
+  promptSource,
+  />\s*Choose Action\s*</,
+  'duplicate prompt should use one primary Choose Action button',
+);
+assert.match(
+  promptSource,
+  />\s*Overwrite\s*</,
+  'duplicate action menu should offer Overwrite',
+);
+assert.match(
+  promptSource,
+  />\s*Rename\s*</,
+  'duplicate action menu should offer Rename',
+);
+assert.match(
+  promptSource,
+  />\s*Download Anyway\s*</,
+  'duplicate action menu should offer Download Anyway',
+);
+assert.match(
+  promptSource,
+  /confirmDuplicateAction\('overwrite'\)/,
+  'Overwrite should send a replace-queue duplicate action',
+);
+assert.match(
+  promptSource,
+  /duplicateAction:\s*'rename'/,
+  'Rename should send a rename duplicate action',
+);
+assert.match(
+  promptSource,
+  /confirmDuplicateAction\('download_anyway'\)/,
+  'Download Anyway should send an allow-copy duplicate action',
+);
+assert.doesNotMatch(
+  promptSource,
+  />\s*Show Existing\s*</,
+  'compact duplicate prompt should not keep the old Show Existing secondary action',
 );
 
 for (const [name, source] of progressSources) {

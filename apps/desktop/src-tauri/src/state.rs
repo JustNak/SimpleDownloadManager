@@ -119,6 +119,7 @@ pub enum DuplicatePolicy {
     #[default]
     ReturnExisting,
     Allow,
+    ReplaceExisting,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -636,6 +637,23 @@ impl RuntimeState {
                 return Ok(result);
             }
         }
+        let duplicate_replacement_index =
+            if options.duplicate_policy == DuplicatePolicy::ReplaceExisting {
+                let index = self.jobs.iter().position(|job| job.url == url);
+                if let Some(index) = index {
+                    let job = &self.jobs[index];
+                    if job_blocks_removal(job, self.active_workers.contains(&job.id)) {
+                        return Err(BackendError {
+                            code: "DUPLICATE_ACTIVE",
+                            message: "Pause or cancel the existing duplicate before replacing it."
+                                .into(),
+                        });
+                    }
+                }
+                index
+            } else {
+                None
+            };
 
         let directory = options
             .directory_override
@@ -662,6 +680,15 @@ impl RuntimeState {
         };
         let target_dir = prepare_category_download_directory(&download_dir, &filename)?;
         verify_download_directory_writable(&target_dir)?;
+        let replaced_duplicate = duplicate_replacement_index.map(|index| {
+            let job = self.jobs.remove(index);
+            self.active_workers.remove(&job.id);
+            self.external_reseed_jobs.remove(&job.id);
+            if job.state != JobState::Completed {
+                let _ = remove_path_if_exists(Path::new(&job.temp_path));
+            }
+            (job.id, job.filename)
+        });
         let job_id = format!("job_{}", self.next_job_number);
         self.next_job_number += 1;
         let (target_path, temp_path) = if transfer_kind == TransferKind::Torrent {
@@ -709,6 +736,14 @@ impl RuntimeState {
             format!("Queued {filename}"),
             Some(job_id.clone()),
         );
+        if let Some((replaced_id, replaced_filename)) = replaced_duplicate {
+            self.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                format!("Replaced duplicate {replaced_filename} ({replaced_id}) with {filename}"),
+                Some(job_id.clone()),
+            );
+        }
 
         Ok(EnqueueResult {
             snapshot: self.snapshot(),
@@ -3331,6 +3366,100 @@ mod tests {
             "Compressed"
         );
         assert!(state.jobs[1].target_path.ends_with("file.zip"));
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_options_replace_duplicate_removes_replaceable_queue_job() {
+        let download_dir = test_runtime_dir("duplicate-replace-queued");
+        let mut existing_job = download_job("job_9", JobState::Queued, ResumeSupport::Supported, 0);
+        existing_job.url = "https://example.com/file.zip".into();
+        existing_job.filename = "file.zip".into();
+        existing_job.target_path = download_dir.join("file.zip").display().to_string();
+        let temp_path = download_dir.join("file.zip.part");
+        std::fs::write(&temp_path, b"partial").unwrap();
+        existing_job.temp_path = temp_path.display().to_string();
+
+        let mut state = runtime_state_with_jobs(vec![existing_job]);
+        state.settings.download_directory = download_dir.display().to_string();
+
+        let result = state
+            .enqueue_download_in_memory(
+                "https://example.com/file.zip",
+                EnqueueOptions {
+                    duplicate_policy: DuplicatePolicy::ReplaceExisting,
+                    ..Default::default()
+                },
+            )
+            .expect("replaceable duplicate should be replaced");
+
+        assert_eq!(result.status, EnqueueStatus::Queued);
+        assert_eq!(state.jobs.len(), 1);
+        assert_ne!(state.jobs[0].id, "job_9");
+        assert_eq!(state.jobs[0].filename, "file.zip");
+        assert!(!temp_path.exists());
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_options_replace_duplicate_rejects_active_duplicate() {
+        let download_dir = test_runtime_dir("duplicate-replace-active");
+        let mut existing_job =
+            download_job("job_9", JobState::Downloading, ResumeSupport::Supported, 25);
+        existing_job.url = "https://example.com/file.zip".into();
+
+        let mut state = runtime_state_with_jobs(vec![existing_job]);
+        state.settings.download_directory = download_dir.display().to_string();
+        state.active_workers.insert("job_9".into());
+
+        let error = state
+            .enqueue_download_in_memory(
+                "https://example.com/file.zip",
+                EnqueueOptions {
+                    duplicate_policy: DuplicatePolicy::ReplaceExisting,
+                    ..Default::default()
+                },
+            )
+            .expect_err("active duplicate should not be replaced");
+
+        assert_eq!(error.code, "DUPLICATE_ACTIVE");
+        assert_eq!(state.jobs.len(), 1);
+
+        let _ = std::fs::remove_dir_all(download_dir);
+    }
+
+    #[test]
+    fn enqueue_options_replace_duplicate_keeps_completed_target_file() {
+        let download_dir = test_runtime_dir("duplicate-replace-completed");
+        let target_path = download_dir.join("file.zip");
+        std::fs::write(&target_path, b"completed").unwrap();
+
+        let mut existing_job =
+            download_job("job_9", JobState::Completed, ResumeSupport::Supported, 100);
+        existing_job.url = "https://example.com/file.zip".into();
+        existing_job.filename = "file.zip".into();
+        existing_job.target_path = target_path.display().to_string();
+        existing_job.temp_path = format!("{}.part", existing_job.target_path);
+
+        let mut state = runtime_state_with_jobs(vec![existing_job]);
+        state.settings.download_directory = download_dir.display().to_string();
+
+        let result = state
+            .enqueue_download_in_memory(
+                "https://example.com/file.zip",
+                EnqueueOptions {
+                    duplicate_policy: DuplicatePolicy::ReplaceExisting,
+                    ..Default::default()
+                },
+            )
+            .expect("completed duplicate should be replaced without deleting the artifact");
+
+        assert_eq!(result.status, EnqueueStatus::Queued);
+        assert!(target_path.exists());
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"completed");
+        assert_ne!(PathBuf::from(&state.jobs[0].target_path), target_path);
 
         let _ = std::fs::remove_dir_all(download_dir);
     }
