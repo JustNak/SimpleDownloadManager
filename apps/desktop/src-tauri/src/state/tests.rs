@@ -2280,6 +2280,7 @@ fn torrent_runtime_update(
         upload_speed: 0,
         eta: None,
         fetched_bytes: 0,
+        phase: TorrentRuntimePhase::Live,
         finished,
         error: None,
     }

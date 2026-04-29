@@ -227,6 +227,7 @@ function TorrentingProgressView({
   onClose,
 }: ProgressViewProps) {
   const metadataPending = isTorrentMetadataPending(job);
+  const checkingFiles = isTorrentCheckingFiles(job);
 
   return (
     <ProgressShell title="Torrenting">
@@ -248,12 +249,12 @@ function TorrentingProgressView({
             />
 
             <MetricRail>
-              <Metric label="Speed" value={job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
-              <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
+              <Metric label="Speed" value={job.state === JobState.Downloading && !checkingFiles ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
+              <Metric label="ETA" value={job.state === JobState.Downloading && !checkingFiles ? formatTime(progressMetrics.timeRemaining) : '--'} />
               <Metric label="Peers" value={torrentPeerCount(job)} />
             </MetricRail>
 
-            <TorrentDownloadedRow job={job} />
+            {checkingFiles ? null : <TorrentDownloadedRow job={job} />}
           </>
         ) : null}
 

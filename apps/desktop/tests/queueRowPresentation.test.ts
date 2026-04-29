@@ -62,6 +62,20 @@ assert.equal(
 );
 
 assert.equal(
+  shouldShowNameProgress({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    progress: 44,
+    totalBytes: 3 * 1024,
+    downloadedBytes: 1024,
+    torrent: { uploadedBytes: 2048, fetchedBytes: 2048, ratio: 0.03, seedingStartedAt: 123_456 },
+  }),
+  false,
+  'seeding restore validation should not show a download progress wash over the filename area',
+);
+
+assert.equal(
   shouldShowNameProgress({ ...baseJob, state: 'completed', progress: 100 }),
   false,
   'completed downloads should remove the inline progress bar entirely',
@@ -143,6 +157,32 @@ assert.equal(
   'active torrents with a prior seeding timestamp should be treated as seeding restores',
 );
 
+assert.equal(
+  isTorrentCheckingFiles({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    totalBytes: 3 * 1024,
+    downloadedBytes: 1024,
+    torrent: { uploadedBytes: 2048, fetchedBytes: 4096, ratio: 0.03, seedingStartedAt: 123_456 },
+  }),
+  true,
+  'prior seeding torrents with verified local progress should show file checking instead of restore/download wording',
+);
+
+assert.equal(
+  isTorrentSeedingRestore({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    totalBytes: 3 * 1024,
+    downloadedBytes: 1024,
+    torrent: { uploadedBytes: 2048, fetchedBytes: 4096, ratio: 0.03, seedingStartedAt: 123_456 },
+  }),
+  false,
+  'verified local progress should leave the broad restoring label',
+);
+
 assert.deepEqual(
   queueStatusPresentation({
     ...baseJob,
@@ -150,8 +190,8 @@ assert.deepEqual(
     state: 'downloading',
     torrent: { uploadedBytes: 2048, ratio: 2.0, seedingStartedAt: 123_456 },
   }),
-  { label: 'Restoring seeding', tone: 'warning' },
-  'seeding restore torrents should not be labeled as fresh downloads',
+  { label: 'Checking', tone: 'warning' },
+  'seeding restore torrents with verified local progress should be labeled as checking rather than downloading',
 );
 
 assert.deepEqual(

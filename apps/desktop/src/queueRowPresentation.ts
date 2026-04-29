@@ -27,8 +27,12 @@ export function isTorrentQueueView(view: string): boolean {
   return view === 'torrents' || view.startsWith('torrent-');
 }
 
-export function shouldShowNameProgress(job: Pick<DownloadJob, 'state' | 'progress'>): boolean {
-  return job.state === 'downloading' && clampQueueProgress(job.progress) > 0;
+type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
+  Partial<Pick<DownloadJob, 'downloadedBytes' | 'filename' | 'progress' | 'torrent' | 'transferKind' | 'totalBytes'>>;
+
+export function shouldShowNameProgress(job: TorrentMetadataPendingJob): boolean {
+  if (isTorrentCheckingFiles(job) || isTorrentSeedingRestore(job)) return false;
+  return job.state === 'downloading' && clampQueueProgress(job.progress ?? 0) > 0;
 }
 
 export function fileBadgeActivityState(
@@ -45,9 +49,6 @@ export function clampQueueProgress(progress: number): number {
   return Math.max(0, Math.min(100, progress));
 }
 
-type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
-  Partial<Pick<DownloadJob, 'downloadedBytes' | 'filename' | 'torrent' | 'transferKind' | 'totalBytes'>>;
-
 export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolean {
   if (job.transferKind !== 'torrent') return false;
   if (job.state !== 'starting' && job.state !== 'downloading') return false;
@@ -58,15 +59,16 @@ export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolea
 export function isTorrentSeedingRestore(job: TorrentMetadataPendingJob): boolean {
   if (job.transferKind !== 'torrent') return false;
   if (!['queued', 'starting', 'downloading'].includes(job.state)) return false;
+  if (isTorrentCheckingFiles(job)) return false;
   return typeof job.torrent?.seedingStartedAt === 'number';
 }
 
 export function isTorrentCheckingFiles(job: TorrentMetadataPendingJob): boolean {
   if (job.transferKind !== 'torrent') return false;
   if (job.state !== 'starting' && job.state !== 'downloading') return false;
-  if (typeof job.torrent?.seedingStartedAt === 'number') return false;
   if ((job.totalBytes ?? 0) <= 0) return false;
   if ((job.downloadedBytes ?? 0) <= 0) return false;
+  if (typeof job.torrent?.seedingStartedAt === 'number') return job.state === 'downloading';
   return (job.torrent?.fetchedBytes ?? 0) === 0;
 }
 

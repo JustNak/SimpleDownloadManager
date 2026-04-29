@@ -63,6 +63,20 @@ assert.equal(
 );
 
 assert.equal(
+  shouldBlurJobIdentity({
+    ...completedJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    progress: 44,
+    totalBytes: 3 * 1024,
+    downloadedBytes: 1024,
+    torrent: { uploadedBytes: 2048, fetchedBytes: 4096, ratio: 0.03, seedingStartedAt: 123_456 },
+  } as typeof completedJob),
+  false,
+  'seeding restore validation should not blur the file identity like an active peer download',
+);
+
+assert.equal(
   shouldBlurJobIdentity(completedJob),
   false,
   'completed jobs should not blur the file identity',

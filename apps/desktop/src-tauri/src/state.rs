@@ -37,7 +37,7 @@ pub(crate) use torrent::should_stop_seeding;
 pub use types::{
     BackendError, BulkArchiveEntry, BulkArchiveReady, DownloadTask, DuplicatePolicy,
     EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation,
-    TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure, WorkerControl,
+    TorrentRuntimePhase, TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure, WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;
