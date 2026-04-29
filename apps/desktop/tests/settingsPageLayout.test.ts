@@ -5,8 +5,8 @@ const source = readFileSync(new URL('../src/SettingsPage.tsx', import.meta.url),
 
 assert.match(
   source,
-  /settings-surface[\s\S]*grid[\s\S]*max-w-6xl[\s\S]*grid-cols-\[220px_minmax\(0,1fr\)\][\s\S]*gap-4[\s\S]*p-4/,
-  'settings surface should use the two-column navigator layout tokens',
+  /settings-surface[\s\S]*grid[\s\S]*max-w-6xl[\s\S]*grid-cols-\[160px_minmax\(0,1fr\)\][\s\S]*gap-3[\s\S]*p-4/,
+  'settings surface should use the slimmer two-column navigator layout tokens',
 );
 
 assert.match(
@@ -39,6 +39,30 @@ assert.match(
   source,
   /settings-nav sticky top-24/,
   'settings navigator should stay visible below the sticky settings header while scrolling long settings pages',
+);
+
+assert.match(
+  source,
+  /className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-1\.5"/,
+  'settings navigator should use slimmer padding',
+);
+
+assert.match(
+  source,
+  /className="flex h-8 items-center rounded-md px-2\.5 text-xs font-medium/,
+  'settings navigator links should use slimmer height and padding',
+);
+
+assert.match(
+  source,
+  /FieldRow label="Torrent Download Directory"[\s\S]*id="torrentDownloadDirectory"[\s\S]*Browse/,
+  'torrent settings should expose a torrent download directory browse row',
+);
+
+assert.match(
+  source,
+  /FieldRow[\s\S]*label="Clear Cache Session"[\s\S]*handleClearTorrentSessionCache/,
+  'torrent settings should expose the torrent session cache cleanup action',
 );
 
 assert.match(

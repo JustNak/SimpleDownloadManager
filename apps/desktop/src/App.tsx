@@ -33,6 +33,7 @@ import {
   browseDirectory,
   cancelJob,
   checkForUpdate,
+  clearTorrentSessionCache,
   deleteJob,
   deleteJobs,
   exportDiagnosticsReport,
@@ -132,6 +133,7 @@ export default function App() {
     downloadPerformanceMode: 'balanced',
     torrent: {
       enabled: true,
+      downloadDirectory: `${DEFAULT_DOWNLOAD_DIRECTORY}\\Torrent`,
       seedMode: 'forever',
       seedRatioLimit: 1,
       seedTimeLimitMinutes: 60,
@@ -756,6 +758,22 @@ export default function App() {
     }
   }
 
+  async function handleClearTorrentSessionCache() {
+    try {
+      const result = await clearTorrentSessionCache();
+      await refreshSnapshotFromBackend();
+      addToast({
+        type: result.pendingRestart ? 'warning' : 'success',
+        title: result.pendingRestart ? 'Cache Clear Scheduled' : 'Cache Session Cleared',
+        message: result.pendingRestart
+          ? `Torrent session cache is locked and will be cleared on next startup: ${result.sessionPath}`
+          : `Torrent session cache cleared: ${result.sessionPath}`,
+      });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Cache Clear Failed', message: getErrorMessage(error) });
+    }
+  }
+
   const counts = useMemo(() => {
     return getQueueCounts(jobs);
   }, [jobs]);
@@ -790,6 +808,11 @@ export default function App() {
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
   const canRetryFailed = canRetryFailedDownloads(jobs);
   const isTorrentStatusView = isTorrentView(view);
+  const hasActiveTorrentJobs = jobs.some(
+    (job) =>
+      job.transferKind === 'torrent'
+      && [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state),
+  );
   const totalDownloadSpeed = jobs
     .filter((job) => job.state === JobState.Downloading)
     .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0);
@@ -884,6 +907,8 @@ export default function App() {
                 diagnostics={diagnostics}
                 onSave={(newSettings) => handleSaveSettings(newSettings, 'all')}
                 onBrowseDirectory={handleBrowseDirectory}
+                hasActiveTorrentJobs={hasActiveTorrentJobs}
+                onClearTorrentSessionCache={handleClearTorrentSessionCache}
                 onCancel={() => requestViewChange('all')}
                 onDirtyChange={setSettingsDirty}
                 onDraftChange={setSettingsDraft}
@@ -1323,9 +1348,6 @@ function StatusBar({
 }) {
   const connectionPresentation = connectionStatusPresentation(connectionState);
   const ConnectionIcon = connectionPresentation.icon;
-  const seedDisplay = torrentStats.seedSpeed > 0
-    ? `${formatBytes(torrentStats.seedSpeed)}/s`
-    : `Up ${formatBytes(torrentStats.uploadedBytes)}`;
 
   return (
     <footer className="status-bar flex h-10 shrink-0 items-center justify-between border-t border-border bg-command px-6 text-xs text-muted-foreground">
@@ -1339,11 +1361,11 @@ function StatusBar({
             <span className="h-4 w-px bg-border" />
             <span className="flex items-center gap-2 text-foreground">
               <Upload size={16} className="text-fuchsia-400" />
-              Seed {seedDisplay}
+              {formatBytes(torrentStats.uploadedBytes)}
             </span>
             <span className="h-4 w-px bg-border" />
             <span className="flex items-center gap-2 text-muted-foreground">
-              Ratio {formatTorrentStatusRatio(torrentStats.averageRatio)}
+              Total Ratio {formatTorrentStatusRatio(torrentStats.totalRatio)}
             </span>
           </>
         ) : (

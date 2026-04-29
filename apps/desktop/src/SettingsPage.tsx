@@ -39,7 +39,7 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
-import { normalizeTorrentSettings } from './torrentSettings';
+import { defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
 
 const ACCENT_COLOR_PRESETS = [
   { name: 'Blue', value: '#3b82f6' },
@@ -57,6 +57,8 @@ interface SettingsPageProps {
   diagnostics: DiagnosticsSnapshot | null;
   onSave: (settings: Settings) => void | Promise<void | boolean>;
   onBrowseDirectory: () => Promise<string | null | void>;
+  hasActiveTorrentJobs: boolean;
+  onClearTorrentSessionCache: () => void | Promise<void>;
   onCancel: () => void;
   onDirtyChange?: (isDirty: boolean) => void;
   onDraftChange?: (settings: Settings) => void;
@@ -76,6 +78,8 @@ export function SettingsPage({
   diagnostics,
   onSave,
   onBrowseDirectory,
+  hasActiveTorrentJobs,
+  onClearTorrentSessionCache,
   onCancel,
   onDirtyChange,
   onDraftChange,
@@ -97,6 +101,7 @@ export function SettingsPage({
   const [excludedSearchQuery, setExcludedSearchQuery] = useState('');
   const [isExcludedSitesDialogOpen, setIsExcludedSitesDialogOpen] = useState(false);
   const [accentColorInput, setAccentColorInput] = useState(normalizeAccentColor(settings.accentColor));
+  const [isClearingTorrentSessionCache, setIsClearingTorrentSessionCache] = useState(false);
 
   formDataRef.current = formData;
 
@@ -148,7 +153,36 @@ export function SettingsPage({
   const handleBrowseDirectory = async () => {
     const selectedDirectory = await onBrowseDirectory();
     if (!selectedDirectory) return;
-    setFormData((prev) => ({ ...prev, downloadDirectory: selectedDirectory }));
+    setFormData((prev) => {
+      const previousDefaultTorrentDirectory = defaultTorrentDownloadDirectory(prev.downloadDirectory);
+      const shouldUpdateTorrentDirectory = !prev.torrent.downloadDirectory
+        || prev.torrent.downloadDirectory === previousDefaultTorrentDirectory;
+      return {
+        ...prev,
+        downloadDirectory: selectedDirectory,
+        torrent: shouldUpdateTorrentDirectory
+          ? normalizeTorrentSettings(
+            { ...prev.torrent, downloadDirectory: defaultTorrentDownloadDirectory(selectedDirectory) },
+            selectedDirectory,
+          )
+          : prev.torrent,
+      };
+    });
+  };
+
+  const handleBrowseTorrentDirectory = async () => {
+    const selectedDirectory = await onBrowseDirectory();
+    if (!selectedDirectory) return;
+    updateTorrentSettings({ downloadDirectory: selectedDirectory });
+  };
+
+  const handleClearTorrentSessionCache = async () => {
+    setIsClearingTorrentSessionCache(true);
+    try {
+      await onClearTorrentSessionCache();
+    } finally {
+      setIsClearingTorrentSessionCache(false);
+    }
   };
 
   const updateExtensionIntegration = (update: Partial<Settings['extensionIntegration']>) => {
@@ -167,7 +201,7 @@ export function SettingsPage({
       torrent: normalizeTorrentSettings({
         ...prev.torrent,
         ...update,
-      }),
+      }, prev.downloadDirectory),
     }));
   };
 
@@ -212,7 +246,7 @@ export function SettingsPage({
 
   return (
     <>
-    <form onSubmit={handleSubmit} className="settings-surface mx-auto grid w-full max-w-6xl grid-cols-[220px_minmax(0,1fr)] gap-4 p-4">
+    <form onSubmit={handleSubmit} className="settings-surface mx-auto grid w-full max-w-6xl grid-cols-[160px_minmax(0,1fr)] gap-3 p-4">
       <header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/95 pb-3 pt-4 backdrop-blur">
         <div>
           <h1 className="text-xl font-semibold tracking-normal text-foreground">Settings</h1>
@@ -229,7 +263,7 @@ export function SettingsPage({
         </div>
       </header>
 
-      <nav className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-2" aria-label="Settings sections">
+      <nav className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-1.5" aria-label="Settings sections">
         <SettingsNavLink href="#settings-general" label="General" />
         <SettingsNavLink href="#settings-updates" label="App Updates" />
         <SettingsNavLink href="#settings-torrenting" label="Torrenting" />
@@ -393,6 +427,42 @@ export function SettingsPage({
               checked={formData.torrent.enabled}
               onChange={(checked) => updateTorrentSettings({ enabled: checked })}
             />
+          </FieldRow>
+
+          <FieldRow label="Torrent Download Directory" description="Default torrent save path." tooltip="New torrent jobs use this folder instead of file-type category folders.">
+            <div className="flex min-w-0 gap-2">
+              <input
+                type="text"
+                id="torrentDownloadDirectory"
+                value={formData.torrent.downloadDirectory}
+                readOnly
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-muted-foreground outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void handleBrowseTorrentDirectory()}
+                className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted"
+              >
+                <FolderOpen size={16} />
+                Browse
+              </button>
+            </div>
+          </FieldRow>
+
+          <FieldRow
+            label="Clear Cache Session"
+            description={hasActiveTorrentJobs ? 'Pause active torrents first.' : 'Remove stale torrent engine resume cache.'}
+            tooltip="Clears the torrent session cache without deleting downloaded payload files or persisted counters."
+          >
+            <button
+              type="button"
+              onClick={() => void handleClearTorrentSessionCache()}
+              disabled={hasActiveTorrentJobs || isClearingTorrentSessionCache}
+              className="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 size={16} />
+              {isClearingTorrentSessionCache ? 'Clearing...' : 'Clear Cache Session'}
+            </button>
           </FieldRow>
 
           <FieldRow label="Seeding Policy" description="Stop condition." tooltip="Controls when completed torrent downloads stop seeding.">
@@ -1048,7 +1118,7 @@ function SettingsNavLink({ href, label }: { href: string; label: string }) {
   return (
     <a
       href={href}
-      className="flex h-9 items-center rounded-md px-3 text-sm font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
+      className="flex h-8 items-center rounded-md px-2.5 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
     >
       {label}
     </a>

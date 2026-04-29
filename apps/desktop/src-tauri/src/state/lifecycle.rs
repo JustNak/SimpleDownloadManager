@@ -15,6 +15,7 @@ impl SharedState {
 
         std::fs::create_dir_all(&base_dir)
             .map_err(|error| format!("Could not create app data directory: {error}"))?;
+        apply_pending_torrent_session_cache_clear(&base_dir);
 
         let storage_path = base_dir.join("state.json");
         let storage_exists = storage_path.exists();
@@ -30,8 +31,13 @@ impl SharedState {
 
         normalize_accent_color(&mut persisted.settings);
         normalize_extension_settings(&mut persisted.settings.extension_integration);
-        normalize_torrent_settings(&mut persisted.settings.torrent);
+        normalize_torrent_settings_for_download_directory(
+            &mut persisted.settings.torrent,
+            &persisted.settings.download_directory,
+        );
         ensure_download_category_directories(Path::new(&persisted.settings.download_directory))?;
+        std::fs::create_dir_all(&persisted.settings.torrent.download_directory)
+            .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
 
         let jobs = persisted
             .jobs

@@ -1558,7 +1558,6 @@ function formatQueueSpeed(job: DownloadJob, averageSpeed: number) {
 
 function formatTorrentSeedMetric(job: DownloadJob) {
   if (!job.torrent) return '--';
-  if (job.state === JobState.Seeding && job.speed > 0) return `${formatBytes(job.speed)}/s`;
   if (job.torrent.uploadedBytes > 0) return formatBytes(job.torrent.uploadedBytes);
   return '--';
 }
@@ -1601,7 +1600,7 @@ function torrentDetailTitle(metrics: TorrentDetailMetric[]) {
 }
 
 function torrentMetricValue(metric: TorrentDetailMetric) {
-  if (metric.kind === 'upload') return `Up ${formatBytes(metric.value)}`;
+  if (metric.kind === 'upload') return `${formatBytes(metric.value)}/s`;
   if (metric.kind === 'peers') return `${metric.value} peers`;
   return `${metric.value} seeds`;
 }

@@ -81,6 +81,7 @@ fn main() {
             commands::clear_completed_jobs,
             commands::save_settings,
             commands::browse_directory,
+            commands::clear_torrent_session_cache,
             commands::browse_torrent_file,
             commands::get_current_download_prompt,
             commands::confirm_download_prompt,

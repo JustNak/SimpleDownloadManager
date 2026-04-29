@@ -1,14 +1,18 @@
 use crate::download::{
-    apply_torrent_runtime_settings, forget_torrent_session_for_restart, schedule_downloads,
-    schedule_external_reseed, EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
+    apply_torrent_runtime_settings, forget_known_torrent_sessions,
+    forget_torrent_session_for_restart, schedule_downloads, schedule_external_reseed,
+    EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
 };
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
-use crate::state::{validate_settings, DuplicatePolicy, EnqueueResult, EnqueueStatus, SharedState};
+use crate::state::{
+    clear_torrent_session_cache_directory, validate_settings, DuplicatePolicy, EnqueueResult,
+    EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
+};
 use crate::storage::{
-    DesktopSnapshot, DiagnosticsSnapshot, DownloadJob, DownloadPrompt, DownloadSource,
-    HostRegistrationStatus, JobState, Settings, TransferKind,
+    DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPrompt,
+    DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
@@ -424,10 +428,7 @@ pub async fn delete_job(
     Ok(())
 }
 
-async fn prepare_torrent_removal(
-    state: &State<'_, SharedState>,
-    id: &str,
-) -> Result<(), String> {
+async fn prepare_torrent_removal(state: &State<'_, SharedState>, id: &str) -> Result<(), String> {
     let Some(cleanup) = state
         .torrent_removal_cleanup_info(id)
         .await
@@ -498,6 +499,34 @@ pub async fn browse_directory() -> Result<Option<String>, String> {
         .map_err(|error| format!("Could not open folder picker: {error}"))?;
 
     Ok(selected.map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn clear_torrent_session_cache(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<TorrentSessionCacheClearResult, String> {
+    let prepared = state
+        .prepare_torrent_session_cache_clear()
+        .await
+        .map_err(|error| error.message)?;
+
+    if let Err(error) = forget_known_torrent_sessions(&prepared.torrents).await {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent",
+                format!(
+                    "Could not forget in-memory torrent sessions before cache cleanup: {error}"
+                ),
+                None,
+            )
+            .await;
+    }
+
+    let result = clear_torrent_session_cache_directory(&state.app_data_dir())?;
+    emit_snapshot(&app, &prepared.snapshot);
+    Ok(result)
 }
 
 #[tauri::command]

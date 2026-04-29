@@ -329,14 +329,15 @@ assert.deepEqual(
     ...baseJob,
     transferKind: 'torrent',
     state: 'seeding',
+    speed: 81920,
     torrent: { uploadedBytes: 2048, ratio: 2.0, peers: 9, seeds: 46 },
   }),
   [
-    { kind: 'upload', label: 'Uploaded', value: 2048 },
+    { kind: 'upload', label: 'Upload speed', value: 81920 },
     { kind: 'peers', label: 'Peers', value: 9 },
     { kind: 'seeds', label: 'Seeds', value: 46 },
   ],
-  'torrent row metrics should omit ratio and keep upload/peer/seed indicators separate',
+  'torrent row metrics should show upload speed instead of total uploaded bytes',
 );
 
 const byteLabel = (bytes: number) => `${bytes} B`;

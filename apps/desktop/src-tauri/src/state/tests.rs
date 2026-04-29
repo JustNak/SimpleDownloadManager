@@ -325,6 +325,30 @@ fn validate_settings_creates_download_category_directories() {
 }
 
 #[test]
+fn validate_settings_defaults_and_creates_torrent_download_directory() {
+    let download_dir = test_runtime_dir("torrent-directory-settings");
+    let mut settings = Settings {
+        download_directory: download_dir.display().to_string(),
+        torrent: TorrentSettings {
+            download_directory: String::new(),
+            ..TorrentSettings::default()
+        },
+        ..Settings::default()
+    };
+
+    validate_settings(&mut settings).expect("settings should validate");
+
+    let expected_torrent_dir = download_dir.join("Torrent");
+    assert_eq!(
+        settings.torrent.download_directory,
+        expected_torrent_dir.display().to_string()
+    );
+    assert!(expected_torrent_dir.is_dir());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
 fn enqueue_routes_downloads_into_category_directories() {
     let download_dir = test_runtime_dir("category-routing");
     let mut state = runtime_state_with_jobs(Vec::new());
@@ -365,6 +389,39 @@ fn enqueue_routes_downloads_into_category_directories() {
 }
 
 #[test]
+fn enqueue_torrent_uses_torrent_directory_without_category_folder() {
+    let download_dir = test_runtime_dir("torrent-directory-routing");
+    let torrent_dir = download_dir.join("Torrent");
+    let mut state = runtime_state_with_jobs(Vec::new());
+    state.settings.download_directory = download_dir.display().to_string();
+    state.settings.torrent.download_directory = torrent_dir.display().to_string();
+
+    let result = state
+        .enqueue_download_in_memory(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Fedora",
+            EnqueueOptions::default(),
+        )
+        .expect("torrent should enqueue into the torrent directory");
+    let job = result
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == result.job_id)
+        .expect("queued torrent job");
+
+    assert_eq!(
+        PathBuf::from(&job.target_path)
+            .parent()
+            .map(Path::to_path_buf),
+        Some(torrent_dir.clone())
+    );
+    assert!(PathBuf::from(&job.temp_path).starts_with(torrent_dir.join(".torrent-state")));
+    assert_ne!(target_parent_folder(&job.target_path), "Other");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
 fn prepare_download_prompt_marks_duplicate_job() {
     let mut existing_job = download_job(
         "job_12",
@@ -396,6 +453,36 @@ fn prepare_download_prompt_marks_duplicate_job() {
         Some("job_12")
     );
     assert_eq!(target_parent_folder(&prompt.target_path), "Compressed");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn prepare_torrent_download_prompt_uses_torrent_directory_without_category_folder() {
+    let download_dir = test_runtime_dir("prompt-torrent-directory");
+    let torrent_dir = download_dir.join("Torrent");
+    let mut state = runtime_state_with_jobs(Vec::new());
+    state.settings.download_directory = download_dir.display().to_string();
+    state.settings.torrent.download_directory = torrent_dir.display().to_string();
+
+    let prompt = state
+        .prepare_download_prompt(
+            "prompt_torrent",
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Fedora",
+            None,
+            None,
+            None,
+        )
+        .expect("torrent prompt should use the torrent directory");
+
+    assert_eq!(prompt.default_directory, torrent_dir.display().to_string());
+    assert_eq!(
+        PathBuf::from(&prompt.target_path)
+            .parent()
+            .map(Path::to_path_buf),
+        Some(torrent_dir.clone())
+    );
+    assert_ne!(target_parent_folder(&prompt.target_path), "Other");
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -805,6 +892,121 @@ async fn external_reseed_non_file_access_failure_is_not_intercepted() {
 
     assert!(handled.is_none());
     assert!(state.is_external_reseed_pending("job_35c").await);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn torrent_session_cache_clear_blocks_active_torrents() {
+    let download_dir = test_runtime_dir("torrent-cache-active");
+    let mut active_job = download_job("job_1", JobState::Seeding, ResumeSupport::Unsupported, 100);
+    active_job.transfer_kind = TransferKind::Torrent;
+    active_job.torrent = Some(TorrentInfo {
+        engine_id: Some(7),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        uploaded_bytes: 2048,
+        ratio: 1.0,
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active_job]);
+
+    let error = state
+        .prepare_torrent_session_cache_clear()
+        .await
+        .expect_err("active torrents should block cache clearing");
+
+    assert_eq!(error.code, "TORRENT_CACHE_ACTIVE");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn torrent_session_cache_clear_resets_runtime_identity_and_reseed_state() {
+    let download_dir = test_runtime_dir("torrent-cache-runtime-reset");
+    let mut paused_job = download_job("job_1", JobState::Paused, ResumeSupport::Unsupported, 100);
+    paused_job.transfer_kind = TransferKind::Torrent;
+    paused_job.downloaded_bytes = 4096;
+    paused_job.torrent = Some(TorrentInfo {
+        engine_id: Some(7),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        uploaded_bytes: 2048,
+        last_runtime_uploaded_bytes: Some(1024),
+        fetched_bytes: 512,
+        last_runtime_fetched_bytes: Some(256),
+        ratio: 0.5,
+        seeding_started_at: Some(1234),
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![paused_job]);
+    state.begin_external_reseed("job_1").await;
+
+    let result = state
+        .prepare_torrent_session_cache_clear()
+        .await
+        .expect("paused torrents should allow cache clearing");
+
+    assert_eq!(result.torrents.len(), 1);
+    assert_eq!(result.torrents[0].engine_id, Some(7));
+    let snapshot_job = result
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_1")
+        .expect("job should remain persisted");
+    let torrent = snapshot_job.torrent.as_ref().expect("torrent metadata");
+    assert_eq!(torrent.engine_id, None);
+    assert_eq!(
+        torrent.info_hash.as_deref(),
+        Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8")
+    );
+    assert_eq!(torrent.uploaded_bytes, 2048);
+    assert_eq!(torrent.fetched_bytes, 512);
+    assert_eq!(torrent.seeding_started_at, Some(1234));
+    assert_eq!(torrent.last_runtime_uploaded_bytes, None);
+    assert_eq!(torrent.last_runtime_fetched_bytes, None);
+    assert!(!state.is_external_reseed_pending("job_1").await);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn torrent_session_cache_directory_clear_removes_session_without_payload() {
+    let download_dir = test_runtime_dir("torrent-cache-directory-clear");
+    let session_dir = download_dir.join("torrent-session");
+    let payload_dir = download_dir.join("Torrent").join("Fedora");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::create_dir_all(&payload_dir).unwrap();
+    std::fs::write(session_dir.join("session.json"), b"stale").unwrap();
+    std::fs::write(payload_dir.join("payload.bin"), b"payload").unwrap();
+
+    let result = clear_torrent_session_cache_directory(&download_dir)
+        .expect("session cache clear should finish");
+
+    assert!(result.cleared);
+    assert!(!result.pending_restart);
+    assert_eq!(result.session_path, session_dir.display().to_string());
+    assert!(!session_dir.exists());
+    assert!(payload_dir.join("payload.bin").exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn pending_torrent_session_cache_clear_runs_before_startup() {
+    let download_dir = test_runtime_dir("torrent-cache-pending-startup");
+    let session_dir = download_dir.join("torrent-session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("session.json"), b"stale").unwrap();
+    std::fs::write(
+        pending_torrent_session_cache_clear_path(&download_dir),
+        b"pending",
+    )
+    .unwrap();
+
+    apply_pending_torrent_session_cache_clear(&download_dir);
+
+    assert!(!session_dir.exists());
+    assert!(!pending_torrent_session_cache_clear_path(&download_dir).exists());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -1969,7 +2171,12 @@ async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_resee
     let release_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        release_state.inner.write().await.active_workers.remove("job_1");
+        release_state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .remove("job_1");
     });
 
     let snapshot = state

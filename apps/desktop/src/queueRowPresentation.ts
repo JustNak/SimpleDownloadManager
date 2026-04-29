@@ -162,11 +162,11 @@ export function formatQueueSizeTitle(
   return `${formatTorrentVerifiedSize(job, formatBytes)}; Downloaded ${formatTorrentFetchedSize(job, formatBytes)}`;
 }
 
-export function torrentDetailMetrics(job: Pick<DownloadJob, 'torrent'>): TorrentDetailMetric[] {
+export function torrentDetailMetrics(job: Pick<DownloadJob, 'torrent' | 'state' | 'speed'>): TorrentDetailMetric[] {
   const metrics: TorrentDetailMetric[] = [];
 
-  if (typeof job.torrent?.uploadedBytes === 'number' && job.torrent.uploadedBytes > 0) {
-    metrics.push({ kind: 'upload', label: 'Uploaded', value: job.torrent.uploadedBytes });
+  if (job.state === 'seeding' && job.torrent) {
+    metrics.push({ kind: 'upload', label: 'Upload speed', value: Math.max(0, job.speed) });
   }
 
   if (typeof job.torrent?.peers === 'number') {

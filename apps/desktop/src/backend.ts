@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings } from './types';
+import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings, type TorrentSessionCacheClearResult } from './types';
 import type { ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
@@ -47,6 +47,7 @@ const defaultSettings: Settings = {
   downloadPerformanceMode: 'balanced',
   torrent: {
     enabled: true,
+    downloadDirectory: `${mockDownloadDirectory}\\Torrent`,
     seedMode: 'forever',
     seedRatioLimit: 1,
     seedTimeLimitMinutes: 60,
@@ -735,6 +736,17 @@ export async function saveSettings(settings: Settings): Promise<Settings> {
 export async function browseDirectory(): Promise<string | null> {
   if (!isTauriRuntime()) return mockState.settings.downloadDirectory;
   return invokeCommand<string | null>('browse_directory');
+}
+
+export async function clearTorrentSessionCache(): Promise<TorrentSessionCacheClearResult> {
+  if (!isTauriRuntime()) {
+    return {
+      cleared: true,
+      pendingRestart: false,
+      sessionPath: 'C:\\Users\\You\\AppData\\Local\\SimpleDownloadManager\\torrent-session',
+    };
+  }
+  return invokeCommand<TorrentSessionCacheClearResult>('clear_torrent_session_cache');
 }
 
 export async function browseTorrentFile(): Promise<string | null> {

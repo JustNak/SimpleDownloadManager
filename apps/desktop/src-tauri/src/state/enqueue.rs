@@ -183,10 +183,21 @@ impl RuntimeState {
             });
         }
 
+        let torrent_download_directory =
+            if self.settings.torrent.download_directory.trim().is_empty() {
+                default_torrent_download_directory_for(&self.settings.download_directory)
+            } else {
+                self.settings.torrent.download_directory.clone()
+            };
+        let default_directory = if transfer_kind == TransferKind::Torrent {
+            &torrent_download_directory
+        } else {
+            &self.settings.download_directory
+        };
         let directory = options
             .directory_override
             .as_deref()
-            .unwrap_or(&self.settings.download_directory)
+            .unwrap_or(default_directory)
             .trim();
         if directory.is_empty() {
             return Err(BackendError {
@@ -206,7 +217,11 @@ impl RuntimeState {
         } else {
             filename_from_hint(options.filename_hint.as_deref(), &url)
         };
-        let target_dir = prepare_category_download_directory(&download_dir, &filename)?;
+        let target_dir = if transfer_kind == TransferKind::Torrent {
+            download_dir.clone()
+        } else {
+            prepare_category_download_directory(&download_dir, &filename)?
+        };
         verify_download_directory_writable(&target_dir)?;
         let (base_target_path, base_temp_path) = candidate_target_paths(&target_dir, &filename);
         let duplicate_match =
@@ -336,12 +351,23 @@ impl RuntimeState {
         } else {
             filename_from_hint(filename_hint.as_deref(), &url)
         };
-        let default_directory = self.settings.download_directory.clone();
+        let default_directory = if transfer_kind == TransferKind::Torrent {
+            if self.settings.torrent.download_directory.trim().is_empty() {
+                default_torrent_download_directory_for(&self.settings.download_directory)
+            } else {
+                self.settings.torrent.download_directory.clone()
+            }
+        } else {
+            self.settings.download_directory.clone()
+        };
         let target_path = if default_directory.trim().is_empty() {
             String::new()
         } else {
-            let category_dir =
-                category_download_directory(Path::new(&default_directory), &filename);
+            let category_dir = if transfer_kind == TransferKind::Torrent {
+                PathBuf::from(&default_directory)
+            } else {
+                category_download_directory(Path::new(&default_directory), &filename)
+            };
             let (base_target_path, base_temp_path) =
                 candidate_target_paths(&category_dir, &filename);
             let duplicate_match =
@@ -356,8 +382,11 @@ impl RuntimeState {
         let duplicate_match = if default_directory.trim().is_empty() {
             self.duplicate_download_match(&url, Path::new(""), Path::new(""))
         } else {
-            let category_dir =
-                category_download_directory(Path::new(&default_directory), &filename);
+            let category_dir = if transfer_kind == TransferKind::Torrent {
+                PathBuf::from(&default_directory)
+            } else {
+                category_download_directory(Path::new(&default_directory), &filename)
+            };
             let (base_target_path, base_temp_path) =
                 candidate_target_paths(&category_dir, &filename);
             self.duplicate_download_match(&url, &base_target_path, &base_temp_path)

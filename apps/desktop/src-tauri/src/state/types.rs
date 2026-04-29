@@ -1,6 +1,7 @@
 use crate::storage::{
     BulkArchiveInfo, DesktopSnapshot, DownloadSource, HandoffAuth, TorrentInfo, TransferKind,
 };
+use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,20 @@ pub struct ExternalUsePreparation {
 pub struct TorrentRemovalCleanupInfo {
     pub torrent: TorrentInfo,
     pub wait_for_worker_release: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TorrentSessionCacheClearState {
+    pub snapshot: DesktopSnapshot,
+    pub torrents: Vec<TorrentInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentSessionCacheClearResult {
+    pub cleared: bool,
+    pub pending_restart: bool,
+    pub session_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

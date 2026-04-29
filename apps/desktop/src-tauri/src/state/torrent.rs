@@ -1,5 +1,8 @@
 use super::*;
 
+const TORRENT_SESSION_CACHE_DIR: &str = "torrent-session";
+const TORRENT_SESSION_CACHE_CLEAR_PENDING: &str = "torrent-session.clear-pending";
+
 pub(crate) fn should_stop_seeding(
     settings: &TorrentSettings,
     ratio: f64,
@@ -53,6 +56,57 @@ pub(super) fn is_external_reseed_file_access_error(message: &str) -> bool {
 }
 
 impl SharedState {
+    pub async fn prepare_torrent_session_cache_clear(
+        &self,
+    ) -> Result<TorrentSessionCacheClearState, BackendError> {
+        let (snapshot, persisted, torrents) = {
+            let mut state = self.inner.write().await;
+            if state.jobs.iter().any(|job| {
+                job.transfer_kind == TransferKind::Torrent
+                    && matches!(
+                        job.state,
+                        JobState::Queued
+                            | JobState::Starting
+                            | JobState::Downloading
+                            | JobState::Seeding
+                    )
+            }) {
+                return Err(BackendError {
+                    code: "TORRENT_CACHE_ACTIVE",
+                    message: "Pause active, queued, or seeding torrents before clearing the torrent session cache."
+                        .into(),
+                });
+            }
+
+            let mut torrents = Vec::new();
+            for job in &mut state.jobs {
+                if job.transfer_kind != TransferKind::Torrent {
+                    continue;
+                }
+
+                let Some(torrent) = job.torrent.as_mut() else {
+                    continue;
+                };
+
+                torrents.push(torrent.clone());
+                torrent.engine_id = None;
+                torrent.last_runtime_uploaded_bytes = None;
+                torrent.last_runtime_fetched_bytes = None;
+            }
+            state.external_reseed_jobs.clear();
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "torrent".into(),
+                "Cleared torrent runtime session identity".into(),
+                None,
+            );
+            (state.snapshot(), state.persisted(), torrents)
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(TorrentSessionCacheClearState { snapshot, torrents })
+    }
+
     pub async fn begin_external_reseed(&self, id: &str) {
         let mut state = self.inner.write().await;
         if state.jobs.iter().any(|job| {
@@ -268,10 +322,13 @@ impl SharedState {
             });
         }
 
-        Ok(job.torrent.clone().map(|torrent| TorrentRemovalCleanupInfo {
-            torrent,
-            wait_for_worker_release,
-        }))
+        Ok(job
+            .torrent
+            .clone()
+            .map(|torrent| TorrentRemovalCleanupInfo {
+                torrent,
+                wait_for_worker_release,
+            }))
     }
 
     pub async fn wait_for_torrent_removal_release(&self, id: &str) -> Result<(), BackendError> {
@@ -650,5 +707,67 @@ impl SharedState {
 
         persist_state(&self.storage_path, &persisted)?;
         Ok(snapshot)
+    }
+}
+
+pub(crate) fn pending_torrent_session_cache_clear_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(TORRENT_SESSION_CACHE_CLEAR_PENDING)
+}
+
+pub(crate) fn apply_pending_torrent_session_cache_clear(app_data_dir: &Path) {
+    let marker_path = pending_torrent_session_cache_clear_path(app_data_dir);
+    if !marker_path.exists() {
+        return;
+    }
+
+    match remove_torrent_session_cache_directory(app_data_dir) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(marker_path);
+        }
+        Err(error) => {
+            eprintln!("could not clear pending torrent session cache: {error}");
+        }
+    }
+}
+
+pub(crate) fn clear_torrent_session_cache_directory(
+    app_data_dir: &Path,
+) -> Result<TorrentSessionCacheClearResult, String> {
+    let session_path = app_data_dir.join(TORRENT_SESSION_CACHE_DIR);
+    let marker_path = pending_torrent_session_cache_clear_path(app_data_dir);
+    match remove_torrent_session_cache_directory(app_data_dir) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&marker_path);
+            Ok(TorrentSessionCacheClearResult {
+                cleared: true,
+                pending_restart: false,
+                session_path: session_path.display().to_string(),
+            })
+        }
+        Err(error) => {
+            std::fs::create_dir_all(app_data_dir).map_err(|create_error| {
+                format!(
+                    "Could not create app data directory for pending cache cleanup: {create_error}"
+                )
+            })?;
+            std::fs::write(&marker_path, b"pending").map_err(|write_error| {
+                format!("Could not schedule torrent session cache cleanup: {write_error}")
+            })?;
+            eprintln!("torrent session cache cleanup scheduled for next startup: {error}");
+            Ok(TorrentSessionCacheClearResult {
+                cleared: false,
+                pending_restart: true,
+                session_path: session_path.display().to_string(),
+            })
+        }
+    }
+}
+
+fn remove_torrent_session_cache_directory(app_data_dir: &Path) -> std::io::Result<()> {
+    let session_path = app_data_dir.join(TORRENT_SESSION_CACHE_DIR);
+    match std::fs::remove_dir_all(session_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }

@@ -41,8 +41,7 @@ export interface TorrentFooterStats {
   active: number;
   seeding: number;
   uploadedBytes: number;
-  seedSpeed: number;
-  averageRatio: number;
+  totalRatio: number;
 }
 
 const DOWNLOAD_CATEGORY_IDS: readonly DownloadCategory[] = ['document', 'program', 'picture', 'video', 'compressed', 'music', 'other'];
@@ -116,21 +115,15 @@ export function isTorrentView(view: ViewState): view is TorrentViewState {
 
 export function getTorrentFooterStats(jobs: readonly DownloadJob[]): TorrentFooterStats {
   const torrentJobs = jobs.filter(isTorrentDownload);
-  const ratios = torrentJobs
-    .map((job) => job.torrent?.ratio)
-    .filter((ratio): ratio is number => typeof ratio === 'number' && Number.isFinite(ratio));
+  const uploadedBytes = torrentJobs.reduce((total, job) => total + (job.torrent?.uploadedBytes ?? 0), 0);
+  const verifiedBytes = torrentJobs.reduce((total, job) => total + Math.max(0, job.downloadedBytes), 0);
 
   return {
     all: torrentJobs.length,
     active: torrentJobs.filter((job) => stateIn(job.state, activeDownloadStates)).length,
     seeding: torrentJobs.filter((job) => job.state === 'seeding').length,
-    uploadedBytes: torrentJobs.reduce((total, job) => total + (job.torrent?.uploadedBytes ?? 0), 0),
-    seedSpeed: torrentJobs
-      .filter((job) => job.state === 'seeding')
-      .reduce((total, job) => total + Math.max(0, job.speed), 0),
-    averageRatio: ratios.length > 0
-      ? ratios.reduce((total, ratio) => total + ratio, 0) / ratios.length
-      : 0,
+    uploadedBytes,
+    totalRatio: verifiedBytes > 0 ? uploadedBytes / verifiedBytes : 0,
   };
 }
 

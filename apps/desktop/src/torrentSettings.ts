@@ -2,6 +2,7 @@ import type { TorrentSettings } from './types';
 
 const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   enabled: true,
+  downloadDirectory: '',
   seedMode: 'forever',
   seedRatioLimit: 1,
   seedTimeLimitMinutes: 60,
@@ -10,9 +11,13 @@ const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   portForwardingPort: 42000,
 };
 
-export function normalizeTorrentSettings(value: Partial<TorrentSettings> | undefined): TorrentSettings {
+export function normalizeTorrentSettings(
+  value: Partial<TorrentSettings> | undefined,
+  downloadDirectory = '',
+): TorrentSettings {
   return {
     enabled: value?.enabled ?? DEFAULT_TORRENT_SETTINGS.enabled,
+    downloadDirectory: normalizeTorrentDownloadDirectory(value?.downloadDirectory, downloadDirectory),
     seedMode: isSeedMode(value?.seedMode) ? value.seedMode : DEFAULT_TORRENT_SETTINGS.seedMode,
     seedRatioLimit: clampNumber(value?.seedRatioLimit, 0.1, 100, DEFAULT_TORRENT_SETTINGS.seedRatioLimit),
     seedTimeLimitMinutes: Math.round(clampNumber(
@@ -25,6 +30,13 @@ export function normalizeTorrentSettings(value: Partial<TorrentSettings> | undef
     portForwardingEnabled: value?.portForwardingEnabled ?? DEFAULT_TORRENT_SETTINGS.portForwardingEnabled,
     portForwardingPort: normalizeForwardingPort(value?.portForwardingPort),
   };
+}
+
+export function defaultTorrentDownloadDirectory(downloadDirectory: string): string {
+  const trimmed = downloadDirectory.trim().replace(/[\\/]+$/, '');
+  if (!trimmed) return '';
+  const separator = trimmed.includes('\\') ? '\\' : '/';
+  return `${trimmed}${separator}Torrent`;
 }
 
 export function shouldStopSeeding(settings: TorrentSettings, ratio: number, elapsedSeconds: number): boolean {
@@ -55,4 +67,9 @@ function normalizeForwardingPort(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TORRENT_SETTINGS.portForwardingPort;
   const port = Math.round(value);
   return port >= 1024 && port <= 65534 ? port : DEFAULT_TORRENT_SETTINGS.portForwardingPort;
+}
+
+function normalizeTorrentDownloadDirectory(value: unknown, downloadDirectory: string): string {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return defaultTorrentDownloadDirectory(downloadDirectory);
 }

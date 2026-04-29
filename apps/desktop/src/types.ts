@@ -128,12 +128,19 @@ export interface ExtensionIntegrationSettings {
 
 export interface TorrentSettings {
   enabled: boolean;
+  downloadDirectory: string;
   seedMode: TorrentSeedMode;
   seedRatioLimit: number;
   seedTimeLimitMinutes: number;
   uploadLimitKibPerSecond: number;
   portForwardingEnabled: boolean;
   portForwardingPort: number;
+}
+
+export interface TorrentSessionCacheClearResult {
+  cleared: boolean;
+  pendingRestart: boolean;
+  sessionPath: string;
 }
 
 export interface Settings {

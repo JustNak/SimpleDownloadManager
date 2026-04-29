@@ -293,6 +293,8 @@ pub struct TorrentSettings {
     #[serde(default = "default_torrent_enabled")]
     pub enabled: bool,
     #[serde(default)]
+    pub download_directory: String,
+    #[serde(default)]
     pub seed_mode: TorrentSeedMode,
     #[serde(default = "default_seed_ratio_limit")]
     pub seed_ratio_limit: f64,
@@ -501,6 +503,7 @@ impl Default for TorrentSettings {
     fn default() -> Self {
         Self {
             enabled: default_torrent_enabled(),
+            download_directory: String::new(),
             seed_mode: TorrentSeedMode::Forever,
             seed_ratio_limit: default_seed_ratio_limit(),
             seed_time_limit_minutes: default_seed_time_limit_minutes(),
@@ -545,6 +548,13 @@ pub fn default_extension_listen_port() -> u32 {
 
 pub fn default_download_directory() -> String {
     default_download_directory_path().display().to_string()
+}
+
+pub fn default_torrent_download_directory_for(download_directory: &str) -> String {
+    Path::new(download_directory.trim())
+        .join("Torrent")
+        .display()
+        .to_string()
 }
 
 fn default_download_directory_path() -> PathBuf {

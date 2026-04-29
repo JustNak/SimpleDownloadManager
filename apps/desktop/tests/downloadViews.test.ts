@@ -31,6 +31,8 @@ const jobs: DownloadJob[] = [
     url: 'magnet:?xt=urn:btih:active',
     transferKind: 'torrent',
     state: 'downloading',
+    downloadedBytes: 512,
+    totalBytes: 2048,
   },
   {
     ...baseJob,
@@ -40,6 +42,8 @@ const jobs: DownloadJob[] = [
     transferKind: 'torrent',
     state: 'seeding',
     speed: 4096,
+    downloadedBytes: 2048,
+    totalBytes: 2048,
     torrent: { uploadedBytes: 1024, ratio: 1.4 },
   },
   {
@@ -89,10 +93,9 @@ assert.deepEqual(
     active: 1,
     seeding: 1,
     uploadedBytes: 1024,
-    seedSpeed: 4096,
-    averageRatio: 1.4,
+    totalRatio: 0.4,
   },
-  'torrent footer stats should summarize live seeding upload speed without sharing regular download counts',
+  'torrent footer stats should summarize total uploaded bytes and total ratio without sharing regular download counts',
 );
 
 assert.deepEqual(

@@ -1,11 +1,12 @@
 use crate::commands::emit_snapshot;
 use crate::state::{
-    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState,
-    TorrentRuntimePhase, WorkerControl,
+    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
+    WorkerControl,
 };
 use crate::storage::{
-    BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
-    ResumeSupport, TorrentInfo, TorrentSettings, TransferKind,
+    default_torrent_download_directory_for, BulkArchiveStatus, DiagnosticLevel,
+    DownloadPerformanceMode, FailureCategory, HandoffAuth, ResumeSupport, TorrentInfo,
+    TorrentSettings, TransferKind,
 };
 use crate::torrent::{
     pending_torrent_cleanup_info_hash, prepare_torrent_source, PreparedTorrentSource,
@@ -107,6 +108,24 @@ pub async fn forget_torrent_session_for_restart(
     engine
         .forget_existing(torrent.engine_id, torrent.info_hash.as_deref())
         .await?;
+    Ok(())
+}
+
+pub async fn forget_known_torrent_sessions(torrents: &[TorrentInfo]) -> Result<(), String> {
+    let Some(engine) = TORRENT_ENGINE.get() else {
+        return Ok(());
+    };
+
+    for torrent in torrents {
+        if torrent.engine_id.is_none() && torrent.info_hash.is_none() {
+            continue;
+        }
+
+        engine
+            .forget_existing(torrent.engine_id, torrent.info_hash.as_deref())
+            .await?;
+    }
+
     Ok(())
 }
 
@@ -1072,7 +1091,11 @@ async fn run_torrent_download_attempt(
                         Some(task.id.clone()),
                     )
                     .await;
-                return Err(download_error(FailureCategory::Torrent, message.into(), false));
+                return Err(download_error(
+                    FailureCategory::Torrent,
+                    message.into(),
+                    false,
+                ));
             }
 
             if update.finished
@@ -1740,7 +1763,13 @@ async fn cleanup_pending_torrent_metadata(
 
 async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
     let settings = state.settings().await;
-    let default_output_folder = PathBuf::from(&settings.download_directory);
+    let default_output_folder = if settings.torrent.download_directory.trim().is_empty() {
+        PathBuf::from(default_torrent_download_directory_for(
+            &settings.download_directory,
+        ))
+    } else {
+        PathBuf::from(&settings.torrent.download_directory)
+    };
     let data_dir = state.app_data_dir();
     TORRENT_ENGINE
         .get_or_try_init(|| async {
@@ -3949,7 +3978,10 @@ mod tests {
         let target_dir = std::env::current_dir()
             .unwrap()
             .join("test-runtime")
-            .join(format!("restore-placeholder-cleanup-{}", std::process::id()));
+            .join(format!(
+                "restore-placeholder-cleanup-{}",
+                std::process::id()
+            ));
         let empty_placeholder = target_dir.join("torrent-a634dc94");
         let nonempty_placeholder = target_dir.join("torrent-deadbeef");
         let payload = target_dir.join("Need for Speed - Most Wanted [FitGirl Repack]");

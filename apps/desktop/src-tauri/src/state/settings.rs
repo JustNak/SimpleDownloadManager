@@ -110,6 +110,20 @@ pub(super) fn normalize_torrent_settings(settings: &mut TorrentSettings) {
     }
 }
 
+pub(super) fn normalize_torrent_settings_for_download_directory(
+    settings: &mut TorrentSettings,
+    download_directory: &str,
+) {
+    normalize_torrent_settings(settings);
+
+    let torrent_directory = settings.download_directory.trim();
+    settings.download_directory = if torrent_directory.is_empty() {
+        default_torrent_download_directory_for(download_directory)
+    } else {
+        torrent_directory.to_string()
+    };
+}
+
 pub(super) fn normalize_accent_color(settings: &mut Settings) {
     let accent_color = settings.accent_color.trim();
     let is_hex_color = accent_color.len() == 7
@@ -166,11 +180,16 @@ pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
 
     normalize_accent_color(settings);
     normalize_extension_settings(&mut settings.extension_integration);
-    normalize_torrent_settings(&mut settings.torrent);
+    normalize_torrent_settings_for_download_directory(
+        &mut settings.torrent,
+        &settings.download_directory,
+    );
 
     std::fs::create_dir_all(&settings.download_directory)
         .map_err(|error| format!("Could not create download directory: {error}"))?;
     ensure_download_category_directories(Path::new(&settings.download_directory))?;
+    std::fs::create_dir_all(&settings.torrent.download_directory)
+        .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
 
     Ok(())
 }

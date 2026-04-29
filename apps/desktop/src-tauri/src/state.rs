@@ -1,12 +1,13 @@
 use crate::storage::{
     default_download_directory, default_extension_listen_port,
-    default_torrent_port_forwarding_port, load_persisted_state, persist_state, BulkArchiveInfo,
-    BulkArchiveStatus, ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel,
-    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
-    ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
-    HostRegistrationDiagnostics, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
-    MainWindowState, PersistedState, QueueSummary, ResumeSupport, Settings, TorrentInfo,
-    TorrentSeedMode, TorrentSettings, TransferKind,
+    default_torrent_download_directory_for, default_torrent_port_forwarding_port,
+    load_persisted_state, persist_state, BulkArchiveInfo, BulkArchiveStatus, ConnectionState,
+    DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
+    DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
+    FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
+    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
+    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentSeedMode, TorrentSettings,
+    TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -33,12 +34,16 @@ use progress::*;
 use runtime::*;
 pub use settings::validate_settings;
 use settings::*;
-pub(crate) use torrent::should_stop_seeding;
+pub(crate) use torrent::{
+    apply_pending_torrent_session_cache_clear, clear_torrent_session_cache_directory,
+    pending_torrent_session_cache_clear_path, should_stop_seeding,
+};
 pub use types::{
     BackendError, BulkArchiveEntry, BulkArchiveReady, DownloadTask, DuplicatePolicy,
     EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation,
     TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
-    TorrentSeedingRestoreFailure, WorkerControl,
+    TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult, TorrentSessionCacheClearState,
+    WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;

@@ -12,6 +12,7 @@ function makeSettings(theme: Settings['theme']): Settings {
     downloadPerformanceMode: 'balanced',
     torrent: {
       enabled: true,
+      downloadDirectory: 'C:\\Users\\You\\Downloads\\Torrent',
       seedMode: 'forever',
       seedRatioLimit: 1,
       seedTimeLimitMinutes: 60,
