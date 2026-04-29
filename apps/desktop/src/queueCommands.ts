@@ -32,6 +32,20 @@ export function canRemoveDownloadImmediately(job: DownloadJob): boolean {
   return !activeRemovalStates.has(job.state);
 }
 
+export function isPausedSeedingTorrentDeleteCandidate(job: DownloadJob): boolean {
+  return job.transferKind === 'torrent'
+    && job.state === 'paused'
+    && typeof job.torrent?.seedingStartedAt === 'number';
+}
+
+export function deleteActionLabelForJob(job: DownloadJob): string {
+  return isPausedSeedingTorrentDeleteCandidate(job) ? 'Delete from disk...' : 'Delete';
+}
+
+export function defaultDeleteFromDiskForJobs(jobs: DownloadJob[]): boolean {
+  return jobs.length === 1 && isPausedSeedingTorrentDeleteCandidate(jobs[0]);
+}
+
 export function canShowProgressPopup(job: DownloadJob): boolean {
   return progressPopupStates.has(job.state);
 }

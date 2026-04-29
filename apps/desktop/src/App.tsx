@@ -46,7 +46,6 @@ import {
   pauseAllJobs,
   pauseJob,
   revealJobInFolder,
-  removeJob,
   renameJob,
   resumeAllJobs,
   resumeJob,
@@ -470,15 +469,6 @@ export default function App() {
       addToast({ type: 'info', title: 'Restarting Download', message: 'Partial progress was cleared and the download was queued again.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Restart Failed', message: getErrorMessage(error) });
-    }
-  }
-
-  async function handleRemove(id: string) {
-    try {
-      await removeJob(id);
-      if (selectedJobId === id) setSelectedJobId(null);
-    } catch (error) {
-      addToast({ type: 'error', title: 'Remove Failed', message: getErrorMessage(error) });
     }
   }
 
@@ -926,7 +916,6 @@ export default function App() {
                 onCancel={handleCancel}
                 onRetry={handleRetry}
                 onRestart={handleRestart}
-                onRemove={handleRemove}
                 onDelete={handleDelete}
                 onDeleteMany={handleDeleteMany}
                 onRename={handleRename}

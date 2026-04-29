@@ -40,6 +40,12 @@ pub struct ExternalUsePreparation {
     pub snapshot: Option<DesktopSnapshot>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TorrentRemovalCleanupInfo {
+    pub torrent: TorrentInfo,
+    pub wait_for_worker_release: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorrentRuntimePhase {
     Initializing,

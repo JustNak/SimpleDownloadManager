@@ -241,6 +241,87 @@ impl SharedState {
         }))
     }
 
+    pub async fn torrent_removal_cleanup_info(
+        &self,
+        id: &str,
+    ) -> Result<Option<TorrentRemovalCleanupInfo>, BackendError> {
+        let state = self.inner.read().await;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Job not found.".into(),
+            })?;
+
+        if job.transfer_kind != TransferKind::Torrent {
+            return Ok(None);
+        }
+
+        let is_active_worker = state.active_workers.contains(id);
+        let wait_for_worker_release = job.state == JobState::Paused && is_active_worker;
+        if job_blocks_removal(job, is_active_worker) && !wait_for_worker_release {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Pause or cancel the active transfer before removing it.".into(),
+            });
+        }
+
+        Ok(job.torrent.clone().map(|torrent| TorrentRemovalCleanupInfo {
+            torrent,
+            wait_for_worker_release,
+        }))
+    }
+
+    pub async fn wait_for_torrent_removal_release(&self, id: &str) -> Result<(), BackendError> {
+        self.wait_for_external_use_release(
+            id,
+            EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT,
+            EXTERNAL_USE_HANDLE_RELEASE_POLL,
+        )
+        .await
+    }
+
+    pub async fn pause_torrent_payload_disappeared(
+        &self,
+        id: &str,
+        message: impl Into<String>,
+    ) -> Result<DesktopSnapshot, String> {
+        let message = message.into();
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.active_workers.remove(id);
+            state.external_reseed_jobs.remove(id);
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                if job.transfer_kind != TransferKind::Torrent {
+                    return Err("Job is not a torrent.".into());
+                }
+
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = Some(message.clone());
+                job.failure_category = Some(FailureCategory::Torrent);
+                job.filename.clone()
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent".into(),
+                format!("Paused torrent seeding for {filename}: {message}"),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     #[cfg(test)]
     pub(super) async fn is_external_reseed_pending(&self, id: &str) -> bool {
         self.inner.read().await.external_reseed_jobs.contains(id)

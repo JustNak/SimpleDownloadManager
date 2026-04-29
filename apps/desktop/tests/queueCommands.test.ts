@@ -5,6 +5,8 @@ import {
   canRemoveDownloadImmediately,
   canShowProgressPopup,
   canRetryFailedDownloads,
+  defaultDeleteFromDiskForJobs,
+  deleteActionLabelForJob,
 } from '../src/queueCommands.ts';
 import type { DownloadJob } from '../src/types.ts';
 
@@ -71,6 +73,38 @@ assert.equal(
   canRemoveDownloadImmediately(job('job_1', 'canceled')),
   true,
   'canceled transfers should be removable immediately even if backend cleanup is still settling',
+);
+
+const pausedSeedingTorrent: DownloadJob = {
+  ...job('job_seed', 'paused'),
+  filename: 'Seeded Torrent',
+  transferKind: 'torrent',
+  targetPath: 'E:\\Download\\Other\\Seeded Torrent',
+  torrent: { uploadedBytes: 2048, fetchedBytes: 4096, ratio: 0.5, seedingStartedAt: 123_456 },
+};
+
+assert.equal(
+  deleteActionLabelForJob(pausedSeedingTorrent),
+  'Delete from disk...',
+  'paused torrents that had started seeding should expose an explicit disk-delete action',
+);
+
+assert.equal(
+  defaultDeleteFromDiskForJobs([pausedSeedingTorrent]),
+  true,
+  'paused seeding torrent delete prompt should default to deleting the payload from disk',
+);
+
+assert.equal(
+  deleteActionLabelForJob({ ...pausedSeedingTorrent, state: 'seeding' }),
+  'Delete',
+  'active seeding torrents should not expose the disk-delete label before being paused',
+);
+
+assert.equal(
+  defaultDeleteFromDiskForJobs([job('job_2', 'queued')]),
+  false,
+  'normal removable downloads should keep disk deletion unchecked by default',
 );
 
 assert.equal(

@@ -400,6 +400,7 @@ pub async fn remove_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
+    prepare_torrent_removal(&state, &id).await?;
     let snapshot = state.remove_job(&id).await.map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
@@ -413,6 +414,7 @@ pub async fn delete_job(
     id: String,
     delete_from_disk: bool,
 ) -> Result<(), String> {
+    prepare_torrent_removal(&state, &id).await?;
     let snapshot = state
         .delete_job(&id, delete_from_disk)
         .await
@@ -420,6 +422,28 @@ pub async fn delete_job(
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
+}
+
+async fn prepare_torrent_removal(
+    state: &State<'_, SharedState>,
+    id: &str,
+) -> Result<(), String> {
+    let Some(cleanup) = state
+        .torrent_removal_cleanup_info(id)
+        .await
+        .map_err(|error| error.message)?
+    else {
+        return Ok(());
+    };
+
+    if cleanup.wait_for_worker_release {
+        state
+            .wait_for_torrent_removal_release(id)
+            .await
+            .map_err(|error| error.message)?;
+    }
+
+    forget_torrent_session_for_restart(state.inner(), &cleanup.torrent).await
 }
 
 #[tauri::command]
@@ -1229,6 +1253,33 @@ mod tests {
             runtime_apply < schedule,
             "torrent upload limits should be applied to the live session before downloads are rescheduled"
         );
+    }
+
+    #[test]
+    fn torrent_remove_and_delete_prepare_engine_cleanup_before_state_mutation() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        for function_name in ["remove_job", "delete_job"] {
+            let function_start = production_source
+                .find(&format!("pub async fn {function_name}("))
+                .unwrap_or_else(|| panic!("{function_name} command should exist"));
+            let function_body = &production_source[function_start..];
+            let cleanup = function_body
+                .find("prepare_torrent_removal(&state, &id).await?;")
+                .unwrap_or_else(|| panic!("{function_name} should prepare torrent engine cleanup"));
+            let state_mutation = function_body
+                .find(&format!(".{function_name}(&id"))
+                .unwrap_or_else(|| panic!("{function_name} should call state.{function_name}"));
+
+            assert!(
+                cleanup < state_mutation,
+                "{function_name} should forget rqbit session metadata before removing persisted job state"
+            );
+        }
     }
 
     #[test]

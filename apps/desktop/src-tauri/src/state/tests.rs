@@ -1942,6 +1942,53 @@ async fn delete_canceled_torrent_job_with_files_clears_stale_worker_slot() {
 }
 
 #[tokio::test]
+async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_reseed() {
+    let download_dir = test_runtime_dir("delete-paused-seeding-torrent");
+    let target_path = download_dir.join("seeded-output");
+    let temp_path = download_dir.join(".torrent-state").join("job_1");
+    std::fs::create_dir_all(&target_path).unwrap();
+    std::fs::write(target_path.join("payload.bin"), b"payload").unwrap();
+    std::fs::create_dir_all(&temp_path).unwrap();
+    let mut paused_job = download_job("job_1", JobState::Paused, ResumeSupport::Unsupported, 100);
+    paused_job.transfer_kind = TransferKind::Torrent;
+    paused_job.progress = 100.0;
+    paused_job.target_path = target_path.display().to_string();
+    paused_job.temp_path = temp_path.display().to_string();
+    paused_job.torrent = Some(TorrentInfo {
+        engine_id: Some(42),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        seeding_started_at: Some(123_456),
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![paused_job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+        runtime.external_reseed_jobs.insert("job_1".into());
+    }
+    let release_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        release_state.inner.write().await.active_workers.remove("job_1");
+    });
+
+    let snapshot = state
+        .delete_job("job_1", true)
+        .await
+        .expect("paused seeding torrent deletion should wait briefly for worker release");
+
+    assert!(snapshot.jobs.is_empty());
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_1"));
+    assert!(!runtime.external_reseed_jobs.contains("job_1"));
+    drop(runtime);
+    assert!(!target_path.exists());
+    assert!(!temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn seeding_jobs_release_download_scheduler_slots() {
     let download_dir = test_runtime_dir("seeding-slots");
     let mut seeding_job = download_job("job_1", JobState::Seeding, ResumeSupport::Unsupported, 100);

@@ -335,6 +335,7 @@ impl SharedState {
         delete_from_disk: bool,
     ) -> Result<DesktopSnapshot, BackendError> {
         if delete_from_disk {
+            self.wait_for_paused_torrent_delete_release(id).await?;
             let (target_path, temp_path) = {
                 let state = self.inner.read().await;
                 let job =
@@ -369,6 +370,35 @@ impl SharedState {
         }
 
         self.remove_job(id).await
+    }
+
+    async fn wait_for_paused_torrent_delete_release(&self, id: &str) -> Result<(), BackendError> {
+        let should_wait = {
+            let state = self.inner.read().await;
+            let job = state
+                .jobs
+                .iter()
+                .find(|job| job.id == id)
+                .ok_or_else(|| BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "Job not found.".into(),
+                })?;
+
+            job.transfer_kind == TransferKind::Torrent
+                && job.state == JobState::Paused
+                && state.active_workers.contains(id)
+        };
+
+        if should_wait {
+            self.wait_for_external_use_release(
+                id,
+                EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT,
+                EXTERNAL_USE_HANDLE_RELEASE_POLL,
+            )
+            .await?;
+        }
+
+        Ok(())
     }
 
     pub async fn rename_job(

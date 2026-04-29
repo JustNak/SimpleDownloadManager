@@ -750,7 +750,20 @@ async fn run_torrent_download_attempt(
         ) {
             TorrentRestoreTarget::Current => {}
             TorrentRestoreTarget::Repaired(repaired) => {
+                let previous_output_folder = output_folder.clone();
+                if let Some(torrent) = existing_torrent_for_resume {
+                    engine
+                        .forget_existing(torrent.engine_id, torrent.info_hash.as_deref())
+                        .await
+                        .map_err(|message| {
+                            download_error(FailureCategory::Torrent, message, false)
+                        })?;
+                }
                 output_folder = repaired;
+                cleanup_empty_generated_torrent_placeholder(
+                    &previous_output_folder,
+                    &output_folder,
+                );
                 let snapshot = state
                     .update_torrent_restore_target_path(&task.id, &output_folder)
                     .await
@@ -1034,6 +1047,20 @@ async fn run_torrent_download_attempt(
                     TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
                 }
             }
+        }
+        if torrent_seeding_payload_disappeared(&update, &output_folder) {
+            let message = torrent_seeding_payload_disappeared_message();
+            engine
+                .forget(engine_id)
+                .await
+                .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+            cleanup_empty_torrent_output_folder(&output_folder);
+            let snapshot = state
+                .pause_torrent_payload_disappeared(&task.id, message)
+                .await
+                .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+            emit_snapshot(app, &snapshot);
+            return Ok(DownloadOutcome::Paused);
         }
         if restoring_seeding {
             if let Some(message) = torrent_restore_validation_failure(&update) {
@@ -1419,6 +1446,10 @@ fn torrent_restore_payload_missing_message() -> &'static str {
     "Seeding restore could not find local payload files; pausing instead of downloading them again. Choose the folder containing the files or restart the torrent."
 }
 
+fn torrent_seeding_payload_disappeared_message() -> &'static str {
+    "Torrent payload files disappeared while seeding; stopping the torrent session so the folder is not recreated. Use restart if you want to download it again."
+}
+
 fn torrent_has_resume_identity(torrent: Option<&TorrentInfo>) -> bool {
     torrent.is_some_and(|torrent| torrent.engine_id.is_some() || torrent.info_hash.is_some())
 }
@@ -1503,6 +1534,16 @@ fn torrent_restore_validation_failure(
     None
 }
 
+fn torrent_seeding_payload_disappeared(
+    update: &crate::state::TorrentRuntimeSnapshot,
+    target_path: &Path,
+) -> bool {
+    update.finished
+        && matches!(update.phase, TorrentRuntimePhase::Live)
+        && update.total_bytes > 0
+        && target_payload_appears_empty(target_path)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TorrentRestoreTarget {
     Current,
@@ -1534,6 +1575,36 @@ fn protected_restore_payload_target(
     }
 
     TorrentRestoreTarget::Missing
+}
+
+fn cleanup_empty_generated_torrent_placeholder(previous_target: &Path, repaired_target: &Path) {
+    if previous_target == repaired_target || !is_generated_torrent_placeholder(previous_target) {
+        return;
+    }
+
+    cleanup_empty_torrent_output_folder(previous_target);
+}
+
+fn cleanup_empty_torrent_output_folder(target_path: &Path) {
+    let Ok(metadata) = std::fs::metadata(target_path) else {
+        return;
+    };
+    if !metadata.is_dir() || !target_payload_appears_empty(target_path) {
+        return;
+    }
+
+    let _ = std::fs::remove_dir(target_path);
+}
+
+fn is_generated_torrent_placeholder(target_path: &Path) -> bool {
+    let Some(name) = target_path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let Some(hash) = name.strip_prefix("torrent-") else {
+        return false;
+    };
+
+    !hash.is_empty() && hash.chars().all(|character| character.is_ascii_hexdigit())
 }
 
 fn torrent_restore_payload_candidate_names(
@@ -3868,6 +3939,78 @@ mod tests {
             resolved,
             TorrentRestoreTarget::Repaired(payload),
             "restore should use the existing payload folder instead of the empty generated magnet placeholder"
+        );
+
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn restore_target_repair_cleans_only_empty_generated_placeholder() {
+        let target_dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("restore-placeholder-cleanup-{}", std::process::id()));
+        let empty_placeholder = target_dir.join("torrent-a634dc94");
+        let nonempty_placeholder = target_dir.join("torrent-deadbeef");
+        let payload = target_dir.join("Need for Speed - Most Wanted [FitGirl Repack]");
+        let _ = std::fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&empty_placeholder).unwrap();
+        std::fs::create_dir_all(&nonempty_placeholder).unwrap();
+        std::fs::write(nonempty_placeholder.join("keep.bin"), [1_u8]).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("payload.bin"), [1_u8]).unwrap();
+
+        cleanup_empty_generated_torrent_placeholder(&empty_placeholder, &payload);
+        cleanup_empty_generated_torrent_placeholder(&nonempty_placeholder, &payload);
+
+        assert!(
+            !empty_placeholder.exists(),
+            "empty generated torrent-* placeholder should be removed after path repair"
+        );
+        assert!(
+            nonempty_placeholder.exists(),
+            "non-empty generated placeholder should not be removed by best-effort cleanup"
+        );
+
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn live_seeding_detects_missing_payload_before_recreating_folder() {
+        let target_dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("seeding-missing-payload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target_dir);
+        let update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Need for Speed - Most Wanted".into()),
+            total_files: Some(2),
+            peers: Some(1),
+            seeds: None,
+            downloaded_bytes: 3 * 1024 * 1024,
+            total_bytes: 3 * 1024 * 1024,
+            uploaded_bytes: 1024,
+            fetched_bytes: 3 * 1024 * 1024,
+            download_speed: 0,
+            upload_speed: 128,
+            eta: None,
+            phase: crate::state::TorrentRuntimePhase::Live,
+            finished: true,
+            error: None,
+        };
+
+        assert!(
+            torrent_seeding_payload_disappeared(&update, &target_dir),
+            "missing target payload while rqbit reports live seeding should stop the session"
+        );
+
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("payload.bin"), [1_u8]).unwrap();
+        assert!(
+            !torrent_seeding_payload_disappeared(&update, &target_dir),
+            "existing payload should keep normal seeding behavior"
         );
 
         let _ = std::fs::remove_dir_all(target_dir);

@@ -7,7 +7,13 @@ import {
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
-import { canRemoveDownloadImmediately, canShowProgressPopup, canSwapFailedDownloadToBrowser } from './queueCommands';
+import {
+  canRemoveDownloadImmediately,
+  canShowProgressPopup,
+  canSwapFailedDownloadToBrowser,
+  defaultDeleteFromDiskForJobs,
+  deleteActionLabelForJob,
+} from './queueCommands';
 import {
   clampQueueProgress,
   fileBadgeActivityState,
@@ -88,7 +94,6 @@ interface QueueViewProps {
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
   onRestart: (id: string) => void;
-  onRemove: (id: string) => void;
   onDelete: (id: string, deleteFromDisk: boolean) => void;
   onDeleteMany: (ids: string[], deleteFromDisk: boolean) => void;
   onRename: (id: string, filename: string) => void;
@@ -114,7 +119,6 @@ export function QueueView({
   onCancel,
   onRetry,
   onRestart,
-  onRemove,
   onDelete,
   onDeleteMany,
   onRename,
@@ -249,7 +253,7 @@ export function QueueView({
     const removableJobs = promptJobs.filter(canRemoveDownloadImmediately);
     if (removableJobs.length === 0) return;
     setDeletePromptJobs(removableJobs);
-    setDeleteFromDisk(false);
+    setDeleteFromDisk(defaultDeleteFromDiskForJobs(removableJobs));
   }
 
   function continueSelectionDrag(jobId: string) {
@@ -597,7 +601,7 @@ export function QueueView({
                       onCancel={onCancel}
                       onRetry={onRetry}
                       onRestart={onRestart}
-                      onRemove={onRemove}
+                      onRequestDelete={() => openDeletePromptForJobs([job])}
                       onReveal={onReveal}
                       onShowPopup={onShowPopup}
                       onSwapFailedToBrowser={onSwapFailedToBrowser}
@@ -650,7 +654,6 @@ export function QueueView({
           onCancel={onCancel}
           onRetry={onRetry}
           onRestart={onRestart}
-          onRemove={onRemove}
           onOpen={onOpen}
           onReveal={onReveal}
           onClose={onClearSelection}
@@ -735,6 +738,9 @@ function FileContextMenu({
   onDelete: () => void;
 }) {
   const canDelete = canRemoveDownloadImmediately(job);
+  const deleteLabel = deleteCount === 1
+    ? deleteActionLabelForJob(job)
+    : getDeleteContextMenuLabel(deleteCount);
 
   return (
     <div
@@ -752,7 +758,7 @@ function FileContextMenu({
       {canDelete ? (
         <>
           <MenuItem icon={<Pencil size={16} />} label="Rename" onClick={() => onRename(job)} />
-          <MenuItem icon={<Trash2 size={16} />} label={getDeleteContextMenuLabel(deleteCount)} onClick={onDelete} destructive />
+          <MenuItem icon={<Trash2 size={16} />} label={deleteLabel} onClick={onDelete} destructive />
         </>
       ) : null}
     </div>
@@ -997,7 +1003,6 @@ function DownloadDetailsPane({
   onCancel,
   onRetry,
   onRestart,
-  onRemove,
   onOpen,
   onReveal,
   onClose,
@@ -1012,7 +1017,6 @@ function DownloadDetailsPane({
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
   onRestart: (id: string) => void;
-  onRemove: (id: string) => void;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
   onClose: () => void;
@@ -1217,7 +1221,7 @@ function RowActions({
   onCancel,
   onRetry,
   onRestart,
-  onRemove,
+  onRequestDelete,
   onReveal,
   onShowPopup,
   onSwapFailedToBrowser,
@@ -1231,7 +1235,7 @@ function RowActions({
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
   onRestart: (id: string) => void;
-  onRemove: (id: string) => void;
+  onRequestDelete: () => void;
   onReveal: (id: string) => void;
   onShowPopup: (id: string) => void;
   onSwapFailedToBrowser: (id: string) => void;
@@ -1284,7 +1288,15 @@ function RowActions({
             <MenuItem icon={<X size={16} />} label="Cancel" onClick={() => runMenuAction(onCancel)} />
           ) : null}
           {canRemove ? (
-            <MenuItem icon={<Trash2 size={16} />} label="Remove" onClick={() => runMenuAction(onRemove)} destructive />
+            <MenuItem
+              icon={<Trash2 size={16} />}
+              label={deleteActionLabelForJob(job)}
+              onClick={() => {
+                onCloseMenu();
+                onRequestDelete();
+              }}
+              destructive
+            />
           ) : null}
         </div>
       ) : null}
