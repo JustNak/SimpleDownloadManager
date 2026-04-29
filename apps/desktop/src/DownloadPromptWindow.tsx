@@ -76,7 +76,13 @@ export function DownloadPromptWindow() {
       : prompt.targetPath;
   }, [directoryOverride, prompt]);
 
-  const isDuplicate = Boolean(prompt?.duplicateJob);
+  const isDuplicate = Boolean(prompt?.duplicateJob || prompt?.duplicatePath);
+  const duplicateLabel = prompt?.duplicateJob?.filename
+    ?? prompt?.duplicateFilename
+    ?? prompt?.duplicatePath
+    ?? '';
+  const duplicateMessage = prompt?.duplicateJob ? 'Already in queue: ' : 'Destination exists: ';
+  const overwriteLabel = prompt?.duplicateJob ? 'replace queue' : 'replace file';
   const canSwapToBrowser = prompt?.source?.entryPoint === 'browser_download' && !isDuplicate;
   const sourceLabel = prompt?.source
     ? `${prompt.source.browser} ${prompt.source.entryPoint.replaceAll('_', ' ')}`
@@ -145,9 +151,9 @@ export function DownloadPromptWindow() {
         {isDuplicate ? (
           <div className="mb-1.5 flex shrink-0 items-center gap-1.5 overflow-hidden rounded border border-warning/45 bg-warning/10 px-2 py-1.5 text-[11px] leading-4 text-warning">
             <AlertTriangle size={14} className="shrink-0" />
-            <div className="min-w-0 flex-1 truncate" title={prompt.duplicateJob?.filename}>
-              <span className="font-semibold text-foreground">Already in queue: </span>
-              <span className="text-warning/90">{prompt.duplicateJob?.filename}</span>
+            <div className="min-w-0 flex-1 truncate" title={duplicateLabel}>
+              <span className="font-semibold text-foreground">{duplicateMessage}</span>
+              <span className="text-warning/90">{duplicateLabel}</span>
             </div>
           </div>
         ) : null}
@@ -255,7 +261,7 @@ export function DownloadPromptWindow() {
                         className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left font-semibold text-warning hover:bg-muted"
                       >
                         <span>Overwrite</span>
-                        <span className="text-[10px] font-medium text-muted-foreground">replace queue</span>
+                        <span className="text-[10px] font-medium text-muted-foreground">{overwriteLabel}</span>
                       </button>
                       <button
                         onClick={startDuplicateRename}

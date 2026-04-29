@@ -401,6 +401,82 @@ fn prepare_download_prompt_marks_duplicate_job() {
 }
 
 #[test]
+fn prepare_download_prompt_marks_duplicate_target_job_for_same_filename() {
+    let download_dir = test_runtime_dir("prompt-target-job-duplicate");
+    let mut existing_job = download_job("job_13", JobState::Paused, ResumeSupport::Supported, 0);
+    existing_job.url = "https://example.com/first-file.pdf".into();
+    existing_job.filename = "guide.pdf".into();
+    existing_job.target_path = download_dir
+        .join("Document")
+        .join("guide.pdf")
+        .display()
+        .to_string();
+    existing_job.temp_path = format!("{}.part", existing_job.target_path);
+
+    let mut state = runtime_state_with_jobs(vec![existing_job]);
+    state.settings.download_directory = download_dir.display().to_string();
+
+    let prompt = state
+        .prepare_download_prompt(
+            "prompt_target",
+            "https://cdn.example.com/second-file",
+            None,
+            Some("guide.pdf".into()),
+            None,
+        )
+        .expect("prompt should be prepared");
+
+    assert_eq!(
+        prompt.duplicate_job.as_ref().map(|job| job.id.as_str()),
+        Some("job_13")
+    );
+    assert_eq!(
+        prompt.duplicate_path.as_deref(),
+        Some(
+            download_dir
+                .join("Document")
+                .join("guide.pdf")
+                .display()
+                .to_string()
+                .as_str()
+        )
+    );
+    assert_eq!(prompt.duplicate_reason.as_deref(), Some("path"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn prepare_download_prompt_marks_duplicate_existing_target_file() {
+    let download_dir = test_runtime_dir("prompt-target-file-duplicate");
+    let target_path = download_dir.join("Document").join("guide.pdf");
+    std::fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+    std::fs::write(&target_path, b"existing").unwrap();
+
+    let mut state = runtime_state_with_jobs(Vec::new());
+    state.settings.download_directory = download_dir.display().to_string();
+
+    let prompt = state
+        .prepare_download_prompt(
+            "prompt_file",
+            "https://cdn.example.com/generated",
+            None,
+            Some("guide.pdf".into()),
+            None,
+        )
+        .expect("prompt should be prepared");
+
+    assert!(prompt.duplicate_job.is_none());
+    assert_eq!(
+        prompt.duplicate_path.as_deref(),
+        Some(target_path.display().to_string().as_str())
+    );
+    assert_eq!(prompt.duplicate_reason.as_deref(), Some("file"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
 fn destination_write_probe_reports_blocked_probe_path() {
     let test_dir = test_runtime_dir("destination-write-probe");
     let probe_name = "blocked-probe";

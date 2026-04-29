@@ -2,6 +2,7 @@ import {
   isErrorResponse,
   isUrlHostExcludedByPatterns,
   type ExtensionIntegrationSettings,
+  type HandoffAuth,
   type HostToExtensionResponse,
 } from '@myapp/protocol';
 
@@ -77,6 +78,11 @@ export type FirefoxWebRequestDownloadCandidate = {
   filename?: string;
   totalBytes?: number;
   incognito: boolean;
+};
+export type BrowserDownloadHandoffMetadata = {
+  suggestedFilename?: string;
+  totalBytes?: number;
+  handoffAuth?: HandoffAuth;
 };
 
 export type BrowserDownloadBypassState = {
@@ -242,6 +248,22 @@ export function shouldRestoreBrowserDownloadAfterPromptSwap(response: HostToExte
 
 export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response: HostToExtensionResponse): boolean {
   return isErrorResponse(response) && response.code === 'PROTECTED_DOWNLOAD_AUTH_REQUIRED';
+}
+
+export function createBrowserDownloadHandoffMetadata(
+  item: { filename?: string; totalBytes?: number },
+  handoffAuth?: HandoffAuth,
+): BrowserDownloadHandoffMetadata {
+  const suggestedFilename = basenameOnly(item.filename);
+  const totalBytes = typeof item.totalBytes === 'number' && Number.isFinite(item.totalBytes) && item.totalBytes > 0
+    ? Math.floor(item.totalBytes)
+    : undefined;
+
+  return {
+    ...(suggestedFilename ? { suggestedFilename } : {}),
+    ...(totalBytes ? { totalBytes } : {}),
+    ...(handoffAuth ? { handoffAuth } : {}),
+  };
 }
 
 export async function discardBrowserDownload(

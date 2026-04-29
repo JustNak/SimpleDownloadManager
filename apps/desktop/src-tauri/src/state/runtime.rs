@@ -75,16 +75,24 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn duplicate_enqueue_result(&self, url: &str) -> Option<EnqueueResult> {
         let existing_index = self.jobs.iter().position(|job| job.url == url)?;
         let existing_job = &self.jobs[existing_index];
 
-        Some(EnqueueResult {
+        Some(self.duplicate_enqueue_result_for_job(existing_job))
+    }
+
+    pub(super) fn duplicate_enqueue_result_for_job(
+        &self,
+        existing_job: &DownloadJob,
+    ) -> EnqueueResult {
+        EnqueueResult {
             snapshot: self.snapshot(),
             job_id: existing_job.id.clone(),
             filename: existing_job.filename.clone(),
             status: EnqueueStatus::DuplicateExistingJob,
-        })
+        }
     }
 
     pub(super) fn queue_summary(&self) -> QueueSummary {

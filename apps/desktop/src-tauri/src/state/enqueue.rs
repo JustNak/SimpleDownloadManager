@@ -1,5 +1,13 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct DuplicateDownloadMatch {
+    pub job: Option<DownloadJob>,
+    pub path: Option<String>,
+    pub filename: Option<String>,
+    pub reason: &'static str,
+}
+
 impl SharedState {
     pub async fn enqueue_download(
         &self,
@@ -175,29 +183,6 @@ impl RuntimeState {
             });
         }
 
-        if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
-            if let Some(result) = self.duplicate_enqueue_result(&url) {
-                return Ok(result);
-            }
-        }
-        let duplicate_replacement_index =
-            if options.duplicate_policy == DuplicatePolicy::ReplaceExisting {
-                let index = self.jobs.iter().position(|job| job.url == url);
-                if let Some(index) = index {
-                    let job = &self.jobs[index];
-                    if job_blocks_removal(job, self.active_workers.contains(&job.id)) {
-                        return Err(BackendError {
-                            code: "DUPLICATE_ACTIVE",
-                            message: "Pause or cancel the existing duplicate before replacing it."
-                                .into(),
-                        });
-                    }
-                }
-                index
-            } else {
-                None
-            };
-
         let directory = options
             .directory_override
             .as_deref()
@@ -223,6 +208,41 @@ impl RuntimeState {
         };
         let target_dir = prepare_category_download_directory(&download_dir, &filename)?;
         verify_download_directory_writable(&target_dir)?;
+        let (base_target_path, base_temp_path) = candidate_target_paths(&target_dir, &filename);
+        let duplicate_match =
+            self.duplicate_download_match(&url, &base_target_path, &base_temp_path);
+
+        if options.duplicate_policy == DuplicatePolicy::ReturnExisting {
+            if let Some(job) = duplicate_match
+                .as_ref()
+                .and_then(|duplicate| duplicate.job.as_ref())
+            {
+                return Ok(self.duplicate_enqueue_result_for_job(job));
+            }
+        }
+
+        let duplicate_replacement_index =
+            if options.duplicate_policy == DuplicatePolicy::ReplaceExisting {
+                let index = duplicate_match
+                    .as_ref()
+                    .and_then(|duplicate| duplicate.job.as_ref())
+                    .and_then(|duplicate_job| {
+                        self.jobs.iter().position(|job| job.id == duplicate_job.id)
+                    });
+                if let Some(index) = index {
+                    let job = &self.jobs[index];
+                    if job_blocks_removal(job, self.active_workers.contains(&job.id)) {
+                        return Err(BackendError {
+                            code: "DUPLICATE_ACTIVE",
+                            message: "Pause or cancel the existing duplicate before replacing it."
+                                .into(),
+                        });
+                    }
+                }
+                index
+            } else {
+                None
+            };
         let replaced_duplicate = duplicate_replacement_index.map(|index| {
             let job = self.jobs.remove(index);
             self.active_workers.remove(&job.id);
@@ -239,6 +259,11 @@ impl RuntimeState {
                 unique_target_path(&target_dir, &filename, &self.jobs),
                 torrent_state_path_for_job(&download_dir, &job_id),
             )
+        } else if options.duplicate_policy == DuplicatePolicy::ReplaceExisting
+            && duplicate_match.is_some()
+        {
+            prepare_overwrite_target(&base_target_path, &base_temp_path)?;
+            (base_target_path, base_temp_path)
         } else {
             allocate_target_paths(&target_dir, &filename, &self.jobs)
         };
@@ -317,10 +342,26 @@ impl RuntimeState {
         } else {
             let category_dir =
                 category_download_directory(Path::new(&default_directory), &filename);
-            let (target_path, _) = allocate_target_paths(&category_dir, &filename, &self.jobs);
+            let (base_target_path, base_temp_path) =
+                candidate_target_paths(&category_dir, &filename);
+            let duplicate_match =
+                self.duplicate_download_match(&url, &base_target_path, &base_temp_path);
+            let (target_path, _) = if duplicate_match.is_some() {
+                (base_target_path, base_temp_path)
+            } else {
+                allocate_target_paths(&category_dir, &filename, &self.jobs)
+            };
             target_path.display().to_string()
         };
-        let duplicate_job = self.jobs.iter().find(|job| job.url == url).cloned();
+        let duplicate_match = if default_directory.trim().is_empty() {
+            self.duplicate_download_match(&url, Path::new(""), Path::new(""))
+        } else {
+            let category_dir =
+                category_download_directory(Path::new(&default_directory), &filename);
+            let (base_target_path, base_temp_path) =
+                candidate_target_paths(&category_dir, &filename);
+            self.duplicate_download_match(&url, &base_target_path, &base_temp_path)
+        };
 
         Ok(DownloadPrompt {
             id: id.into(),
@@ -330,7 +371,112 @@ impl RuntimeState {
             total_bytes: total_bytes.filter(|bytes| *bytes > 0),
             default_directory,
             target_path,
-            duplicate_job,
+            duplicate_job: duplicate_match
+                .as_ref()
+                .and_then(|duplicate| duplicate.job.clone()),
+            duplicate_path: duplicate_match
+                .as_ref()
+                .and_then(|duplicate| duplicate.path.clone()),
+            duplicate_filename: duplicate_match
+                .as_ref()
+                .and_then(|duplicate| duplicate.filename.clone()),
+            duplicate_reason: duplicate_match
+                .as_ref()
+                .map(|duplicate| duplicate.reason.to_string()),
         })
     }
+
+    pub(super) fn duplicate_download_match(
+        &self,
+        url: &str,
+        target_path: &Path,
+        temp_path: &Path,
+    ) -> Option<DuplicateDownloadMatch> {
+        if let Some(job) = self.jobs.iter().find(|job| job.url == url) {
+            return Some(DuplicateDownloadMatch {
+                job: Some(job.clone()),
+                path: non_empty_string(job.target_path.clone()),
+                filename: Some(job.filename.clone()),
+                reason: "url",
+            });
+        }
+
+        if let Some(job) = self.jobs.iter().find(|job| {
+            path_matches(&job.target_path, target_path) || path_matches(&job.temp_path, temp_path)
+        }) {
+            return Some(DuplicateDownloadMatch {
+                job: Some(job.clone()),
+                path: non_empty_string(job.target_path.clone()),
+                filename: Some(job.filename.clone()),
+                reason: "path",
+            });
+        }
+
+        if !target_path.as_os_str().is_empty() && target_path.exists() {
+            return Some(DuplicateDownloadMatch {
+                job: None,
+                path: Some(target_path.display().to_string()),
+                filename: target_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string),
+                reason: "file",
+            });
+        }
+
+        if !temp_path.as_os_str().is_empty() && temp_path.exists() {
+            return Some(DuplicateDownloadMatch {
+                job: None,
+                path: Some(temp_path.display().to_string()),
+                filename: temp_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string),
+                reason: "partial_file",
+            });
+        }
+
+        None
+    }
+}
+
+fn path_matches(existing_path: &str, candidate: &Path) -> bool {
+    if existing_path.trim().is_empty() || candidate.as_os_str().is_empty() {
+        return false;
+    }
+
+    path_key(existing_path) == path_key(&candidate.display().to_string())
+}
+
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn prepare_overwrite_target(target_path: &Path, temp_path: &Path) -> Result<(), BackendError> {
+    if target_path.is_dir() {
+        return Err(BackendError {
+            code: "DESTINATION_INVALID",
+            message: format!(
+                "Cannot overwrite directory destination {}.",
+                target_path.display()
+            ),
+        });
+    }
+
+    if target_path.exists() {
+        std::fs::remove_file(target_path).map_err(|error| BackendError {
+            code: "DESTINATION_INVALID",
+            message: format!("Could not replace existing download file: {error}"),
+        })?;
+    }
+
+    remove_file_if_exists(temp_path).map_err(internal_error)
 }

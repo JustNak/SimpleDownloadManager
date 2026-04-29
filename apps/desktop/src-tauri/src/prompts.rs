@@ -160,6 +160,9 @@ mod tests {
             default_directory: "C:/Downloads".into(),
             target_path: format!("C:/Downloads/{id}.zip"),
             duplicate_job: None,
+            duplicate_path: None,
+            duplicate_filename: None,
+            duplicate_reason: None,
         }
     }
 }

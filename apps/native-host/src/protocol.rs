@@ -53,6 +53,10 @@ pub struct HandoffAuth {
 pub struct EnqueueDownloadPayload {
     pub url: String,
     pub source: RequestSource,
+    #[serde(rename = "suggestedFilename")]
+    pub suggested_filename: Option<String>,
+    #[serde(rename = "totalBytes")]
+    pub total_bytes: Option<u64>,
     #[serde(rename = "handoffAuth")]
     pub handoff_auth: Option<HandoffAuth>,
 }
@@ -216,6 +220,11 @@ pub fn parse_enqueue_payload(
 
     payload.url = validate_http_url(&request.request_id, &payload.url)?;
     validate_request_source(&request.request_id, &payload.source)?;
+    validate_metadata_field(
+        &request.request_id,
+        "suggestedFilename",
+        payload.suggested_filename.as_deref(),
+    )?;
     validate_handoff_auth(
         &request.request_id,
         payload.handoff_auth.as_ref(),
@@ -560,6 +569,28 @@ mod tests {
             payload.url,
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Example"
         );
+    }
+
+    #[test]
+    fn parse_enqueue_payload_preserves_browser_download_metadata() {
+        let request = request(
+            "enqueue_download",
+            json!({
+                "url": "https://example.com/download?id=123",
+                "source": {
+                    "entryPoint": "browser_download",
+                    "browser": "firefox",
+                    "extensionVersion": "0.3.52"
+                },
+                "suggestedFilename": "guide.pdf",
+                "totalBytes": 4096
+            }),
+        );
+
+        let payload = parse_enqueue_payload(&request).expect("metadata should be accepted");
+
+        assert_eq!(payload.suggested_filename.as_deref(), Some("guide.pdf"));
+        assert_eq!(payload.total_bytes, Some(4096));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings
 import browser from './browser';
 import {
   browserDownloadUrl,
+  createBrowserDownloadHandoffMetadata,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
   detachBrowserDownloadForDesktopPrompt,
@@ -360,15 +361,13 @@ async function handOffBrowserDownload(
 
   const handoffAuth = takeCapturedHandoffAuth(handoffDetails, settings);
 
+  const metadata = createBrowserDownloadHandoffMetadata(item, handoffAuth);
+
   if (settings.downloadHandoffMode === 'auto') {
-    return enqueueDownload(url, source, handoffAuth);
+    return enqueueDownload(url, source, metadata);
   }
 
-  return promptDownload(url, source, {
-    suggestedFilename: basenameOnly(item.filename),
-    totalBytes: item.totalBytes && item.totalBytes > 0 ? item.totalBytes : undefined,
-    handoffAuth,
-  });
+  return promptDownload(url, source, metadata);
 }
 
 async function recordHostError(response: Extract<HostToExtensionResponse, { ok: false }>): Promise<void> {

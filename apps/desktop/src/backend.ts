@@ -759,6 +759,9 @@ export async function getCurrentDownloadPrompt(): Promise<DownloadPrompt | null>
         extensionVersion: '0.1.0',
       },
       duplicateJob: undefined,
+      duplicatePath: undefined,
+      duplicateFilename: undefined,
+      duplicateReason: undefined,
     };
   }
   return invokeCommand<DownloadPrompt | null>('get_current_download_prompt');

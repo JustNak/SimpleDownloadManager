@@ -6,7 +6,7 @@ const repoRoot = path.resolve();
 const expectedVersion = '0.3.51-alpha';
 const expectedProtocolVersion = '0.3.48-alpha';
 const expectedNativeHostVersion = '0.3.48-alpha';
-const expectedExtensionVersion = '0.3.46-alpha';
+const expectedExtensionVersion = '0.3.47-alpha';
 
 for (const manifestPath of [
   'package.json',

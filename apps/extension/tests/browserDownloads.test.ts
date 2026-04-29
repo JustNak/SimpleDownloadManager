@@ -3,6 +3,7 @@ import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
   browserDownloadUrl,
   cancelBrowserDownloadForDesktopPrompt,
+  createBrowserDownloadHandoffMetadata,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
   detachBrowserDownloadForDesktopPrompt,
@@ -213,6 +214,21 @@ async function main() {
     }),
     true,
     'protected-download auth failures should leave the browser fallback path active',
+  );
+  assert.deepEqual(
+    createBrowserDownloadHandoffMetadata(
+      {
+        filename: 'C:\\Users\\Downloads\\html_css_basic_guide (2).pdf',
+        totalBytes: 95437.8,
+      },
+      { headers: [{ name: 'Cookie', value: 'session=abc' }] },
+    ),
+    {
+      suggestedFilename: 'html_css_basic_guide (2).pdf',
+      totalBytes: 95437,
+      handoffAuth: { headers: [{ name: 'Cookie', value: 'session=abc' }] },
+    },
+    'browser auto handoffs should include the resolved filename and size for desktop duplicate checks',
   );
 
   const suggestionCalls: Array<{ filename?: string; conflictAction?: 'uniquify' | 'overwrite' | 'prompt' } | undefined> = [];

@@ -87,12 +87,20 @@ export interface HandoffAuth {
 export interface EnqueueDownloadPayload {
   url: string;
   source: RequestSource;
+  suggestedFilename?: string;
+  totalBytes?: number;
   handoffAuth?: HandoffAuth;
 }
 
 export interface PromptDownloadPayload {
   url: string;
   source: RequestSource;
+  suggestedFilename?: string;
+  totalBytes?: number;
+  handoffAuth?: HandoffAuth;
+}
+
+export interface DownloadRequestMetadata {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
@@ -384,6 +392,24 @@ export function sanitizeHandoffAuth(auth: HandoffAuth | undefined): HandoffAuth 
   return headers.length > 0 ? { headers } : undefined;
 }
 
+function normalizeDownloadRequestMetadata(metadata: DownloadRequestMetadata | HandoffAuth | undefined): DownloadRequestMetadata {
+  if (!metadata) {
+    return {};
+  }
+
+  if ('headers' in metadata) {
+    return { handoffAuth: metadata };
+  }
+
+  return metadata;
+}
+
+function normalizeTotalBytes(totalBytes: number | undefined): number | undefined {
+  return typeof totalBytes === 'number' && Number.isFinite(totalBytes) && totalBytes > 0
+    ? Math.floor(totalBytes)
+    : undefined;
+}
+
 export function createPingRequest(requestId = createRequestId()): RequestEnvelope<'ping', EmptyPayload> {
   return {
     protocolVersion: PROTOCOL_VERSION,
@@ -418,14 +444,17 @@ export function createEnqueueDownloadRequest(
   url: string,
   source: RequestSource,
   requestId = createRequestId(),
-  handoffAuth?: HandoffAuth,
+  metadata: DownloadRequestMetadata | HandoffAuth = {},
 ): ValidationResult<RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>> {
   const validatedUrl = validateHttpUrl(url);
   if (!validatedUrl.ok) {
     return validatedUrl;
   }
 
-  const sanitizedAuth = sanitizeHandoffAuth(handoffAuth);
+  const normalizedMetadata = normalizeDownloadRequestMetadata(metadata);
+  const totalBytes = normalizeTotalBytes(normalizedMetadata.totalBytes);
+  const suggestedFilename = trimMetadata(normalizedMetadata.suggestedFilename);
+  const sanitizedAuth = sanitizeHandoffAuth(normalizedMetadata.handoffAuth);
   return {
     ok: true,
     value: {
@@ -435,6 +464,8 @@ export function createEnqueueDownloadRequest(
       payload: {
         url: validatedUrl.value,
         source: sanitizeSource(source),
+        suggestedFilename,
+        totalBytes,
         ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
       },
     },
@@ -444,7 +475,7 @@ export function createEnqueueDownloadRequest(
 export function createPromptDownloadRequest(
   url: string,
   source: RequestSource,
-  metadata: { suggestedFilename?: string; totalBytes?: number; handoffAuth?: HandoffAuth } = {},
+  metadata: DownloadRequestMetadata = {},
   requestId = createRequestId(),
 ): ValidationResult<RequestEnvelope<'prompt_download', PromptDownloadPayload>> {
   const validatedUrl = validateHttpUrl(url);
@@ -452,10 +483,7 @@ export function createPromptDownloadRequest(
     return validatedUrl;
   }
 
-  const totalBytes =
-    typeof metadata.totalBytes === 'number' && Number.isFinite(metadata.totalBytes) && metadata.totalBytes > 0
-      ? Math.floor(metadata.totalBytes)
-      : undefined;
+  const totalBytes = normalizeTotalBytes(metadata.totalBytes);
 
   const sanitizedAuth = sanitizeHandoffAuth(metadata.handoffAuth);
   return {

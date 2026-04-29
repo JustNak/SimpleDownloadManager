@@ -108,6 +108,9 @@ export interface DownloadPrompt {
   defaultDirectory: string;
   targetPath: string;
   duplicateJob?: DownloadJob;
+  duplicatePath?: string;
+  duplicateFilename?: string;
+  duplicateReason?: 'url' | 'path' | 'file' | 'partial_file';
 }
 
 export interface ExtensionIntegrationSettings {

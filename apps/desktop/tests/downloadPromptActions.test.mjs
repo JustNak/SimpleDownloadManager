@@ -5,6 +5,7 @@ import path from 'node:path';
 const repoRoot = path.resolve();
 const backendSource = await readFile(path.join(repoRoot, 'apps/desktop/src/backend.ts'), 'utf8');
 const promptSource = await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadPromptWindow.tsx'), 'utf8');
+const ipcSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/ipc/mod.rs'), 'utf8');
 const windowsSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/windows.rs'), 'utf8');
 const progressSources = [
   ['single download progress', await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadProgressWindow.tsx'), 'utf8')],
@@ -47,6 +48,11 @@ assert.match(
   promptSource,
   /prompt\?\.source\?\.entryPoint === 'browser_download' && !isDuplicate/,
   'Swap button should only be shown for non-duplicate browser download prompts',
+);
+assert.match(
+  promptSource,
+  /prompt\?\.duplicateJob \|\| prompt\?\.duplicatePath/,
+  'destination-only duplicate prompts should render the same duplicate action UI as URL duplicates',
 );
 assert.match(
   promptSource,
@@ -110,8 +116,13 @@ assert.match(
 );
 assert.match(
   promptSource,
-  /title=\{prompt\.duplicateJob\?\.filename\}/,
+  /title=\{duplicateLabel\}/,
   'duplicate prompt filename should preserve its full value in a tooltip while compact',
+);
+assert.match(
+  ipcSource,
+  /"enqueue_download"[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/,
+  'auto enqueue handoffs should reroute detected duplicates through the prompt flow',
 );
 
 for (const [name, source] of progressSources) {
