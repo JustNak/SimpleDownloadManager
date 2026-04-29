@@ -36,8 +36,10 @@ pub use settings::validate_settings;
 use settings::*;
 pub(crate) use torrent::{
     apply_pending_torrent_session_cache_clear, clear_torrent_session_cache_directory,
-    pending_torrent_session_cache_clear_path, should_stop_seeding,
+    should_stop_seeding,
 };
+#[cfg(test)]
+pub(crate) use torrent::pending_torrent_session_cache_clear_path;
 pub use types::{
     BackendError, BulkArchiveEntry, BulkArchiveReady, DownloadTask, DuplicatePolicy,
     EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation,
