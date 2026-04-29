@@ -1,4 +1,4 @@
-use crate::state::TorrentRuntimeSnapshot;
+use crate::state::{TorrentRuntimePhase, TorrentRuntimeSnapshot};
 use crate::storage::TorrentSettings;
 use librqbit::api::TorrentIdOrHash;
 use librqbit::dht::PersistentDhtConfig;
@@ -146,6 +146,7 @@ impl TorrentEngine {
         source: &PreparedTorrentSource,
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
+        start_paused: bool,
         tracker_first_diagnostics: Option<UnboundedSender<TrackerFirstMetadataOutcome>>,
     ) -> Result<TorrentAddSessionOutcome, String> {
         tokio::fs::create_dir_all(output_folder)
@@ -155,7 +156,12 @@ impl TorrentEngine {
 
         if source.tracker_first_metadata {
             match self
-                .try_add_tracker_first_metadata(source, output_folder, upload_limit_kib_per_second)
+                .try_add_tracker_first_metadata(
+                    source,
+                    output_folder,
+                    upload_limit_kib_per_second,
+                    start_paused,
+                )
                 .await?
             {
                 Ok(id) => {
@@ -174,6 +180,7 @@ impl TorrentEngine {
         let options = torrent_add_options(
             output_folder,
             upload_limit_kib_per_second,
+            start_paused,
             &source.fallback_trackers_for_options,
         );
         let add_torrent = AddTorrent::from_cli_argument(&source.source)
@@ -186,6 +193,7 @@ impl TorrentEngine {
         source: &PreparedTorrentSource,
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
+        start_paused: bool,
     ) -> Result<Result<TorrentAddSessionOutcome, TrackerFirstMetadataOutcome>, String> {
         let add_torrent = AddTorrent::from_cli_argument(&source.source)
             .map_err(|error| format!("Could not read torrent source: {error:#}"))?;
@@ -227,6 +235,7 @@ impl TorrentEngine {
         let options = torrent_add_options(
             output_folder,
             upload_limit_kib_per_second,
+            start_paused,
             &source.fallback_trackers_for_options,
         );
         let id = self
@@ -266,6 +275,7 @@ impl TorrentEngine {
         engine_id: Option<usize>,
         info_hash: Option<&str>,
         upload_limit_kib_per_second: u32,
+        validate_only: bool,
     ) -> Result<Option<usize>, String> {
         self.set_upload_limit(upload_limit_kib_per_second);
 
@@ -273,10 +283,7 @@ impl TorrentEngine {
             let cached_handle = self.handles.lock().await.get(&engine_id).cloned();
             if let Some(handle) = cached_handle {
                 let id = handle.id();
-                self.session
-                    .unpause(&handle)
-                    .await
-                    .map_err(|error| format!("Could not resume torrent: {error:#}"))?;
+                self.prepare_existing_for_resume(&handle, validate_only).await?;
                 return Ok(Some(id));
             }
         }
@@ -288,14 +295,32 @@ impl TorrentEngine {
 
             let id = handle.id();
             self.handles.lock().await.insert(id, handle.clone());
-            self.session
-                .unpause(&handle)
-                .await
-                .map_err(|error| format!("Could not resume torrent: {error:#}"))?;
+            self.prepare_existing_for_resume(&handle, validate_only).await?;
             return Ok(Some(id));
         }
 
         Ok(None)
+    }
+
+    async fn prepare_existing_for_resume(
+        &self,
+        handle: &Arc<ManagedTorrent>,
+        validate_only: bool,
+    ) -> Result<(), String> {
+        if validate_only {
+            if matches!(handle.stats().state, librqbit::TorrentStatsState::Live) {
+                self.session
+                    .pause(handle)
+                    .await
+                    .map_err(|error| format!("Could not pause torrent for seeding restore validation: {error:#}"))?;
+            }
+            return Ok(());
+        }
+
+        self.session
+            .unpause(handle)
+            .await
+            .map_err(|error| format!("Could not resume torrent: {error:#}"))
     }
 
     pub async fn pause(&self, id: usize) -> Result<(), String> {
@@ -541,8 +566,18 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
         download_speed: torrent_download_speed_bytes_per_second(&stats),
         upload_speed: torrent_upload_speed_bytes_per_second(&stats),
         eta: torrent_eta_seconds(&stats),
+        phase: torrent_runtime_phase(&stats),
         finished: stats.finished,
         error: stats.error,
+    }
+}
+
+fn torrent_runtime_phase(stats: &librqbit::TorrentStats) -> TorrentRuntimePhase {
+    match stats.state {
+        librqbit::TorrentStatsState::Initializing => TorrentRuntimePhase::Initializing,
+        librqbit::TorrentStatsState::Paused => TorrentRuntimePhase::Paused,
+        librqbit::TorrentStatsState::Live => TorrentRuntimePhase::Live,
+        librqbit::TorrentStatsState::Error => TorrentRuntimePhase::Error,
     }
 }
 
@@ -603,10 +638,11 @@ fn mib_per_second_to_bytes_per_second(mib_per_second: f64) -> u64 {
 fn torrent_add_options(
     output_folder: &Path,
     upload_limit_kib_per_second: u32,
+    start_paused: bool,
     fallback_trackers: &[String],
 ) -> AddTorrentOptions {
     AddTorrentOptions {
-        paused: false,
+        paused: start_paused,
         output_folder: Some(output_folder.display().to_string()),
         overwrite: true,
         ratelimits: torrent_limits(upload_limit_kib_per_second),
@@ -761,6 +797,7 @@ mod tests {
         let options = torrent_add_options(
             Path::new("C:/Downloads/file"),
             0,
+            false,
             &prepared.fallback_trackers_for_options,
         );
 

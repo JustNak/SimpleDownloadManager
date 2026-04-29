@@ -50,6 +50,7 @@ impl SharedState {
                     let task = DownloadTask {
                         id: job.id.clone(),
                         url: job.url.clone(),
+                        filename: job.filename.clone(),
                         transfer_kind: job.transfer_kind,
                         torrent: job.torrent.clone(),
                         handoff_auth: auth_by_job.get(&job.id).cloned(),

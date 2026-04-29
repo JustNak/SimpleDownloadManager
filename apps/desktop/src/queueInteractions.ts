@@ -9,7 +9,16 @@ export function isJobArtifactMissing(job: DownloadJob): boolean {
 }
 
 export function shouldBlurJobIdentity(job: DownloadJob): boolean {
+  if (isSeedingRestoreValidation(job)) return false;
   return job.state === 'starting' || job.state === 'downloading';
+}
+
+function isSeedingRestoreValidation(job: DownloadJob): boolean {
+  return job.transferKind === 'torrent'
+    && job.state === 'downloading'
+    && typeof job.torrent?.seedingStartedAt === 'number'
+    && job.totalBytes > 0
+    && job.downloadedBytes > 0;
 }
 
 export function selectJobRange(jobIds: string[], anchorId: string, currentId: string): string[] {

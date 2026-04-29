@@ -13,6 +13,7 @@ pub struct BackendError {
 pub struct DownloadTask {
     pub id: String,
     pub url: String,
+    pub filename: String,
     pub transfer_kind: TransferKind,
     pub torrent: Option<TorrentInfo>,
     pub handoff_auth: Option<HandoffAuth>,
@@ -39,6 +40,14 @@ pub struct ExternalUsePreparation {
     pub snapshot: Option<DesktopSnapshot>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TorrentRuntimePhase {
+    Initializing,
+    Paused,
+    Live,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub struct TorrentRuntimeSnapshot {
     pub engine_id: usize,
@@ -54,6 +63,7 @@ pub struct TorrentRuntimeSnapshot {
     pub download_speed: u64,
     pub upload_speed: u64,
     pub eta: Option<u64>,
+    pub phase: TorrentRuntimePhase,
     pub finished: bool,
     pub error: Option<String>,
 }

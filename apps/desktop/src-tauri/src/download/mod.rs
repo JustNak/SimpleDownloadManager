@@ -1,6 +1,7 @@
 use crate::commands::emit_snapshot;
 use crate::state::{
-    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, WorkerControl,
+    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState,
+    TorrentRuntimePhase, WorkerControl,
 };
 use crate::storage::{
     BulkArchiveStatus, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
@@ -709,7 +710,7 @@ async fn run_torrent_download_attempt(
             .await;
     }
 
-    let output_folder = task.target_path.clone();
+    let mut output_folder = task.target_path.clone();
     let existing_torrent = task.torrent.as_ref();
     let stale_verified_torrent = is_stale_verified_torrent_task(task);
     if stale_verified_torrent {
@@ -741,6 +742,30 @@ async fn run_torrent_download_attempt(
         existing_torrent
     };
     let restoring_seeding = is_torrent_seeding_restore(existing_torrent_for_resume);
+    if restoring_seeding {
+        match protected_restore_payload_target(
+            &output_folder,
+            existing_torrent_for_resume,
+            &task.filename,
+        ) {
+            TorrentRestoreTarget::Current => {}
+            TorrentRestoreTarget::Repaired(repaired) => {
+                output_folder = repaired;
+                let snapshot = state
+                    .update_torrent_restore_target_path(&task.id, &output_folder)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                emit_snapshot(app, &snapshot);
+            }
+            TorrentRestoreTarget::Missing => {
+                return Err(download_error(
+                    FailureCategory::Torrent,
+                    torrent_restore_payload_missing_message().into(),
+                    false,
+                ));
+            }
+        }
+    }
     let mut prepared_source_for_recheck = None::<PreparedTorrentSource>;
     let mut stale_completion_recheck_attempted = stale_verified_torrent;
     let mut engine_id = match engine
@@ -748,6 +773,7 @@ async fn run_torrent_download_attempt(
             existing_torrent_for_resume.and_then(|torrent| torrent.engine_id),
             existing_torrent_for_resume.and_then(|torrent| torrent.info_hash.as_deref()),
             settings.torrent.upload_limit_kib_per_second,
+            restoring_seeding,
         )
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?
@@ -816,6 +842,7 @@ async fn run_torrent_download_attempt(
                 &prepared_source,
                 &output_folder,
                 settings.torrent.upload_limit_kib_per_second,
+                restoring_seeding,
                 Some(tracker_first_diagnostics),
             )
             .await;
@@ -879,6 +906,7 @@ async fn run_torrent_download_attempt(
                     &prepared_source,
                     &output_folder,
                     settings.torrent.upload_limit_kib_per_second,
+                    false,
                     None,
                 )
                 .await?;
@@ -906,6 +934,7 @@ async fn run_torrent_download_attempt(
     let mut was_finished = persisted_seeding_started_at.is_some();
     let mut first_snapshot = true;
     let mut last_persisted_at = Instant::now();
+    let mut restored_seeding_unpaused = false;
     loop {
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
@@ -988,6 +1017,7 @@ async fn run_torrent_download_attempt(
                     prepared_source,
                     &output_folder,
                     settings.torrent.upload_limit_kib_per_second,
+                    false,
                     None,
                 )
                 .await?;
@@ -1003,6 +1033,30 @@ async fn run_torrent_download_attempt(
                     }
                     TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
                 }
+            }
+        }
+        if restoring_seeding {
+            if let Some(message) = torrent_restore_validation_failure(&update) {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        message,
+                        Some(task.id.clone()),
+                    )
+                    .await;
+                return Err(download_error(FailureCategory::Torrent, message.into(), false));
+            }
+
+            if update.finished
+                && !restored_seeding_unpaused
+                && matches!(update.phase, TorrentRuntimePhase::Paused)
+            {
+                engine
+                    .unpause(engine_id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                restored_seeding_unpaused = true;
             }
         }
         let now = Instant::now();
@@ -1243,6 +1297,7 @@ async fn add_prepared_torrent_with_controls(
     prepared_source: &PreparedTorrentSource,
     output_folder: &Path,
     upload_limit_kib_per_second: u32,
+    start_paused: bool,
     tracker_first_diagnostics: Option<mpsc::UnboundedSender<TrackerFirstMetadataOutcome>>,
 ) -> Result<TorrentAddOutcome, DownloadError> {
     add_torrent_with_controls(
@@ -1252,6 +1307,7 @@ async fn add_prepared_torrent_with_controls(
             prepared_source,
             output_folder,
             upload_limit_kib_per_second,
+            start_paused,
             tracker_first_diagnostics,
         ),
         TORRENT_METADATA_TIMEOUT,
@@ -1351,6 +1407,18 @@ fn repeated_stale_torrent_completion_message() -> &'static str {
     "Torrent verification still reports complete, but the target folder is empty after recheck. Clear the torrent and add it again, or choose a folder containing the files."
 }
 
+fn torrent_restore_peer_download_blocked_message() -> &'static str {
+    "Seeding restore started downloading from peers before local files validated complete; pausing to avoid an unintended redownload."
+}
+
+fn torrent_restore_incomplete_payload_message() -> &'static str {
+    "Seeding restore found incomplete local files; pausing instead of downloading them again. Use restart if you want to download this torrent again."
+}
+
+fn torrent_restore_payload_missing_message() -> &'static str {
+    "Seeding restore could not find local payload files; pausing instead of downloading them again. Choose the folder containing the files or restart the torrent."
+}
+
 fn torrent_has_resume_identity(torrent: Option<&TorrentInfo>) -> bool {
     torrent.is_some_and(|torrent| torrent.engine_id.is_some() || torrent.info_hash.is_some())
 }
@@ -1412,6 +1480,95 @@ fn is_stale_torrent_completion(
         && update.downloaded_bytes >= update.total_bytes
         && update.fetched_bytes == 0
         && target_payload_appears_empty(target_path)
+}
+
+fn torrent_restore_validation_failure(
+    update: &crate::state::TorrentRuntimeSnapshot,
+) -> Option<&'static str> {
+    if update.finished {
+        return None;
+    }
+
+    if matches!(update.phase, TorrentRuntimePhase::Live)
+        || update.fetched_bytes > 0
+        || update.download_speed > 0
+    {
+        return Some(torrent_restore_peer_download_blocked_message());
+    }
+
+    if matches!(update.phase, TorrentRuntimePhase::Paused) && update.total_bytes > 0 {
+        return Some(torrent_restore_incomplete_payload_message());
+    }
+
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TorrentRestoreTarget {
+    Current,
+    Repaired(PathBuf),
+    Missing,
+}
+
+fn protected_restore_payload_target(
+    current_target: &Path,
+    torrent: Option<&TorrentInfo>,
+    fallback_name: &str,
+) -> TorrentRestoreTarget {
+    if !target_payload_appears_empty(current_target) {
+        return TorrentRestoreTarget::Current;
+    }
+
+    let Some(parent) = current_target.parent() else {
+        return TorrentRestoreTarget::Missing;
+    };
+
+    for name in torrent_restore_payload_candidate_names(torrent, fallback_name) {
+        let candidate = parent.join(name);
+        if candidate == current_target {
+            continue;
+        }
+        if !target_payload_appears_empty(&candidate) {
+            return TorrentRestoreTarget::Repaired(candidate);
+        }
+    }
+
+    TorrentRestoreTarget::Missing
+}
+
+fn torrent_restore_payload_candidate_names(
+    torrent: Option<&TorrentInfo>,
+    fallback_name: &str,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(name) = torrent.and_then(|torrent| torrent.name.as_deref()) {
+        let candidate = sanitize_torrent_payload_name(name);
+        if !candidate.is_empty() {
+            names.push(candidate);
+        }
+    }
+
+    let fallback = sanitize_torrent_payload_name(fallback_name);
+    if !fallback.is_empty() && !names.iter().any(|name| name == &fallback) {
+        names.push(fallback);
+    }
+
+    names
+}
+
+fn sanitize_torrent_payload_name(input: &str) -> String {
+    input
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            character if character.is_control() => '_',
+            _ => character,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .to_string()
 }
 
 fn target_payload_appears_empty(target_path: &Path) -> bool {
@@ -3539,6 +3696,7 @@ mod tests {
             download_speed: 0,
             upload_speed: 0,
             eta: None,
+            phase: crate::state::TorrentRuntimePhase::Live,
             finished: true,
             error: None,
         };
@@ -3595,6 +3753,7 @@ mod tests {
             download_speed: 0,
             upload_speed: 0,
             eta: None,
+            phase: crate::state::TorrentRuntimePhase::Live,
             finished: true,
             error: None,
         };
@@ -3650,6 +3809,68 @@ mod tests {
                 reused_existing_session: false,
             },
         ));
+    }
+
+    #[test]
+    fn protected_restore_rejects_live_peer_fetch_before_completion() {
+        let update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Need for Speed - Most Wanted".into()),
+            total_files: Some(2),
+            peers: Some(1),
+            seeds: None,
+            downloaded_bytes: 1024 * 1024,
+            total_bytes: 3 * 1024 * 1024,
+            uploaded_bytes: 0,
+            fetched_bytes: 512 * 1024,
+            download_speed: 128 * 1024,
+            upload_speed: 0,
+            eta: Some(15),
+            phase: crate::state::TorrentRuntimePhase::Live,
+            finished: false,
+            error: None,
+        };
+
+        assert_eq!(
+            torrent_restore_validation_failure(&update),
+            Some(torrent_restore_peer_download_blocked_message()),
+            "prior seeding restore must not keep downloading from peers under a restore label"
+        );
+    }
+
+    #[test]
+    fn protected_restore_resolves_sibling_payload_for_generated_placeholder_target() {
+        let target_dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("restore-target-repair-{}", std::process::id()));
+        let placeholder = target_dir.join("torrent-a634dc94");
+        let payload = target_dir.join("Need for Speed - Most Wanted [FitGirl Repack]");
+        let _ = std::fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&placeholder).unwrap();
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("payload.bin"), [1_u8]).unwrap();
+
+        let resolved = protected_restore_payload_target(
+            &placeholder,
+            Some(&TorrentInfo {
+                name: Some("Need for Speed - Most Wanted [FitGirl Repack]".into()),
+                seeding_started_at: Some(123_456),
+                uploaded_bytes: 21 * 1024 * 1024,
+                fetched_bytes: 4 * 1024 * 1024 * 1024,
+                ..TorrentInfo::default()
+            }),
+            "Need for Speed - Most Wanted [FitGirl Repack]",
+        );
+
+        assert_eq!(
+            resolved,
+            TorrentRestoreTarget::Repaired(payload),
+            "restore should use the existing payload folder instead of the empty generated magnet placeholder"
+        );
+
+        let _ = std::fs::remove_dir_all(target_dir);
     }
 
     #[test]

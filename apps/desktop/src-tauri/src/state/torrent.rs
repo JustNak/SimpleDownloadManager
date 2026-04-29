@@ -354,6 +354,39 @@ impl SharedState {
         }
     }
 
+    pub async fn update_torrent_restore_target_path(
+        &self,
+        id: &str,
+        target_path: &Path,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                return Err("Job not found.".into());
+            };
+            if job.transfer_kind != TransferKind::Torrent {
+                return Err("Job is not a torrent.".into());
+            }
+
+            job.target_path = target_path.display().to_string();
+            let filename = job.filename.clone();
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "torrent".into(),
+                format!(
+                    "Repaired seeding restore target for {filename} to {}",
+                    target_path.display()
+                ),
+                Some(id.into()),
+            );
+
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn update_torrent_progress(
         &self,
         id: &str,
@@ -368,9 +401,22 @@ impl SharedState {
 
             let preserve_paused = job.state == JobState::Paused;
             let was_seeding = job.state == JobState::Seeding;
+            let restoring_seeding = job
+                .torrent
+                .as_ref()
+                .and_then(|torrent| torrent.seeding_started_at)
+                .is_some();
+            let restore_validation = restoring_seeding
+                && !update.finished
+                && matches!(
+                    update.phase,
+                    TorrentRuntimePhase::Initializing | TorrentRuntimePhase::Paused
+                );
             if !preserve_paused {
                 job.state = if update.finished {
                     JobState::Seeding
+                } else if restore_validation {
+                    JobState::Downloading
                 } else {
                     JobState::Downloading
                 };
@@ -381,10 +427,12 @@ impl SharedState {
                 0
             } else if update.finished {
                 update.upload_speed
+            } else if restore_validation {
+                0
             } else {
                 update.download_speed
             };
-            job.eta = if preserve_paused || update.finished {
+            job.eta = if preserve_paused || update.finished || restore_validation {
                 0
             } else {
                 update.eta.unwrap_or(0)
