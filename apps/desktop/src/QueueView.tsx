@@ -13,6 +13,9 @@ import {
   fileBadgeActivityState,
   formatQueueSize,
   formatQueueSizeTitle,
+  isTorrentCheckingFiles,
+  isTorrentMetadataPending,
+  isTorrentSeedingRestore,
   queueTableColumnsForView,
   queueStatusPresentation,
   shouldShowNameProgress,
@@ -1505,6 +1508,10 @@ function emptyStateTitle(view: string) {
 }
 
 function statusText(job: DownloadJob) {
+  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
+  if (isTorrentCheckingFiles(job)) return 'Checking files';
+  if (isTorrentMetadataPending(job)) return 'Finding metadata';
+
   if (job.state === JobState.Failed && job.failureCategory) {
     return `${formatFailureCategory(job.failureCategory)} Error`;
   }

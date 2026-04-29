@@ -73,6 +73,12 @@ impl TrackerFirstMetadataOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TorrentAddSessionOutcome {
+    pub engine_id: usize,
+    pub reused_existing_session: bool,
+}
+
 pub struct TorrentEngine {
     session: Arc<Session>,
     handles: Arc<Mutex<HashMap<usize, Arc<ManagedTorrent>>>>,
@@ -141,7 +147,7 @@ impl TorrentEngine {
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
         tracker_first_diagnostics: Option<UnboundedSender<TrackerFirstMetadataOutcome>>,
-    ) -> Result<usize, String> {
+    ) -> Result<TorrentAddSessionOutcome, String> {
         tokio::fs::create_dir_all(output_folder)
             .await
             .map_err(|error| format!("Could not create torrent output directory: {error}"))?;
@@ -180,7 +186,7 @@ impl TorrentEngine {
         source: &PreparedTorrentSource,
         output_folder: &Path,
         upload_limit_kib_per_second: u32,
-    ) -> Result<Result<usize, TrackerFirstMetadataOutcome>, String> {
+    ) -> Result<Result<TorrentAddSessionOutcome, TrackerFirstMetadataOutcome>, String> {
         let add_torrent = AddTorrent::from_cli_argument(&source.source)
             .map_err(|error| format!("Could not read torrent source: {error:#}"))?;
         let tracker_session = match Session::new_with_opts(
@@ -233,18 +239,26 @@ impl TorrentEngine {
         &self,
         add_torrent: AddTorrent<'_>,
         options: AddTorrentOptions,
-    ) -> Result<usize, String> {
-        let handle = self
+    ) -> Result<TorrentAddSessionOutcome, String> {
+        let response = self
             .session
             .add_torrent(add_torrent, Some(options))
             .await
-            .map_err(|error| format!("Could not add torrent: {error:#}"))?
-            .into_handle()
-            .ok_or_else(|| "Torrent engine returned list-only response.".to_string())?;
+            .map_err(|error| format!("Could not add torrent: {error:#}"))?;
+        let (handle, reused_existing_session) = match response {
+            AddTorrentResponse::AlreadyManaged(_, handle) => (handle, true),
+            AddTorrentResponse::Added(_, handle) => (handle, false),
+            AddTorrentResponse::ListOnly(_) => {
+                return Err("Torrent engine returned list-only response.".to_string());
+            }
+        };
 
         let id = handle.id();
         self.handles.lock().await.insert(id, handle);
-        Ok(id)
+        Ok(TorrentAddSessionOutcome {
+            engine_id: id,
+            reused_existing_session,
+        })
     }
 
     pub async fn resume_existing(

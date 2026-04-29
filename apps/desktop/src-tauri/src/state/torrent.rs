@@ -446,6 +446,56 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn reset_stale_torrent_completion_for_recheck(
+        &self,
+        id: &str,
+        info_hash: Option<String>,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                job.state = JobState::Starting;
+                job.progress = 0.0;
+                job.downloaded_bytes = 0;
+                job.total_bytes = 0;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = None;
+                job.failure_category = None;
+
+                let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+                if info_hash.is_some() {
+                    torrent.info_hash = info_hash;
+                }
+                torrent.engine_id = None;
+                torrent.peers = None;
+                torrent.seeds = None;
+                torrent.uploaded_bytes = 0;
+                torrent.last_runtime_uploaded_bytes = None;
+                torrent.fetched_bytes = 0;
+                torrent.last_runtime_fetched_bytes = None;
+                torrent.ratio = 0.0;
+                torrent.seeding_started_at = None;
+
+                job.filename.clone()
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent".into(),
+                format!("Cleared stale torrent verification for {filename}; rechecking files"),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn complete_torrent_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;

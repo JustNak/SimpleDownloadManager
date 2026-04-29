@@ -2126,6 +2126,87 @@ async fn seeding_restore_non_file_failure_pauses_with_attention_instead_of_faili
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn stale_torrent_completion_reset_requeues_verification_without_losing_identity() {
+    let download_dir = test_runtime_dir("stale-torrent-reset");
+    let mut job = download_job("job_1", JobState::Seeding, ResumeSupport::Unsupported, 100);
+    job.transfer_kind = TransferKind::Torrent;
+    job.url = "magnet:?xt=urn:btih:420f3778a160fbe6eb0a67c8470256be13b0ecc8".into();
+    job.target_path = download_dir.join("empty-output").display().to_string();
+    job.temp_path = download_dir
+        .join(".torrent-state")
+        .join("job_1")
+        .display()
+        .to_string();
+    job.downloaded_bytes = 8 * 1024;
+    job.total_bytes = 8 * 1024;
+    job.speed = 4096;
+    job.eta = 15;
+    job.error = Some("previous false seeding".into());
+    job.failure_category = Some(FailureCategory::Torrent);
+    job.torrent = Some(TorrentInfo {
+        engine_id: Some(42),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        name: Some("Stale Torrent".into()),
+        total_files: Some(2),
+        peers: Some(0),
+        seeds: None,
+        uploaded_bytes: 0,
+        last_runtime_uploaded_bytes: Some(0),
+        fetched_bytes: 0,
+        last_runtime_fetched_bytes: Some(0),
+        ratio: 0.0,
+        seeding_started_at: Some(123_456),
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+    }
+
+    let snapshot = state
+        .reset_stale_torrent_completion_for_recheck(
+            "job_1",
+            Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        )
+        .await
+        .expect("stale torrent completion should reset");
+
+    let job = &snapshot.jobs[0];
+    assert_eq!(job.state, JobState::Starting);
+    assert_eq!(job.downloaded_bytes, 0);
+    assert_eq!(job.total_bytes, 0);
+    assert_eq!(job.progress, 0.0);
+    assert_eq!(job.speed, 0);
+    assert_eq!(job.eta, 0);
+    assert_eq!(job.error, None);
+    assert_eq!(job.failure_category, None);
+
+    let torrent = job.torrent.as_ref().expect("torrent metadata remains");
+    assert_eq!(
+        torrent.info_hash.as_deref(),
+        Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8")
+    );
+    assert_eq!(torrent.name.as_deref(), Some("Stale Torrent"));
+    assert_eq!(torrent.engine_id, None);
+    assert_eq!(torrent.uploaded_bytes, 0);
+    assert_eq!(torrent.last_runtime_uploaded_bytes, None);
+    assert_eq!(torrent.fetched_bytes, 0);
+    assert_eq!(torrent.last_runtime_fetched_bytes, None);
+    assert_eq!(torrent.ratio, 0.0);
+    assert_eq!(torrent.seeding_started_at, None);
+
+    let runtime = state.inner.read().await;
+    assert!(runtime.active_workers.contains("job_1"));
+    assert!(runtime
+        .diagnostic_events
+        .iter()
+        .any(|event| event.level == DiagnosticLevel::Warning
+            && event.message.contains("Cleared stale torrent verification")));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn seed_policy_defaults_to_forever_and_supports_limits() {
     let mut settings = Settings::default();

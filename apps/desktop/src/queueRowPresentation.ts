@@ -46,7 +46,7 @@ export function clampQueueProgress(progress: number): number {
 }
 
 type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
-  Partial<Pick<DownloadJob, 'filename' | 'torrent' | 'transferKind' | 'totalBytes'>>;
+  Partial<Pick<DownloadJob, 'downloadedBytes' | 'filename' | 'torrent' | 'transferKind' | 'totalBytes'>>;
 
 export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolean {
   if (job.transferKind !== 'torrent') return false;
@@ -61,8 +61,18 @@ export function isTorrentSeedingRestore(job: TorrentMetadataPendingJob): boolean
   return typeof job.torrent?.seedingStartedAt === 'number';
 }
 
+export function isTorrentCheckingFiles(job: TorrentMetadataPendingJob): boolean {
+  if (job.transferKind !== 'torrent') return false;
+  if (job.state !== 'starting' && job.state !== 'downloading') return false;
+  if (typeof job.torrent?.seedingStartedAt === 'number') return false;
+  if ((job.totalBytes ?? 0) <= 0) return false;
+  if ((job.downloadedBytes ?? 0) <= 0) return false;
+  return (job.torrent?.fetchedBytes ?? 0) === 0;
+}
+
 export function torrentActivitySummary(job: TorrentMetadataPendingJob): string {
   if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
+  if (isTorrentCheckingFiles(job)) return 'Checking files';
   return isTorrentMetadataPending(job) ? 'Finding metadata' : 'No peer activity yet';
 }
 
@@ -86,6 +96,10 @@ export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueSt
 
   if (isTorrentMetadataPending(job)) {
     return { label: 'Finding', tone: 'warning' };
+  }
+
+  if (isTorrentCheckingFiles(job)) {
+    return { label: 'Checking', tone: 'warning' };
   }
 
   switch (job.state) {
