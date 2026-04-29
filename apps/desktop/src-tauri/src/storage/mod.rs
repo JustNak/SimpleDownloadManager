@@ -224,6 +224,12 @@ pub struct DownloadPrompt {
     pub default_directory: String,
     pub target_path: String,
     pub duplicate_job: Option<DownloadJob>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 {
   "name": "@myapp/extension",
   "private": true,
-  "version": "0.3.46-alpha",
+  "version": "0.3.47-alpha",
   "type": "module",
   "scripts": {
     "build": "node ./scripts/build.mjs",

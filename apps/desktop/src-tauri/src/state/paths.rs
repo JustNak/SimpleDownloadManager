@@ -363,6 +363,12 @@ pub(super) fn allocate_target_paths(
     (fallback_target, fallback_temp)
 }
 
+pub(super) fn candidate_target_paths(download_dir: &Path, filename: &str) -> (PathBuf, PathBuf) {
+    let target_path = download_dir.join(filename);
+    let temp_path = download_dir.join(format!("{filename}.part"));
+    (target_path, temp_path)
+}
+
 pub(super) fn unique_target_path(
     download_dir: &Path,
     filename: &str,

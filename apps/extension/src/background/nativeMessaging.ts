@@ -7,6 +7,7 @@ import {
   createSaveExtensionSettingsRequest,
   toUserFacingMessage,
   type BrowserKind,
+  type DownloadRequestMetadata,
   type EnqueueDownloadPayload,
   type ErrorCode,
   type ExtensionIntegrationSettings,
@@ -110,9 +111,9 @@ export async function openApp(): Promise<HostToExtensionResponse> {
 export async function enqueueDownload(
   url: string,
   source: Omit<RequestSource, 'browser'>,
-  handoffAuth?: HandoffAuth,
+  metadata: DownloadRequestMetadata = {},
 ): Promise<HostToExtensionResponse> {
-  const request = createEnqueueDownloadRequest(url, { ...source, browser: detectBrowser() }, undefined, handoffAuth);
+  const request = createEnqueueDownloadRequest(url, { ...source, browser: detectBrowser() }, undefined, metadata);
   if (!request.ok) {
     return {
       ok: false,

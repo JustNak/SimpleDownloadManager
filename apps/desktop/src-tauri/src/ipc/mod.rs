@@ -102,6 +102,8 @@ impl From<EnqueueSource> for DownloadSource {
 struct EnqueuePayload {
     url: String,
     source: EnqueueSource,
+    suggested_filename: Option<String>,
+    total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
 }
 
@@ -516,85 +518,16 @@ async fn handle_request(
                 Err(error) => return map_backend_error(request.request_id, error),
             };
 
-            let receiver = prompts.enqueue(prompt.clone()).await;
-            if let Err(error) = show_download_prompt_window(&app) {
-                let _ = prompts.resolve(&prompt.id, PromptDecision::Cancel).await;
-                return HostResponse::error(
-                    request.request_id,
-                    "blocked_by_policy",
-                    "INTERNAL_ERROR",
-                    format!("Could not open download prompt: {error}"),
-                );
-            }
-            if let Some(active_prompt) = prompts.active_prompt().await {
-                let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
-            }
-
-            match receiver.await.unwrap_or(PromptDecision::SwapToBrowser) {
-                PromptDecision::Cancel => HostResponse::prompt_dismissed(request.request_id),
-                PromptDecision::SwapToBrowser => HostResponse::prompt_canceled(request.request_id),
-                PromptDecision::ShowExisting => {
-                    if let Some(job) = prompt.duplicate_job {
-                        focus_job_in_main_window(&app, &job.id);
-                        HostResponse::existing_job(request.request_id, job.id, job.filename)
-                    } else {
-                        HostResponse::prompt_dismissed(request.request_id)
-                    }
-                }
-                PromptDecision::Download {
-                    directory_override,
-                    duplicate_action,
-                    renamed_filename,
-                } => {
-                    if let Err(error) = probe_browser_download_access(
-                        &state,
-                        &source,
-                        &prompt.url,
-                        payload.handoff_auth.as_ref(),
-                    )
-                    .await
-                    {
-                        return map_backend_error(request.request_id, error);
-                    }
-                    let (filename_hint, duplicate_policy) = match prompt_enqueue_details(
-                        prompt.filename,
-                        duplicate_action,
-                        renamed_filename,
-                    ) {
-                        Ok(details) => details,
-                        Err(error) => return map_backend_error(request.request_id, error),
-                    };
-
-                    let result = state
-                        .enqueue_download_with_options(
-                            prompt.url,
-                            EnqueueOptions {
-                                source: Some(source),
-                                directory_override,
-                                filename_hint: Some(filename_hint),
-                                handoff_auth: payload.handoff_auth,
-                                duplicate_policy,
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-
-                    match result {
-                        Ok(result) => {
-                            let show_progress = state.show_progress_after_handoff().await;
-                            emit_snapshot(&app, &result.snapshot);
-                            if result.status == EnqueueStatus::Queued {
-                                if show_progress {
-                                    let _ = show_progress_window(&app, &result.job_id);
-                                }
-                                schedule_downloads(app, state);
-                            }
-                            HostResponse::enqueue_result(request.request_id, result)
-                        }
-                        Err(error) => map_backend_error(request.request_id, error),
-                    }
-                }
-            }
+            run_prompt_download(
+                &app,
+                state,
+                prompts,
+                request.request_id,
+                prompt,
+                source,
+                payload.handoff_auth,
+            )
+            .await
         }
         "enqueue_download" => {
             let payload = match serde_json::from_value::<EnqueuePayload>(request.payload) {
@@ -610,6 +543,35 @@ async fn handle_request(
             };
 
             let source: DownloadSource = payload.source.into();
+            if source.entry_point == "browser_download" {
+                let prompt = match state
+                    .prepare_download_prompt(
+                        request.request_id.clone(),
+                        &payload.url,
+                        Some(source.clone()),
+                        payload.suggested_filename.clone(),
+                        payload.total_bytes,
+                    )
+                    .await
+                {
+                    Ok(prompt) => prompt,
+                    Err(error) => return map_backend_error(request.request_id, error),
+                };
+
+                if prompt_has_duplicate(&prompt) {
+                    return run_prompt_download(
+                        &app,
+                        state,
+                        prompts,
+                        request.request_id,
+                        prompt,
+                        source,
+                        payload.handoff_auth,
+                    )
+                    .await;
+                }
+            }
+
             if let Err(error) = probe_browser_download_access(
                 &state,
                 &source,
@@ -626,6 +588,7 @@ async fn handle_request(
                     payload.url,
                     EnqueueOptions {
                         source: Some(source),
+                        filename_hint: payload.suggested_filename,
                         handoff_auth: payload.handoff_auth,
                         ..Default::default()
                     },
@@ -726,6 +689,11 @@ fn validate_enqueue_request_payload(request: &HostRequest) -> ValidationResult {
     let payload = parse_payload::<EnqueuePayload>(request, "enqueue")?;
     validate_handoff_url(&request.request_id, &payload.url)?;
     validate_request_source(&request.request_id, &payload.source)?;
+    validate_metadata_field(
+        &request.request_id,
+        "suggestedFilename",
+        payload.suggested_filename.as_deref(),
+    )?;
     validate_handoff_auth(
         &request.request_id,
         payload.handoff_auth.as_ref(),
@@ -1321,6 +1289,95 @@ fn map_backend_error(request_id: String, error: BackendError) -> HostResponse {
 
 fn should_register_host_contact_before_response(message_type: &str) -> bool {
     matches!(message_type, "prompt_download")
+}
+
+async fn run_prompt_download(
+    app: &AppHandle,
+    state: SharedState,
+    prompts: PromptRegistry,
+    request_id: String,
+    prompt: crate::storage::DownloadPrompt,
+    source: DownloadSource,
+    handoff_auth: Option<HandoffAuth>,
+) -> HostResponse {
+    let receiver = prompts.enqueue(prompt.clone()).await;
+    if let Err(error) = show_download_prompt_window(app) {
+        let _ = prompts.resolve(&prompt.id, PromptDecision::Cancel).await;
+        return HostResponse::error(
+            request_id,
+            "blocked_by_policy",
+            "INTERNAL_ERROR",
+            format!("Could not open download prompt: {error}"),
+        );
+    }
+    if let Some(active_prompt) = prompts.active_prompt().await {
+        let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
+    }
+
+    match receiver.await.unwrap_or(PromptDecision::SwapToBrowser) {
+        PromptDecision::Cancel => HostResponse::prompt_dismissed(request_id),
+        PromptDecision::SwapToBrowser => HostResponse::prompt_canceled(request_id),
+        PromptDecision::ShowExisting => {
+            if let Some(job) = prompt.duplicate_job {
+                focus_job_in_main_window(app, &job.id);
+                HostResponse::existing_job(request_id, job.id, job.filename)
+            } else {
+                HostResponse::prompt_dismissed(request_id)
+            }
+        }
+        PromptDecision::Download {
+            directory_override,
+            duplicate_action,
+            renamed_filename,
+        } => {
+            if let Err(error) =
+                probe_browser_download_access(&state, &source, &prompt.url, handoff_auth.as_ref())
+                    .await
+            {
+                return map_backend_error(request_id, error);
+            }
+            let (filename_hint, duplicate_policy) =
+                match prompt_enqueue_details(prompt.filename, duplicate_action, renamed_filename) {
+                    Ok(details) => details,
+                    Err(error) => return map_backend_error(request_id, error),
+                };
+
+            let result = state
+                .enqueue_download_with_options(
+                    prompt.url,
+                    EnqueueOptions {
+                        source: Some(source),
+                        directory_override,
+                        filename_hint: Some(filename_hint),
+                        handoff_auth,
+                        duplicate_policy,
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+            match result {
+                Ok(result) => {
+                    let show_progress = state.show_progress_after_handoff().await;
+                    emit_snapshot(app, &result.snapshot);
+                    if result.status == EnqueueStatus::Queued {
+                        if show_progress {
+                            let _ = show_progress_window(app, &result.job_id);
+                        }
+                        schedule_downloads(app.clone(), state);
+                    }
+                    HostResponse::enqueue_result(request_id, result)
+                }
+                Err(error) => map_backend_error(request_id, error),
+            }
+        }
+    }
+}
+
+fn prompt_has_duplicate(prompt: &crate::storage::DownloadPrompt) -> bool {
+    prompt.duplicate_job.is_some()
+        || prompt.duplicate_path.is_some()
+        || prompt.duplicate_reason.is_some()
 }
 
 #[cfg(test)]

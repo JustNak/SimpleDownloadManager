@@ -29,6 +29,29 @@ assert.equal(
   'prompt handoff should accept magnet links',
 );
 
+const enqueueWithMetadata = createEnqueueDownloadRequest(
+  'https://example.com/download?id=123',
+  source,
+  'request_metadata',
+  {
+    suggestedFilename: 'nested/report%20final.pdf',
+    totalBytes: 1024.75,
+  },
+);
+assert.equal(enqueueWithMetadata.ok, true, 'enqueue handoff should accept browser download metadata');
+if (enqueueWithMetadata.ok) {
+  assert.equal(
+    enqueueWithMetadata.value.payload.suggestedFilename,
+    'nested/report%20final.pdf',
+    'enqueue handoff should preserve a bounded suggested filename for desktop duplicate checks',
+  );
+  assert.equal(
+    enqueueWithMetadata.value.payload.totalBytes,
+    1024,
+    'enqueue handoff should normalize positive total bytes like prompt handoff',
+  );
+}
+
 assert.equal(
   shouldHandOffTorrentBrowserDownload({
     url: 'https://example.com/releases/example.torrent',
