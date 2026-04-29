@@ -6,6 +6,7 @@ import {
   formatQueueSizeTitle,
   formatTorrentFetchedSize,
   formatTorrentVerifiedSize,
+  isTorrentCheckingFiles,
   isTorrentSeedingRestore,
   QUEUE_TABLE_COLUMNS,
   queueTableColumnsForView,
@@ -166,6 +167,32 @@ assert.deepEqual(
 );
 
 assert.equal(
+  isTorrentCheckingFiles({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 8 * 1024,
+    downloadedBytes: 8 * 1024,
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, fetchedBytes: 0, ratio: 0 },
+  }),
+  true,
+  'stale verification recovery should be detected as a file check instead of a fresh download',
+);
+
+assert.deepEqual(
+  queueStatusPresentation({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    totalBytes: 8 * 1024,
+    downloadedBytes: 8 * 1024,
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, fetchedBytes: 0, ratio: 0 },
+  }),
+  { label: 'Checking', tone: 'warning' },
+  'stale verification recovery should show Checking rather than Downloading',
+);
+
+assert.equal(
   torrentActivitySummary({
     ...baseJob,
     transferKind: 'torrent',
@@ -187,6 +214,19 @@ assert.equal(
   }),
   'Finding metadata',
   'unresolved starting torrents should describe active metadata lookup',
+);
+
+assert.equal(
+  torrentActivitySummary({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 8 * 1024,
+    downloadedBytes: 8 * 1024,
+    torrent: { infoHash: '420f3778a160fbe6eb0a67c8470256be13b0ecc8', uploadedBytes: 0, fetchedBytes: 0, ratio: 0 },
+  }),
+  'Checking files',
+  'stale verification recovery should describe file checking in the row subtitle',
 );
 
 assert.equal(

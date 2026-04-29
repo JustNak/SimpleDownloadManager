@@ -7,8 +7,8 @@ use crate::storage::{
     ResumeSupport, TorrentInfo, TorrentSettings, TransferKind,
 };
 use crate::torrent::{
-    pending_torrent_cleanup_info_hash, prepare_torrent_source, TorrentEngine,
-    TrackerFirstMetadataOutcome,
+    pending_torrent_cleanup_info_hash, prepare_torrent_source, PreparedTorrentSource,
+    TorrentAddSessionOutcome, TorrentEngine, TorrentSourceKind, TrackerFirstMetadataOutcome,
 };
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
@@ -257,7 +257,7 @@ enum DownloadOutcome {
 
 #[derive(Debug)]
 enum TorrentAddOutcome {
-    Added(usize),
+    Added(TorrentAddSessionOutcome),
     Interrupted(DownloadOutcome),
 }
 
@@ -711,11 +711,42 @@ async fn run_torrent_download_attempt(
 
     let output_folder = task.target_path.clone();
     let existing_torrent = task.torrent.as_ref();
-    let restoring_seeding = is_torrent_seeding_restore(existing_torrent);
-    let engine_id = match engine
+    let stale_verified_torrent = is_stale_verified_torrent_task(task);
+    if stale_verified_torrent {
+        let info_hash = existing_torrent.and_then(|torrent| torrent.info_hash.clone());
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent",
+                stale_torrent_verified_recheck_message(),
+                Some(task.id.clone()),
+            )
+            .await;
+        if let Some(torrent) = existing_torrent {
+            engine
+                .forget_existing(torrent.engine_id, torrent.info_hash.as_deref())
+                .await
+                .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+        }
+        let snapshot = state
+            .reset_stale_torrent_completion_for_recheck(&task.id, info_hash)
+            .await
+            .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+        emit_snapshot(app, &snapshot);
+    }
+
+    let existing_torrent_for_resume = if stale_verified_torrent {
+        None
+    } else {
+        existing_torrent
+    };
+    let restoring_seeding = is_torrent_seeding_restore(existing_torrent_for_resume);
+    let mut prepared_source_for_recheck = None::<PreparedTorrentSource>;
+    let mut stale_completion_recheck_attempted = stale_verified_torrent;
+    let mut engine_id = match engine
         .resume_existing(
-            existing_torrent.and_then(|torrent| torrent.engine_id),
-            existing_torrent.and_then(|torrent| torrent.info_hash.as_deref()),
+            existing_torrent_for_resume.and_then(|torrent| torrent.engine_id),
+            existing_torrent_for_resume.and_then(|torrent| torrent.info_hash.as_deref()),
             settings.torrent.upload_limit_kib_per_second,
         )
         .await
@@ -746,7 +777,7 @@ async fn run_torrent_download_attempt(
                         Some(task.id.clone()),
                     )
                     .await;
-            } else if torrent_has_resume_identity(existing_torrent) {
+            } else if torrent_has_resume_identity(existing_torrent_for_resume) {
                 let _ = state
                     .record_diagnostic_event(
                         DiagnosticLevel::Info,
@@ -758,6 +789,7 @@ async fn run_torrent_download_attempt(
             }
             let prepared_source = prepare_torrent_source(&task.url);
             let pending_cleanup_info_hash = pending_torrent_cleanup_info_hash(&prepared_source);
+            prepared_source_for_recheck = Some(prepared_source.clone());
             if prepared_source.fallback_trackers_added > 0 {
                 record_fallback_tracker_usage(
                     state,
@@ -777,17 +809,14 @@ async fn run_torrent_download_attempt(
                 .await;
             let tracker_first_diagnostics =
                 spawn_tracker_first_metadata_diagnostics(state.clone(), task.id.clone());
-            let add_outcome = add_torrent_with_controls(
+            let add_outcome = add_prepared_torrent_with_controls(
                 state,
                 &task.id,
-                engine.add_source(
-                    &prepared_source,
-                    &output_folder,
-                    settings.torrent.upload_limit_kib_per_second,
-                    Some(tracker_first_diagnostics),
-                ),
-                TORRENT_METADATA_TIMEOUT,
-                TORRENT_METADATA_CONTROL_INTERVAL,
+                engine.as_ref(),
+                &prepared_source,
+                &output_folder,
+                settings.torrent.upload_limit_kib_per_second,
+                Some(tracker_first_diagnostics),
             )
             .await;
             let add_outcome = match add_outcome {
@@ -805,8 +834,8 @@ async fn run_torrent_download_attempt(
                     return Err(error);
                 }
             };
-            match add_outcome {
-                TorrentAddOutcome::Added(engine_id) => engine_id,
+            let mut add_session = match add_outcome {
+                TorrentAddOutcome::Added(outcome) => outcome,
                 TorrentAddOutcome::Interrupted(outcome) => {
                     if matches!(outcome, DownloadOutcome::Canceled) {
                         cleanup_pending_torrent_metadata(
@@ -819,7 +848,47 @@ async fn run_torrent_download_attempt(
                     }
                     return Ok(outcome);
                 }
+            };
+
+            if should_readd_fresh_reused_session(
+                existing_torrent_for_resume,
+                &prepared_source,
+                add_session,
+            ) {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        fresh_reused_torrent_session_recheck_message(),
+                        Some(task.id.clone()),
+                    )
+                    .await;
+                forget_stale_torrent_session(
+                    engine.as_ref(),
+                    add_session.engine_id,
+                    pending_cleanup_info_hash.as_deref(),
+                )
+                .await
+                .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                stale_completion_recheck_attempted = true;
+
+                let readd_outcome = add_prepared_torrent_with_controls(
+                    state,
+                    &task.id,
+                    engine.as_ref(),
+                    &prepared_source,
+                    &output_folder,
+                    settings.torrent.upload_limit_kib_per_second,
+                    None,
+                )
+                .await?;
+                add_session = match readd_outcome {
+                    TorrentAddOutcome::Added(outcome) => outcome,
+                    TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                };
             }
+
+            add_session.engine_id
         }
     };
     let _ = state
@@ -870,6 +939,71 @@ async fn run_torrent_download_attempt(
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
         if let Some(error) = update.error.clone() {
             return Err(download_error(FailureCategory::Torrent, error, false));
+        }
+        if let Some(prepared_source) = prepared_source_for_recheck.as_ref() {
+            if is_stale_torrent_completion(
+                prepared_source.source_kind,
+                first_snapshot,
+                &update,
+                &output_folder,
+            ) {
+                let message = if stale_completion_recheck_attempted {
+                    repeated_stale_torrent_completion_message()
+                } else {
+                    stale_torrent_completion_recheck_message()
+                };
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        message,
+                        Some(task.id.clone()),
+                    )
+                    .await;
+
+                if stale_completion_recheck_attempted {
+                    return Err(download_error(
+                        FailureCategory::Torrent,
+                        message.into(),
+                        false,
+                    ));
+                }
+
+                forget_stale_torrent_session(engine.as_ref(), engine_id, Some(&update.info_hash))
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                let snapshot = state
+                    .reset_stale_torrent_completion_for_recheck(
+                        &task.id,
+                        Some(update.info_hash.clone()),
+                    )
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                emit_snapshot(app, &snapshot);
+
+                let add_outcome = add_prepared_torrent_with_controls(
+                    state,
+                    &task.id,
+                    engine.as_ref(),
+                    prepared_source,
+                    &output_folder,
+                    settings.torrent.upload_limit_kib_per_second,
+                    None,
+                )
+                .await?;
+                match add_outcome {
+                    TorrentAddOutcome::Added(outcome) => {
+                        engine_id = outcome.engine_id;
+                        stale_completion_recheck_attempted = true;
+                        first_snapshot = true;
+                        seeding_started = None;
+                        persisted_seeding_started_at = None;
+                        was_finished = false;
+                        continue;
+                    }
+                    TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                }
+            }
         }
         let now = Instant::now();
 
@@ -1034,7 +1168,7 @@ async fn add_torrent_with_controls<F>(
     control_interval: Duration,
 ) -> Result<TorrentAddOutcome, DownloadError>
 where
-    F: Future<Output = Result<usize, String>>,
+    F: Future<Output = Result<TorrentAddSessionOutcome, String>>,
 {
     tokio::pin!(add_torrent);
     let timeout = tokio::time::sleep(metadata_timeout);
@@ -1045,7 +1179,7 @@ where
         tokio::select! {
             result = &mut add_torrent => {
                 return match result {
-                    Ok(engine_id) => Ok(TorrentAddOutcome::Added(engine_id)),
+                    Ok(outcome) => Ok(TorrentAddOutcome::Added(outcome)),
                     Err(message) => {
                         let _ = state
                             .record_diagnostic_event(
@@ -1100,6 +1234,30 @@ where
             }
         }
     }
+}
+
+async fn add_prepared_torrent_with_controls(
+    state: &SharedState,
+    job_id: &str,
+    engine: &TorrentEngine,
+    prepared_source: &PreparedTorrentSource,
+    output_folder: &Path,
+    upload_limit_kib_per_second: u32,
+    tracker_first_diagnostics: Option<mpsc::UnboundedSender<TrackerFirstMetadataOutcome>>,
+) -> Result<TorrentAddOutcome, DownloadError> {
+    add_torrent_with_controls(
+        state,
+        job_id,
+        engine.add_source(
+            prepared_source,
+            output_folder,
+            upload_limit_kib_per_second,
+            tracker_first_diagnostics,
+        ),
+        TORRENT_METADATA_TIMEOUT,
+        TORRENT_METADATA_CONTROL_INTERVAL,
+    )
+    .await
 }
 
 async fn record_fallback_tracker_usage(
@@ -1177,6 +1335,22 @@ fn torrent_restore_recheck_existing_files_message() -> &'static str {
     "No saved seeding session found; rechecking existing files before seeding"
 }
 
+fn fresh_reused_torrent_session_recheck_message() -> &'static str {
+    "Fresh torrent matched an existing engine session; clearing stale verification and rechecking files"
+}
+
+fn stale_torrent_completion_recheck_message() -> &'static str {
+    "Torrent reported complete but the target folder is empty; clearing stale verification and rechecking files"
+}
+
+fn stale_torrent_verified_recheck_message() -> &'static str {
+    "Existing torrent seeding state has no payload files; clearing stale verification and rechecking files"
+}
+
+fn repeated_stale_torrent_completion_message() -> &'static str {
+    "Torrent verification still reports complete, but the target folder is empty after recheck. Clear the torrent and add it again, or choose a folder containing the files."
+}
+
 fn torrent_has_resume_identity(torrent: Option<&TorrentInfo>) -> bool {
     torrent.is_some_and(|torrent| torrent.engine_id.is_some() || torrent.info_hash.is_some())
 }
@@ -1186,7 +1360,105 @@ fn is_torrent_seeding_restore(torrent: Option<&TorrentInfo>) -> bool {
 }
 
 fn is_torrent_seeding_restore_task(task: &crate::state::DownloadTask) -> bool {
-    task.transfer_kind == TransferKind::Torrent && is_torrent_seeding_restore(task.torrent.as_ref())
+    task.transfer_kind == TransferKind::Torrent
+        && is_torrent_seeding_restore(task.torrent.as_ref())
+        && !is_stale_verified_torrent_task(task)
+}
+
+fn is_stale_verified_torrent_task(task: &crate::state::DownloadTask) -> bool {
+    if task.transfer_kind != TransferKind::Torrent {
+        return false;
+    }
+    if !task
+        .url
+        .get(..task.url.len().min("magnet:".len()))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:"))
+    {
+        return false;
+    }
+    let Some(torrent) = task.torrent.as_ref() else {
+        return false;
+    };
+    if torrent.seeding_started_at.is_none()
+        || torrent.fetched_bytes > 0
+        || torrent.uploaded_bytes > 0
+    {
+        return false;
+    }
+
+    target_payload_appears_empty(&task.target_path)
+}
+
+fn should_readd_fresh_reused_session(
+    torrent: Option<&TorrentInfo>,
+    prepared_source: &PreparedTorrentSource,
+    add_session: TorrentAddSessionOutcome,
+) -> bool {
+    prepared_source.source_kind == TorrentSourceKind::Magnet
+        && add_session.reused_existing_session
+        && !is_torrent_seeding_restore(torrent)
+}
+
+fn is_stale_torrent_completion(
+    source_kind: TorrentSourceKind,
+    first_snapshot: bool,
+    update: &crate::state::TorrentRuntimeSnapshot,
+    target_path: &Path,
+) -> bool {
+    source_kind == TorrentSourceKind::Magnet
+        && first_snapshot
+        && update.finished
+        && update.total_bytes > 0
+        && update.downloaded_bytes >= update.total_bytes
+        && update.fetched_bytes == 0
+        && target_payload_appears_empty(target_path)
+}
+
+fn target_payload_appears_empty(target_path: &Path) -> bool {
+    let metadata = match std::fs::metadata(target_path) {
+        Ok(metadata) => metadata,
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+    };
+
+    if metadata.is_file() {
+        return metadata.len() == 0;
+    }
+    if !metadata.is_dir() {
+        return true;
+    }
+
+    let mut pending = vec![target_path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                return false;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() && metadata.len() > 0 {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+async fn forget_stale_torrent_session(
+    engine: &TorrentEngine,
+    engine_id: usize,
+    info_hash: Option<&str>,
+) -> Result<(), String> {
+    if let Some(info_hash) = info_hash {
+        if engine.forget_by_info_hash(info_hash).await? {
+            return Ok(());
+        }
+    }
+
+    engine.forget(engine_id).await
 }
 
 fn torrent_metadata_timeout_message() -> String {
@@ -3124,7 +3396,7 @@ mod tests {
             add_torrent_with_controls(
                 &state,
                 "job_1",
-                pending::<Result<usize, String>>(),
+                pending::<Result<TorrentAddSessionOutcome, String>>(),
                 Duration::from_secs(60),
                 Duration::from_millis(1),
             ),
@@ -3149,7 +3421,7 @@ mod tests {
         let error = add_torrent_with_controls(
             &state,
             "job_1",
-            pending::<Result<usize, String>>(),
+            pending::<Result<TorrentAddSessionOutcome, String>>(),
             Duration::from_millis(1),
             Duration::from_secs(60),
         )
@@ -3243,6 +3515,144 @@ mod tests {
     }
 
     #[test]
+    fn stale_torrent_completion_detects_empty_magnet_target() {
+        let target_dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("stale-torrent-empty-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        assert!(target_payload_appears_empty(&target_dir.join("missing")));
+
+        let update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Stale Torrent".into()),
+            total_files: Some(1),
+            peers: Some(0),
+            seeds: None,
+            downloaded_bytes: 8 * 1024,
+            total_bytes: 8 * 1024,
+            uploaded_bytes: 0,
+            fetched_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            eta: None,
+            finished: true,
+            error: None,
+        };
+
+        assert!(target_payload_appears_empty(&target_dir));
+        assert!(is_stale_torrent_completion(
+            crate::torrent::TorrentSourceKind::Magnet,
+            true,
+            &update,
+            &target_dir,
+        ));
+
+        let mut fetched_update = update.clone();
+        fetched_update.fetched_bytes = 512;
+        assert!(!is_stale_torrent_completion(
+            crate::torrent::TorrentSourceKind::Magnet,
+            true,
+            &fetched_update,
+            &target_dir,
+        ));
+
+        std::fs::write(target_dir.join("payload.bin"), [1_u8]).unwrap();
+        assert!(!target_payload_appears_empty(&target_dir));
+        assert!(!is_stale_torrent_completion(
+            crate::torrent::TorrentSourceKind::Magnet,
+            true,
+            &update,
+            &target_dir,
+        ));
+
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn stale_torrent_completion_ignores_non_initial_or_file_torrent_snapshots() {
+        let target_dir = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("stale-torrent-guards-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Stale Torrent".into()),
+            total_files: Some(1),
+            peers: Some(0),
+            seeds: None,
+            downloaded_bytes: 8 * 1024,
+            total_bytes: 8 * 1024,
+            uploaded_bytes: 0,
+            fetched_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            eta: None,
+            finished: true,
+            error: None,
+        };
+
+        assert!(!is_stale_torrent_completion(
+            crate::torrent::TorrentSourceKind::TorrentFile,
+            true,
+            &update,
+            &target_dir,
+        ));
+        assert!(!is_stale_torrent_completion(
+            crate::torrent::TorrentSourceKind::Magnet,
+            false,
+            &update,
+            &target_dir,
+        ));
+
+        let _ = std::fs::remove_dir_all(target_dir);
+    }
+
+    #[test]
+    fn fresh_magnet_reused_session_forces_readd_but_restore_does_not() {
+        let prepared_source = PreparedTorrentSource {
+            source: "magnet:?xt=urn:btih:420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            source_kind: TorrentSourceKind::Magnet,
+            fallback_trackers_added: 0,
+            fallback_trackers_for_options: Vec::new(),
+            tracker_first_metadata: true,
+        };
+        let reused = TorrentAddSessionOutcome {
+            engine_id: 42,
+            reused_existing_session: true,
+        };
+
+        assert!(should_readd_fresh_reused_session(
+            Some(&TorrentInfo::default()),
+            &prepared_source,
+            reused,
+        ));
+        assert!(!should_readd_fresh_reused_session(
+            Some(&TorrentInfo {
+                seeding_started_at: Some(123_456),
+                ..TorrentInfo::default()
+            }),
+            &prepared_source,
+            reused,
+        ));
+        assert!(!should_readd_fresh_reused_session(
+            Some(&TorrentInfo::default()),
+            &prepared_source,
+            TorrentAddSessionOutcome {
+                engine_id: 42,
+                reused_existing_session: false,
+            },
+        ));
+    }
+
+    #[test]
     fn torrent_add_flow_wires_tracker_first_diagnostics_channel() {
         let source = include_str!("mod.rs");
         let production_source = source
@@ -3253,12 +3663,12 @@ mod tests {
             .find("spawn_tracker_first_metadata_diagnostics(")
             .expect("torrent add flow should create a diagnostics channel");
         let add_source = production_source[channel..]
-            .find("engine.add_source(")
-            .expect("torrent add flow should pass diagnostics to add_source")
+            .find("add_prepared_torrent_with_controls(")
+            .expect("torrent add flow should pass diagnostics to the controlled add helper")
             + channel;
         let argument = production_source[add_source..]
             .find("Some(tracker_first_diagnostics)")
-            .expect("tracker-first diagnostics sender should be passed into add_source")
+            .expect("tracker-first diagnostics sender should be passed into the add helper")
             + add_source;
 
         assert!(

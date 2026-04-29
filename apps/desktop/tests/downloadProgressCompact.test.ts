@@ -133,6 +133,18 @@ assert.match(
 
 assert.match(
   progressSource,
+  /isTorrentCheckingFiles/,
+  'torrenting progress popup should detect stale verification recovery checks',
+);
+
+assert.match(
+  progressSource,
+  /Checking files/,
+  'torrenting progress popup should label stale verification recovery as checking files',
+);
+
+assert.match(
+  progressSource,
   /Restoring seeding/,
   'torrenting progress popup should label prior seeding jobs as restoring seeding instead of downloading',
 );

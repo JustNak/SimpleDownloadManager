@@ -34,6 +34,7 @@ import {
   type ProgressSample,
 } from './downloadProgressMetrics';
 import {
+  isTorrentCheckingFiles,
   isTorrentMetadataPending,
   isTorrentSeedingRestore,
   formatTorrentFetchedSize,
@@ -499,6 +500,7 @@ function ActionButton({
 
 function statusText(job: DownloadJob) {
   if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
+  if (isTorrentCheckingFiles(job)) return 'Checking files';
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
 
   switch (job.state) {
@@ -526,7 +528,7 @@ function statusText(job: DownloadJob) {
 function statusClass(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
   if (job.state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
-  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
+  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentCheckingFiles(job) || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
   if (job.state === JobState.Paused || job.state === JobState.Canceled) return 'border-border bg-muted text-muted-foreground';
   return 'border-primary/40 bg-primary/10 text-primary';
 }
@@ -534,7 +536,7 @@ function statusClass(job: DownloadJob) {
 function progressColor(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'bg-success';
   if (job.state === JobState.Failed) return 'bg-destructive';
-  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentMetadataPending(job)) return 'bg-warning';
+  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentCheckingFiles(job) || isTorrentMetadataPending(job)) return 'bg-warning';
   if (job.transferKind === 'torrent') return 'bg-warning';
   return 'bg-primary';
 }
@@ -553,6 +555,7 @@ function torrentFetchedText(job: DownloadJob) {
 
 function torrentStatusLine(job: DownloadJob) {
   if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
+  if (isTorrentCheckingFiles(job)) return `Checking files - ${verifiedTorrentText(job)}`;
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
   if (job.state === JobState.Seeding) return `Seeding - ${verifiedTorrentText(job)}`;
   const activity = torrentActivitySummary(job);
