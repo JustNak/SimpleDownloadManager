@@ -5,6 +5,7 @@ import {
   cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
+  detachBrowserDownloadForDesktopPrompt,
   discardBrowserDownloadBeforeFilenameRelease,
   discardBrowserDownload,
   restartBrowserDownload,
@@ -13,6 +14,7 @@ import {
   shouldBypassBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
   shouldHandleBrowserDownload,
+  shouldRestoreBrowserDownloadAfterPromptSwap,
   shouldRestoreBrowserDownloadAfterFailedProtectedHandoff,
 } from '../src/background/browserDownloads.ts';
 
@@ -300,6 +302,100 @@ async function main() {
     ['cancel:101'],
     'filename-interception handoffs should cancel the browser item before waiting on the desktop prompt',
   );
+
+  const detachBeforePromptOrder: string[] = [];
+  await detachBrowserDownloadForDesktopPrompt(
+    {
+      async cancel(downloadId: number) {
+        detachBeforePromptOrder.push(`cancel:${downloadId}`);
+      },
+      async search(query: { id: number }) {
+        detachBeforePromptOrder.push(`search:${query.id}`);
+        return [];
+      },
+      async erase(query: { id: number }) {
+        detachBeforePromptOrder.push(`erase:${query.id}`);
+      },
+    },
+    102,
+    () => {
+      detachBeforePromptOrder.push('suggest');
+    },
+  );
+  detachBeforePromptOrder.push('desktop-prompt-wait');
+  assert.deepEqual(
+    detachBeforePromptOrder,
+    ['cancel:102', 'suggest', 'search:102', 'erase:102', 'desktop-prompt-wait'],
+    'prompt capture should detach the browser download before waiting for the desktop prompt',
+  );
+
+  const detachRetryOrder: string[] = [];
+  await detachBrowserDownloadForDesktopPrompt(
+    {
+      async cancel(downloadId: number) {
+        detachRetryOrder.push(`cancel:${downloadId}`);
+        throw new Error('not in progress');
+      },
+      async search(query: { id: number }) {
+        detachRetryOrder.push(`search:${query.id}`);
+        return [];
+      },
+      async erase(query: { id: number }) {
+        detachRetryOrder.push(`erase:${query.id}`);
+      },
+    },
+    103,
+    () => {
+      detachRetryOrder.push('suggest');
+    },
+  );
+  assert.deepEqual(
+    detachRetryOrder,
+    ['cancel:103', 'suggest', 'cancel:103', 'search:103', 'erase:103'],
+    'prompt capture should retry cancel after filename release when Chrome rejects pre-release cancellation',
+  );
+
+  assert.equal(
+    shouldRestoreBrowserDownloadAfterPromptSwap({
+      ok: true,
+      requestId: 'request_prompt_canceled',
+      type: 'accepted',
+      payload: {
+        appState: 'running',
+        status: 'canceled',
+      },
+    }),
+    true,
+    'Swap should restore the browser download',
+  );
+  assert.equal(
+    shouldRestoreBrowserDownloadAfterPromptSwap({
+      ok: true,
+      requestId: 'request_prompt_dismissed_by_cancel_button',
+      type: 'accepted',
+      payload: {
+        appState: 'running',
+        status: 'dismissed',
+      },
+    }),
+    false,
+    'Cancel should fully cancel the browser download instead of restoring it',
+  );
+  for (const status of ['queued', 'duplicate_existing_job', 'dismissed'] as const) {
+    assert.equal(
+      shouldRestoreBrowserDownloadAfterPromptSwap({
+        ok: true,
+        requestId: `request_prompt_${status}`,
+        type: 'accepted',
+        payload: {
+          appState: 'running',
+          status,
+        },
+      }),
+      false,
+      `${status} prompt results should not restore the browser download after detachment`,
+    );
+  }
 
   let restartedWith: unknown;
   const bypass = createBrowserDownloadBypassState();

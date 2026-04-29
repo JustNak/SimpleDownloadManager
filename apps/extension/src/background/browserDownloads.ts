@@ -234,6 +234,12 @@ export function shouldDiscardBrowserDownloadAfterHandoff(response: HostToExtensi
     );
 }
 
+export function shouldRestoreBrowserDownloadAfterPromptSwap(response: HostToExtensionResponse): boolean {
+  return !isErrorResponse(response)
+    && response.type === 'accepted'
+    && response.payload.status === 'canceled';
+}
+
 export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response: HostToExtensionResponse): boolean {
   return isErrorResponse(response) && response.code === 'PROTECTED_DOWNLOAD_AUTH_REQUIRED';
 }
@@ -252,6 +258,14 @@ export async function cancelBrowserDownloadForDesktopPrompt(
   downloadId: number,
 ): Promise<void> {
   await downloads.cancel(downloadId).catch(() => undefined);
+}
+
+export async function detachBrowserDownloadForDesktopPrompt(
+  downloads: BrowserDownloadsCleanupApi,
+  downloadId: number,
+  releaseFilename: () => void,
+): Promise<void> {
+  await discardBrowserDownloadBeforeFilenameRelease(downloads, downloadId, releaseFilename);
 }
 
 export async function discardBrowserDownloadBeforeFilenameRelease(

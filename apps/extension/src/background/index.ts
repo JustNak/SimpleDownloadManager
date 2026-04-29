@@ -2,11 +2,10 @@ import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings
 import browser from './browser';
 import {
   browserDownloadUrl,
-  cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
+  detachBrowserDownloadForDesktopPrompt,
   discardBrowserDownload,
-  discardBrowserDownloadBeforeFilenameRelease,
   firefoxWebRequestDownloadCandidate,
   markBrowserDownloadBypassUrl,
   restartBrowserDownload,
@@ -17,6 +16,7 @@ import {
   shouldBypassBrowserDownloadUrl,
   shouldHandleBrowserDownload,
   shouldDiscardBrowserDownloadAfterHandoff,
+  shouldRestoreBrowserDownloadAfterPromptSwap,
   type BrowserDownloadFilenameInterceptionApi,
   type BrowserDownloadFilenameInterceptionCandidate,
   type BrowserDownloadFilenameSuggest,
@@ -186,7 +186,7 @@ async function handleBrowserDownloadDeterminingFilename(
   const releaseFilename = () => {
     suggestBrowserDownload(item, suggest);
   };
-  await cancelBrowserDownloadForDesktopPrompt(browser.downloads, item.id);
+  let isBrowserDownloadDetached = false;
 
   try {
     const pingResponse = await pingNativeHost();
@@ -203,26 +203,22 @@ async function handleBrowserDownloadDeterminingFilename(
       return;
     }
 
+    await detachBrowserDownloadForDesktopPrompt(browser.downloads, item.id, releaseFilename);
+    isBrowserDownloadDetached = true;
+
     const response = await handOffBrowserDownload(url, item, settings);
 
     if (isErrorResponse(response)) {
       await recordHostError(response);
-      await restoreBrowserDownloadFallback(item, releaseFilename);
-      return;
-    }
-
-    if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
-      await discardBrowserDownloadBeforeFilenameRelease(browser.downloads, item.id, () => {
-        releaseFilename();
-      });
-      const state = rememberStateSettings(await setLastResult('connected', response));
-      await updateBrowserBadge(state);
+      await restoreBrowserDownloadFallback(item);
       return;
     }
 
     const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item, releaseFilename);
+    if (shouldRestoreBrowserDownloadAfterPromptSwap(response)) {
+      await restoreBrowserDownloadFallback(item);
+    }
   } catch (error) {
     const state = await setHostError(
       'HOST_NOT_AVAILABLE',
@@ -230,7 +226,7 @@ async function handleBrowserDownloadDeterminingFilename(
       'error',
     );
     await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item, releaseFilename);
+    await restoreBrowserDownloadFallback(item, isBrowserDownloadDetached ? undefined : releaseFilename);
   } finally {
     activeBrowserDownloadIds.delete(item.id);
   }
