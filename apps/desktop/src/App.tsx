@@ -564,6 +564,18 @@ export default function App() {
     }
   }
 
+  async function handleShowPopup(id: string) {
+    try {
+      await openProgressWindow(id);
+    } catch (error) {
+      addToast({
+        type: 'warning',
+        title: 'Progress Popup Failed',
+        message: getErrorMessage(error, 'The progress popup could not be opened.'),
+      });
+    }
+  }
+
   async function handleOpenInstallDocs() {
     try {
       await openInstallDocs();
@@ -910,6 +922,7 @@ export default function App() {
                 onRename={handleRename}
                 onOpen={handleOpenFile}
                 onReveal={handleReveal}
+                onShowPopup={handleShowPopup}
               />
 
               <StatusBar

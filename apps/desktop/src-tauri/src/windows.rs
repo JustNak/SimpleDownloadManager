@@ -39,9 +39,9 @@ pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html?window=download-prompt".into()),
     )
     .title("New download detected")
-    .inner_size(540.0, 430.0)
-    .min_inner_size(540.0, 430.0)
-    .max_inner_size(540.0, 430.0)
+    .inner_size(460.0, 280.0)
+    .min_inner_size(460.0, 280.0)
+    .max_inner_size(460.0, 280.0)
     .resizable(false)
     .maximizable(false)
     .decorations(false)
@@ -177,9 +177,9 @@ fn batch_progress_window_label(batch_id: &str) -> String {
 fn progress_window_geometry() -> ProgressWindowGeometry {
     ProgressWindowGeometry {
         width: 460.0,
-        height: 250.0,
+        height: 280.0,
         min_width: 460.0,
-        min_height: 250.0,
+        min_height: 280.0,
     }
 }
 
@@ -256,7 +256,7 @@ mod tests {
         let geometry = super::progress_window_geometry();
 
         assert_eq!(geometry.width, 460.0);
-        assert_eq!(geometry.height, 250.0);
+        assert_eq!(geometry.height, 280.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
     }

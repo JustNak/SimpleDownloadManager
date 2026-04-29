@@ -954,6 +954,98 @@ async fn torrent_progress_keeps_live_download_speed_until_seeding() {
 }
 
 #[tokio::test]
+async fn torrent_progress_uses_runtime_eta_until_seeding() {
+    let download_dir = test_runtime_dir("torrent-progress-live-eta");
+    let mut job = download_job(
+        "job_39c",
+        JobState::Downloading,
+        ResumeSupport::Unsupported,
+        0,
+    );
+    job.transfer_kind = TransferKind::Torrent;
+    job.torrent = Some(TorrentInfo::default());
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let mut update = torrent_runtime_update(0, 1024, false);
+    update.total_bytes = 4096;
+    update.eta = Some(321);
+    let snapshot = state
+        .update_torrent_progress("job_39c", update.clone(), false)
+        .await
+        .expect("torrent progress should update");
+
+    assert_eq!(snapshot.jobs[0].state, JobState::Downloading);
+    assert_eq!(snapshot.jobs[0].eta, 321);
+
+    let mut finished_update = update;
+    finished_update.downloaded_bytes = 4096;
+    finished_update.total_bytes = 4096;
+    finished_update.finished = true;
+    finished_update.eta = Some(999);
+    let snapshot = state
+        .update_torrent_progress("job_39c", finished_update, false)
+        .await
+        .expect("torrent progress should update");
+
+    assert_eq!(snapshot.jobs[0].state, JobState::Seeding);
+    assert_eq!(snapshot.jobs[0].eta, 0);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn torrent_final_pause_snapshot_updates_counters_without_unpausing_job() {
+    let download_dir = test_runtime_dir("torrent-final-pause-snapshot");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job("job_39d", JobState::Paused, ResumeSupport::Unsupported, 25);
+    job.transfer_kind = TransferKind::Torrent;
+    job.downloaded_bytes = 1024;
+    job.total_bytes = 4096;
+    job.speed = 0;
+    job.eta = 0;
+    job.torrent = Some(TorrentInfo {
+        uploaded_bytes: 100,
+        last_runtime_uploaded_bytes: Some(40),
+        fetched_bytes: 200,
+        last_runtime_fetched_bytes: Some(80),
+        ratio: 100.0 / 1024.0,
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(storage_path.clone(), vec![job]);
+
+    let mut final_update = torrent_runtime_update(70, 2048, false);
+    final_update.total_bytes = 4096;
+    final_update.fetched_bytes = 180;
+    final_update.download_speed = 55_000;
+    final_update.eta = Some(120);
+    let snapshot = state
+        .update_torrent_progress("job_39d", final_update, true)
+        .await
+        .expect("final torrent pause snapshot should persist");
+
+    assert_eq!(snapshot.jobs[0].state, JobState::Paused);
+    assert_eq!(snapshot.jobs[0].downloaded_bytes, 2048);
+    assert_eq!(snapshot.jobs[0].speed, 0);
+    assert_eq!(snapshot.jobs[0].eta, 0);
+    let torrent = snapshot.jobs[0].torrent.as_ref().expect("torrent metadata");
+    assert_eq!(torrent.uploaded_bytes, 130);
+    assert_eq!(torrent.fetched_bytes, 300);
+    assert_eq!(torrent.ratio, 130.0 / 2048.0);
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    let persisted_torrent = persisted.jobs[0]
+        .torrent
+        .as_ref()
+        .expect("persisted torrent metadata");
+    assert_eq!(persisted.jobs[0].state, JobState::Paused);
+    assert_eq!(persisted.jobs[0].downloaded_bytes, 2048);
+    assert_eq!(persisted_torrent.uploaded_bytes, 130);
+    assert_eq!(persisted_torrent.fetched_bytes, 300);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn open_completed_http_directory_still_requires_file() {
     let download_dir = test_runtime_dir("open-http-directory-rejected");
     let target_path = download_dir.join("not-a-file");
@@ -1919,6 +2011,7 @@ fn torrent_runtime_update(
         uploaded_bytes,
         download_speed: 0,
         upload_speed: 0,
+        eta: None,
         fetched_bytes: 0,
         finished,
         error: None,

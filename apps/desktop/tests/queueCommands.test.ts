@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   canClearCompletedDownloads,
   canRemoveDownloadImmediately,
+  canShowProgressPopup,
   canRetryFailedDownloads,
 } from '../src/queueCommands.ts';
 import type { DownloadJob } from '../src/types.ts';
@@ -69,4 +70,40 @@ assert.equal(
   canRemoveDownloadImmediately(job('job_1', 'canceled')),
   true,
   'canceled transfers should be removable immediately even if backend cleanup is still settling',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'queued')),
+  true,
+  'queued downloads should be eligible for a progress popup',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'starting')),
+  true,
+  'starting downloads should be eligible for a progress popup',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'downloading')),
+  true,
+  'downloading jobs should be eligible for a progress popup',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'seeding')),
+  true,
+  'seeding torrents should be eligible for a progress popup',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'paused')),
+  false,
+  'paused downloads should not show a progress popup action',
+);
+
+assert.equal(
+  canShowProgressPopup(job('job_1', 'completed')),
+  false,
+  'completed downloads should use open/show actions instead of progress popup',
 );

@@ -141,53 +141,53 @@ export function DownloadPromptWindow() {
     <div className="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
       <PopupTitlebar title={isDuplicate ? 'Duplicate download detected' : 'New download detected'} onClose={() => void handleClose()} />
 
-      <main className="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface px-3 py-2">
         {isDuplicate ? (
-          <div className="mb-3 flex items-start gap-2 rounded border border-warning/45 bg-warning/10 px-2.5 py-2 text-xs text-warning">
-            <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-            <div className="min-w-0">
-              <div className="font-semibold text-foreground">This URL is already in the queue.</div>
-              <div className="mt-0.5 truncate text-warning/90">{prompt.duplicateJob?.filename}</div>
+          <div className="mb-1.5 flex shrink-0 items-center gap-1.5 overflow-hidden rounded border border-warning/45 bg-warning/10 px-2 py-1.5 text-[11px] leading-4 text-warning">
+            <AlertTriangle size={14} className="shrink-0" />
+            <div className="min-w-0 flex-1 truncate" title={prompt.duplicateJob?.filename}>
+              <span className="font-semibold text-foreground">Already in queue: </span>
+              <span className="text-warning/90">{prompt.duplicateJob?.filename}</span>
             </div>
           </div>
         ) : null}
 
-        <section className="flex min-w-0 gap-3">
+        <section className="flex min-h-0 min-w-0 shrink-0 gap-2">
           <FileBadge filename={prompt.filename} />
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-base font-semibold leading-5 text-foreground" title={prompt.filename}>{prompt.filename}</h1>
-            <div className="mt-0.5 truncate text-xs text-muted-foreground" title={prompt.url}>{getHost(prompt.url)}</div>
-            <div className="mt-3 grid grid-cols-[92px_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
-              <MetaLabel icon={<Globe size={15} />} label="Source" />
+          <div className="min-w-0 flex-1 overflow-hidden">
+            <h1 className="truncate text-sm font-semibold leading-5 text-foreground" title={prompt.filename}>{prompt.filename}</h1>
+            <div className="truncate text-[11px] leading-4 text-muted-foreground" title={prompt.url}>{getHost(prompt.url)}</div>
+            <div className="mt-1.5 grid min-w-0 grid-cols-[86px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[10px] leading-[14px]">
+              <MetaLabel icon={<Globe size={13} />} label="Source" />
               <MetaValue value={prompt.url} accent />
-              <MetaLabel icon={<FolderOpen size={15} />} label="Destination" />
+              <MetaLabel icon={<FolderOpen size={13} />} label="Destination" />
               <MetaValue value={destination || 'Choose a destination before downloading.'} />
-              <MetaLabel icon={<HardDrive size={15} />} label="File size" />
+              <MetaLabel icon={<HardDrive size={13} />} label="File size" />
               <MetaValue value={formatBytes(prompt.totalBytes)} />
-              <MetaLabel icon={<MousePointerClick size={15} />} label="Detected by" />
+              <MetaLabel icon={<MousePointerClick size={13} />} label="Detected by" />
               <MetaValue value={sourceLabel} />
             </div>
           </div>
         </section>
 
         {errorMessage ? (
-          <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="mt-1.5 shrink-0 truncate rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] leading-4 text-destructive" title={errorMessage}>
             {errorMessage}
           </div>
         ) : null}
 
-        <div className="mt-auto flex items-center justify-between gap-3 border-t border-border pt-3">
+        <div className="mt-auto flex min-h-[38px] shrink-0 items-center justify-between gap-2 border-t border-border pt-2">
           <button
             onClick={() => void handleChangeDirectory()}
             disabled={isBusy}
-            className="flex h-8 items-center gap-2 rounded border border-input px-3 text-xs font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-8 shrink-0 items-center gap-2 rounded border border-input px-3 text-xs font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
           >
             <FolderOpen size={16} />
             Change
           </button>
 
           {isDuplicate && isRenamingDuplicate ? (
-            <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
+            <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
               <input
                 value={renamedFilename}
                 onChange={(event) => setRenamedFilename(event.target.value)}
@@ -198,6 +198,7 @@ export function DownloadPromptWindow() {
                 autoFocus
                 className="h-8 min-w-0 flex-1 rounded border border-input bg-background px-2.5 text-xs text-foreground outline-none transition focus:border-primary"
                 aria-label="Renamed filename"
+                title={renamedFilename}
               />
               <button
                 onClick={() => {
@@ -218,7 +219,7 @@ export function DownloadPromptWindow() {
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex min-w-0 items-center justify-end gap-1.5">
               <button
                 onClick={() => void runAction(() => cancelDownloadPrompt(prompt.id))}
                 disabled={isBusy}
@@ -241,7 +242,7 @@ export function DownloadPromptWindow() {
                   <button
                     onClick={() => setDuplicateMenuOpen((open) => !open)}
                     disabled={isBusy}
-                    className="flex h-8 min-w-[126px] items-center justify-center gap-1.5 rounded bg-primary px-3 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex h-8 min-w-[118px] items-center justify-center gap-1.5 rounded bg-primary px-3 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Download size={14} />
                     Choose Action
@@ -307,9 +308,9 @@ function BrowserWindowIcon() {
 
 function MetaLabel({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
-    <div className="flex items-center gap-2 text-muted-foreground">
-      {icon}
-      <span>{label}</span>
+    <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+      <span className="shrink-0">{icon}</span>
+      <span className="truncate">{label}</span>
     </div>
   );
 }

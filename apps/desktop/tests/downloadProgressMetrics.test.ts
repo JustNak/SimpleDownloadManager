@@ -177,6 +177,7 @@ const torrentAfterProgressJump = {
   downloadedBytes: 1_073_742_824,
   progress: 50,
   speed: 262_144,
+  eta: 73,
 };
 const torrentJumpSamples = recordProgressSample(
   torrentBaselineSamples,
@@ -187,9 +188,26 @@ assert.deepEqual(
   calculateDownloadProgressMetrics(torrentAfterProgressJump, torrentJumpSamples, 15_000),
   {
     averageSpeed: 262_144,
-    timeRemaining: 4_096,
+    timeRemaining: 73,
   },
-  'torrent metrics should use backend live speed instead of treating metadata progress jumps as throughput',
+  'torrent metrics should use backend live speed and ETA instead of treating metadata progress jumps as throughput',
+);
+
+assert.deepEqual(
+  calculateDownloadProgressMetrics(
+    {
+      ...torrentAfterProgressJump,
+      state: 'seeding',
+      eta: 73,
+    },
+    torrentJumpSamples,
+    16_000,
+  ),
+  {
+    averageSpeed: 262_144,
+    timeRemaining: 0,
+  },
+  'torrent metrics should hide ETA once the torrent is seeding',
 );
 
 assert.equal(

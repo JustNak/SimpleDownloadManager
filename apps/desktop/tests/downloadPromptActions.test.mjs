@@ -5,6 +5,7 @@ import path from 'node:path';
 const repoRoot = path.resolve();
 const backendSource = await readFile(path.join(repoRoot, 'apps/desktop/src/backend.ts'), 'utf8');
 const promptSource = await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadPromptWindow.tsx'), 'utf8');
+const windowsSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/windows.rs'), 'utf8');
 const progressSources = [
   ['single download progress', await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadProgressWindow.tsx'), 'utf8')],
   ['batch download progress', await readFile(path.join(repoRoot, 'apps/desktop/src/BatchProgressWindow.tsx'), 'utf8')],
@@ -86,6 +87,31 @@ assert.doesNotMatch(
   promptSource,
   />\s*Show Existing\s*</,
   'compact duplicate prompt should not keep the old Show Existing secondary action',
+);
+assert.match(
+  windowsSource,
+  /\.inner_size\(460\.0,\s*280\.0\)[\s\S]*\.min_inner_size\(460\.0,\s*280\.0\)[\s\S]*\.max_inner_size\(460\.0,\s*280\.0\)/,
+  'download prompt window should use the compact fixed 460x280 geometry',
+);
+assert.match(
+  promptSource,
+  /className="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface px-3 py-2"/,
+  'download prompt content should use a compact overflow-protected shell',
+);
+assert.match(
+  promptSource,
+  /className="mt-auto flex min-h-\[38px\] shrink-0 items-center justify-between gap-2 border-t border-border pt-2"/,
+  'download prompt action bar should keep a predictable compact height',
+);
+assert.match(
+  promptSource,
+  /function MetaValue[\s\S]*className=\{`min-w-0 truncate/,
+  'prompt metadata values should be min-width constrained and truncated',
+);
+assert.match(
+  promptSource,
+  /title=\{prompt\.duplicateJob\?\.filename\}/,
+  'duplicate prompt filename should preserve its full value in a tooltip while compact',
 );
 
 for (const [name, source] of progressSources) {

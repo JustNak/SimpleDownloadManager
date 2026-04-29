@@ -300,25 +300,34 @@ impl SharedState {
                 return Err("Job not found.".into());
             };
 
+            let preserve_paused = job.state == JobState::Paused;
             let was_seeding = job.state == JobState::Seeding;
-            job.state = if update.finished {
-                JobState::Seeding
-            } else {
-                JobState::Downloading
-            };
+            if !preserve_paused {
+                job.state = if update.finished {
+                    JobState::Seeding
+                } else {
+                    JobState::Downloading
+                };
+            }
             job.downloaded_bytes = update.downloaded_bytes;
             job.total_bytes = update.total_bytes.max(update.downloaded_bytes);
-            job.speed = if update.finished {
+            job.speed = if preserve_paused {
+                0
+            } else if update.finished {
                 update.upload_speed
             } else {
                 update.download_speed
+            };
+            job.eta = if preserve_paused || update.finished {
+                0
+            } else {
+                update.eta.unwrap_or(0)
             };
             job.progress = if job.total_bytes == 0 {
                 0.0
             } else {
                 (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
             };
-            job.eta = 0;
             if let Some(name) = &update.name {
                 job.filename = sanitize_filename(name);
             }
@@ -350,7 +359,8 @@ impl SharedState {
             if update.finished && torrent.seeding_started_at.is_none() {
                 torrent.seeding_started_at = Some(current_unix_timestamp_millis());
             }
-            let started_seeding = update.finished && !was_seeding && !had_seeding_started;
+            let started_seeding =
+                !preserve_paused && update.finished && !was_seeding && !had_seeding_started;
             let event_message = started_seeding.then(|| format!("Seeding {}", job.filename));
             if let Some(message) = event_message {
                 state.push_diagnostic_event(

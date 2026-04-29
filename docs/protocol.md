@@ -98,6 +98,13 @@ URL handling is intentionally narrow:
 - Browser download interception uses `http:`/`https:` download items and hands `.torrent` URLs or filenames to the desktop app as torrent jobs.
 - The envelope version stays `1`; torrent handoff uses the existing `url` field.
 
+Torrent lifecycle behavior:
+
+- Resume keeps the torrent session identity and asks the torrent engine to continue or verify existing pieces.
+- Restart forgets app and torrent-engine session metadata but keeps downloaded torrent files so they can be rechecked.
+- Cancel/remove stops app tracking and forgets the torrent session without deleting downloaded torrent data.
+- Completed torrents may keep seeding until the configured ratio/time policy stops them.
+
 `ignoredFileExtensions` applies only to automatic browser download capture.
 Manual sends, popup sends, and context-menu sends are still allowed.
 `authenticatedHandoffHosts` is retained for backward compatibility with older settings.

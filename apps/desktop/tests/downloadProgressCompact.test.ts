@@ -133,12 +133,12 @@ assert.doesNotMatch(
 
 assert.match(
   windowsSource,
-  /width:\s*460\.0,[\s\S]*height:\s*250\.0,/,
-  'single progress popup geometry should be compact at 460x250',
+  /width:\s*460\.0,[\s\S]*height:\s*280\.0,/,
+  'single progress popup geometry should keep the compact width but provide 280px height for torrent controls',
 );
 
 assert.match(
   backendSource,
-  /window\.open\(\s*popupUrl\(`\?window=download-progress&jobId=\$\{encodeURIComponent\(id\)\}`\),\s*`download-progress-\$\{id\}`,\s*'width=460,height=250'\s*\)/,
-  'browser fallback progress popup should use the same compact 460x250 geometry',
+  /window\.open\(\s*popupUrl\(`\?window=download-progress&jobId=\$\{encodeURIComponent\(id\)\}`\),\s*`download-progress-\$\{id\}`,\s*'width=460,height=280'\s*\)/,
+  'browser fallback progress popup should use the same compact 460x280 geometry',
 );

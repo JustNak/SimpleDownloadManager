@@ -783,7 +783,7 @@ export async function cancelDownloadPrompt(id: string): Promise<void> {
 
 export async function openProgressWindow(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=460,height=250');
+    window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=460,height=280');
     return;
   }
   await invokeCommand('open_progress_window', { id });

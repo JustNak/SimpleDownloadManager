@@ -102,10 +102,7 @@ impl TorrentEngine {
         {
             Ok(session) => (session, None),
             Err(error) if is_listen_error(&format!("{error:#}")) => {
-                let listen_ports = torrent_listen_port_description(&settings);
-                let message = format!(
-                        "Torrent listen {listen_ports} unavailable; continuing without inbound peer listener: {error:#}"
-                    );
+                let message = torrent_listener_fallback_message(&settings, &format!("{error:#}"));
                 let fallback_session = Session::new_with_opts(
                     default_output_folder,
                     torrent_session_options_with_listener(persistence_dir, None, false),
@@ -494,6 +491,13 @@ fn is_listen_error(message: &str) -> bool {
     message.contains("error listening on TCP") || message.contains("no ports in range")
 }
 
+fn torrent_listener_fallback_message(settings: &TorrentSettings, error: &str) -> String {
+    let listen_ports = torrent_listen_port_description(settings);
+    format!(
+        "Torrent listen {listen_ports} unavailable; continuing without inbound peer listener or UPnP forwarding: {error}"
+    )
+}
+
 fn send_tracker_first_outcome(
     diagnostics: &Option<UnboundedSender<TrackerFirstMetadataOutcome>>,
     outcome: TrackerFirstMetadataOutcome,
@@ -522,6 +526,7 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
         fetched_bytes: torrent_fetched_bytes(&stats),
         download_speed: torrent_download_speed_bytes_per_second(&stats),
         upload_speed: torrent_upload_speed_bytes_per_second(&stats),
+        eta: torrent_eta_seconds(&stats),
         finished: stats.finished,
         error: stats.error,
     }
@@ -549,6 +554,23 @@ fn torrent_upload_speed_bytes_per_second(stats: &librqbit::TorrentStats) -> u64 
         .as_ref()
         .map(|live| mib_per_second_to_bytes_per_second(live.upload_speed.mbps))
         .unwrap_or(0)
+}
+
+fn torrent_eta_seconds(stats: &librqbit::TorrentStats) -> Option<u64> {
+    stats
+        .live
+        .as_ref()
+        .and_then(|live| live.time_remaining.as_ref())
+        .and_then(duration_with_human_readable_seconds)
+}
+
+fn duration_with_human_readable_seconds<T: serde::Serialize>(duration: &T) -> Option<u64> {
+    let value = serde_json::to_value(duration).ok()?;
+    duration_with_human_readable_value_seconds(&value)
+}
+
+fn duration_with_human_readable_value_seconds(value: &serde_json::Value) -> Option<u64> {
+    value.get("duration")?.get("secs")?.as_u64()
 }
 
 fn mib_per_second_to_bytes_per_second(mib_per_second: f64) -> u64 {
@@ -790,6 +812,21 @@ mod tests {
     }
 
     #[test]
+    fn listener_fallback_message_mentions_inbound_listener_and_upnp() {
+        let settings = TorrentSettings {
+            port_forwarding_enabled: true,
+            port_forwarding_port: 43000,
+            ..TorrentSettings::default()
+        };
+
+        let message = torrent_listener_fallback_message(&settings, "listen failed");
+
+        assert!(message.contains("port 43000"));
+        assert!(message.contains("without inbound peer listener or UPnP forwarding"));
+        assert!(message.contains("listen failed"));
+    }
+
+    #[test]
     fn tracker_first_session_options_disable_dht_persistence_and_listener() {
         let options = tracker_first_session_options();
 
@@ -887,6 +924,26 @@ mod tests {
         };
 
         assert_eq!(torrent_upload_speed_bytes_per_second(&stats), 786_432);
+    }
+
+    #[test]
+    fn runtime_eta_uses_serialized_librqbit_time_remaining_shape() {
+        let value = serde_json::json!({
+            "duration": { "secs": 125, "nanos": 500_000_000u32 },
+            "human_readable": "2m 5s"
+        });
+
+        assert_eq!(
+            duration_with_human_readable_value_seconds(&value),
+            Some(125)
+        );
+    }
+
+    #[test]
+    fn runtime_eta_is_none_without_serialized_duration_seconds() {
+        let value = serde_json::json!({ "human_readable": "unknown" });
+
+        assert_eq!(duration_with_human_readable_value_seconds(&value), None);
     }
 
     #[test]

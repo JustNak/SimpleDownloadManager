@@ -6,6 +6,13 @@ const activeRemovalStates = new Set<string>([
   'seeding',
 ]);
 
+const progressPopupStates = new Set<string>([
+  'queued',
+  'starting',
+  'downloading',
+  'seeding',
+]);
+
 export function canRetryFailedDownloads(jobs: DownloadJob[]): boolean {
   return jobs.some((job) => job.state === 'failed');
 }
@@ -16,4 +23,8 @@ export function canClearCompletedDownloads(jobs: DownloadJob[]): boolean {
 
 export function canRemoveDownloadImmediately(job: DownloadJob): boolean {
   return !activeRemovalStates.has(job.state);
+}
+
+export function canShowProgressPopup(job: DownloadJob): boolean {
+  return progressPopupStates.has(job.state);
 }

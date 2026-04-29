@@ -47,9 +47,11 @@ export function calculateDownloadProgressMetrics(
     ? backendSpeed
     : observedAverageSpeed(job, samples) || backendSpeed;
   const remainingBytes = Math.max(0, (job.totalBytes || 0) - (job.downloadedBytes || 0));
-  const timeRemaining = averageSpeed > 0 && remainingBytes > 0
-    ? Math.ceil(remainingBytes / averageSpeed)
-    : 0;
+  const timeRemaining = job.transferKind === 'torrent'
+    ? torrentBackendTimeRemaining(job)
+    : averageSpeed > 0 && remainingBytes > 0
+      ? Math.ceil(remainingBytes / averageSpeed)
+      : 0;
 
   return {
     averageSpeed,
@@ -72,6 +74,11 @@ export function calculateDownloadProgressMetricsByJobId(
 
 export function shouldShowCompletedFileAction(job: DownloadJob): boolean {
   return (job.state === 'completed' || job.state === 'seeding') && Boolean(job.targetPath);
+}
+
+function torrentBackendTimeRemaining(job: DownloadJob): number {
+  if (job.state !== 'downloading' || isTorrentMetadataPendingForProgress(job)) return 0;
+  return Math.max(0, Math.round(job.eta || 0));
 }
 
 function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): number {

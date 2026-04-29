@@ -663,13 +663,23 @@ async fn run_torrent_download_attempt(
                 .record_diagnostic_event(
                     DiagnosticLevel::Info,
                     "torrent",
-                    "Resumed torrent session",
+                    torrent_resume_existing_session_message(),
                     Some(task.id.clone()),
                 )
                 .await;
             engine_id
         }
         None => {
+            if torrent_has_resume_identity(existing_torrent) {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "torrent",
+                        torrent_readd_for_verification_message(),
+                        Some(task.id.clone()),
+                    )
+                    .await;
+            }
             let prepared_source = prepare_torrent_source(&task.url);
             let pending_cleanup_info_hash = pending_torrent_cleanup_info_hash(&prepared_source);
             if prepared_source.fallback_trackers_added > 0 {
@@ -754,6 +764,14 @@ async fn run_torrent_download_attempt(
     loop {
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
+                persist_final_torrent_snapshot_before_pause(
+                    app,
+                    state,
+                    engine.as_ref(),
+                    engine_id,
+                    &task.id,
+                )
+                .await?;
                 engine
                     .pause(engine_id)
                     .await
@@ -842,6 +860,47 @@ async fn run_torrent_download_attempt(
 
         tokio::time::sleep(PROGRESS_UPDATE_INTERVAL).await;
     }
+}
+
+async fn persist_final_torrent_snapshot_before_pause(
+    app: &AppHandle,
+    state: &SharedState,
+    engine: &TorrentEngine,
+    engine_id: usize,
+    job_id: &str,
+) -> Result<(), DownloadError> {
+    let update = match engine.snapshot(engine_id).await {
+        Ok(update) => update,
+        Err(message) => {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Warning,
+                    "torrent",
+                    format!("Could not capture final torrent snapshot before pause: {message}"),
+                    Some(job_id.to_string()),
+                )
+                .await;
+            return Ok(());
+        }
+    };
+
+    if let Some(message) = update.error.clone() {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent",
+                format!("Final torrent snapshot before pause reported an engine error: {message}"),
+                Some(job_id.to_string()),
+            )
+            .await;
+    }
+
+    let snapshot = state
+        .update_torrent_progress(job_id, update, true)
+        .await
+        .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+    emit_snapshot(app, &snapshot);
+    Ok(())
 }
 
 fn torrent_progress_should_persist(
@@ -1015,13 +1074,27 @@ fn tracker_first_metadata_diagnostic_message(outcome: &TrackerFirstMetadataOutco
     match outcome {
         TrackerFirstMetadataOutcome::Resolved => "Tracker-first torrent metadata resolved".into(),
         TrackerFirstMetadataOutcome::TimedOut => format!(
-            "Tracker-first torrent metadata timed out after {} seconds; falling back to DHT",
+            "Tracker-first torrent metadata timed out after {} seconds; falling back to the main DHT session",
             crate::torrent::TORRENT_TRACKER_FIRST_METADATA_TIMEOUT.as_secs()
         ),
         TrackerFirstMetadataOutcome::Failed(message) => {
-            format!("Tracker-first torrent metadata failed; falling back to DHT: {message}")
+            format!(
+                "Tracker-first torrent metadata failed; falling back to the main DHT session: {message}"
+            )
         }
     }
+}
+
+fn torrent_resume_existing_session_message() -> &'static str {
+    "Resumed torrent from saved session"
+}
+
+fn torrent_readd_for_verification_message() -> &'static str {
+    "No saved torrent session found; re-adding torrent for piece verification"
+}
+
+fn torrent_has_resume_identity(torrent: Option<&TorrentInfo>) -> bool {
+    torrent.is_some_and(|torrent| torrent.engine_id.is_some() || torrent.info_hash.is_some())
 }
 
 fn torrent_metadata_timeout_message() -> String {
@@ -3033,14 +3106,35 @@ mod tests {
         );
         assert_eq!(
             tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::TimedOut),
-            "Tracker-first torrent metadata timed out after 15 seconds; falling back to DHT"
+            "Tracker-first torrent metadata timed out after 15 seconds; falling back to the main DHT session"
         );
         assert_eq!(
             tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::Failed(
                 "tracker unavailable".into()
             )),
-            "Tracker-first torrent metadata failed; falling back to DHT: tracker unavailable"
+            "Tracker-first torrent metadata failed; falling back to the main DHT session: tracker unavailable"
         );
+    }
+
+    #[test]
+    fn torrent_resume_path_diagnostics_distinguish_resume_and_readd() {
+        assert_eq!(
+            torrent_resume_existing_session_message(),
+            "Resumed torrent from saved session"
+        );
+        assert_eq!(
+            torrent_readd_for_verification_message(),
+            "No saved torrent session found; re-adding torrent for piece verification"
+        );
+        assert!(!torrent_has_resume_identity(None));
+        assert!(torrent_has_resume_identity(Some(&TorrentInfo {
+            engine_id: Some(7),
+            ..TorrentInfo::default()
+        })));
+        assert!(torrent_has_resume_identity(Some(&TorrentInfo {
+            info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+            ..TorrentInfo::default()
+        })));
     }
 
     #[test]

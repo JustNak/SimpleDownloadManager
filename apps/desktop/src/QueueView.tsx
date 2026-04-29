@@ -7,7 +7,7 @@ import {
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
-import { canRemoveDownloadImmediately } from './queueCommands';
+import { canRemoveDownloadImmediately, canShowProgressPopup } from './queueCommands';
 import {
   clampQueueProgress,
   fileBadgeActivityState,
@@ -40,6 +40,7 @@ import {
   FileImage,
   FileText,
   FileVideo,
+  ExternalLink,
   FolderOpen,
   Globe,
   GripHorizontal,
@@ -90,6 +91,7 @@ interface QueueViewProps {
   onRename: (id: string, filename: string) => void;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
+  onShowPopup: (id: string) => void;
 }
 
 export function QueueView({
@@ -114,6 +116,7 @@ export function QueueView({
   onRename,
   onOpen,
   onReveal,
+  onShowPopup,
 }: QueueViewProps) {
   const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) ?? null : null;
   const [openMenuJobId, setOpenMenuJobId] = useState<string | null>(null);
@@ -478,10 +481,10 @@ export function QueueView({
                 {tableColumns[0]}
               </SortableColumnHeader>
             </div>
-            <SortableColumnHeader column="date" sortMode={sortMode} onSortChange={onSortChange}>
+            <SortableColumnHeader column="date" sortMode={sortMode} onSortChange={onSortChange} align={isTorrentTable ? 'center' : 'left'} className={torrentColumnAlignClass(isTorrentTable)}>
               {tableColumns[1]}
             </SortableColumnHeader>
-            <div title={isTorrentTable ? 'Seed upload speed' : undefined}>{tableColumns[2]}</div>
+            <div title={isTorrentTable ? 'Seed upload speed' : undefined} className={torrentColumnAlignClass(isTorrentTable)}>{tableColumns[2]}</div>
             <div title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
             <SortableColumnHeader column="size" sortMode={sortMode} onSortChange={onSortChange}>
               {tableColumns[4]}
@@ -560,11 +563,11 @@ export function QueueView({
                     />
                   </div>
 
-                  <div className="truncate pr-4 text-muted-foreground tabular-nums" title={formatFullJobDate(job.createdAt)}>
+                  <div className={queueDateCellClass(isTorrentTable)} title={formatFullJobDate(job.createdAt)}>
                     {formatJobDate(job.createdAt)}
                   </div>
 
-                  <div className="tabular-nums text-muted-foreground">
+                  <div className={queueMetricCellClass(isTorrentTable)}>
                     {isTorrentTable ? formatTorrentSeedMetric(job) : formatQueueSpeed(job, averageSpeed)}
                   </div>
                   <div className="tabular-nums text-muted-foreground">
@@ -591,6 +594,7 @@ export function QueueView({
                       onRestart={onRestart}
                       onRemove={onRemove}
                       onReveal={onReveal}
+                      onShowPopup={onShowPopup}
                     />
                   </div>
                 </div>
@@ -613,6 +617,10 @@ export function QueueView({
           onReveal={(id) => {
             setContextMenu(null);
             onReveal(id);
+          }}
+          onShowPopup={(id) => {
+            setContextMenu(null);
+            onShowPopup(id);
           }}
           onRename={(job) => {
             setContextMenu(null);
@@ -706,6 +714,7 @@ function FileContextMenu({
   y,
   onOpen,
   onReveal,
+  onShowPopup,
   onRename,
   onDelete,
 }: {
@@ -715,6 +724,7 @@ function FileContextMenu({
   y: number;
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
+  onShowPopup: (id: string) => void;
   onRename: (job: DownloadJob) => void;
   onDelete: () => void;
 }) {
@@ -730,6 +740,9 @@ function FileContextMenu({
     >
       <MenuItem icon={<FileText size={16} />} label="Open File" onClick={() => onOpen(job.id)} />
       <MenuItem icon={<FolderOpen size={16} />} label="Open Folder" onClick={() => onReveal(job.id)} />
+      {canShowProgressPopup(job) ? (
+        <MenuItem icon={<ExternalLink size={16} />} label="Show Popup" onClick={() => onShowPopup(job.id)} />
+      ) : null}
       {canDelete ? (
         <>
           <MenuItem icon={<Pencil size={16} />} label="Rename" onClick={() => onRename(job)} />
@@ -914,17 +927,24 @@ function SortableColumnHeader({
   sortMode,
   onSortChange,
   align = 'left',
+  className = '',
   children,
 }: {
   column: SortColumn;
   sortMode: SortMode;
   onSortChange: (column: SortColumn) => void;
-  align?: 'left' | 'right';
+  align?: 'left' | 'center' | 'right';
+  className?: string;
   children: React.ReactNode;
 }) {
   const active = sortModeKey(sortMode) === column;
   const direction = sortModeDirection(sortMode);
   const Icon = active ? direction === 'asc' ? ArrowUp : ArrowDown : ArrowUpDown;
+  const alignmentClass = align === 'right'
+    ? 'justify-end'
+    : align === 'center'
+      ? 'justify-center'
+      : 'justify-start';
 
   return (
     <button
@@ -932,7 +952,7 @@ function SortableColumnHeader({
       onClick={() => onSortChange(column)}
       className={`inline-flex min-w-0 items-center gap-1.5 rounded-sm text-xs font-semibold transition hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/25 ${
         active ? 'text-primary' : 'text-muted-foreground'
-      } ${align === 'right' ? 'justify-end' : 'justify-start'}`}
+      } ${alignmentClass} ${className}`}
       aria-label={`Sort by ${String(children)} ${active && direction === 'asc' ? 'descending' : 'ascending'}`}
     >
       <span className="truncate">{children}</span>
@@ -1193,6 +1213,7 @@ function RowActions({
   onRestart,
   onRemove,
   onReveal,
+  onShowPopup,
 }: {
   job: DownloadJob;
   menuOpen: boolean;
@@ -1205,6 +1226,7 @@ function RowActions({
   onRestart: (id: string) => void;
   onRemove: (id: string) => void;
   onReveal: (id: string) => void;
+  onShowPopup: (id: string) => void;
 }) {
   const canPause = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   const canResume = job.state === JobState.Paused;
@@ -1235,6 +1257,9 @@ function RowActions({
           className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl"
           onClick={(event) => event.stopPropagation()}
         >
+          {canShowProgressPopup(job) ? (
+            <MenuItem icon={<ExternalLink size={16} />} label="Show Popup" onClick={() => runMenuAction(onShowPopup)} />
+          ) : null}
           {job.targetPath ? (
             <MenuItem icon={<FolderOpen size={16} />} label="Show in folder" onClick={() => runMenuAction(onReveal)} />
           ) : null}
@@ -1504,8 +1529,24 @@ function formatQueueSpeed(job: DownloadJob, averageSpeed: number) {
 function formatTorrentSeedMetric(job: DownloadJob) {
   if (!job.torrent) return '--';
   if (job.state === JobState.Seeding && job.speed > 0) return `${formatBytes(job.speed)}/s`;
-  if (job.torrent.uploadedBytes > 0) return `Up ${formatBytes(job.torrent.uploadedBytes)}`;
+  if (job.torrent.uploadedBytes > 0) return formatBytes(job.torrent.uploadedBytes);
   return '--';
+}
+
+function torrentColumnAlignClass(isTorrentTable: boolean) {
+  return isTorrentTable ? 'w-full text-center' : '';
+}
+
+function queueDateCellClass(isTorrentTable: boolean) {
+  return isTorrentTable
+    ? 'truncate text-center text-muted-foreground tabular-nums'
+    : 'truncate pr-4 text-muted-foreground tabular-nums';
+}
+
+function queueMetricCellClass(isTorrentTable: boolean) {
+  return isTorrentTable
+    ? 'text-center tabular-nums text-muted-foreground'
+    : 'tabular-nums text-muted-foreground';
 }
 
 function formatQueueTime(job: DownloadJob, timeRemaining: number) {
@@ -1611,7 +1652,7 @@ function setsEqual<T>(left: Set<T>, right: Set<T>) {
 
 function getContextMenuPosition(jobId: string, x: number, y: number) {
   const menuWidth = 192;
-  const menuHeight = 148;
+  const menuHeight = 180;
   return {
     jobId,
     x: clamp(x, 8, Math.max(8, window.innerWidth - menuWidth - 8)),

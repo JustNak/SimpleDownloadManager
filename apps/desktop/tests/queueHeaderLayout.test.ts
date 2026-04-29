@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../src/QueueView.tsx', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 
 assert.doesNotMatch(
   source,
@@ -169,4 +170,64 @@ assert.match(
   source,
   /const COMPLETED_BADGE_DURATION_MS = 1200;/,
   'completed file badge overlay should use the requested 1200ms duration',
+);
+
+assert.match(
+  source,
+  /<SortableColumnHeader column="date"[\s\S]*className=\{torrentColumnAlignClass\(isTorrentTable\)\}/,
+  'torrent table Date header should be centered with the Date cells',
+);
+
+assert.match(
+  source,
+  /<div title=\{isTorrentTable \? 'Seed upload speed' : undefined\} className=\{torrentColumnAlignClass\(isTorrentTable\)\}>/,
+  'torrent table Seed header should be centered with the Seed cells',
+);
+
+assert.match(
+  source,
+  /className=\{queueDateCellClass\(isTorrentTable\)\}/,
+  'torrent table Date cells should share a centered alignment class',
+);
+
+assert.match(
+  source,
+  /className=\{queueMetricCellClass\(isTorrentTable\)\}/,
+  'torrent table Seed metric cells should share a centered alignment class',
+);
+
+assert.doesNotMatch(
+  source,
+  /function formatTorrentSeedMetric[\s\S]*return `Up \$\{formatBytes\(job\.torrent\.uploadedBytes\)\}`;/,
+  'torrent table Seed cells should omit the Up prefix and show only the uploaded byte value',
+);
+
+assert.equal(
+  (source.match(/label="Show Popup"/g) ?? []).length,
+  2,
+  'Show Popup should be available in both row action menus and right-click context menus',
+);
+
+assert.equal(
+  (source.match(/canShowProgressPopup\(job\) \? \(/g) ?? []).length,
+  2,
+  'both Show Popup menu entries should be gated to active download states',
+);
+
+assert.match(
+  source,
+  /onShowPopup: \(id: string\) => void;/,
+  'QueueView should accept an explicit Show Popup callback',
+);
+
+assert.match(
+  appSource,
+  /async function handleShowPopup\(id: string\)[\s\S]*await openProgressWindow\(id\)/,
+  'App should wire Show Popup through the existing progress popup opener',
+);
+
+assert.match(
+  appSource,
+  /onShowPopup=\{handleShowPopup\}/,
+  'QueueView should receive the Show Popup handler from App',
 );
