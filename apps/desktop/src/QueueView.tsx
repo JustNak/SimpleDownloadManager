@@ -7,7 +7,7 @@ import {
 } from './queueInteractions';
 import { getDeleteContextMenuLabel, getDeletePromptContent } from './deletePrompts';
 import type { DownloadProgressMetrics } from './downloadProgressMetrics';
-import { canRemoveDownloadImmediately, canShowProgressPopup } from './queueCommands';
+import { canRemoveDownloadImmediately, canShowProgressPopup, canSwapFailedDownloadToBrowser } from './queueCommands';
 import {
   clampQueueProgress,
   fileBadgeActivityState,
@@ -92,6 +92,7 @@ interface QueueViewProps {
   onOpen: (id: string) => void;
   onReveal: (id: string) => void;
   onShowPopup: (id: string) => void;
+  onSwapFailedToBrowser: (id: string) => void;
 }
 
 export function QueueView({
@@ -117,6 +118,7 @@ export function QueueView({
   onOpen,
   onReveal,
   onShowPopup,
+  onSwapFailedToBrowser,
 }: QueueViewProps) {
   const selectedJob = selectedJobId ? jobs.find((job) => job.id === selectedJobId) ?? null : null;
   const [openMenuJobId, setOpenMenuJobId] = useState<string | null>(null);
@@ -595,6 +597,7 @@ export function QueueView({
                       onRemove={onRemove}
                       onReveal={onReveal}
                       onShowPopup={onShowPopup}
+                      onSwapFailedToBrowser={onSwapFailedToBrowser}
                     />
                   </div>
                 </div>
@@ -1214,6 +1217,7 @@ function RowActions({
   onRemove,
   onReveal,
   onShowPopup,
+  onSwapFailedToBrowser,
 }: {
   job: DownloadJob;
   menuOpen: boolean;
@@ -1227,6 +1231,7 @@ function RowActions({
   onRemove: (id: string) => void;
   onReveal: (id: string) => void;
   onShowPopup: (id: string) => void;
+  onSwapFailedToBrowser: (id: string) => void;
 }) {
   const canPause = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   const canResume = job.state === JobState.Paused;
@@ -1250,6 +1255,9 @@ function RowActions({
       {canRetry ? (
         <IconButton title="Retry" onClick={() => onRetry(job.id)}><RotateCw size={17} /></IconButton>
       ) : null}
+      {canSwapFailedDownloadToBrowser(job) ? (
+        <IconButton title="Swap" onClick={() => onSwapFailedToBrowser(job.id)}><ExternalLink size={17} /></IconButton>
+      ) : null}
       <IconButton title="More actions" onClick={onToggleMenu}><MoreHorizontal size={18} /></IconButton>
 
       {menuOpen ? (
@@ -1265,6 +1273,9 @@ function RowActions({
           ) : null}
           {canRetry ? (
             <MenuItem icon={<RotateCcw size={16} />} label="Restart" onClick={() => runMenuAction(onRestart)} />
+          ) : null}
+          {canSwapFailedDownloadToBrowser(job) ? (
+            <MenuItem icon={<ExternalLink size={16} />} label="Swap" onClick={() => runMenuAction(onSwapFailedToBrowser)} />
           ) : null}
           {canCancel ? (
             <MenuItem icon={<X size={16} />} label="Cancel" onClick={() => runMenuAction(onCancel)} />

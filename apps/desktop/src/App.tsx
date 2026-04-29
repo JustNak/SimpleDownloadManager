@@ -58,6 +58,7 @@ import {
   subscribeToStateChanged,
   subscribeToSelectedJobRequested,
   subscribeToUpdateInstallProgress,
+  swapFailedDownloadToBrowser,
   testExtensionHandoff,
 } from './backend';
 import type { AddJobsResult } from './backend';
@@ -504,6 +505,15 @@ export default function App() {
     }
   }
 
+  async function handleSwapFailedToBrowser(id: string) {
+    try {
+      await swapFailedDownloadToBrowser(id);
+      addToast({ type: 'info', title: 'Swapped to Browser', message: 'The download URL was opened in your browser.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Swap Failed', message: getErrorMessage(error) });
+    }
+  }
+
   async function handleDeleteMany(ids: string[], deleteFromDisk: boolean) {
     const uniqueIds = [...new Set(ids)].filter(Boolean);
     if (uniqueIds.length === 0) return;
@@ -923,6 +933,7 @@ export default function App() {
                 onOpen={handleOpenFile}
                 onReveal={handleReveal}
                 onShowPopup={handleShowPopup}
+                onSwapFailedToBrowser={handleSwapFailedToBrowser}
               />
 
               <StatusBar

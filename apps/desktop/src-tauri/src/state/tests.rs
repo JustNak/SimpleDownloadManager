@@ -1940,6 +1940,116 @@ async fn queued_torrent_task_preserves_resume_metadata() {
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn seeding_restore_file_access_failure_pauses_and_queues_external_retry() {
+    let download_dir = test_runtime_dir("seeding-restore-file-access");
+    let mut job = download_job("job_1", JobState::Starting, ResumeSupport::Unsupported, 100);
+    job.transfer_kind = TransferKind::Torrent;
+    job.target_path = download_dir.join("torrent-output").display().to_string();
+    job.temp_path = download_dir
+        .join(".torrent-state")
+        .join("job_1")
+        .display()
+        .to_string();
+    job.torrent = Some(TorrentInfo {
+        engine_id: Some(42),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        uploaded_bytes: 2048,
+        fetched_bytes: 1024,
+        ratio: 2.0,
+        seeding_started_at: Some(123_456),
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+    }
+
+    let handled = state
+        .handle_torrent_seeding_restore_failure(
+            "job_1",
+            "The process cannot access the file because it is being used by another process.",
+            FailureCategory::Torrent,
+        )
+        .await
+        .expect("restore failure should be handled")
+        .expect("seeding restore should pause instead of failing");
+
+    assert!(handled.retry_reseed);
+    assert_eq!(handled.snapshot.jobs[0].state, JobState::Paused);
+    assert_ne!(handled.snapshot.jobs[0].state, JobState::Failed);
+    assert_eq!(
+        handled.snapshot.jobs[0]
+            .torrent
+            .as_ref()
+            .and_then(|torrent| torrent.seeding_started_at),
+        Some(123_456)
+    );
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_1"));
+    assert!(runtime.external_reseed_jobs.contains("job_1"));
+    assert!(runtime
+        .diagnostic_events
+        .iter()
+        .any(|event| event.level == DiagnosticLevel::Warning
+            && event.message.contains("Automatic seeding restore")
+            && event.message.contains("waiting for external file access")));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn seeding_restore_non_file_failure_pauses_with_attention_instead_of_failing() {
+    let download_dir = test_runtime_dir("seeding-restore-non-file");
+    let mut job = download_job("job_1", JobState::Starting, ResumeSupport::Unsupported, 100);
+    job.transfer_kind = TransferKind::Torrent;
+    job.torrent = Some(TorrentInfo {
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        seeding_started_at: Some(123_456),
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+    }
+
+    let handled = state
+        .handle_torrent_seeding_restore_failure(
+            "job_1",
+            "Torrent metadata lookup timed out after 60 seconds. Add trackers or retry later.",
+            FailureCategory::Torrent,
+        )
+        .await
+        .expect("restore failure should be handled")
+        .expect("seeding restore should pause instead of failing");
+
+    assert!(!handled.retry_reseed);
+    assert_eq!(handled.snapshot.jobs[0].state, JobState::Paused);
+    assert_eq!(
+        handled.snapshot.jobs[0].failure_category,
+        Some(FailureCategory::Torrent)
+    );
+    assert_eq!(
+        handled.snapshot.jobs[0]
+            .torrent
+            .as_ref()
+            .and_then(|torrent| torrent.seeding_started_at),
+        Some(123_456)
+    );
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_1"));
+    assert!(!runtime.external_reseed_jobs.contains("job_1"));
+    assert!(runtime
+        .diagnostic_events
+        .iter()
+        .any(|event| event.level == DiagnosticLevel::Warning
+            && event.message.contains("Paused seeding restore")));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn seed_policy_defaults_to_forever_and_supports_limits() {
     let mut settings = Settings::default();

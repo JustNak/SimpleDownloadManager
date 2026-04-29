@@ -125,6 +125,18 @@ assert.match(
   'torrenting view should preserve the metadata-pending state label',
 );
 
+assert.match(
+  progressSource,
+  /isTorrentSeedingRestore/,
+  'torrenting progress popup should detect prior seeding restores',
+);
+
+assert.match(
+  progressSource,
+  /Restoring seeding/,
+  'torrenting progress popup should label prior seeding jobs as restoring seeding instead of downloading',
+);
+
 assert.doesNotMatch(
   progressSource,
   /\$\{torrentPeerCount\(job\)\}\/--|\/--/,

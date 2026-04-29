@@ -161,6 +161,68 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                     .await
                 {
                     emit_snapshot(&app, &snapshot);
+                } else if is_torrent_seeding_restore_task(&task) {
+                    match state
+                        .handle_torrent_seeding_restore_failure(
+                            &task.id,
+                            error.message.clone(),
+                            error.category,
+                        )
+                        .await
+                    {
+                        Ok(Some(handled)) => {
+                            emit_snapshot(&app, &handled.snapshot);
+                            if handled.retry_reseed {
+                                schedule_external_reseed(
+                                    app.clone(),
+                                    state.clone(),
+                                    task.id.clone(),
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(None) => {
+                            if let Ok(snapshot) = state
+                                .fail_job(&task.id, error.message.clone(), error.category)
+                                .await
+                            {
+                                emit_snapshot(&app, &snapshot);
+                                notify_download_failure(
+                                    &app,
+                                    &state,
+                                    &task,
+                                    snapshot
+                                        .jobs
+                                        .iter()
+                                        .find(|job| job.id == task.id)
+                                        .and_then(|job| job.error.as_deref()),
+                                )
+                                .await;
+                            }
+                        }
+                        Err(handle_error) => {
+                            eprintln!(
+                                "failed to pause torrent seeding restore after error: {handle_error}"
+                            );
+                            if let Ok(snapshot) = state
+                                .fail_job(&task.id, error.message.clone(), error.category)
+                                .await
+                            {
+                                emit_snapshot(&app, &snapshot);
+                                notify_download_failure(
+                                    &app,
+                                    &state,
+                                    &task,
+                                    snapshot
+                                        .jobs
+                                        .iter()
+                                        .find(|job| job.id == task.id)
+                                        .and_then(|job| job.error.as_deref()),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 } else if let Ok(snapshot) = state
                     .fail_job(&task.id, error.message.clone(), error.category)
                     .await
@@ -649,6 +711,7 @@ async fn run_torrent_download_attempt(
 
     let output_folder = task.target_path.clone();
     let existing_torrent = task.torrent.as_ref();
+    let restoring_seeding = is_torrent_seeding_restore(existing_torrent);
     let engine_id = match engine
         .resume_existing(
             existing_torrent.and_then(|torrent| torrent.engine_id),
@@ -663,14 +726,27 @@ async fn run_torrent_download_attempt(
                 .record_diagnostic_event(
                     DiagnosticLevel::Info,
                     "torrent",
-                    torrent_resume_existing_session_message(),
+                    if restoring_seeding {
+                        torrent_restore_existing_seeding_session_message()
+                    } else {
+                        torrent_resume_existing_session_message()
+                    },
                     Some(task.id.clone()),
                 )
                 .await;
             engine_id
         }
         None => {
-            if torrent_has_resume_identity(existing_torrent) {
+            if restoring_seeding {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "torrent",
+                        torrent_restore_recheck_existing_files_message(),
+                        Some(task.id.clone()),
+                    )
+                    .await;
+            } else if torrent_has_resume_identity(existing_torrent) {
                 let _ = state
                     .record_diagnostic_event(
                         DiagnosticLevel::Info,
@@ -1089,12 +1165,28 @@ fn torrent_resume_existing_session_message() -> &'static str {
     "Resumed torrent from saved session"
 }
 
+fn torrent_restore_existing_seeding_session_message() -> &'static str {
+    "Restored torrent seeding from saved session"
+}
+
 fn torrent_readd_for_verification_message() -> &'static str {
     "No saved torrent session found; re-adding torrent for piece verification"
 }
 
+fn torrent_restore_recheck_existing_files_message() -> &'static str {
+    "No saved seeding session found; rechecking existing files before seeding"
+}
+
 fn torrent_has_resume_identity(torrent: Option<&TorrentInfo>) -> bool {
     torrent.is_some_and(|torrent| torrent.engine_id.is_some() || torrent.info_hash.is_some())
+}
+
+fn is_torrent_seeding_restore(torrent: Option<&TorrentInfo>) -> bool {
+    torrent.is_some_and(|torrent| torrent.seeding_started_at.is_some())
+}
+
+fn is_torrent_seeding_restore_task(task: &crate::state::DownloadTask) -> bool {
+    task.transfer_kind == TransferKind::Torrent && is_torrent_seeding_restore(task.torrent.as_ref())
 }
 
 fn torrent_metadata_timeout_message() -> String {
@@ -3123,8 +3215,16 @@ mod tests {
             "Resumed torrent from saved session"
         );
         assert_eq!(
+            torrent_restore_existing_seeding_session_message(),
+            "Restored torrent seeding from saved session"
+        );
+        assert_eq!(
             torrent_readd_for_verification_message(),
             "No saved torrent session found; re-adding torrent for piece verification"
+        );
+        assert_eq!(
+            torrent_restore_recheck_existing_files_message(),
+            "No saved seeding session found; rechecking existing files before seeding"
         );
         assert!(!torrent_has_resume_identity(None));
         assert!(torrent_has_resume_identity(Some(&TorrentInfo {
@@ -3133,6 +3233,11 @@ mod tests {
         })));
         assert!(torrent_has_resume_identity(Some(&TorrentInfo {
             info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+            ..TorrentInfo::default()
+        })));
+        assert!(!is_torrent_seeding_restore(None));
+        assert!(is_torrent_seeding_restore(Some(&TorrentInfo {
+            seeding_started_at: Some(123_456),
             ..TorrentInfo::default()
         })));
     }

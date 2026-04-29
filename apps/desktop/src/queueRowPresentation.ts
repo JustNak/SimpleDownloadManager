@@ -55,7 +55,14 @@ export function isTorrentMetadataPending(job: TorrentMetadataPendingJob): boolea
   return !job.torrent?.name;
 }
 
+export function isTorrentSeedingRestore(job: TorrentMetadataPendingJob): boolean {
+  if (job.transferKind !== 'torrent') return false;
+  if (!['queued', 'starting', 'downloading'].includes(job.state)) return false;
+  return typeof job.torrent?.seedingStartedAt === 'number';
+}
+
 export function torrentActivitySummary(job: TorrentMetadataPendingJob): string {
+  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
   return isTorrentMetadataPending(job) ? 'Finding metadata' : 'No peer activity yet';
 }
 
@@ -73,6 +80,10 @@ export function torrentDisplayName(job: TorrentMetadataPendingJob): string {
 }
 
 export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueStatusPresentation {
+  if (isTorrentSeedingRestore(job)) {
+    return { label: 'Restoring seeding', tone: 'warning' };
+  }
+
   if (isTorrentMetadataPending(job)) {
     return { label: 'Finding', tone: 'warning' };
   }

@@ -115,3 +115,9 @@ pub enum ExternalReseedAttempt {
     Pending,
     Stop,
 }
+
+#[derive(Debug, Clone)]
+pub struct TorrentSeedingRestoreFailure {
+    pub snapshot: DesktopSnapshot,
+    pub retry_reseed: bool,
+}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  canSwapFailedDownloadToBrowser,
   canClearCompletedDownloads,
   canRemoveDownloadImmediately,
   canShowProgressPopup,
@@ -106,4 +107,58 @@ assert.equal(
   canShowProgressPopup(job('job_1', 'completed')),
   false,
   'completed downloads should use open/show actions instead of progress popup',
+);
+
+assert.equal(
+  canSwapFailedDownloadToBrowser({
+    ...job('job_1', 'failed'),
+    source: {
+      entryPoint: 'browser_download',
+      browser: 'chrome',
+      extensionVersion: '0.3.51',
+    },
+  }),
+  true,
+  'failed browser-origin HTTP downloads should be eligible for Swap',
+);
+
+assert.equal(
+  canSwapFailedDownloadToBrowser({
+    ...job('job_1', 'failed'),
+    source: {
+      entryPoint: 'popup',
+      browser: 'chrome',
+      extensionVersion: '0.3.51',
+    },
+  }),
+  false,
+  'manual extension downloads should not show browser Swap after failure',
+);
+
+assert.equal(
+  canSwapFailedDownloadToBrowser({
+    ...job('job_1', 'downloading'),
+    source: {
+      entryPoint: 'browser_download',
+      browser: 'chrome',
+      extensionVersion: '0.3.51',
+    },
+  }),
+  false,
+  'active downloads should not show failed-download Swap',
+);
+
+assert.equal(
+  canSwapFailedDownloadToBrowser({
+    ...job('job_1', 'failed'),
+    url: 'magnet:?xt=urn:btih:example',
+    transferKind: 'torrent',
+    source: {
+      entryPoint: 'browser_download',
+      browser: 'chrome',
+      extensionVersion: '0.3.51',
+    },
+  }),
+  false,
+  'torrent failures should not be swapped to the browser download UI',
 );

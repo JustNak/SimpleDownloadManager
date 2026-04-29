@@ -175,6 +175,72 @@ impl SharedState {
         Ok(Some(snapshot))
     }
 
+    pub async fn handle_torrent_seeding_restore_failure(
+        &self,
+        id: &str,
+        message: impl Into<String>,
+        failure_category: FailureCategory,
+    ) -> Result<Option<TorrentSeedingRestoreFailure>, String> {
+        let message = message.into();
+        let retry_reseed = failure_category == FailureCategory::Torrent
+            && is_external_reseed_file_access_error(&message);
+        let handled = {
+            let mut state = self.inner.write().await;
+
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                if job.transfer_kind != TransferKind::Torrent
+                    || job
+                        .torrent
+                        .as_ref()
+                        .and_then(|torrent| torrent.seeding_started_at)
+                        .is_none()
+                {
+                    return Ok(None);
+                }
+
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = Some(message.clone());
+                job.failure_category = Some(failure_category);
+                job.filename.clone()
+            };
+
+            state.active_workers.remove(id);
+            let event_message = if retry_reseed {
+                state.external_reseed_jobs.insert(id.into());
+                format!(
+                    "Automatic seeding restore for {filename} is waiting for external file access to finish: {message}"
+                )
+            } else {
+                state.external_reseed_jobs.remove(id);
+                format!("Paused seeding restore for {filename}: {message}")
+            };
+
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent".into(),
+                event_message,
+                Some(id.into()),
+            );
+
+            Some((state.snapshot(), state.persisted()))
+        };
+
+        let Some((snapshot, persisted)) = handled else {
+            return Ok(None);
+        };
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(Some(TorrentSeedingRestoreFailure {
+            snapshot,
+            retry_reseed,
+        }))
+    }
+
     #[cfg(test)]
     pub(super) async fn is_external_reseed_pending(&self, id: &str) -> bool {
         self.inner.read().await.external_reseed_jobs.contains(id)

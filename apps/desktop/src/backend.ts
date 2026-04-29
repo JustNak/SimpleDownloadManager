@@ -4,6 +4,7 @@ import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, 
 import type { ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
+import { canSwapFailedDownloadToBrowser } from './queueCommands';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -230,6 +231,11 @@ let mockState: DesktopSnapshot = {
       url: 'https://example.com/broken-driver.exe',
       filename: 'driver-installer.exe',
       transferKind: 'http',
+      source: {
+        entryPoint: 'browser_download',
+        browser: 'chrome',
+        extensionVersion: '0.3.51',
+      },
       state: JobState.Failed,
       createdAt: mockNow - 1000 * 60 * 24,
       progress: 22,
@@ -538,6 +544,19 @@ export async function retryFailedJobs(): Promise<void> {
     return;
   }
   await invokeCommand('retry_failed_jobs');
+}
+
+export async function swapFailedDownloadToBrowser(id: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    const job = mockState.jobs.find((candidate) => candidate.id === id);
+    if (!job) throw new Error('Download was not found.');
+    if (!canSwapFailedDownloadToBrowser(job)) {
+      throw new Error('Only failed browser downloads can be swapped back to the browser.');
+    }
+    window.open(job.url, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  await invokeCommand('swap_failed_download_to_browser', { id });
 }
 
 export async function removeJob(id: string): Promise<void> {

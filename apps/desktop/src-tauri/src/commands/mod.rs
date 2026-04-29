@@ -7,8 +7,8 @@ use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{validate_settings, DuplicatePolicy, EnqueueResult, EnqueueStatus, SharedState};
 use crate::storage::{
-    DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource, HostRegistrationStatus,
-    Settings, TransferKind,
+    DesktopSnapshot, DiagnosticsSnapshot, DownloadJob, DownloadPrompt, DownloadSource,
+    HostRegistrationStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
@@ -377,6 +377,21 @@ pub async fn retry_failed_jobs(
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
+}
+
+#[tauri::command]
+pub async fn swap_failed_download_to_browser(
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<(), String> {
+    let snapshot = state.snapshot().await;
+    let job = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == id)
+        .ok_or_else(|| "Download was not found.".to_string())?;
+    let url = failed_browser_download_url(job)?;
+    open_url(url)
 }
 
 #[tauri::command]
@@ -823,6 +838,37 @@ fn unix_timestamp_millis() -> u128 {
         .unwrap_or_default()
 }
 
+fn failed_browser_download_url(job: &DownloadJob) -> Result<&str, String> {
+    if job.state != JobState::Failed
+        || job.transfer_kind != TransferKind::Http
+        || job
+            .source
+            .as_ref()
+            .map(|source| source.entry_point.as_str())
+            != Some("browser_download")
+    {
+        return Err("Only failed browser downloads can be swapped back to the browser.".into());
+    }
+
+    let parsed = url::Url::parse(&job.url)
+        .map_err(|_| "The download URL is not valid for browser swap.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http and https downloads can be swapped back to the browser.".into());
+    }
+
+    Ok(job.url.as_str())
+}
+
+#[cfg(windows)]
+fn open_url(url: &str) -> Result<(), String> {
+    shell_execute(OsStr::new("open"), OsStr::new(url), None)
+}
+
+#[cfg(not(windows))]
+fn open_url(_url: &str) -> Result<(), String> {
+    Err("Opening downloads in the browser is only supported on Windows in this build.".into())
+}
+
 #[cfg(windows)]
 fn open_path(path: &Path) -> Result<(), String> {
     shell_execute(OsStr::new("open"), path.as_os_str(), None)
@@ -1109,7 +1155,9 @@ fn torrent_import_value_from_text(content: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::should_register_native_host;
-    use crate::storage::HostRegistrationStatus;
+    use crate::storage::{
+        DownloadJob, DownloadSource, HostRegistrationStatus, JobState, ResumeSupport, TransferKind,
+    };
     #[cfg(windows)]
     use std::path::Path;
 
@@ -1184,6 +1232,28 @@ mod tests {
     }
 
     #[test]
+    fn failed_browser_download_url_accepts_only_failed_browser_http_jobs() {
+        let mut job = failed_browser_download_job();
+
+        assert_eq!(
+            super::failed_browser_download_url(&job).unwrap(),
+            "https://example.com/file.zip"
+        );
+
+        job.state = JobState::Downloading;
+        assert!(super::failed_browser_download_url(&job).is_err());
+
+        job = failed_browser_download_job();
+        job.source = None;
+        assert!(super::failed_browser_download_url(&job).is_err());
+
+        job = failed_browser_download_job();
+        job.url = "magnet:?xt=urn:btih:example".into();
+        job.transfer_kind = TransferKind::Torrent;
+        assert!(super::failed_browser_download_url(&job).is_err());
+    }
+
+    #[test]
     fn torrent_import_value_accepts_torrent_files() {
         let dir = test_runtime_dir("torrent-import");
         let path = dir.join("sample.torrent");
@@ -1212,6 +1282,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn failed_browser_download_job() -> DownloadJob {
+        DownloadJob {
+            id: "job_1".into(),
+            url: "https://example.com/file.zip".into(),
+            filename: "file.zip".into(),
+            source: Some(DownloadSource {
+                entry_point: "browser_download".into(),
+                browser: "chrome".into(),
+                extension_version: "0.3.51".into(),
+                page_url: None,
+                page_title: None,
+                referrer: None,
+                incognito: Some(false),
+            }),
+            transfer_kind: TransferKind::Http,
+            integrity_check: None,
+            torrent: None,
+            state: JobState::Failed,
+            created_at: 0,
+            progress: 25.0,
+            total_bytes: 100,
+            downloaded_bytes: 25,
+            speed: 0,
+            eta: 0,
+            error: Some("network error".into()),
+            failure_category: None,
+            resume_support: ResumeSupport::Supported,
+            retry_attempts: 1,
+            target_path: "C:/Downloads/file.zip".into(),
+            temp_path: "C:/Downloads/file.zip.part".into(),
+            artifact_exists: None,
+            bulk_archive: None,
+        }
     }
 
     fn test_runtime_dir(name: &str) -> std::path::PathBuf {

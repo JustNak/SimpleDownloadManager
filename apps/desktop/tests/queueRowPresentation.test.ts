@@ -6,6 +6,7 @@ import {
   formatQueueSizeTitle,
   formatTorrentFetchedSize,
   formatTorrentVerifiedSize,
+  isTorrentSeedingRestore,
   QUEUE_TABLE_COLUMNS,
   queueTableColumnsForView,
   queueStatusPresentation,
@@ -130,6 +131,28 @@ assert.deepEqual(
   { label: 'Seeding', tone: 'primary' },
 );
 
+assert.equal(
+  isTorrentSeedingRestore({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    torrent: { uploadedBytes: 2048, ratio: 2.0, seedingStartedAt: 123_456 },
+  }),
+  true,
+  'active torrents with a prior seeding timestamp should be treated as seeding restores',
+);
+
+assert.deepEqual(
+  queueStatusPresentation({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    torrent: { uploadedBytes: 2048, ratio: 2.0, seedingStartedAt: 123_456 },
+  }),
+  { label: 'Restoring seeding', tone: 'warning' },
+  'seeding restore torrents should not be labeled as fresh downloads',
+);
+
 assert.deepEqual(
   queueStatusPresentation({
     ...baseJob,
@@ -140,6 +163,18 @@ assert.deepEqual(
   }),
   { label: 'Finding', tone: 'warning' },
   'metadata-pending torrents should show a specific Finding badge instead of Downloading',
+);
+
+assert.equal(
+  torrentActivitySummary({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'starting',
+    totalBytes: 0,
+    torrent: { uploadedBytes: 2048, ratio: 2.0, seedingStartedAt: 123_456 },
+  }),
+  'Restoring seeding',
+  'seeding restores should describe reseed recovery before metadata lookup wording',
 );
 
 assert.equal(

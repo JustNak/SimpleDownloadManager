@@ -19,6 +19,7 @@ import {
   resumeJob,
   retryJob,
   revealJobInFolder,
+  swapFailedDownloadToBrowser,
   subscribeToStateChanged,
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
@@ -34,11 +35,13 @@ import {
 } from './downloadProgressMetrics';
 import {
   isTorrentMetadataPending,
+  isTorrentSeedingRestore,
   formatTorrentFetchedSize,
   formatTorrentVerifiedSize,
   torrentActivitySummary,
   torrentDisplayName,
 } from './queueRowPresentation';
+import { canSwapFailedDownloadToBrowser } from './queueCommands';
 
 type PopupActionRunner = (
   action: () => Promise<void>,
@@ -439,6 +442,14 @@ function ActionBar({
       {isFailed ? (
         <ActionButton label="Retry" icon={<RotateCw size={14} />} disabled={isBusy} primary onClick={() => void runAction(() => retryJob(job.id))} />
       ) : null}
+      {isFailed && canSwapFailedDownloadToBrowser(job) ? (
+        <ActionButton
+          label="Swap"
+          icon={<ExternalLink size={14} />}
+          disabled={isBusy}
+          onClick={() => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true })}
+        />
+      ) : null}
       {(isActive || isPaused) ? (
         <ActionButton label={cancelLabel} icon={<X size={14} />} disabled={isBusy} destructive={isConfirmingCancel} danger={!isConfirmingCancel} onClick={onCancelClick} />
       ) : null}
@@ -487,6 +498,7 @@ function ActionButton({
 }
 
 function statusText(job: DownloadJob) {
+  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
 
   switch (job.state) {
@@ -514,7 +526,7 @@ function statusText(job: DownloadJob) {
 function statusClass(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
   if (job.state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
-  if (job.state === JobState.Queued || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
+  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
   if (job.state === JobState.Paused || job.state === JobState.Canceled) return 'border-border bg-muted text-muted-foreground';
   return 'border-primary/40 bg-primary/10 text-primary';
 }
@@ -522,7 +534,7 @@ function statusClass(job: DownloadJob) {
 function progressColor(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'bg-success';
   if (job.state === JobState.Failed) return 'bg-destructive';
-  if (job.state === JobState.Queued || isTorrentMetadataPending(job)) return 'bg-warning';
+  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentMetadataPending(job)) return 'bg-warning';
   if (job.transferKind === 'torrent') return 'bg-warning';
   return 'bg-primary';
 }
@@ -540,6 +552,7 @@ function torrentFetchedText(job: DownloadJob) {
 }
 
 function torrentStatusLine(job: DownloadJob) {
+  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
   if (isTorrentMetadataPending(job)) return 'Finding metadata';
   if (job.state === JobState.Seeding) return `Seeding - ${verifiedTorrentText(job)}`;
   const activity = torrentActivitySummary(job);

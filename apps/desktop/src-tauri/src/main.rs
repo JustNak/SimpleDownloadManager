@@ -74,6 +74,7 @@ fn main() {
             commands::retry_job,
             commands::restart_job,
             commands::retry_failed_jobs,
+            commands::swap_failed_download_to_browser,
             commands::remove_job,
             commands::delete_job,
             commands::rename_job,
