@@ -8,13 +8,13 @@ import { popupTitlebarControls } from './popupTitlebarControls';
 export function PopupTitlebar({ title, onClose }: { title: string; onClose?: () => void }) {
   const appWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
 
-  const handlePointerDown = async (event: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!appWindow || !shouldStartWindowDrag(event)) return;
-    try {
-      await appWindow.startDragging();
-    } catch {
+
+    event.preventDefault();
+    appWindow.startDragging().catch(() => {
       // The drag region attribute remains the fallback.
-    }
+    });
   };
 
   const handleClose = () => {
@@ -30,8 +30,8 @@ export function PopupTitlebar({ title, onClose }: { title: string; onClose?: () 
 
   return (
     <div
-      className="flex h-10 shrink-0 select-none items-center justify-between border-b border-border bg-background"
-      onPointerDown={(event) => void handlePointerDown(event)}
+      className="flex h-11 shrink-0 select-none items-center justify-between border-b border-border bg-background"
+      onPointerDownCapture={handlePointerDown}
     >
       <div
         data-tauri-drag-region
