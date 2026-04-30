@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const updaterReleaseTag = 'updater-alpha';
 export const updaterMetadataFilename = 'latest-alpha.json';
+export const slintUpdaterMetadataFilename = 'latest-alpha-slint.json';
 export const updaterRepository = 'JustNak/SimpleDownloadManager';
 
 export function requireSigningEnvironment(env = process.env) {
@@ -44,7 +45,9 @@ export function createLatestAlphaJson({
   };
 }
 
-export function updaterReleasePaths(root, version) {
+export function updaterReleasePaths(root, version, {
+  metadataFilename = updaterMetadataFilename,
+} = {}) {
   const releaseRoot = path.join(root, 'release');
   const installerName = windowsInstallerName(version);
   const installerPath = path.join(releaseRoot, 'bundle', 'nsis', installerName);
@@ -53,7 +56,7 @@ export function updaterReleasePaths(root, version) {
     installerName,
     installerPath,
     signaturePath: `${installerPath}.sig`,
-    metadataPath: path.join(releaseRoot, updaterMetadataFilename),
+    metadataPath: path.join(releaseRoot, metadataFilename),
   };
 }
 
@@ -61,12 +64,13 @@ export async function writeLatestAlphaJson({
   root,
   repository = updaterRepository,
   releaseTag = updaterReleaseTag,
+  metadataFilename = updaterMetadataFilename,
   notes = 'Alpha update',
   pubDate = new Date().toISOString(),
 } = {}) {
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   const version = packageJson.version;
-  const paths = updaterReleasePaths(root, version);
+  const paths = updaterReleasePaths(root, version, { metadataFilename });
   const signature = (await readFile(paths.signaturePath, 'utf8')).trim();
   const metadata = createLatestAlphaJson({
     version,
@@ -77,6 +81,13 @@ export async function writeLatestAlphaJson({
   });
   await writeFile(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
   return { metadata, paths };
+}
+
+export function writeSlintLatestAlphaJson(options = {}) {
+  return writeLatestAlphaJson({
+    ...options,
+    metadataFilename: slintUpdaterMetadataFilename,
+  });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

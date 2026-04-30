@@ -4693,6 +4693,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "simple-download-manager-desktop-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",
@@ -4701,6 +4702,16 @@ dependencies = [
  "url",
  "windows-sys 0.59.0",
  "winreg 0.52.0",
+]
+
+[[package]]
+name = "simple-download-manager-desktop-core"
+version = "0.3.52-alpha"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

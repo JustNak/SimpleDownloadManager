@@ -145,7 +145,7 @@ pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: St
 
             match state.queue_external_reseed_attempt(&id).await {
                 Ok(ExternalReseedAttempt::Queued(snapshot)) => {
-                    emit_snapshot(&app, &snapshot);
+                    emit_snapshot(&app, snapshot.as_ref());
                     schedule_downloads(app.clone(), state.clone());
                 }
                 Ok(ExternalReseedAttempt::Pending) => {}
@@ -1107,10 +1107,12 @@ async fn run_torrent_download_attempt(
                 &task.id,
                 engine.as_ref(),
                 &prepared_source,
-                &output_folder,
-                settings.torrent.upload_limit_kib_per_second,
-                restoring_seeding,
-                Some(tracker_first_diagnostics),
+                AddPreparedTorrentControls {
+                    output_folder: &output_folder,
+                    upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
+                    start_paused: restoring_seeding,
+                    tracker_first_diagnostics: Some(tracker_first_diagnostics),
+                },
             )
             .await;
             let add_outcome = match add_outcome {
@@ -1171,10 +1173,12 @@ async fn run_torrent_download_attempt(
                     &task.id,
                     engine.as_ref(),
                     &prepared_source,
-                    &output_folder,
-                    settings.torrent.upload_limit_kib_per_second,
-                    false,
-                    None,
+                    AddPreparedTorrentControls {
+                        output_folder: &output_folder,
+                        upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
+                        start_paused: false,
+                        tracker_first_diagnostics: None,
+                    },
                 )
                 .await?;
                 add_session = match readd_outcome {
@@ -1289,10 +1293,12 @@ async fn run_torrent_download_attempt(
                     &task.id,
                     engine.as_ref(),
                     prepared_source,
-                    &output_folder,
-                    settings.torrent.upload_limit_kib_per_second,
-                    false,
-                    None,
+                    AddPreparedTorrentControls {
+                        output_folder: &output_folder,
+                        upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
+                        start_paused: false,
+                        tracker_first_diagnostics: None,
+                    },
                 )
                 .await?;
                 match add_outcome {
@@ -1380,10 +1386,14 @@ async fn run_torrent_download_attempt(
                             &task.id,
                             engine.as_ref(),
                             &prepared_source,
-                            &output_folder,
-                            settings.torrent.upload_limit_kib_per_second,
-                            false,
-                            None,
+                            AddPreparedTorrentControls {
+                                output_folder: &output_folder,
+                                upload_limit_kib_per_second: settings
+                                    .torrent
+                                    .upload_limit_kib_per_second,
+                                start_paused: false,
+                                tracker_first_diagnostics: None,
+                            },
                         )
                         .await?;
                         match readd_outcome {
@@ -1511,10 +1521,14 @@ async fn run_torrent_download_attempt(
                         &task.id,
                         engine.as_ref(),
                         &prepared_source,
-                        &output_folder,
-                        settings.torrent.upload_limit_kib_per_second,
-                        false,
-                        None,
+                        AddPreparedTorrentControls {
+                            output_folder: &output_folder,
+                            upload_limit_kib_per_second: settings
+                                .torrent
+                                .upload_limit_kib_per_second,
+                            start_paused: false,
+                            tracker_first_diagnostics: None,
+                        },
                     )
                     .await?;
                     match readd_outcome {
@@ -1760,25 +1774,29 @@ where
     }
 }
 
+struct AddPreparedTorrentControls<'a> {
+    output_folder: &'a Path,
+    upload_limit_kib_per_second: u32,
+    start_paused: bool,
+    tracker_first_diagnostics: Option<mpsc::UnboundedSender<TrackerFirstMetadataOutcome>>,
+}
+
 async fn add_prepared_torrent_with_controls(
     state: &SharedState,
     job_id: &str,
     engine: &TorrentEngine,
     prepared_source: &PreparedTorrentSource,
-    output_folder: &Path,
-    upload_limit_kib_per_second: u32,
-    start_paused: bool,
-    tracker_first_diagnostics: Option<mpsc::UnboundedSender<TrackerFirstMetadataOutcome>>,
+    controls: AddPreparedTorrentControls<'_>,
 ) -> Result<TorrentAddOutcome, DownloadError> {
     add_torrent_with_controls(
         state,
         job_id,
         engine.add_source(
             prepared_source,
-            output_folder,
-            upload_limit_kib_per_second,
-            start_paused,
-            tracker_first_diagnostics,
+            controls.output_folder,
+            controls.upload_limit_kib_per_second,
+            controls.start_paused,
+            controls.tracker_first_diagnostics,
         ),
         TORRENT_METADATA_TIMEOUT,
         TORRENT_METADATA_CONTROL_INTERVAL,

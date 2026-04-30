@@ -33,7 +33,7 @@ fn main() {
         }
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_updater::Builder::new()
                 .installer_arg(lifecycle::POST_UPDATE_ARG)
@@ -88,6 +88,7 @@ fn main() {
             commands::show_existing_download_prompt,
             commands::swap_download_prompt,
             commands::cancel_download_prompt,
+            commands::take_pending_selected_job_request,
             commands::open_progress_window,
             commands::open_batch_progress_window,
             commands::get_progress_batch_context,
@@ -99,6 +100,14 @@ fn main() {
             updates::check_for_update,
             updates::install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run tauri app");
+        .build(tauri::generate_context!())
+        .expect("failed to build tauri app");
+
+    app.run(|_app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+            if lifecycle::should_keep_app_running_after_exit_request(code) {
+                api.prevent_exit();
+            }
+        }
+    });
 }

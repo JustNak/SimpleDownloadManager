@@ -10,10 +10,11 @@
   "scripts": {
     "build:extension": "npm run build --workspace @myapp/extension",
     "build:desktop": "npm run build --workspace @myapp/desktop",
+    "build:desktop:slint": "cargo build --manifest-path apps/desktop-slint/Cargo.toml",
     "test": "npm run test:ts && npm run test:rust",
     "test:ts": "node ./scripts/run-ts-tests.mjs",
-    "test:rust": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && cargo test --manifest-path apps/native-host/Cargo.toml",
-    "clippy": "cargo clippy --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/native-host/Cargo.toml -- -D warnings",
+    "test:rust": "cargo test --manifest-path apps/desktop-core/Cargo.toml && cargo test --manifest-path apps/desktop-slint/Cargo.toml && cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && cargo test --manifest-path apps/native-host/Cargo.toml",
+    "clippy": "cargo clippy --all-targets --manifest-path apps/desktop-core/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/desktop-slint/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/desktop/src-tauri/Cargo.toml -- -D warnings && cargo clippy --all-targets --manifest-path apps/native-host/Cargo.toml -- -D warnings",
     "check": "npm run typecheck && npm test && npm run build:extension && npm run build:desktop && npm run clippy",
     "lint:firefox": "node ./scripts/lint-firefox.mjs",
     "package:firefox-amo": "npm run build:extension && node ./scripts/package-firefox-amo.mjs",

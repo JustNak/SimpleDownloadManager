@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionState, JobState } from './types';
 import type { DownloadJob, QueueRowSize, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
-import { SettingsPage } from './SettingsPage';
 import { ToastArea } from './ToastArea';
-import { AddDownloadModal, type AddDownloadOutcome } from './AddDownloadModal';
+import type { AddDownloadOutcome } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
 import { compareDownloadsForSort, nextSortModeForColumn, type SortMode } from './downloadSorting';
 import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
@@ -59,6 +58,7 @@ import {
   subscribeToSelectedJobRequested,
   subscribeToUpdateInstallProgress,
   swapFailedDownloadToBrowser,
+  takePendingSelectedJobRequest,
   testExtensionHandoff,
 } from './backend';
 import type { AddJobsResult } from './backend';
@@ -113,6 +113,8 @@ import {
 
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
+const SettingsPage = lazy(() => import('./SettingsPage').then((module) => ({ default: module.SettingsPage })));
+const AddDownloadModal = lazy(() => import('./AddDownloadModal').then((module) => ({ default: module.AddDownloadModal })));
 
 function externalUseAutoReseedMessage(target: 'file' | 'folder', retrySeconds: number): string {
   if (retrySeconds === 60) {
@@ -260,6 +262,12 @@ export default function App() {
         setView('all');
         setSelectedJobId(jobId);
       });
+
+      const pendingJobId = await takePendingSelectedJobRequest();
+      if (pendingJobId) {
+        setView('all');
+        setSelectedJobId(pendingJobId);
+      }
     }
 
     void subscribe();
@@ -903,26 +911,28 @@ export default function App() {
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
           {view === 'settings' ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <SettingsPage
-                settings={settings}
-                diagnostics={diagnostics}
-                onSave={(newSettings) => handleSaveSettings(newSettings, 'all')}
-                onBrowseDirectory={handleBrowseDirectory}
-                hasActiveTorrentJobs={hasActiveTorrentJobs}
-                onClearTorrentSessionCache={handleClearTorrentSessionCache}
-                onCancel={() => requestViewChange('all')}
-                onDirtyChange={setSettingsDirty}
-                onDraftChange={setSettingsDraft}
-                onRefreshDiagnostics={refreshDiagnostics}
-                onOpenInstallDocs={handleOpenInstallDocs}
-                onRunHostRegistrationFix={handleRunHostRegistrationFix}
-                onTestExtensionHandoff={handleTestExtensionHandoff}
-                onCopyDiagnostics={handleCopyDiagnostics}
-                onExportDiagnostics={handleExportDiagnostics}
-                updateState={updateState}
-                onCheckForUpdates={() => void handleCheckForUpdates('manual')}
-                onInstallUpdate={() => void handleInstallUpdate()}
-              />
+              <Suspense fallback={<PanelLoading label="Loading settings" />}>
+                <SettingsPage
+                  settings={settings}
+                  diagnostics={diagnostics}
+                  onSave={(newSettings) => handleSaveSettings(newSettings, 'all')}
+                  onBrowseDirectory={handleBrowseDirectory}
+                  hasActiveTorrentJobs={hasActiveTorrentJobs}
+                  onClearTorrentSessionCache={handleClearTorrentSessionCache}
+                  onCancel={() => requestViewChange('all')}
+                  onDirtyChange={setSettingsDirty}
+                  onDraftChange={setSettingsDraft}
+                  onRefreshDiagnostics={refreshDiagnostics}
+                  onOpenInstallDocs={handleOpenInstallDocs}
+                  onRunHostRegistrationFix={handleRunHostRegistrationFix}
+                  onTestExtensionHandoff={handleTestExtensionHandoff}
+                  onCopyDiagnostics={handleCopyDiagnostics}
+                  onExportDiagnostics={handleExportDiagnostics}
+                  updateState={updateState}
+                  onCheckForUpdates={() => void handleCheckForUpdates('manual')}
+                  onInstallUpdate={() => void handleInstallUpdate()}
+                />
+              </Suspense>
             </div>
           ) : (
             <>
@@ -967,10 +977,12 @@ export default function App() {
       <ToastArea toasts={toasts} onDismiss={removeToast} />
 
       {isAddModalOpen && (
-        <AddDownloadModal
-          onClose={() => setIsAddModalOpen(false)}
-          onAdded={handleAddDownloadResult}
-        />
+        <Suspense fallback={null}>
+          <AddDownloadModal
+            onClose={() => setIsAddModalOpen(false)}
+            onAdded={handleAddDownloadResult}
+          />
+        </Suspense>
       )}
 
       {isUnsavedSettingsPromptOpen && (
@@ -989,6 +1001,14 @@ export default function App() {
           onInstall={() => void handleInstallUpdate()}
         />
       ) : null}
+    </div>
+  );
+}
+
+function PanelLoading({ label }: { label: string }) {
+  return (
+    <div className="flex min-h-64 items-center justify-center bg-surface text-sm text-muted-foreground">
+      {label}
     </div>
   );
 }

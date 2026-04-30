@@ -144,7 +144,7 @@ pub enum WorkerControl {
 
 #[derive(Debug, Clone)]
 pub enum ExternalReseedAttempt {
-    Queued(DesktopSnapshot),
+    Queued(Box<DesktopSnapshot>),
     Pending,
     Stop,
 }

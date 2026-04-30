@@ -5,8 +5,8 @@ use crate::storage::{MainWindowState, Settings, StartupLaunchMode};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Runtime, Size,
-    WebviewWindow, Window, WindowEvent,
+    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Runtime, Size, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
 
 #[cfg(windows)]
@@ -26,10 +26,15 @@ use winreg::RegKey;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 pub const POST_UPDATE_ARG: &str = "--post-update";
+pub const MAIN_WINDOW_WIDTH: f64 = 1360.0;
+pub const MAIN_WINDOW_HEIGHT: f64 = 860.0;
+pub const MAIN_WINDOW_MIN_WIDTH: f64 = 1360.0;
+pub const MAIN_WINDOW_MIN_HEIGHT: f64 = 720.0;
 const AUTOSTART_ARG: &str = "--autostart";
 const INSTALLER_CONFIGURE_ARG: &str = "--installer-configure";
 const INSTALLER_STARTUP_ARG: &str = "--installer-startup";
 const INSTALLER_TRAY_ARG: &str = "--installer-tray";
+const MAIN_WINDOW_TITLE: &str = "Simple Download Manager";
 const TRAY_MENU_OPEN: &str = "open";
 const TRAY_MENU_EXIT: &str = "exit";
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\SimpleDownloadManager.SingleInstance";
@@ -63,6 +68,24 @@ pub struct MainWindowStatePolicy {
 pub struct InstallerLaunchOptions {
     pub start_on_startup: bool,
     pub startup_launch_mode: StartupLaunchMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MainWindowConfig {
+    pub label: &'static str,
+    pub title: &'static str,
+    pub width: f64,
+    pub height: f64,
+    pub min_width: f64,
+    pub min_height: f64,
+    pub resizable: bool,
+    pub decorations: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainWindowCloseAction {
+    Destroy,
 }
 
 #[cfg(windows)]
@@ -125,7 +148,7 @@ pub fn initialize_app_lifecycle(app: &mut App, state: &SharedState) -> Result<()
         eprintln!("failed to synchronize autostart setting: {error}");
     }
 
-    initialize_main_window(app.handle(), state, &settings)
+    initialize_main_window(app.handle(), &settings)
 }
 
 pub fn main_window_state_policy() -> MainWindowStatePolicy {
@@ -135,6 +158,28 @@ pub fn main_window_state_policy() -> MainWindowStatePolicy {
         maximized: true,
         visible: false,
     }
+}
+
+pub fn main_window_config() -> MainWindowConfig {
+    MainWindowConfig {
+        label: MAIN_WINDOW_LABEL,
+        title: MAIN_WINDOW_TITLE,
+        width: MAIN_WINDOW_WIDTH,
+        height: MAIN_WINDOW_HEIGHT,
+        min_width: MAIN_WINDOW_MIN_WIDTH,
+        min_height: MAIN_WINDOW_MIN_HEIGHT,
+        resizable: true,
+        decorations: false,
+        visible: false,
+    }
+}
+
+pub fn main_window_close_action() -> MainWindowCloseAction {
+    MainWindowCloseAction::Destroy
+}
+
+pub fn should_keep_app_running_after_exit_request(code: Option<i32>) -> bool {
+    code.is_none()
 }
 
 pub fn is_autostart_launch() -> bool {
@@ -234,6 +279,18 @@ pub fn should_show_main_window_on_startup(
     !(is_autostart_launch && startup_launch_mode == StartupLaunchMode::Tray)
 }
 
+pub fn should_create_main_window_on_startup(
+    is_autostart_launch: bool,
+    is_post_update_launch: bool,
+    startup_launch_mode: StartupLaunchMode,
+) -> bool {
+    should_show_main_window_on_startup(
+        is_autostart_launch,
+        is_post_update_launch,
+        startup_launch_mode,
+    )
+}
+
 pub fn sync_autostart_setting(start_on_startup: bool) -> Result<(), String> {
     sync_autostart_setting_for_command(start_on_startup, AUTOSTART_ARG)
 }
@@ -273,25 +330,16 @@ fn sync_autostart_setting_for_command(
 
 pub fn initialize_main_window<R: Runtime>(
     app: &AppHandle<R>,
-    state: &SharedState,
     settings: &Settings,
 ) -> Result<(), String> {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
-        return Ok(());
-    };
-
-    if let Some(window_state) = state.main_window_state_sync() {
-        restore_main_window_state(&window, &window_state);
-    }
-
-    if should_show_main_window_on_startup(
+    if should_create_main_window_on_startup(
         is_autostart_launch(),
         is_post_update_launch(),
         settings.startup_launch_mode,
     ) {
         show_main_window(app)
     } else {
-        hide_main_window_to_tray(app)
+        Ok(())
     }
 }
 
@@ -315,23 +363,23 @@ pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) 
             Err(error) => eprintln!("failed to capture main window state before hiding: {error}"),
         }
     }
-    if let Err(error) = window.set_skip_taskbar(true) {
-        eprintln!("failed to remove main window from taskbar: {error}");
-    }
-    if let Err(error) = window.hide() {
-        eprintln!("failed to hide main window to tray: {error}");
+    match main_window_close_action() {
+        MainWindowCloseAction::Destroy => {
+            if let Err(error) = window.destroy() {
+                eprintln!("failed to unload main window to tray: {error}");
+            }
+        }
     }
 }
 
 pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        window
-            .set_skip_taskbar(false)
-            .map_err(|error| error.to_string())?;
-        let _ = window.unminimize();
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-    }
+    let window = ensure_main_window(app)?;
+    window
+        .set_skip_taskbar(false)
+        .map_err(|error| error.to_string())?;
+    let _ = window.unminimize();
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -339,13 +387,39 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 pub fn hide_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         save_main_window_state(app)?;
-        window
-            .set_skip_taskbar(true)
-            .map_err(|error| error.to_string())?;
-        window.hide().map_err(|error| error.to_string())?;
+        match main_window_close_action() {
+            MainWindowCloseAction::Destroy => {
+                window.destroy().map_err(|error| error.to_string())?;
+            }
+        }
     }
 
     Ok(())
+}
+
+pub fn ensure_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, String> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        return Ok(window);
+    }
+
+    let config = main_window_config();
+    let window = WebviewWindowBuilder::new(app, config.label, WebviewUrl::App("index.html".into()))
+        .title(config.title)
+        .inner_size(config.width, config.height)
+        .min_inner_size(config.min_width, config.min_height)
+        .resizable(config.resizable)
+        .decorations(config.decorations)
+        .visible(config.visible)
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    if let Some(state) = app.try_state::<SharedState>() {
+        if let Some(window_state) = state.main_window_state_sync() {
+            restore_main_window_state(&window, &window_state);
+        }
+    }
+
+    Ok(window)
 }
 
 fn setup_tray(app: &mut App) -> Result<(), String> {
@@ -601,6 +675,61 @@ mod tests {
         assert!(policy.position);
         assert!(policy.maximized);
         assert!(!policy.visible);
+    }
+
+    #[test]
+    fn main_window_config_keeps_previous_geometry_but_starts_hidden() {
+        let config = super::main_window_config();
+
+        assert_eq!(config.label, super::MAIN_WINDOW_LABEL);
+        assert_eq!(config.title, "Simple Download Manager");
+        assert_eq!(config.width, 1360.0);
+        assert_eq!(config.height, 860.0);
+        assert_eq!(config.min_width, 1360.0);
+        assert_eq!(config.min_height, 720.0);
+        assert!(config.resizable);
+        assert!(!config.decorations);
+        assert!(!config.visible);
+    }
+
+    #[test]
+    fn startup_creation_policy_skips_autostart_tray_webview() {
+        assert!(super::should_create_main_window_on_startup(
+            false,
+            false,
+            crate::storage::StartupLaunchMode::Tray,
+        ));
+        assert!(!super::should_create_main_window_on_startup(
+            true,
+            false,
+            crate::storage::StartupLaunchMode::Tray,
+        ));
+        assert!(super::should_create_main_window_on_startup(
+            true,
+            true,
+            crate::storage::StartupLaunchMode::Tray,
+        ));
+    }
+
+    #[test]
+    fn close_to_tray_policy_unloads_main_webview() {
+        assert_eq!(
+            super::main_window_close_action(),
+            super::MainWindowCloseAction::Destroy
+        );
+    }
+
+    #[test]
+    fn implicit_last_window_exit_request_keeps_tray_app_running() {
+        assert!(super::should_keep_app_running_after_exit_request(None));
+    }
+
+    #[test]
+    fn explicit_exit_requests_are_allowed_to_finish() {
+        assert!(!super::should_keep_app_running_after_exit_request(Some(0)));
+        assert!(!super::should_keep_app_running_after_exit_request(Some(
+            tauri::RESTART_EXIT_CODE
+        )));
     }
 
     #[test]

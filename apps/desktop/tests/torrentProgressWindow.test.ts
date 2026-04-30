@@ -16,18 +16,18 @@ assert.ok(
 
 const torrentSource = readFileSync(torrentProgressUrl, 'utf8');
 const mainSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8');
-const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendMockSource = readFileSync(new URL('../src/backendMock.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
 const capabilitySource = readFileSync(new URL('../src-tauri/capabilities/default.json', import.meta.url), 'utf8');
 
 assert.match(
   mainSource,
-  /import \{ TorrentProgressWindow \} from '\.\/TorrentProgressWindow';[\s\S]*windowMode === 'torrent-progress'\s*\?\s*TorrentProgressWindow/,
-  'main route should mount TorrentProgressWindow for ?window=torrent-progress',
+  /windowMode === 'torrent-progress'[\s\S]*import\(['"]\.\/TorrentProgressWindow['"]\)[\s\S]*default:\s*module\.TorrentProgressWindow/,
+  'main route should lazy-load TorrentProgressWindow for ?window=torrent-progress',
 );
 
 assert.match(
-  backendSource,
+  backendMockSource,
   /job\.transferKind === 'torrent'[\s\S]*\?window=torrent-progress&jobId=\$\{encodeURIComponent\(id\)\}[\s\S]*torrent-progress-\$\{id\}[\s\S]*width=720,height=520/,
   'browser fallback openProgressWindow should route torrent jobs to a 720x520 torrent popup',
 );

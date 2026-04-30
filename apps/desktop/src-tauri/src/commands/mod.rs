@@ -16,7 +16,8 @@ use crate::storage::{
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
-    show_download_prompt_window, show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
+    show_download_prompt_window, show_progress_window_for_transfer_kind, take_pending_selected_job,
+    DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -654,6 +655,11 @@ pub async fn cancel_download_prompt(
     id: String,
 ) -> Result<(), String> {
     complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::Cancel).await
+}
+
+#[tauri::command]
+pub fn take_pending_selected_job_request() -> Option<String> {
+    take_pending_selected_job()
 }
 
 #[tauri::command]

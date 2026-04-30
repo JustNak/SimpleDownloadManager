@@ -12,11 +12,15 @@ const {
   createLatestAlphaJson,
   githubReleaseAssetName,
   requireSigningEnvironment,
+  slintUpdaterMetadataFilename,
   updaterAssetUrl,
+  updaterMetadataFilename,
   updaterReleaseTag,
 } = updaterRelease;
 
 assert.equal(updaterReleaseTag, 'updater-alpha');
+assert.equal(updaterMetadataFilename, 'latest-alpha.json');
+assert.equal(slintUpdaterMetadataFilename, 'latest-alpha-slint.json');
 
 const installerName = 'Simple Download Manager_0.3.48-alpha_x64-setup.exe';
 assert.equal(

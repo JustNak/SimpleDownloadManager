@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const progressSource = readFileSync(new URL('../src/DownloadProgressWindow.tsx', import.meta.url), 'utf8');
-const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendMockUrl = new URL('../src/backendMock.ts', import.meta.url);
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
+
+assert.ok(
+  existsSync(backendMockUrl),
+  'browser-preview mock behavior should live in backendMock.ts',
+);
+
+const backendMockSource = readFileSync(backendMockUrl, 'utf8');
 
 assert.match(
   progressSource,
@@ -72,7 +79,7 @@ assert.match(
 );
 
 assert.match(
-  backendSource,
+  backendMockSource,
   /window\.open\(\s*popupUrl\(`\?window=download-progress&jobId=\$\{encodeURIComponent\(id\)\}`\),\s*`download-progress-\$\{id\}`,\s*'width=460,height=280'\s*\)/,
   'browser fallback download progress popup should keep the compact 460x280 geometry',
 );

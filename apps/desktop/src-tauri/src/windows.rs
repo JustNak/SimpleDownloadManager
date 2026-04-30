@@ -197,17 +197,33 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
 }
 
 pub fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    if let Err(error) = crate::lifecycle::show_main_window(app) {
+        eprintln!("failed to focus main window: {error}");
     }
 }
 
 pub fn focus_job_in_main_window(app: &AppHandle, job_id: &str) {
+    if app
+        .get_webview_window(crate::lifecycle::MAIN_WINDOW_LABEL)
+        .is_none()
+    {
+        queue_pending_selected_job(job_id);
+    }
     focus_main_window(app);
     let _ = app.emit_to("main", SELECT_JOB_EVENT, job_id);
+}
+
+pub fn queue_pending_selected_job(job_id: &str) {
+    if let Ok(mut pending_job_id) = pending_selected_job().lock() {
+        *pending_job_id = Some(job_id.into());
+    }
+}
+
+pub fn take_pending_selected_job() -> Option<String> {
+    pending_selected_job()
+        .lock()
+        .ok()
+        .and_then(|mut pending_job_id| pending_job_id.take())
 }
 
 fn progress_window_label(job_id: &str) -> String {
@@ -319,6 +335,11 @@ fn remembered_download_prompt_position() -> &'static Mutex<Option<PopupWindowPos
     POSITION.get_or_init(|| Mutex::new(None))
 }
 
+fn pending_selected_job() -> &'static Mutex<Option<String>> {
+    static JOB_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    JOB_ID.get_or_init(|| Mutex::new(None))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -387,6 +408,14 @@ mod tests {
         assert_eq!(geometry.height, 520.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
+    }
+
+    #[test]
+    fn pending_selected_job_is_taken_once() {
+        super::queue_pending_selected_job("job_42");
+
+        assert_eq!(super::take_pending_selected_job(), Some("job_42".into()));
+        assert_eq!(super::take_pending_selected_job(), None);
     }
 
     #[test]

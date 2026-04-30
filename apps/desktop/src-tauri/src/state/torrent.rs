@@ -172,7 +172,7 @@ impl SharedState {
 
         if let Some((snapshot, persisted)) = queued {
             persist_state(&self.storage_path, &persisted)?;
-            return Ok(ExternalReseedAttempt::Queued(snapshot));
+            return Ok(ExternalReseedAttempt::Queued(Box::new(snapshot)));
         }
 
         Ok(ExternalReseedAttempt::Stop)
@@ -554,8 +554,6 @@ impl SharedState {
             if !preserve_paused {
                 job.state = if update.finished {
                     JobState::Seeding
-                } else if restore_validation {
-                    JobState::Downloading
                 } else {
                     JobState::Downloading
                 };

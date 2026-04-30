@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendMockUrl = new URL('../src/backendMock.ts', import.meta.url);
 const queueViewSource = readFileSync(new URL('../src/QueueView.tsx', import.meta.url), 'utf8');
+
+assert.ok(
+  existsSync(backendMockUrl),
+  'browser-preview mock behavior should live in backendMock.ts',
+);
+
+const backendMockSource = readFileSync(backendMockUrl, 'utf8');
 
 assert.match(
   backendSource,
@@ -42,7 +50,7 @@ assert.match(
 );
 
 assert.match(
-  backendSource,
+  backendMockSource,
   /return \{ pausedTorrent: true, autoReseedRetrySeconds: 60 \}/,
   'mock external use should mirror the backend auto-reseed retry timing',
 );
