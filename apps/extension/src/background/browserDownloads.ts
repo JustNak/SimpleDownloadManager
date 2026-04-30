@@ -295,21 +295,11 @@ export async function discardBrowserDownloadBeforeFilenameRelease(
   downloadId: number,
   releaseFilename: () => void,
 ): Promise<void> {
-  let canceledBeforeRelease = false;
-
-  try {
-    await downloads.cancel(downloadId);
-    canceledBeforeRelease = true;
-  } catch {
-    canceledBeforeRelease = false;
-  }
+  await downloads.cancel(downloadId).catch(() => undefined);
 
   releaseFilename();
 
-  if (!canceledBeforeRelease) {
-    await downloads.cancel(downloadId).catch(() => undefined);
-  }
-
+  await downloads.cancel(downloadId).catch(() => undefined);
   await removeCompletedBrowserDownloadFile(downloads, downloadId);
   await downloads.erase({ id: downloadId }).catch(() => undefined);
 }

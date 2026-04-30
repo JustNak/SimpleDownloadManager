@@ -1,0 +1,4 @@
+
+> @myapp/desktop@0.3.52-alpha dev
+> node ../../node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173
+

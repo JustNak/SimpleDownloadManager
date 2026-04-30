@@ -274,8 +274,8 @@ async function main() {
   );
   assert.deepEqual(
     releaseOrder,
-    ['cancel:99', 'suggest', 'search:99', 'erase:99'],
-    'accepted handoffs should cancel before releasing filename determination to prevent Save As leakage',
+    ['cancel:99', 'suggest', 'cancel:99', 'search:99', 'erase:99'],
+    'accepted handoffs should cancel before and after releasing filename determination to prevent Save As leakage',
   );
 
   const fallbackReleaseOrder: string[] = [];
@@ -341,7 +341,7 @@ async function main() {
   detachBeforePromptOrder.push('desktop-prompt-wait');
   assert.deepEqual(
     detachBeforePromptOrder,
-    ['cancel:102', 'suggest', 'search:102', 'erase:102', 'desktop-prompt-wait'],
+    ['cancel:102', 'suggest', 'cancel:102', 'search:102', 'erase:102', 'desktop-prompt-wait'],
     'prompt capture should detach the browser download before waiting for the desktop prompt',
   );
 

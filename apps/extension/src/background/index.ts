@@ -187,31 +187,27 @@ async function handleBrowserDownloadDeterminingFilename(
   const releaseFilename = () => {
     suggestBrowserDownload(item, suggest);
   };
-  let isBrowserDownloadDetached = false;
 
   try {
+    await detachBrowserDownloadForDesktopPrompt(browser.downloads, item.id, releaseFilename);
+
     const pingResponse = await pingNativeHost();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
-      await restoreBrowserDownloadFallback(item, releaseFilename);
       return;
     }
 
-    rememberStateSettings(await setLastResult('connected', pingResponse));
+    const pingState = rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
-      await restoreBrowserDownloadFallback(item, releaseFilename);
+      await updateBrowserBadge(pingState);
       return;
     }
-
-    await detachBrowserDownloadForDesktopPrompt(browser.downloads, item.id, releaseFilename);
-    isBrowserDownloadDetached = true;
 
     const response = await handOffBrowserDownload(url, item, settings);
 
     if (isErrorResponse(response)) {
       await recordHostError(response);
-      await restoreBrowserDownloadFallback(item);
       return;
     }
 
@@ -227,7 +223,6 @@ async function handleBrowserDownloadDeterminingFilename(
       'error',
     );
     await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item, isBrowserDownloadDetached ? undefined : releaseFilename);
   } finally {
     activeBrowserDownloadIds.delete(item.id);
   }
