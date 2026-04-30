@@ -4140,9 +4140,11 @@ name = "simple-download-manager-desktop-core"
 version = "0.3.52-alpha"
 dependencies = [
  "dirs",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tokio",
+ "url",
 ]
 
 [[package]]

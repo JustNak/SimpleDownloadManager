@@ -67,8 +67,8 @@ impl SharedState {
         Ok(state)
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_tests(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Self {
+    #[doc(hidden)]
+    pub fn for_tests(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RuntimeState {
                 connection_state: ConnectionState::Connected,

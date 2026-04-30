@@ -3,11 +3,7 @@ use super::*;
 const TORRENT_SESSION_CACHE_DIR: &str = "torrent-session";
 const TORRENT_SESSION_CACHE_CLEAR_PENDING: &str = "torrent-session.clear-pending";
 
-pub(crate) fn should_stop_seeding(
-    settings: &TorrentSettings,
-    ratio: f64,
-    elapsed_seconds: u64,
-) -> bool {
+pub fn should_stop_seeding(settings: &TorrentSettings, ratio: f64, elapsed_seconds: u64) -> bool {
     match settings.seed_mode {
         TorrentSeedMode::Forever => false,
         TorrentSeedMode::Ratio => ratio >= settings.seed_ratio_limit,
@@ -778,7 +774,7 @@ pub(crate) fn apply_pending_torrent_session_cache_clear(app_data_dir: &Path) {
     }
 }
 
-pub(crate) fn clear_torrent_session_cache_directory(
+pub fn clear_torrent_session_cache_directory(
     app_data_dir: &Path,
 ) -> Result<TorrentSessionCacheClearResult, String> {
     let session_path = app_data_dir.join(TORRENT_SESSION_CACHE_DIR);
