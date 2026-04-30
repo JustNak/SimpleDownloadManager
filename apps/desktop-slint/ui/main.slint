@@ -8,20 +8,59 @@ export struct JobRow {
     bytes-text: string,
 }
 
+export struct PromptDetails {
+    id: string,
+    title: string,
+    filename: string,
+    url: string,
+    destination: string,
+    size-text: string,
+    duplicate-text: string,
+}
+
+export struct ProgressDetails {
+    id: string,
+    title: string,
+    filename: string,
+    state: string,
+    bytes-text: string,
+    progress: float,
+    error-text: string,
+}
+
+export struct BatchDetails {
+    batch-id: string,
+    title: string,
+    summary: string,
+    bytes-text: string,
+    progress: float,
+}
+
 export component MainWindow inherits Window {
     title: "Simple Download Manager";
     preferred-width: 1360px;
     preferred-height: 860px;
-    min-width: 1024px;
-    min-height: 640px;
+    min-width: 1360px;
+    min-height: 720px;
 
     in property <[JobRow]> jobs;
     in property <string> status-text: "No downloads";
+    in property <string> update-status-text: "Updates idle";
+    in property <string> update-current-version: "";
+    in property <string> update-new-version: "";
+    in property <string> update-body: "";
+    in property <string> update-error-text: "";
+    in property <string> update-progress-text: "";
+    in property <float> update-progress: 0;
+    in property <bool> update-can-check: true;
+    in property <bool> update-can-install: false;
     callback add-download-requested();
     callback pause-job-requested(string);
     callback resume-job-requested(string);
     callback cancel-job-requested(string);
     callback open-progress-requested(string);
+    callback check-update-requested();
+    callback install-update-requested();
 
     VerticalBox {
         padding: 18px;
@@ -49,6 +88,81 @@ export component MainWindow inherits Window {
             text: root.status-text;
             color: #586174;
             font-size: 13px;
+        }
+
+        Rectangle {
+            border-color: #d5dae3;
+            border-width: 1px;
+            border-radius: 6px;
+            background: #ffffff;
+            height: 96px;
+            horizontal-stretch: 1;
+
+            HorizontalBox {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 12px;
+
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+
+                    Text {
+                        text: root.update-status-text;
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: #111827;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: "Current " + root.update-current-version + " | Latest " + root.update-new-version;
+                        font-size: 11px;
+                        color: #586174;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.update-body;
+                        font-size: 11px;
+                        color: #374151;
+                        overflow: elide;
+                        visible: root.update-body != "";
+                    }
+
+                    Text {
+                        text: root.update-progress-text;
+                        font-size: 11px;
+                        color: #2563eb;
+                        overflow: elide;
+                        visible: root.update-progress-text != "";
+                    }
+
+                    Text {
+                        text: root.update-error-text;
+                        font-size: 11px;
+                        color: #b91c1c;
+                        overflow: elide;
+                        visible: root.update-error-text != "";
+                    }
+                }
+
+                Button {
+                    text: "Check";
+                    enabled: root.update-can-check;
+                    clicked => {
+                        root.check-update-requested();
+                    }
+                }
+
+                Button {
+                    text: "Install";
+                    enabled: root.update-can-install;
+                    clicked => {
+                        root.install-update-requested();
+                    }
+                }
+            }
         }
 
         Rectangle {
@@ -122,6 +236,222 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+}
+
+component PopupHeader inherits Rectangle {
+    in property <string> title;
+    height: 34px;
+    background: #111827;
+
+    Text {
+        text: root.title;
+        color: #ffffff;
+        font-size: 13px;
+        font-weight: 700;
+        vertical-alignment: center;
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        overflow: elide;
+    }
+}
+
+component MetaLine inherits HorizontalBox {
+    in property <string> label;
+    in property <string> value;
+    spacing: 8px;
+
+    Text {
+        text: root.label;
+        color: #586174;
+        font-size: 11px;
+        width: 84px;
+        overflow: elide;
+    }
+
+    Text {
+        text: root.value;
+        color: #111827;
+        font-size: 11px;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+component ProgressLine inherits Rectangle {
+    in property <float> progress;
+    height: 8px;
+    border-color: #d5dae3;
+    border-width: 1px;
+    border-radius: 4px;
+    background: #f5f7fb;
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        height: parent.height;
+        width: parent.width * root.progress / 100;
+        border-radius: 4px;
+        background: #2563eb;
+    }
+}
+
+export component DownloadPromptWindow inherits Window {
+    title: prompt.title;
+    preferred-width: 460px;
+    preferred-height: 280px;
+    min-width: 460px;
+    min-height: 280px;
+    max-width: 460px;
+    max-height: 280px;
+
+    in property <PromptDetails> prompt;
+
+    VerticalBox {
+        PopupHeader {
+            title: prompt.title;
+        }
+
+        VerticalBox {
+            padding: 12px;
+            spacing: 7px;
+
+            Text {
+                text: prompt.filename;
+                font-size: 15px;
+                font-weight: 700;
+                color: #111827;
+                overflow: elide;
+            }
+
+            MetaLine { label: "Source"; value: prompt.url; }
+            MetaLine { label: "Destination"; value: prompt.destination; }
+            MetaLine { label: "File size"; value: prompt.size-text; }
+
+            Text {
+                text: prompt.duplicate-text;
+                color: #92400e;
+                font-size: 11px;
+                overflow: elide;
+                visible: prompt.duplicate-text != "";
+            }
+        }
+    }
+}
+
+export component HttpProgressWindow inherits Window {
+    title: details.title;
+    preferred-width: 460px;
+    preferred-height: 280px;
+    min-width: 460px;
+    min-height: 280px;
+    max-width: 460px;
+    max-height: 280px;
+
+    in property <ProgressDetails> details;
+
+    VerticalBox {
+        PopupHeader { title: details.title; }
+
+        VerticalBox {
+            padding: 12px;
+            spacing: 8px;
+
+            Text {
+                text: details.filename;
+                font-size: 15px;
+                font-weight: 700;
+                color: #111827;
+                overflow: elide;
+            }
+
+            MetaLine { label: "State"; value: details.state; }
+            MetaLine { label: "Bytes"; value: details.bytes-text; }
+            ProgressLine { progress: details.progress; }
+
+            Text {
+                text: details.error-text;
+                color: #b91c1c;
+                font-size: 11px;
+                overflow: elide;
+                visible: details.error-text != "";
+            }
+        }
+    }
+}
+
+export component TorrentProgressWindow inherits Window {
+    title: details.title;
+    preferred-width: 720px;
+    preferred-height: 520px;
+    min-width: 720px;
+    min-height: 520px;
+    max-width: 720px;
+    max-height: 520px;
+
+    in property <ProgressDetails> details;
+
+    VerticalBox {
+        PopupHeader { title: details.title; }
+
+        VerticalBox {
+            padding: 14px;
+            spacing: 10px;
+
+            Text {
+                text: details.filename;
+                font-size: 16px;
+                font-weight: 700;
+                color: #111827;
+                overflow: elide;
+            }
+
+            MetaLine { label: "State"; value: details.state; }
+            MetaLine { label: "Bytes"; value: details.bytes-text; }
+            ProgressLine { progress: details.progress; }
+
+            Text {
+                text: details.error-text;
+                color: #b91c1c;
+                font-size: 11px;
+                overflow: elide;
+                visible: details.error-text != "";
+            }
+        }
+    }
+}
+
+export component BatchProgressWindow inherits Window {
+    title: details.title;
+    preferred-width: 560px;
+    preferred-height: 430px;
+    min-width: 560px;
+    min-height: 430px;
+    max-width: 560px;
+    max-height: 430px;
+
+    in property <BatchDetails> details;
+
+    VerticalBox {
+        PopupHeader { title: details.title; }
+
+        VerticalBox {
+            padding: 14px;
+            spacing: 10px;
+
+            Text {
+                text: details.summary;
+                font-size: 15px;
+                font-weight: 700;
+                color: #111827;
+                overflow: elide;
+            }
+
+            MetaLine { label: "Batch"; value: details.batch-id; }
+            MetaLine { label: "Bytes"; value: details.bytes-text; }
+            ProgressLine { progress: details.progress; }
         }
     }
 }

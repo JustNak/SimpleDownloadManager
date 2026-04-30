@@ -31,18 +31,31 @@ export function createLatestAlphaJson({
   pubDate,
   url,
   signature,
+  format,
 }) {
+  const platform = {
+    url,
+    signature,
+  };
+  if (format) {
+    platform.format = format;
+  }
+
   return {
     version,
     notes,
     pub_date: pubDate,
     platforms: {
-      'windows-x86_64': {
-        url,
-        signature,
-      },
+      'windows-x86_64': platform,
     },
   };
+}
+
+export function createSlintLatestAlphaJson(options) {
+  return createLatestAlphaJson({
+    ...options,
+    format: 'nsis',
+  });
 }
 
 export function updaterReleasePaths(root, version, {
@@ -65,6 +78,7 @@ export async function writeLatestAlphaJson({
   repository = updaterRepository,
   releaseTag = updaterReleaseTag,
   metadataFilename = updaterMetadataFilename,
+  createMetadata = createLatestAlphaJson,
   notes = 'Alpha update',
   pubDate = new Date().toISOString(),
 } = {}) {
@@ -72,7 +86,7 @@ export async function writeLatestAlphaJson({
   const version = packageJson.version;
   const paths = updaterReleasePaths(root, version, { metadataFilename });
   const signature = (await readFile(paths.signaturePath, 'utf8')).trim();
-  const metadata = createLatestAlphaJson({
+  const metadata = createMetadata({
     version,
     notes,
     pubDate,
@@ -87,6 +101,7 @@ export function writeSlintLatestAlphaJson(options = {}) {
   return writeLatestAlphaJson({
     ...options,
     metadataFilename: slintUpdaterMetadataFilename,
+    createMetadata: createSlintLatestAlphaJson,
   });
 }
 

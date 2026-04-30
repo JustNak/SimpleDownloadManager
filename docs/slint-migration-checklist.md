@@ -9,7 +9,7 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
 | Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
 | Phase 2: Transfer Engines And IPC | In Progress | 90% | Native-host protocol, handoff, HTTP/torrent transfer, and scheduler/worker handling live in `desktop-core`; Tauri remains the app shell. |
-| Phase 3: Slint Runtime Shell | In Progress | 25% | Slint app loads real state, renders jobs, receives backend events, and invokes basic queue commands. |
+| Phase 3: Slint Runtime Shell | In Progress | 96% | Slint app loads real state, handles backend events, invokes basic queue commands, accepts native-host wake/focus requests, persists main-window geometry, delegates low-risk Windows shell effects, supports tray open/exit plus close-to-tray, owns basic prompt/progress popup lifecycle, handles notifications plus native-host registration repair, and has a basic cargo-packager updater UI. |
 | Phase 4: Slint UI Feature Parity | Not Started | 5% | Every current React/Tauri workflow has a Slint equivalent. |
 | Phase 5: Packaging And Updater Transition | Not Started | 5% | Signed Slint installer and updater transition are smoke-tested. |
 | Phase 6: Cutover And Tauri Removal | Blocked | 0% | Slint is the only desktop product and Tauri is removed. |
@@ -73,22 +73,32 @@ Acceptance:
 
 ## Phase 3: Slint Runtime Shell
 
-Status: **In Progress, 25%**
+Status: **In Progress, 96%**
 
 Tasks:
 - [x] Compile external `.slint` files with `slint-build`.
 - [x] Add basic main window scaffold and controller conversion tests.
 - [x] Add background Tokio runtime and event bridge using `slint::invoke_from_event_loop`.
 - [x] Implement initial Slint `DesktopBackend` client/controller wiring for snapshots and basic queue commands.
-- [ ] Implement native window lifecycle: main window, prompt window, progress windows, close-to-tray.
-- [ ] Implement Windows shell services: single instance, tray, dialogs, notifications, open/reveal, startup registry.
+- [x] Implement Slint single-instance guard, duplicate-launch wake request, and native-host named-pipe transport.
+- [x] Implement Slint main-window sizing, restore, focus/show, and close-time geometry persistence.
+- [x] Implement Slint dialog, diagnostics export, open/reveal/install-doc, and startup registry shell services.
+- [x] Implement Slint tray open/exit and close-to-tray lifecycle.
+- [x] Implement prompt and progress window lifecycle.
+- [x] Implement Slint notifications and native-host registration diagnostics/repair.
+- [x] Implement updater UI.
 
 Acceptance:
 - [x] Slint app loads persisted state.
 - [x] Slint app renders real jobs.
 - [x] Slint app reacts to backend events.
 - [x] Slint app invokes basic queue commands.
-- [ ] Browser/native-host handoff wakes or focuses the Slint app.
+- [x] Browser/native-host handoff wakes or focuses the Slint app.
+- [x] Slint shell services cover folder/torrent dialogs, diagnostics export, open/reveal/install docs, and startup registry sync.
+- [x] Tray open/exit and close-to-tray lifecycle are wired in Slint.
+- [x] Prompt and progress popup lifecycle is wired in Slint with fixed Tauri-compatible sizing.
+- [x] Slint shell services cover native notifications and native-host registration diagnostics/repair.
+- [x] Slint update checks, install delegation, and install-progress UI updates are wired through `cargo-packager-updater`.
 - [ ] Window sizing and close/minimize behavior match current Tauri behavior.
 
 ## Phase 4: Slint UI Feature Parity

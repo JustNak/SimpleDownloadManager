@@ -6,6 +6,11 @@ test-runtime/
 .tmp/
 .cargo-temp/
 .codex-*.log
+output/playwright/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/resources/install/
 .DS_Store

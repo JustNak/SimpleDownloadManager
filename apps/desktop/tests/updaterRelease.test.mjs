@@ -10,6 +10,7 @@ try {
 
 const {
   createLatestAlphaJson,
+  createSlintLatestAlphaJson,
   githubReleaseAssetName,
   requireSigningEnvironment,
   slintUpdaterMetadataFilename,
@@ -54,6 +55,25 @@ assert.equal(latest.pub_date, '2026-04-27T00:00:00.000Z');
 assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64']);
 assert.equal(latest.platforms['windows-x86_64'].signature, 'signed-content');
 assert.match(latest.platforms['windows-x86_64'].url, /Simple\.Download\.Manager_0\.3\.48-alpha_x64-setup\.exe$/);
+assert.equal(
+  latest.platforms['windows-x86_64'].format,
+  undefined,
+  'Tauri updater metadata should keep the original feed shape',
+);
+
+const slintLatest = createSlintLatestAlphaJson({
+  version: '0.3.48-alpha',
+  notes: 'Alpha update',
+  pubDate: '2026-04-27T00:00:00.000Z',
+  url: latest.platforms['windows-x86_64'].url,
+  signature: 'signed-content',
+});
+
+assert.equal(
+  slintLatest.platforms['windows-x86_64'].format,
+  'nsis',
+  'Slint cargo-packager updater metadata should identify the NSIS installer format',
+);
 
 assert.throws(
   () => requireSigningEnvironment({}),

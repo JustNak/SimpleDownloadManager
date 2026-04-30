@@ -1,3 +1,11 @@
+pub mod lifecycle;
+pub mod main_window;
+pub mod native_host;
+pub mod notifications;
+pub mod popups;
+pub mod tray;
+pub mod windows;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowSize {
     pub width: u32,
