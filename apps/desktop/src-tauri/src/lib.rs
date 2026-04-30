@@ -2,6 +2,7 @@ pub mod commands;
 pub mod download;
 pub mod ipc;
 pub mod lifecycle;
+pub mod native_host;
 pub mod prompts {
     pub use simple_download_manager_desktop_core::prompts::*;
 }

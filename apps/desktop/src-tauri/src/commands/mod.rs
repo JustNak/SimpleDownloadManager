@@ -1,9 +1,10 @@
 use crate::download::{
     apply_torrent_runtime_settings, forget_known_torrent_sessions,
-    forget_torrent_session_for_restart, schedule_downloads, schedule_external_reseed,
+    forget_torrent_session_for_restart, probe_browser_handoff_access, schedule_downloads,
+    schedule_external_reseed,
 };
-use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
+use crate::native_host::gather_host_registration_diagnostics;
 use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{EnqueueOptions, EnqueueStatus, SharedState};
 use crate::storage::{
@@ -12,15 +13,16 @@ use crate::storage::{
     TransferKind,
 };
 use crate::windows::{
-    close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
-    show_download_prompt_window, show_progress_window_for_transfer_kind, take_pending_selected_job,
-    DOWNLOAD_PROMPT_WINDOW,
+    close_download_prompt_window, focus_job_in_main_window, focus_main_window,
+    show_batch_progress_window, show_download_prompt_window,
+    show_progress_window_for_transfer_kind, take_pending_selected_job, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::Deserialize;
 pub use simple_download_manager_desktop_core::backend::ProgressBatchRegistry;
 use simple_download_manager_desktop_core::backend::{prompt_enqueue_details, CoreDesktopBackend};
 use simple_download_manager_desktop_core::contracts::{
     AddJobRequest, AddJobResult, AddJobsRequest, AddJobsResult, BackendFuture,
+    BrowserDownloadAccessError, BrowserDownloadAccessProbe, BrowserDownloadAccessProbeFuture,
     ConfirmPromptRequest, DesktopBackend, DesktopEvent, ExternalUseResult, PromptDuplicateAction,
     ShellServices, SELECT_JOB_EVENT, UPDATE_INSTALL_PROGRESS_EVENT,
 };
@@ -93,12 +95,12 @@ pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
 }
 
 #[derive(Clone)]
-struct TauriShellServices {
+pub(crate) struct TauriShellServices {
     app: AppHandle,
 }
 
 impl TauriShellServices {
-    fn new(app: AppHandle) -> Self {
+    pub(crate) fn new(app: AppHandle) -> Self {
         Self { app }
     }
 }
@@ -129,6 +131,14 @@ impl ShellServices for TauriShellServices {
                     eprintln!("shell error during {}: {}", error.operation, error.message);
                 }
             }
+            Ok(())
+        })
+    }
+
+    fn focus_main_window(&self) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            focus_main_window(&app);
             Ok(())
         })
     }
@@ -257,6 +267,27 @@ impl ShellServices for TauriShellServices {
         Box::pin(async move {
             apply_torrent_runtime_settings(&settings);
             Ok(())
+        })
+    }
+
+    fn probe_browser_download_access(
+        &self,
+        _state: SharedState,
+        _source: DownloadSource,
+        url: String,
+        handoff_auth: Option<simple_download_manager_desktop_core::storage::HandoffAuth>,
+    ) -> BrowserDownloadAccessProbeFuture<'_> {
+        Box::pin(async move {
+            probe_browser_handoff_access(&url, handoff_auth.as_ref())
+                .await
+                .map(|probe| BrowserDownloadAccessProbe {
+                    status: probe.status,
+                })
+                .map_err(|error| BrowserDownloadAccessError {
+                    code: error.code,
+                    message: error.message,
+                    status: error.status,
+                })
         })
     }
 
@@ -850,8 +881,8 @@ async fn run_test_extension_handoff(
                     renamed_filename,
                 ) {
                     Ok(details) => details,
-                    Err(message) => {
-                        eprintln!("test extension handoff failed: {message}");
+                    Err(error) => {
+                        eprintln!("test extension handoff failed: {}", error.message);
                         return;
                     }
                 };

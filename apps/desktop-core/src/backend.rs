@@ -3,10 +3,11 @@ use crate::contracts::{
     BackendFuture, ConfirmPromptRequest, DesktopBackend, DesktopEvent, ExternalUseResult,
     ProgressBatchContext, ShellServices,
 };
+use crate::host_protocol::{HostRequest, HostResponse};
 use crate::prompts::{PromptDecision, PromptRegistry};
 use crate::state::{
-    clear_torrent_session_cache_directory, validate_settings, BackendError, DuplicatePolicy,
-    EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
+    clear_torrent_session_cache_directory, validate_settings, BackendError, EnqueueOptions,
+    EnqueueResult, EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
 };
 use crate::storage::{
     DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPrompt, JobState,
@@ -49,6 +50,21 @@ where
 
     pub fn prompts(&self) -> &PromptRegistry {
         &self.prompts
+    }
+
+    pub async fn handle_host_request(&self, request: HostRequest) -> HostResponse {
+        crate::host_protocol::handle_host_request(
+            self.state.clone(),
+            self.prompts.clone(),
+            self.shell.as_ref(),
+            request,
+        )
+        .await
+    }
+
+    pub async fn refresh_host_connection_diagnostics(&self) -> Result<(), String> {
+        crate::host_protocol::refresh_host_connection_diagnostics(&self.state, self.shell.as_ref())
+            .await
     }
 }
 
@@ -618,27 +634,4 @@ fn failed_browser_download_url(job: &DownloadJob) -> Result<&str, String> {
     Ok(job.url.as_str())
 }
 
-pub fn prompt_enqueue_details(
-    default_filename: String,
-    duplicate_action: crate::prompts::PromptDuplicateAction,
-    renamed_filename: Option<String>,
-) -> Result<(String, DuplicatePolicy), String> {
-    match duplicate_action {
-        crate::prompts::PromptDuplicateAction::ReturnExisting => {
-            Ok((default_filename, DuplicatePolicy::ReturnExisting))
-        }
-        crate::prompts::PromptDuplicateAction::DownloadAnyway => {
-            Ok((default_filename, DuplicatePolicy::Allow))
-        }
-        crate::prompts::PromptDuplicateAction::Overwrite => {
-            Ok((default_filename, DuplicatePolicy::ReplaceExisting))
-        }
-        crate::prompts::PromptDuplicateAction::Rename => {
-            let filename = renamed_filename.unwrap_or_default();
-            if filename.trim().is_empty() {
-                return Err("Filename cannot be empty.".into());
-            }
-            Ok((filename, DuplicatePolicy::Allow))
-        }
-    }
-}
+pub use crate::host_protocol::prompt_enqueue_details;

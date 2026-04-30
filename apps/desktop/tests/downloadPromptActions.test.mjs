@@ -5,7 +5,10 @@ import path from 'node:path';
 const repoRoot = path.resolve();
 const backendSource = await readFile(path.join(repoRoot, 'apps/desktop/src/backend.ts'), 'utf8');
 const promptSource = await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadPromptWindow.tsx'), 'utf8');
-const ipcSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/ipc/mod.rs'), 'utf8');
+const hostProtocolSource = await readFile(
+  path.join(repoRoot, 'apps/desktop-core/src/host_protocol.rs'),
+  'utf8',
+);
 const windowsSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/windows.rs'), 'utf8');
 const progressSources = [
   ['single download progress', await readFile(path.join(repoRoot, 'apps/desktop/src/DownloadProgressWindow.tsx'), 'utf8')],
@@ -120,7 +123,7 @@ assert.match(
   'duplicate prompt filename should preserve its full value in a tooltip while compact',
 );
 assert.match(
-  ipcSource,
+  hostProtocolSource,
   /"enqueue_download"[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/,
   'auto enqueue handoffs should reroute detected duplicates through the prompt flow',
 );

@@ -14,11 +14,30 @@ pub const SELECT_JOB_EVENT: &str = "app://select-job";
 pub const UPDATE_INSTALL_PROGRESS_EVENT: &str = "app://update-install-progress";
 
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+pub type BrowserDownloadAccessProbeFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<BrowserDownloadAccessProbe, BrowserDownloadAccessError>>
+            + Send
+            + 'a,
+    >,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellError {
     pub operation: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserDownloadAccessProbe {
+    pub status: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserDownloadAccessError {
+    pub code: &'static str,
+    pub message: String,
+    pub status: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +194,10 @@ pub trait ShellServices: Send + Sync {
         Box::pin(async { Ok(()) })
     }
 
+    fn focus_main_window(&self) -> BackendFuture<'_, ()> {
+        unsupported_shell_operation("focus main window")
+    }
+
     fn show_download_prompt_window(&self) -> BackendFuture<'_, ()> {
         unsupported_shell_operation("show download prompt window")
     }
@@ -247,8 +270,14 @@ pub trait ShellServices: Send + Sync {
         _source: DownloadSource,
         _url: String,
         _handoff_auth: Option<HandoffAuth>,
-    ) -> BackendFuture<'_, ()> {
-        unsupported_shell_operation("probe browser download access")
+    ) -> BrowserDownloadAccessProbeFuture<'_> {
+        Box::pin(async {
+            Err(BrowserDownloadAccessError {
+                code: "DOWNLOAD_FAILED",
+                message: "Shell service does not support probe browser download access.".into(),
+                status: None,
+            })
+        })
     }
 
     fn schedule_external_reseed(&self, _state: SharedState, _id: String) -> BackendFuture<'_, ()> {
