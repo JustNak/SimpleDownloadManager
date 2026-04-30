@@ -1,30 +1,36 @@
 use crate::download::{
     apply_torrent_runtime_settings, forget_known_torrent_sessions,
     forget_torrent_session_for_restart, schedule_downloads, schedule_external_reseed,
-    EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
 };
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
-use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
-use crate::state::{
-    clear_torrent_session_cache_directory, validate_settings, DuplicatePolicy, EnqueueResult,
-    EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
-};
+use crate::prompts::{PromptDecision, PromptRegistry, PROMPT_CHANGED_EVENT};
+use crate::state::{EnqueueOptions, EnqueueStatus, SharedState};
 use crate::storage::{
-    DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPrompt,
-    DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
+    DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource,
+    HostRegistrationDiagnostics, HostRegistrationStatus, Settings, TorrentInfo, TorrentSettings,
+    TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
     show_download_prompt_window, show_progress_window_for_transfer_kind, take_pending_selected_job,
     DOWNLOAD_PROMPT_WINDOW,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
+pub use simple_download_manager_desktop_core::backend::ProgressBatchRegistry;
+use simple_download_manager_desktop_core::backend::{prompt_enqueue_details, CoreDesktopBackend};
+use simple_download_manager_desktop_core::contracts::{
+    AddJobRequest, AddJobResult, AddJobsRequest, AddJobsResult, BackendFuture,
+    ConfirmPromptRequest, DesktopBackend, DesktopEvent, ExternalUseResult, PromptDuplicateAction,
+    ShellServices, SELECT_JOB_EVENT, UPDATE_INSTALL_PROGRESS_EVENT,
+};
+pub use simple_download_manager_desktop_core::contracts::{
+    ProgressBatchContext, ProgressBatchKind,
+};
+use simple_download_manager_desktop_core::state::TorrentSessionCacheClearResult;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -80,138 +86,345 @@ impl Default for ReleaseMetadata {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddJobResult {
-    pub job_id: String,
-    pub filename: String,
-    pub status: String,
-}
-
-impl From<EnqueueResult> for AddJobResult {
-    fn from(result: EnqueueResult) -> Self {
-        Self {
-            job_id: result.job_id,
-            filename: result.filename,
-            status: result.status.as_protocol_value().into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddJobsResult {
-    pub results: Vec<AddJobResult>,
-    pub queued_count: usize,
-    pub duplicate_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalUseResult {
-    pub paused_torrent: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_reseed_retry_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProgressBatchKind {
-    Multi,
-    Bulk,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProgressBatchContext {
-    pub batch_id: String,
-    pub kind: ProgressBatchKind,
-    pub job_ids: Vec<String>,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archive_name: Option<String>,
-}
-
-#[derive(Debug, Default)]
-pub struct ProgressBatchRegistry {
-    contexts: RwLock<HashMap<String, ProgressBatchContext>>,
-}
-
-impl ProgressBatchRegistry {
-    pub fn store(&self, context: ProgressBatchContext) {
-        if let Ok(mut contexts) = self.contexts.write() {
-            contexts.insert(context.batch_id.clone(), context);
-        }
-    }
-
-    pub fn get(&self, batch_id: &str) -> Option<ProgressBatchContext> {
-        self.contexts
-            .read()
-            .ok()
-            .and_then(|contexts| contexts.get(batch_id).cloned())
-    }
-}
-
 pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
     if let Err(error) = app.emit(STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
     }
 }
 
-async fn complete_prompt_action(
-    app: &AppHandle,
-    prompts: PromptRegistry,
-    id: &str,
-    decision: PromptDecision,
-) -> Result<(), String> {
-    let remember_prompt_position = matches!(&decision, PromptDecision::Download { .. });
-    let next_prompt = prompts.resolve(id, decision).await?;
-    if let Some(prompt) = next_prompt {
-        show_download_prompt_window(app)?;
-        app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, prompt)
-            .map_err(|error| error.to_string())?;
-    } else {
-        close_download_prompt_window(app, remember_prompt_position);
+#[derive(Clone)]
+struct TauriShellServices {
+    app: AppHandle,
+}
+
+impl TauriShellServices {
+    fn new(app: AppHandle) -> Self {
+        Self { app }
     }
-    Ok(())
+}
+
+impl ShellServices for TauriShellServices {
+    fn emit_event(&self, event: DesktopEvent) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            match event {
+                DesktopEvent::StateChanged(snapshot) => {
+                    app.emit(STATE_CHANGED_EVENT, *snapshot)
+                        .map_err(|error| error.to_string())?;
+                }
+                DesktopEvent::DownloadPromptChanged(Some(prompt)) => {
+                    app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, *prompt)
+                        .map_err(|error| error.to_string())?;
+                }
+                DesktopEvent::DownloadPromptChanged(None) => {}
+                DesktopEvent::SelectJobRequested(id) => {
+                    app.emit(SELECT_JOB_EVENT, id)
+                        .map_err(|error| error.to_string())?;
+                }
+                DesktopEvent::UpdateInstallProgress(progress) => {
+                    app.emit(UPDATE_INSTALL_PROGRESS_EVENT, progress)
+                        .map_err(|error| error.to_string())?;
+                }
+                DesktopEvent::ShellError(error) => {
+                    eprintln!("shell error during {}: {}", error.operation, error.message);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn show_download_prompt_window(&self) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move { show_download_prompt_window(&app) })
+    }
+
+    fn close_download_prompt_window(&self, remember_position: bool) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            close_download_prompt_window(&app, remember_position);
+            Ok(())
+        })
+    }
+
+    fn focus_job_in_main_window(&self, id: String) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            focus_job_in_main_window(&app, &id);
+            Ok(())
+        })
+    }
+
+    fn take_pending_selected_job_request(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async { Ok(take_pending_selected_job()) })
+    }
+
+    fn show_progress_window(
+        &self,
+        id: String,
+        transfer_kind: TransferKind,
+    ) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move { show_progress_window_for_transfer_kind(&app, &id, transfer_kind) })
+    }
+
+    fn show_batch_progress_window(&self, batch_id: String) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move { show_batch_progress_window(&app, &batch_id) })
+    }
+
+    fn browse_directory(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async {
+            let selected =
+                tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
+                    .await
+                    .map_err(|error| format!("Could not open folder picker: {error}"))?;
+
+            Ok(selected.map(|path| path.display().to_string()))
+        })
+    }
+
+    fn browse_torrent_file(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async {
+            let selected = tauri::async_runtime::spawn_blocking(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Torrent or magnet", &["torrent", "magnet", "txt"])
+                    .pick_file()
+            })
+            .await
+            .map_err(|error| format!("Could not open torrent picker: {error}"))?;
+
+            selected
+                .as_deref()
+                .map(torrent_import_value_from_path)
+                .transpose()
+        })
+    }
+
+    fn save_diagnostics_report(&self, report: String) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async move {
+            let path = tauri::async_runtime::spawn_blocking(move || {
+                rfd::FileDialog::new()
+                    .set_file_name("simple-download-manager-diagnostics.json")
+                    .save_file()
+            })
+            .await
+            .map_err(|error| format!("Could not open save dialog: {error}"))?;
+
+            let Some(path) = path else {
+                return Ok(None);
+            };
+
+            std::fs::write(&path, report)
+                .map_err(|error| format!("Could not write diagnostics report: {error}"))?;
+
+            Ok(Some(path.display().to_string()))
+        })
+    }
+
+    fn gather_host_registration_diagnostics(
+        &self,
+    ) -> BackendFuture<'_, HostRegistrationDiagnostics> {
+        Box::pin(async { gather_host_registration_diagnostics() })
+    }
+
+    fn sync_autostart_setting(&self, enabled: bool) -> BackendFuture<'_, ()> {
+        Box::pin(async move { sync_autostart_setting(enabled) })
+    }
+
+    fn schedule_downloads(&self, state: SharedState) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            schedule_downloads(app, state);
+            Ok(())
+        })
+    }
+
+    fn forget_torrent_session_for_restart(&self, torrent: TorrentInfo) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let state = app
+                .try_state::<SharedState>()
+                .ok_or_else(|| "Shared state is not managed by the app.".to_string())?;
+            forget_torrent_session_for_restart(state.inner(), &torrent).await
+        })
+    }
+
+    fn forget_known_torrent_sessions(&self, torrents: Vec<TorrentInfo>) -> BackendFuture<'_, ()> {
+        Box::pin(async move { forget_known_torrent_sessions(&torrents).await })
+    }
+
+    fn apply_torrent_runtime_settings(&self, settings: TorrentSettings) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            apply_torrent_runtime_settings(&settings);
+            Ok(())
+        })
+    }
+
+    fn schedule_external_reseed(&self, state: SharedState, id: String) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            schedule_external_reseed(app, state, id).await;
+            Ok(())
+        })
+    }
+
+    fn open_url(&self, url: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            tauri::async_runtime::spawn_blocking(move || open_url(&url))
+                .await
+                .map_err(|error| format!("Could not open URL: {error}"))?
+        })
+    }
+
+    fn open_path(&self, path: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            tauri::async_runtime::spawn_blocking(move || open_path(Path::new(&path)))
+                .await
+                .map_err(|error| format!("Could not open file: {error}"))?
+        })
+    }
+
+    fn reveal_path(&self, path: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            tauri::async_runtime::spawn_blocking(move || reveal_path(Path::new(&path)))
+                .await
+                .map_err(|error| format!("Could not reveal file: {error}"))?
+        })
+    }
+
+    fn open_install_docs(&self) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            let docs_path = resolve_install_resource_path("install.md")?;
+            tauri::async_runtime::spawn_blocking(move || open_path(&docs_path))
+                .await
+                .map_err(|error| format!("Could not open install docs: {error}"))?
+        })
+    }
+
+    fn run_host_registration_fix(&self) -> BackendFuture<'_, ()> {
+        Box::pin(async {
+            tauri::async_runtime::spawn_blocking(register_native_host)
+                .await
+                .map_err(|error| format!("Could not start host registration: {error}"))?
+        })
+    }
+
+    fn test_extension_handoff(
+        &self,
+        state: SharedState,
+        prompts: PromptRegistry,
+    ) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move { run_test_extension_handoff(app, state, prompts).await })
+    }
+}
+
+fn backend(
+    app: AppHandle,
+    state: SharedState,
+    prompts: PromptRegistry,
+    progress_batches: ProgressBatchRegistry,
+) -> CoreDesktopBackend<TauriShellServices> {
+    CoreDesktopBackend::new(
+        state,
+        prompts,
+        progress_batches,
+        TauriShellServices::new(app),
+    )
+}
+
+fn backend_for_state(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> CoreDesktopBackend<TauriShellServices> {
+    backend(
+        app,
+        state.inner().clone(),
+        PromptRegistry::default(),
+        ProgressBatchRegistry::default(),
+    )
+}
+
+fn backend_from_app(
+    app: AppHandle,
+    prompts: PromptRegistry,
+    progress_batches: ProgressBatchRegistry,
+) -> Result<CoreDesktopBackend<TauriShellServices>, String> {
+    let state = app
+        .try_state::<SharedState>()
+        .ok_or_else(|| "Shared state is not managed by the app.".to_string())?
+        .inner()
+        .clone();
+    Ok(backend(app, state, prompts, progress_batches))
+}
+
+pub fn add_job_request_from_tauri_args(
+    url: String,
+    expected_sha256: Option<String>,
+    transfer_kind: Option<TransferKind>,
+) -> AddJobRequest {
+    AddJobRequest {
+        url,
+        directory_override: None,
+        filename_hint: None,
+        expected_sha256,
+        transfer_kind,
+    }
+}
+
+pub fn confirm_prompt_request_from_tauri_args(
+    id: String,
+    directory_override: Option<String>,
+    allow_duplicate: Option<bool>,
+    duplicate_action: Option<PromptDuplicateAction>,
+    renamed_filename: Option<String>,
+) -> ConfirmPromptRequest {
+    let duplicate_action = duplicate_action.unwrap_or_else(|| {
+        if allow_duplicate.unwrap_or(false) {
+            PromptDuplicateAction::DownloadAnyway
+        } else {
+            PromptDuplicateAction::ReturnExisting
+        }
+    });
+
+    ConfirmPromptRequest {
+        id,
+        directory_override,
+        duplicate_action,
+        renamed_filename,
+    }
+}
+
+pub fn progress_batch_context_from_tauri_payload(
+    context: ProgressBatchContext,
+) -> ProgressBatchContext {
+    context
 }
 
 #[tauri::command]
-pub async fn get_app_snapshot(state: State<'_, SharedState>) -> Result<DesktopSnapshot, String> {
-    Ok(state.snapshot().await)
+pub async fn get_app_snapshot(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<DesktopSnapshot, String> {
+    backend_for_state(app, state).get_app_snapshot().await
 }
 
 #[tauri::command]
-pub async fn get_diagnostics(state: State<'_, SharedState>) -> Result<DiagnosticsSnapshot, String> {
-    let host_registration = gather_host_registration_diagnostics()?;
-    Ok(state.diagnostics_snapshot(host_registration).await)
+pub async fn get_diagnostics(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<DiagnosticsSnapshot, String> {
+    backend_for_state(app, state).get_diagnostics().await
 }
 
 #[tauri::command]
 pub async fn export_diagnostics_report(
+    app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<Option<String>, String> {
-    let host_registration = gather_host_registration_diagnostics()?;
-    let diagnostics = state.diagnostics_snapshot(host_registration).await;
-    let report = serde_json::to_string_pretty(&diagnostics)
-        .map_err(|error| format!("Could not serialize diagnostics report: {error}"))?;
-
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        rfd::FileDialog::new()
-            .set_file_name("simple-download-manager-diagnostics.json")
-            .save_file()
-    })
-    .await
-    .map_err(|error| format!("Could not open save dialog: {error}"))?;
-
-    let Some(path) = path else {
-        return Ok(None);
-    };
-
-    std::fs::write(&path, report)
-        .map_err(|error| format!("Could not write diagnostics report: {error}"))?;
-
-    Ok(Some(path.display().to_string()))
+    backend_for_state(app, state)
+        .export_diagnostics_report()
+        .await
 }
 
 #[tauri::command]
@@ -222,23 +435,13 @@ pub async fn add_job(
     expected_sha256: Option<String>,
     transfer_kind: Option<TransferKind>,
 ) -> Result<AddJobResult, String> {
-    let result = state
-        .enqueue_download_with_options(
+    backend_for_state(app, state)
+        .add_job(add_job_request_from_tauri_args(
             url,
-            crate::state::EnqueueOptions {
-                expected_sha256,
-                transfer_kind,
-                ..Default::default()
-            },
-        )
+            expected_sha256,
+            transfer_kind,
+        ))
         .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &result.snapshot);
-    if result.status == EnqueueStatus::Queued {
-        schedule_downloads(app, state.inner().clone());
-    }
-
-    Ok(result.into())
 }
 
 #[tauri::command]
@@ -248,33 +451,12 @@ pub async fn add_jobs(
     urls: Vec<String>,
     bulk_archive_name: Option<String>,
 ) -> Result<AddJobsResult, String> {
-    let results = state
-        .enqueue_downloads(urls, None, bulk_archive_name)
+    backend_for_state(app, state)
+        .add_jobs(AddJobsRequest {
+            urls,
+            bulk_archive_name,
+        })
         .await
-        .map_err(|error| error.message)?;
-
-    if let Some(result) = results.last() {
-        emit_snapshot(&app, &result.snapshot);
-    }
-
-    if results
-        .iter()
-        .any(|result| result.status == EnqueueStatus::Queued)
-    {
-        schedule_downloads(app, state.inner().clone());
-    }
-
-    let queued_count = results
-        .iter()
-        .filter(|result| result.status == EnqueueStatus::Queued)
-        .count();
-    let duplicate_count = results.len().saturating_sub(queued_count);
-
-    Ok(AddJobsResult {
-        results: results.into_iter().map(Into::into).collect(),
-        queued_count,
-        duplicate_count,
-    })
 }
 
 #[tauri::command]
@@ -283,10 +465,7 @@ pub async fn pause_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.pause_job(&id).await.map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).pause_job(id).await
 }
 
 #[tauri::command]
@@ -295,32 +474,17 @@ pub async fn resume_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.resume_job(&id).await.map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).resume_job(id).await
 }
 
 #[tauri::command]
 pub async fn pause_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = state
-        .pause_all_jobs()
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).pause_all_jobs().await
 }
 
 #[tauri::command]
 pub async fn resume_all_jobs(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
-    let snapshot = state
-        .resume_all_jobs()
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).resume_all_jobs().await
 }
 
 #[tauri::command]
@@ -329,10 +493,7 @@ pub async fn cancel_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.cancel_job(&id).await.map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).cancel_job(id).await
 }
 
 #[tauri::command]
@@ -341,10 +502,7 @@ pub async fn retry_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.retry_job(&id).await.map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).retry_job(id).await
 }
 
 #[tauri::command]
@@ -353,21 +511,7 @@ pub async fn restart_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    if let Some(torrent) = state
-        .torrent_restart_cleanup_info(&id)
-        .await
-        .map_err(|error| error.message)?
-    {
-        forget_torrent_session_for_restart(state.inner(), &torrent).await?;
-    }
-
-    let snapshot = state
-        .restart_job(&id)
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).restart_job(id).await
 }
 
 #[tauri::command]
@@ -375,28 +519,18 @@ pub async fn retry_failed_jobs(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let snapshot = state
-        .retry_failed_jobs()
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).retry_failed_jobs().await
 }
 
 #[tauri::command]
 pub async fn swap_failed_download_to_browser(
+    app: AppHandle,
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.snapshot().await;
-    let job = snapshot
-        .jobs
-        .iter()
-        .find(|job| job.id == id)
-        .ok_or_else(|| "Download was not found.".to_string())?;
-    let url = failed_browser_download_url(job)?;
-    open_url(url)
+    backend_for_state(app, state)
+        .swap_failed_download_to_browser(id)
+        .await
 }
 
 #[tauri::command]
@@ -405,11 +539,7 @@ pub async fn remove_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    prepare_torrent_removal(&state, &id).await?;
-    let snapshot = state.remove_job(&id).await.map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).remove_job(id).await
 }
 
 #[tauri::command]
@@ -419,33 +549,9 @@ pub async fn delete_job(
     id: String,
     delete_from_disk: bool,
 ) -> Result<(), String> {
-    prepare_torrent_removal(&state, &id).await?;
-    let snapshot = state
-        .delete_job(&id, delete_from_disk)
+    backend_for_state(app, state)
+        .delete_job(id, delete_from_disk)
         .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
-}
-
-async fn prepare_torrent_removal(state: &State<'_, SharedState>, id: &str) -> Result<(), String> {
-    let Some(cleanup) = state
-        .torrent_removal_cleanup_info(id)
-        .await
-        .map_err(|error| error.message)?
-    else {
-        return Ok(());
-    };
-
-    if cleanup.wait_for_worker_release {
-        state
-            .wait_for_torrent_removal_release(id)
-            .await
-            .map_err(|error| error.message)?;
-    }
-
-    forget_torrent_session_for_restart(state.inner(), &cleanup.torrent).await
 }
 
 #[tauri::command]
@@ -455,13 +561,7 @@ pub async fn rename_job(
     id: String,
     filename: String,
 ) -> Result<(), String> {
-    let snapshot = state
-        .rename_job(&id, &filename)
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
-    Ok(())
+    backend_for_state(app, state).rename_job(id, filename).await
 }
 
 #[tauri::command]
@@ -469,37 +569,21 @@ pub async fn clear_completed_jobs(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let snapshot = state
-        .clear_completed_jobs()
-        .await
-        .map_err(|error| error.message)?;
-    emit_snapshot(&app, &snapshot);
-    Ok(())
+    backend_for_state(app, state).clear_completed_jobs().await
 }
 
 #[tauri::command]
 pub async fn save_settings(
     app: AppHandle,
     state: State<'_, SharedState>,
-    mut settings: Settings,
+    settings: Settings,
 ) -> Result<Settings, String> {
-    validate_settings(&mut settings)?;
-    sync_autostart_setting(settings.start_on_startup)?;
-    let snapshot = state.save_settings(settings).await?;
-    let saved_settings = snapshot.settings.clone();
-    emit_snapshot(&app, &snapshot);
-    apply_torrent_runtime_settings(&saved_settings.torrent);
-    schedule_downloads(app, state.inner().clone());
-    Ok(saved_settings)
+    backend_for_state(app, state).save_settings(settings).await
 }
 
 #[tauri::command]
-pub async fn browse_directory() -> Result<Option<String>, String> {
-    let selected = tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
-        .await
-        .map_err(|error| format!("Could not open folder picker: {error}"))?;
-
-    Ok(selected.map(|path| path.display().to_string()))
+pub async fn browse_directory(app: AppHandle) -> Result<Option<String>, String> {
+    TauriShellServices::new(app).browse_directory().await
 }
 
 #[tauri::command]
@@ -507,50 +591,28 @@ pub async fn clear_torrent_session_cache(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<TorrentSessionCacheClearResult, String> {
-    let prepared = state
-        .prepare_torrent_session_cache_clear()
+    backend_for_state(app, state)
+        .clear_torrent_session_cache()
         .await
-        .map_err(|error| error.message)?;
-
-    if let Err(error) = forget_known_torrent_sessions(&prepared.torrents).await {
-        let _ = state
-            .record_diagnostic_event(
-                DiagnosticLevel::Warning,
-                "torrent",
-                format!(
-                    "Could not forget in-memory torrent sessions before cache cleanup: {error}"
-                ),
-                None,
-            )
-            .await;
-    }
-
-    let result = clear_torrent_session_cache_directory(&state.app_data_dir())?;
-    emit_snapshot(&app, &prepared.snapshot);
-    Ok(result)
 }
 
 #[tauri::command]
-pub async fn browse_torrent_file() -> Result<Option<String>, String> {
-    let selected = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .add_filter("Torrent or magnet", &["torrent", "magnet", "txt"])
-            .pick_file()
-    })
-    .await
-    .map_err(|error| format!("Could not open torrent picker: {error}"))?;
-
-    selected
-        .as_deref()
-        .map(torrent_import_value_from_path)
-        .transpose()
+pub async fn browse_torrent_file(app: AppHandle) -> Result<Option<String>, String> {
+    TauriShellServices::new(app).browse_torrent_file().await
 }
 
 #[tauri::command]
 pub async fn get_current_download_prompt(
+    app: AppHandle,
     prompts: State<'_, PromptRegistry>,
 ) -> Result<Option<DownloadPrompt>, String> {
-    Ok(prompts.active_prompt().await)
+    backend_from_app(
+        app,
+        prompts.inner().clone(),
+        ProgressBatchRegistry::default(),
+    )?
+    .get_current_download_prompt()
+    .await
 }
 
 #[tauri::command]
@@ -563,47 +625,19 @@ pub async fn confirm_download_prompt(
     duplicate_action: Option<PromptDuplicateAction>,
     renamed_filename: Option<String>,
 ) -> Result<(), String> {
-    let duplicate_action = duplicate_action.unwrap_or_else(|| {
-        if allow_duplicate.unwrap_or(false) {
-            PromptDuplicateAction::DownloadAnyway
-        } else {
-            PromptDuplicateAction::ReturnExisting
-        }
-    });
-    complete_prompt_action(
-        &app,
+    backend_from_app(
+        app,
         prompts.inner().clone(),
-        &id,
-        PromptDecision::Download {
-            directory_override,
-            duplicate_action,
-            renamed_filename,
-        },
-    )
+        ProgressBatchRegistry::default(),
+    )?
+    .confirm_download_prompt(confirm_prompt_request_from_tauri_args(
+        id,
+        directory_override,
+        allow_duplicate,
+        duplicate_action,
+        renamed_filename,
+    ))
     .await
-}
-
-fn prompt_enqueue_details(
-    default_filename: String,
-    duplicate_action: PromptDuplicateAction,
-    renamed_filename: Option<String>,
-) -> Result<(String, DuplicatePolicy), String> {
-    match duplicate_action {
-        PromptDuplicateAction::ReturnExisting => {
-            Ok((default_filename, DuplicatePolicy::ReturnExisting))
-        }
-        PromptDuplicateAction::DownloadAnyway => Ok((default_filename, DuplicatePolicy::Allow)),
-        PromptDuplicateAction::Overwrite => {
-            Ok((default_filename, DuplicatePolicy::ReplaceExisting))
-        }
-        PromptDuplicateAction::Rename => {
-            let filename = renamed_filename.unwrap_or_default();
-            if filename.trim().is_empty() {
-                return Err("Filename cannot be empty.".into());
-            }
-            Ok((filename, DuplicatePolicy::Allow))
-        }
-    }
 }
 
 #[tauri::command]
@@ -612,25 +646,13 @@ pub async fn show_existing_download_prompt(
     prompts: State<'_, PromptRegistry>,
     id: String,
 ) -> Result<(), String> {
-    let active_prompt = prompts.active_prompt().await;
-    let existing_job_id = active_prompt
-        .as_ref()
-        .and_then(|prompt| prompt.duplicate_job.as_ref())
-        .map(|job| job.id.clone());
-
-    complete_prompt_action(
-        &app,
+    backend_from_app(
+        app,
         prompts.inner().clone(),
-        &id,
-        PromptDecision::ShowExisting,
-    )
-    .await?;
-
-    if let Some(job_id) = existing_job_id {
-        focus_job_in_main_window(&app, &job_id);
-    }
-
-    Ok(())
+        ProgressBatchRegistry::default(),
+    )?
+    .show_existing_download_prompt(id)
+    .await
 }
 
 #[tauri::command]
@@ -639,12 +661,12 @@ pub async fn swap_download_prompt(
     prompts: State<'_, PromptRegistry>,
     id: String,
 ) -> Result<(), String> {
-    complete_prompt_action(
-        &app,
+    backend_from_app(
+        app,
         prompts.inner().clone(),
-        &id,
-        PromptDecision::SwapToBrowser,
-    )
+        ProgressBatchRegistry::default(),
+    )?
+    .swap_download_prompt(id)
     .await
 }
 
@@ -654,12 +676,20 @@ pub async fn cancel_download_prompt(
     prompts: State<'_, PromptRegistry>,
     id: String,
 ) -> Result<(), String> {
-    complete_prompt_action(&app, prompts.inner().clone(), &id, PromptDecision::Cancel).await
+    backend_from_app(
+        app,
+        prompts.inner().clone(),
+        ProgressBatchRegistry::default(),
+    )?
+    .cancel_download_prompt(id)
+    .await
 }
 
 #[tauri::command]
-pub fn take_pending_selected_job_request() -> Option<String> {
-    take_pending_selected_job()
+pub async fn take_pending_selected_job_request(app: AppHandle) -> Result<Option<String>, String> {
+    TauriShellServices::new(app)
+        .take_pending_selected_job_request()
+        .await
 }
 
 #[tauri::command]
@@ -668,14 +698,7 @@ pub async fn open_progress_window(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.snapshot().await;
-    let transfer_kind = snapshot
-        .jobs
-        .iter()
-        .find(|job| job.id == id)
-        .map(|job| job.transfer_kind)
-        .unwrap_or_default();
-    show_progress_window_for_transfer_kind(&app, &id, transfer_kind)
+    backend_for_state(app, state).open_progress_window(id).await
 }
 
 #[tauri::command]
@@ -683,18 +706,21 @@ pub async fn open_batch_progress_window(
     app: AppHandle,
     registry: State<'_, ProgressBatchRegistry>,
     context: ProgressBatchContext,
-) -> Result<(), String> {
-    let batch_id = context.batch_id.clone();
-    registry.store(context);
-    show_batch_progress_window(&app, &batch_id)
+) -> Result<String, String> {
+    backend_from_app(app, PromptRegistry::default(), registry.inner().clone())?
+        .open_batch_progress_window(progress_batch_context_from_tauri_payload(context))
+        .await
 }
 
 #[tauri::command]
 pub async fn get_progress_batch_context(
+    app: AppHandle,
     registry: State<'_, ProgressBatchRegistry>,
     batch_id: String,
 ) -> Result<Option<ProgressBatchContext>, String> {
-    Ok(registry.get(&batch_id))
+    backend_from_app(app, PromptRegistry::default(), registry.inner().clone())?
+        .get_progress_batch_context(batch_id)
+        .await
 }
 
 #[tauri::command]
@@ -703,34 +729,7 @@ pub async fn open_job_file(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<ExternalUseResult, String> {
-    let preparation = state
-        .prepare_job_for_external_use(&id)
-        .await
-        .map_err(|error| error.message)?;
-    if let Some(snapshot) = &preparation.snapshot {
-        emit_snapshot(&app, snapshot);
-    }
-
-    let path = state
-        .resolve_openable_path(&id)
-        .await
-        .map_err(|error| error.message)?;
-
-    let auto_reseed_retry_seconds = if preparation.paused_torrent {
-        schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await;
-        Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)
-    } else {
-        None
-    };
-
-    tauri::async_runtime::spawn_blocking(move || open_path(&path))
-        .await
-        .map_err(|error| format!("Could not open file: {error}"))??;
-
-    Ok(ExternalUseResult {
-        paused_torrent: preparation.paused_torrent,
-        auto_reseed_retry_seconds,
-    })
+    backend_for_state(app, state).open_job_file(id).await
 }
 
 #[tauri::command]
@@ -739,54 +738,29 @@ pub async fn reveal_job_in_folder(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<ExternalUseResult, String> {
-    let preparation = state
-        .prepare_job_for_external_use(&id)
-        .await
-        .map_err(|error| error.message)?;
-    if let Some(snapshot) = &preparation.snapshot {
-        emit_snapshot(&app, snapshot);
-    }
-
-    let path = state
-        .resolve_revealable_path(&id)
-        .await
-        .map_err(|error| error.message)?;
-
-    let auto_reseed_retry_seconds = if preparation.paused_torrent {
-        schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await;
-        Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)
-    } else {
-        None
-    };
-
-    tauri::async_runtime::spawn_blocking(move || reveal_path(&path))
-        .await
-        .map_err(|error| format!("Could not reveal file: {error}"))??;
-
-    Ok(ExternalUseResult {
-        paused_torrent: preparation.paused_torrent,
-        auto_reseed_retry_seconds,
-    })
+    backend_for_state(app, state).reveal_job_in_folder(id).await
 }
 
 #[tauri::command]
-pub async fn open_install_docs() -> Result<(), String> {
-    let docs_path = resolve_install_resource_path("install.md")?;
-
-    tauri::async_runtime::spawn_blocking(move || open_path(&docs_path))
-        .await
-        .map_err(|error| format!("Could not open install docs: {error}"))??;
-
-    Ok(())
+pub async fn open_install_docs(app: AppHandle) -> Result<(), String> {
+    backend_from_app(
+        app,
+        PromptRegistry::default(),
+        ProgressBatchRegistry::default(),
+    )?
+    .open_install_docs()
+    .await
 }
 
 #[tauri::command]
-pub async fn run_host_registration_fix() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(register_native_host)
-        .await
-        .map_err(|error| format!("Could not start host registration: {error}"))??;
-
-    Ok(())
+pub async fn run_host_registration_fix(app: AppHandle) -> Result<(), String> {
+    backend_from_app(
+        app,
+        PromptRegistry::default(),
+        ProgressBatchRegistry::default(),
+    )?
+    .run_host_registration_fix()
+    .await
 }
 
 pub fn initialize_native_host_registration() {
@@ -810,6 +784,21 @@ pub async fn test_extension_handoff(
     app: AppHandle,
     state: State<'_, SharedState>,
     prompts: State<'_, PromptRegistry>,
+) -> Result<(), String> {
+    backend(
+        app,
+        state.inner().clone(),
+        prompts.inner().clone(),
+        ProgressBatchRegistry::default(),
+    )
+    .test_extension_handoff()
+    .await
+}
+
+async fn run_test_extension_handoff(
+    app: AppHandle,
+    state: SharedState,
+    prompts: PromptRegistry,
 ) -> Result<(), String> {
     let request_id = format!("test_handoff_{}", unix_timestamp_millis());
     let prompt = state
@@ -839,7 +828,7 @@ pub async fn test_extension_handoff(
     }
 
     let worker_app = app.clone();
-    let worker_state = state.inner().clone();
+    let worker_state = state.clone();
     tauri::async_runtime::spawn(async move {
         let decision = receiver.await.unwrap_or(PromptDecision::SwapToBrowser);
         match decision {
@@ -869,7 +858,7 @@ pub async fn test_extension_handoff(
                 let result = worker_state
                     .enqueue_download_with_options(
                         prompt.url,
-                        crate::state::EnqueueOptions {
+                        EnqueueOptions {
                             source: prompt.source,
                             directory_override,
                             filename_hint: Some(filename_hint),
@@ -919,9 +908,10 @@ fn unix_timestamp_millis() -> u128 {
         .unwrap_or_default()
 }
 
-fn failed_browser_download_url(job: &DownloadJob) -> Result<&str, String> {
-    if job.state != JobState::Failed
-        || job.transfer_kind != TransferKind::Http
+#[cfg(test)]
+fn failed_browser_download_url(job: &crate::storage::DownloadJob) -> Result<&str, String> {
+    if job.state != crate::storage::JobState::Failed
+        || job.transfer_kind != crate::storage::TransferKind::Http
         || job
             .source
             .as_ref()
@@ -1270,39 +1260,32 @@ mod tests {
 
     #[test]
     fn external_use_commands_schedule_auto_reseed() {
-        let source = include_str!("mod.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("commands source should contain production code");
+        let source = include_str!("../../../../desktop-core/src/backend.rs");
+        let contracts = include_str!("../../../../desktop-core/src/contracts.rs");
 
-        assert!(production_source.contains("pub auto_reseed_retry_seconds: Option<u64>"));
+        assert!(contracts.contains("pub auto_reseed_retry_seconds: Option<u64>"));
         assert_eq!(
-            production_source
-                .matches("schedule_external_reseed(app.clone(), state.inner().clone(), id.clone()).await")
+            source
+                .matches(".schedule_external_reseed(self.state.clone(), id)")
                 .count(),
             2,
             "open file and open folder should both schedule auto-reseed after pausing a torrent"
         );
-        assert!(production_source.contains("Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)"));
+        assert!(source.contains("Some(EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS)"));
     }
 
     #[test]
     fn save_settings_applies_torrent_runtime_settings_before_rescheduling() {
-        let source = include_str!("mod.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("commands source should contain production code");
-        let save_settings = production_source
-            .find("pub async fn save_settings(")
+        let source = include_str!("../../../../desktop-core/src/backend.rs");
+        let save_settings = source
+            .find("fn save_settings(&self, mut settings: Settings)")
             .expect("save_settings command should exist");
-        let runtime_apply = production_source[save_settings..]
-            .find("apply_torrent_runtime_settings(&saved_settings.torrent);")
+        let runtime_apply = source[save_settings..]
+            .find(".apply_torrent_runtime_settings(saved_settings.torrent.clone())")
             .expect("save_settings should apply torrent runtime settings")
             + save_settings;
-        let schedule = production_source[save_settings..]
-            .find("schedule_downloads(app, state.inner().clone());")
+        let schedule = source[save_settings..]
+            .find(".schedule_downloads(self.state.clone())")
             .expect("save_settings should reschedule downloads")
             + save_settings;
 
@@ -1314,19 +1297,15 @@ mod tests {
 
     #[test]
     fn torrent_remove_and_delete_prepare_engine_cleanup_before_state_mutation() {
-        let source = include_str!("mod.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("commands source should contain production code");
+        let source = include_str!("../../../../desktop-core/src/backend.rs");
 
         for function_name in ["remove_job", "delete_job"] {
-            let function_start = production_source
-                .find(&format!("pub async fn {function_name}("))
+            let function_start = source
+                .find(&format!("fn {function_name}("))
                 .unwrap_or_else(|| panic!("{function_name} command should exist"));
-            let function_body = &production_source[function_start..];
+            let function_body = &source[function_start..];
             let cleanup = function_body
-                .find("prepare_torrent_removal(&state, &id).await?;")
+                .find("self.prepare_torrent_removal(&id).await?;")
                 .unwrap_or_else(|| panic!("{function_name} should prepare torrent engine cleanup"));
             let state_mutation = function_body
                 .find(&format!(".{function_name}(&id"))

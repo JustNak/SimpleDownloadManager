@@ -7,7 +7,7 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | Phase | Status | Completion | Gate |
 | --- | --- | ---: | --- |
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
-| Phase 1: Core Backend Extraction | In Progress | 50% | `desktop-core` owns state, settings, diagnostics, and queue mutation logic. |
+| Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
 | Phase 2: Transfer Engines And IPC | Not Started | 5% | HTTP, torrent, and native-host handoff run through `desktop-core`. |
 | Phase 3: Slint Runtime Shell | In Progress | 5% | Slint app loads real state, receives events, and invokes backend commands. |
 | Phase 4: Slint UI Feature Parity | Not Started | 5% | Every current React/Tauri workflow has a Slint equivalent. |
@@ -25,29 +25,29 @@ Tasks:
 - [x] Keep Tauri app compiling while Slint work proceeds in parallel.
 - [x] Add core/Slint test and clippy script coverage.
 - [x] Replace the rough checklist with this phase tracker.
-- [ ] Keep this tracker updated after each phase-changing migration slice.
+- [x] Keep this tracker updated after each phase-changing migration slice.
 
 Acceptance:
-- [ ] `npm run test:rust` passes.
-- [ ] `npm run clippy` passes.
-- [ ] `npm run build:desktop:slint` passes.
-- [ ] Existing Tauri app remains the shippable desktop app until cutover.
+- [x] `npm run test:rust` passes.
+- [x] `npm run clippy` passes.
+- [x] `npm run build:desktop:slint` passes.
+- [x] Existing Tauri app remains the shippable desktop app until cutover.
 
 ## Phase 1: Core Backend Extraction
 
-Status: **In Progress, 50%**
+Status: **In Progress, 78%**
 
 Tasks:
 - [x] Move storage and prompt contracts behind `desktop-core`.
 - [x] Define `DesktopBackend`, `DesktopEvent`, and `ShellServices`.
 - [x] Move `SharedState` and all state submodules into `desktop-core`.
-- [ ] Move diagnostics and host-registration diagnostics into `desktop-core`.
-- [ ] Convert Tauri commands into thin adapter calls against `DesktopBackend`.
-- [ ] Add adapter tests proving Tauri command inputs map to core requests.
+- [x] Move diagnostics orchestration into `desktop-core`, with host-registration probing behind `ShellServices`.
+- [x] Convert Tauri commands into thin adapter calls against `DesktopBackend`.
+- [x] Add adapter tests proving Tauri command inputs map to core requests.
 
 Acceptance:
 - [x] `apps/desktop-core` owns storage, prompts, state, settings, diagnostics, and queue mutation logic.
-- [ ] `apps/desktop/src-tauri/src/commands` mostly contains Tauri-specific argument/event glue.
+- [x] `apps/desktop/src-tauri/src/commands` mostly contains Tauri-specific argument/event glue.
 - [x] `desktop-core` has no Tauri dependency.
 
 ## Phase 2: Transfer Engines And IPC
@@ -149,11 +149,11 @@ Acceptance:
 
 ## Recurring Verification Gates
 
-- [ ] `npm run test:ts`
-- [ ] `npm run typecheck`
-- [ ] `npm run test:rust`
-- [ ] `npm run clippy`
-- [ ] `npm run build:desktop:slint`
+- [x] `npm run test:ts`
+- [x] `npm run typecheck`
+- [x] `npm run test:rust`
+- [x] `npm run clippy`
+- [x] `npm run build:desktop:slint`
 
 Final parity gates:
 - [ ] Slint release build.

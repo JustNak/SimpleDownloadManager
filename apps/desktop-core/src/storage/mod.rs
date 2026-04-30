@@ -468,6 +468,15 @@ pub struct HostRegistrationDiagnostics {
     pub entries: Vec<HostRegistrationEntry>,
 }
 
+impl Default for HostRegistrationDiagnostics {
+    fn default() -> Self {
+        Self {
+            status: HostRegistrationStatus::Missing,
+            entries: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostRegistrationStatus {
