@@ -4,8 +4,10 @@ version = "0.3.52-alpha"
 edition = "2021"
 
 [dependencies]
+aws-lc-rs = { version = "1.16.3", features = ["prebuilt-nasm"] }
 dirs = "6.0.0"
 futures-util = "0.3.31"
+librqbit = { version = "8.1.1", default-features = false, features = ["rust-tls"] }
 percent-encoding = "2.3.1"
 reqwest = { version = "0.12.15", default-features = false, features = ["http2", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

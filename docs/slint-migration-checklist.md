@@ -8,8 +8,8 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | --- | --- | ---: | --- |
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
 | Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
-| Phase 2: Transfer Engines And IPC | In Progress | 45% | Native-host protocol, handoff, and HTTP transfer behavior run through `desktop-core`; torrent orchestration remains in Tauri. |
-| Phase 3: Slint Runtime Shell | In Progress | 5% | Slint app loads real state, receives events, and invokes backend commands. |
+| Phase 2: Transfer Engines And IPC | In Progress | 90% | Native-host protocol, handoff, HTTP/torrent transfer, and scheduler/worker handling live in `desktop-core`; Tauri remains the app shell. |
+| Phase 3: Slint Runtime Shell | In Progress | 25% | Slint app loads real state, renders jobs, receives backend events, and invokes basic queue commands. |
 | Phase 4: Slint UI Feature Parity | Not Started | 5% | Every current React/Tauri workflow has a Slint equivalent. |
 | Phase 5: Packaging And Updater Transition | Not Started | 5% | Signed Slint installer and updater transition are smoke-tested. |
 | Phase 6: Cutover And Tauri Removal | Blocked | 0% | Slint is the only desktop product and Tauri is removed. |
@@ -52,39 +52,42 @@ Acceptance:
 
 ## Phase 2: Transfer Engines And IPC
 
-Status: **In Progress, 45%**
+Status: **In Progress, 90%**
 
 Tasks:
 - [x] Move HTTP transfer engine into `desktop-core`; keep Tauri worker dispatch as the runtime adapter for now.
-- [ ] Move torrent engine orchestration into `desktop-core`.
+- [x] Remove dormant Tauri-local HTTP implementation and keep HTTP cleanup delegated to `desktop-core::transfer`.
+- [x] Move torrent engine orchestration into `desktop-core`.
 - [x] Move native pipe request validation and browser handoff handling into `desktop-core`.
-- [ ] Replace direct Tauri notifications/events with `ShellServices` and `DesktopEvent`.
-- [ ] Preserve retry, pause, resume, integrity, torrent seeding, external reseed, and duplicate handling semantics.
+- [x] Replace direct Tauri transfer notifications/events with `ShellServices` and `DesktopEvent`.
+- [x] Move transfer scheduler, worker finalization, failure notification, and external reseed retry scheduling into `desktop-core`.
+- [x] Preserve retry, pause, resume, integrity, torrent seeding, external reseed, and duplicate handling semantics through the extraction.
 
 Acceptance:
 - [x] Core tests cover HTTP jobs without starting Tauri.
-- [ ] Core tests cover torrent jobs without starting Tauri.
+- [x] `desktop-core::transfer` is the only HTTP transfer implementation; Tauri dispatch delegates HTTP jobs to core.
+- [x] Core tests cover torrent jobs without starting Tauri.
 - [x] Core tests cover prompt and IPC handoff without starting Tauri.
 - [x] Tauri still works through adapters.
-- [ ] Slint can call the same backend surface Tauri uses.
+- [x] Slint can call the same backend surface Tauri uses.
 
 ## Phase 3: Slint Runtime Shell
 
-Status: **In Progress, 5%**
+Status: **In Progress, 25%**
 
 Tasks:
 - [x] Compile external `.slint` files with `slint-build`.
 - [x] Add basic main window scaffold and controller conversion tests.
-- [ ] Add background Tokio runtime and event bridge using `slint::invoke_from_event_loop`.
-- [ ] Implement Slint `DesktopBackend` client/controller wiring.
+- [x] Add background Tokio runtime and event bridge using `slint::invoke_from_event_loop`.
+- [x] Implement initial Slint `DesktopBackend` client/controller wiring for snapshots and basic queue commands.
 - [ ] Implement native window lifecycle: main window, prompt window, progress windows, close-to-tray.
 - [ ] Implement Windows shell services: single instance, tray, dialogs, notifications, open/reveal, startup registry.
 
 Acceptance:
-- [ ] Slint app loads persisted state.
-- [ ] Slint app renders real jobs.
-- [ ] Slint app reacts to backend events.
-- [ ] Slint app invokes queue commands.
+- [x] Slint app loads persisted state.
+- [x] Slint app renders real jobs.
+- [x] Slint app reacts to backend events.
+- [x] Slint app invokes basic queue commands.
 - [ ] Browser/native-host handoff wakes or focuses the Slint app.
 - [ ] Window sizing and close/minimize behavior match current Tauri behavior.
 

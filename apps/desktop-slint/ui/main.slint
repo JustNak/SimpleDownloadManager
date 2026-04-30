@@ -107,6 +107,13 @@ export component MainWindow inherits Window {
                         }
 
                         Button {
+                            text: "Cancel";
+                            clicked => {
+                                root.cancel-job-requested(job.id);
+                            }
+                        }
+
+                        Button {
                             text: "Details";
                             clicked => {
                                 root.open-progress-requested(job.id);

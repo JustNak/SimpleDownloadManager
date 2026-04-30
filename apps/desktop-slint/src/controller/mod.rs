@@ -40,6 +40,25 @@ pub fn rows_from_snapshot(snapshot: &DesktopSnapshot) -> Vec<JobRow> {
     snapshot.jobs.iter().map(job_row_from_job).collect()
 }
 
+pub fn slint_rows_from_snapshot(snapshot: &DesktopSnapshot) -> Vec<crate::JobRow> {
+    snapshot
+        .jobs
+        .iter()
+        .map(slint_job_row_from_job)
+        .collect()
+}
+
+pub fn slint_job_row_from_job(job: &DownloadJob) -> crate::JobRow {
+    let row = job_row_from_job(job);
+    crate::JobRow {
+        id: row.id.into(),
+        filename: row.filename.into(),
+        state: row.state.into(),
+        progress: row.progress as f32,
+        bytes_text: row.bytes_text.into(),
+    }
+}
+
 fn job_state_label(state: JobState) -> &'static str {
     match state {
         JobState::Queued => "Queued",

@@ -1,6 +1,6 @@
-slint::include_modules!();
-
-fn main() -> Result<(), slint::PlatformError> {
-    let ui = MainWindow::new()?;
-    ui.run()
+fn main() {
+    if let Err(error) = simple_download_manager_desktop_slint::runtime::run_app() {
+        eprintln!("Simple Download Manager failed to start: {error}");
+        std::process::exit(1);
+    }
 }
