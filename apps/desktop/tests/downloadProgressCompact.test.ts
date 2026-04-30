@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const progressSource = readFileSync(new URL('../src/DownloadProgressWindow.tsx', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendMockSource = readFileSync(new URL('../src/backendMock.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
 
 assert.match(
@@ -150,7 +151,13 @@ assert.match(
 );
 
 assert.match(
-  backendSource,
+  backendMockSource,
   /window\.open\(\s*popupUrl\(`\?window=download-progress&jobId=\$\{encodeURIComponent\(id\)\}`\),\s*`download-progress-\$\{id\}`,\s*'width=460,height=280'\s*\)/,
   'browser fallback progress popup should use the same compact 460x280 geometry',
+);
+
+assert.doesNotMatch(
+  backendSource,
+  /window\.open\(\s*popupUrl\(`\?window=download-progress/,
+  'production backend should keep browser preview popup code in backendMock.ts',
 );

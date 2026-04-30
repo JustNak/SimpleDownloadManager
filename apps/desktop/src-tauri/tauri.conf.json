@@ -10,19 +10,7 @@
     "devUrl": "http://localhost:1420"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Simple Download Manager",
-        "width": 1360,
-        "height": 860,
-        "minWidth": 1360,
-        "minHeight": 720,
-        "resizable": true,
-        "decorations": false,
-        "visible": false
-      }
-    ]
+    "windows": []
   },
   "bundle": {
     "active": true,

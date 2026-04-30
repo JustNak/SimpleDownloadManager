@@ -118,7 +118,7 @@ pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: St
 
             match state.queue_external_reseed_attempt(&id).await {
                 Ok(ExternalReseedAttempt::Queued(snapshot)) => {
-                    emit_snapshot(&app, &snapshot);
+                    emit_snapshot(&app, snapshot.as_ref());
                     schedule_downloads(app.clone(), state.clone());
                 }
                 Ok(ExternalReseedAttempt::Pending) => {}

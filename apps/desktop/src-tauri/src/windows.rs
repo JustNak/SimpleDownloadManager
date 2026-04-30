@@ -145,11 +145,8 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
 }
 
 pub fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    if let Err(error) = crate::lifecycle::show_main_window(app) {
+        eprintln!("failed to focus main window: {error}");
     }
 }
 

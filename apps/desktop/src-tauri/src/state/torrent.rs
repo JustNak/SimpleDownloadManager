@@ -117,7 +117,7 @@ impl SharedState {
 
         if let Some((snapshot, persisted)) = queued {
             persist_state(&self.storage_path, &persisted)?;
-            return Ok(ExternalReseedAttempt::Queued(snapshot));
+            return Ok(ExternalReseedAttempt::Queued(Box::new(snapshot)));
         }
 
         Ok(ExternalReseedAttempt::Stop)

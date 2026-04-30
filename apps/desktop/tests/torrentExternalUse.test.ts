@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendMockSource = readFileSync(new URL('../src/backendMock.ts', import.meta.url), 'utf8');
 const queueViewSource = readFileSync(new URL('../src/QueueView.tsx', import.meta.url), 'utf8');
 
 assert.match(
@@ -42,9 +43,15 @@ assert.match(
 );
 
 assert.match(
-  backendSource,
+  backendMockSource,
   /return \{ pausedTorrent: true, autoReseedRetrySeconds: 60 \}/,
   'mock external use should mirror the backend auto-reseed retry timing',
+);
+
+assert.doesNotMatch(
+  backendSource,
+  /return \{ pausedTorrent: true, autoReseedRetrySeconds: 60 \}/,
+  'production backend should keep browser preview external-use mock behavior in backendMock.ts',
 );
 
 assert.match(
