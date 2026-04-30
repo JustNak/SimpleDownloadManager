@@ -110,6 +110,44 @@ pub struct TorrentInfo {
     pub ratio: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seeding_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<TorrentRuntimeDiagnostics>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentPeerDiagnostics {
+    pub state: String,
+    pub fetched_bytes: u64,
+    pub errors: u32,
+    pub downloaded_pieces: u32,
+    pub connection_attempts: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentRuntimeDiagnostics {
+    pub queued_peers: u32,
+    pub connecting_peers: u32,
+    pub live_peers: u32,
+    pub seen_peers: u32,
+    pub dead_peers: u32,
+    pub not_needed_peers: u32,
+    pub contributing_peers: u32,
+    pub peer_errors: u32,
+    #[serde(default)]
+    pub peers_with_errors: u32,
+    #[serde(default)]
+    pub peer_connection_attempts: u32,
+    pub session_download_speed: u64,
+    pub session_upload_speed: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_piece_download_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
+    pub listener_fallback: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_samples: Vec<TorrentPeerDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +325,14 @@ pub enum TorrentSeedMode {
     RatioOrTime,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TorrentPeerConnectionWatchdogMode {
+    #[default]
+    Diagnose,
+    Experimental,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TorrentSettings {
@@ -306,6 +352,8 @@ pub struct TorrentSettings {
     pub port_forwarding_enabled: bool,
     #[serde(default = "default_torrent_port_forwarding_port")]
     pub port_forwarding_port: u32,
+    #[serde(default)]
+    pub peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,7 +429,17 @@ pub struct DiagnosticsSnapshot {
     pub queue_summary: QueueSummary,
     pub last_host_contact_seconds_ago: Option<u64>,
     pub host_registration: HostRegistrationDiagnostics,
+    pub torrent_diagnostics: Vec<TorrentJobDiagnostics>,
     pub recent_events: Vec<DiagnosticEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentJobDiagnostics {
+    pub job_id: String,
+    pub filename: String,
+    pub info_hash: Option<String>,
+    pub diagnostics: TorrentRuntimeDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,6 +568,7 @@ impl Default for TorrentSettings {
             upload_limit_kib_per_second: 0,
             port_forwarding_enabled: false,
             port_forwarding_port: default_torrent_port_forwarding_port(),
+            peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Diagnose,
         }
     }
 }

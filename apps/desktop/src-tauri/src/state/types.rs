@@ -1,5 +1,6 @@
 use crate::storage::{
-    BulkArchiveInfo, DesktopSnapshot, DownloadSource, HandoffAuth, TorrentInfo, TransferKind,
+    BulkArchiveInfo, DesktopSnapshot, DownloadSource, HandoffAuth, TorrentInfo,
+    TorrentRuntimeDiagnostics, TransferKind,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -87,6 +88,7 @@ pub struct TorrentRuntimeSnapshot {
     pub phase: TorrentRuntimePhase,
     pub finished: bool,
     pub error: Option<String>,
+    pub diagnostics: Option<TorrentRuntimeDiagnostics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

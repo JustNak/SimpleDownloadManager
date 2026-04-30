@@ -179,6 +179,7 @@ impl SharedState {
                 .last_host_contact
                 .map(|last_seen| last_seen.elapsed().as_secs()),
             host_registration,
+            torrent_diagnostics: state.torrent_diagnostics_snapshot(),
             recent_events: state.diagnostic_events.clone(),
         }
     }

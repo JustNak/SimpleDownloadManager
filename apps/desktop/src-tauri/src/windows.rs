@@ -1,9 +1,11 @@
+use crate::storage::TransferKind;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const DOWNLOAD_PROMPT_WINDOW: &str = "download-prompt";
 pub const SELECT_JOB_EVENT: &str = "app://select-job";
 const PROGRESS_WINDOW_PREFIX: &str = "download-progress-";
+const TORRENT_PROGRESS_WINDOW_PREFIX: &str = "torrent-progress-";
 const BATCH_PROGRESS_WINDOW_PREFIX: &str = "batch-progress-";
 const PROGRESS_WINDOW_STACK_OFFSET: f64 = 28.0;
 
@@ -105,6 +107,56 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
         .map_err(|error| error.to_string())
 }
 
+pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
+    let label = torrent_progress_window_label(job_id);
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let open_progress_windows = open_progress_popup_count(app);
+    let prompt_position =
+        current_download_prompt_position(app).or_else(last_download_prompt_position);
+    let url = format!("index.html?window=torrent-progress&jobId={job_id}");
+    let geometry = torrent_progress_window_geometry();
+    let policy = progress_window_policy();
+
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+        .title("Torrent session")
+        .inner_size(geometry.width, geometry.height)
+        .min_inner_size(geometry.min_width, geometry.min_height)
+        .max_inner_size(geometry.width, geometry.height)
+        .resizable(false)
+        .minimizable(policy.minimizable)
+        .maximizable(false)
+        .decorations(false)
+        .always_on_top(policy.always_on_top);
+
+    let builder =
+        if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
+            builder.position(position.x, position.y)
+        } else {
+            builder.center()
+        };
+
+    builder
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+pub fn show_progress_window_for_transfer_kind(
+    app: &AppHandle,
+    job_id: &str,
+    transfer_kind: TransferKind,
+) -> Result<(), String> {
+    match transfer_kind {
+        TransferKind::Torrent => show_torrent_progress_window(app, job_id),
+        TransferKind::Http => show_progress_window(app, job_id),
+    }
+}
+
 pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
     let label = batch_progress_window_label(batch_id);
     if let Some(window) = app.get_webview_window(&label) {
@@ -174,12 +226,29 @@ fn batch_progress_window_label(batch_id: &str) -> String {
     format!("{BATCH_PROGRESS_WINDOW_PREFIX}{safe_batch_id}")
 }
 
+fn torrent_progress_window_label(job_id: &str) -> String {
+    let safe_job_id: String = job_id
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '/'))
+        .collect();
+    format!("{TORRENT_PROGRESS_WINDOW_PREFIX}{safe_job_id}")
+}
+
 fn progress_window_geometry() -> ProgressWindowGeometry {
     ProgressWindowGeometry {
         width: 460.0,
         height: 280.0,
         min_width: 460.0,
         min_height: 280.0,
+    }
+}
+
+fn torrent_progress_window_geometry() -> ProgressWindowGeometry {
+    ProgressWindowGeometry {
+        width: 720.0,
+        height: 520.0,
+        min_width: 720.0,
+        min_height: 520.0,
     }
 }
 
@@ -204,6 +273,7 @@ fn open_progress_popup_count(app: &AppHandle) -> usize {
         .keys()
         .filter(|label| {
             label.starts_with(PROGRESS_WINDOW_PREFIX)
+                || label.starts_with(TORRENT_PROGRESS_WINDOW_PREFIX)
                 || label.starts_with(BATCH_PROGRESS_WINDOW_PREFIX)
         })
         .count()
@@ -297,6 +367,24 @@ mod tests {
 
         assert_eq!(geometry.width, 560.0);
         assert_eq!(geometry.height, 430.0);
+        assert_eq!(geometry.min_width, geometry.width);
+        assert_eq!(geometry.min_height, geometry.height);
+    }
+
+    #[test]
+    fn torrent_progress_window_label_is_sanitized_and_stable() {
+        assert_eq!(
+            super::torrent_progress_window_label("job:one/../two?bad"),
+            "torrent-progress-job:one//twobad"
+        );
+    }
+
+    #[test]
+    fn torrent_progress_window_minimum_matches_content_size() {
+        let geometry = super::torrent_progress_window_geometry();
+
+        assert_eq!(geometry.width, 720.0);
+        assert_eq!(geometry.height, 520.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
     }

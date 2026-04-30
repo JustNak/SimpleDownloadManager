@@ -5,6 +5,7 @@ import {
   formatQueueSize,
   formatQueueSizeTitle,
   formatTorrentFetchedSize,
+  formatTorrentProgressStripText,
   formatTorrentVerifiedSize,
   isTorrentCheckingFiles,
   isTorrentSeedingRestore,
@@ -13,6 +14,7 @@ import {
   queueStatusPresentation,
   shouldShowNameProgress,
   torrentActivitySummary,
+  torrentDiagnosticsSummary,
   torrentDetailMetrics,
   torrentDisplayName,
 } from '../src/queueRowPresentation.ts';
@@ -343,6 +345,36 @@ assert.deepEqual(
 const byteLabel = (bytes: number) => `${bytes} B`;
 
 assert.equal(
+  torrentDiagnosticsSummary({
+    ...baseJob,
+    transferKind: 'torrent',
+    torrent: {
+      uploadedBytes: 0,
+      ratio: 0,
+      diagnostics: {
+        livePeers: 12,
+        queuedPeers: 3,
+        connectingPeers: 2,
+        seenPeers: 30,
+        deadPeers: 4,
+        notNeededPeers: 5,
+        contributingPeers: 2,
+        peerErrors: 1,
+        peersWithErrors: 1,
+        peerConnectionAttempts: 7,
+        sessionDownloadSpeed: 65_536,
+        sessionUploadSpeed: 8_192,
+        listenPort: 42000,
+        listenerFallback: true,
+        peerSamples: [],
+      },
+    },
+  }, byteLabel),
+  '12 live / 30 seen, 2 contributing, 1 peer error events, 1 errored peers, 7 attempts, session 65536 B down, port 42000 fallback',
+  'torrent diagnostics summary should expose peer quality and listener state compactly',
+);
+
+assert.equal(
   formatQueueSize({ ...baseJob, state: 'downloading', downloadedBytes: 40, totalBytes: 100 }, byteLabel),
   '40 B / 100 B',
   'active downloads should show downloaded and total size',
@@ -376,6 +408,40 @@ assert.equal(
   formatTorrentFetchedSize(torrentWithCheckedProgressJump, byteLabel),
   '0 B / 2700000000 B from peers',
   'torrent fetched size should not present checked progress jumps as peer downloads',
+);
+
+assert.deepEqual(
+  formatTorrentProgressStripText({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    progress: 25,
+    downloadedBytes: 256,
+    totalBytes: 1024,
+    torrent: { uploadedBytes: 0, fetchedBytes: 0, ratio: 0 },
+  }, 25, byteLabel),
+  {
+    progressLabel: 'Verified 25%',
+    bytesText: 'Verified 256 B / 1024 B',
+  },
+  'torrent progress strip should keep verified labels while checking files',
+);
+
+assert.deepEqual(
+  formatTorrentProgressStripText({
+    ...baseJob,
+    transferKind: 'torrent',
+    state: 'downloading',
+    progress: 0,
+    downloadedBytes: 0,
+    totalBytes: 1024,
+    torrent: { uploadedBytes: 0, fetchedBytes: 736, ratio: 0 },
+  }, 0, byteLabel),
+  {
+    progressLabel: '0%',
+    bytesText: '0 B / 1024 B',
+  },
+  'torrent progress strip should switch to plain download text once peer fetching starts',
 );
 
 assert.equal(

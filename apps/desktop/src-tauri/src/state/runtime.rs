@@ -144,6 +144,22 @@ impl RuntimeState {
                 .count(),
         }
     }
+
+    pub(super) fn torrent_diagnostics_snapshot(&self) -> Vec<TorrentJobDiagnostics> {
+        self.jobs
+            .iter()
+            .filter_map(|job| {
+                let torrent = job.torrent.as_ref()?;
+                let diagnostics = torrent.diagnostics.clone()?;
+                Some(TorrentJobDiagnostics {
+                    job_id: job.id.clone(),
+                    filename: job.filename.clone(),
+                    info_hash: torrent.info_hash.clone(),
+                    diagnostics,
+                })
+            })
+            .collect()
+    }
 }
 
 pub(super) fn job_needs_attention(job: &DownloadJob) -> bool {
@@ -207,6 +223,9 @@ pub(super) fn add_artifact_existence(mut job: DownloadJob) -> DownloadJob {
 
 pub(super) fn clear_transient_job_state(mut job: DownloadJob) -> DownloadJob {
     job.artifact_exists = None;
+    if let Some(torrent) = &mut job.torrent {
+        torrent.diagnostics = None;
+    }
     job
 }
 

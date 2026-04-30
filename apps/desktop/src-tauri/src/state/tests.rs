@@ -1,5 +1,7 @@
 use super::*;
-use crate::storage::HostRegistrationStatus;
+use crate::storage::{
+    HostRegistrationStatus, TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
+};
 
 #[test]
 fn queue_summary_counts_attention_jobs() {
@@ -1936,6 +1938,7 @@ fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
             last_runtime_fetched_bytes: Some(2048),
             ratio: 2.0,
             seeding_started_at: Some(123456),
+            diagnostics: None,
         }),
         state: JobState::Paused,
         created_at: 1,
@@ -2411,6 +2414,7 @@ async fn stale_torrent_completion_reset_requeues_verification_without_losing_ide
         last_runtime_fetched_bytes: Some(0),
         ratio: 0.0,
         seeding_started_at: Some(123_456),
+        diagnostics: None,
     });
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
     {
@@ -2461,9 +2465,86 @@ async fn stale_torrent_completion_reset_requeues_verification_without_losing_ide
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn torrent_restore_runtime_reset_preserves_seeding_history() {
+    let download_dir = test_runtime_dir("restore-runtime-reset");
+    let mut job = download_job(
+        "job_1",
+        JobState::Downloading,
+        ResumeSupport::Unsupported,
+        100,
+    );
+    job.transfer_kind = TransferKind::Torrent;
+    job.downloaded_bytes = 8 * 1024;
+    job.total_bytes = 8 * 1024;
+    job.progress = 100.0;
+    job.speed = 1024;
+    job.eta = 5;
+    job.error = Some("previous restore issue".into());
+    job.failure_category = Some(FailureCategory::Torrent);
+    job.torrent = Some(TorrentInfo {
+        engine_id: Some(42),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        name: Some("Ubuntu".into()),
+        total_files: Some(1),
+        peers: Some(12),
+        seeds: Some(3),
+        uploaded_bytes: 5 * 1024,
+        last_runtime_uploaded_bytes: Some(1024),
+        fetched_bytes: 2 * 1024,
+        last_runtime_fetched_bytes: Some(512),
+        ratio: 2.5,
+        seeding_started_at: Some(123_456),
+        diagnostics: Some(TorrentRuntimeDiagnostics::default()),
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let snapshot = state
+        .reset_torrent_restore_runtime_for_recheck(
+            "job_1",
+            Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        )
+        .await
+        .expect("restore runtime reset should succeed");
+
+    let job = &snapshot.jobs[0];
+    assert_eq!(job.state, JobState::Starting);
+    assert_eq!(job.downloaded_bytes, 0);
+    assert_eq!(job.total_bytes, 0);
+    assert_eq!(job.progress, 0.0);
+    assert_eq!(job.error, None);
+    assert_eq!(job.failure_category, None);
+    let torrent = job.torrent.as_ref().expect("torrent metadata remains");
+    assert_eq!(torrent.engine_id, None);
+    assert_eq!(
+        torrent.info_hash.as_deref(),
+        Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8")
+    );
+    assert_eq!(torrent.uploaded_bytes, 5 * 1024);
+    assert_eq!(torrent.fetched_bytes, 2 * 1024);
+    assert_eq!(torrent.ratio, 2.5);
+    assert_eq!(torrent.seeding_started_at, Some(123_456));
+    assert_eq!(torrent.last_runtime_uploaded_bytes, None);
+    assert_eq!(torrent.last_runtime_fetched_bytes, None);
+    assert_eq!(torrent.diagnostics, None);
+
+    let runtime = state.inner.read().await;
+    assert!(runtime.diagnostic_events.iter().any(|event| {
+        event.level == DiagnosticLevel::Warning
+            && event.message.contains("Rechecking seeding restore")
+    }));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn seed_policy_defaults_to_forever_and_supports_limits() {
     let mut settings = Settings::default();
+    assert_eq!(
+        settings.torrent.peer_connection_watchdog_mode,
+        TorrentPeerConnectionWatchdogMode::Diagnose,
+        "peer connection watchdog should default to diagnostic-only mode"
+    );
     assert!(!should_stop_seeding(&settings.torrent, 9.0, 24 * 60 * 60));
 
     settings.torrent.seed_mode = TorrentSeedMode::Ratio;
@@ -2537,6 +2618,7 @@ fn torrent_runtime_update(
         phase: TorrentRuntimePhase::Live,
         finished,
         error: None,
+        diagnostics: None,
     }
 }
 

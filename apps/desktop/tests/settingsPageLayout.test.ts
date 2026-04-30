@@ -67,6 +67,12 @@ assert.match(
 
 assert.match(
   source,
+  /FieldRow label="Peer Connection Watchdog"[\s\S]*Experimental auto tuning/,
+  'torrent settings should expose the experimental peer connection watchdog mode',
+);
+
+assert.match(
+  source,
   /<header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface\/95 pb-3 pt-4 backdrop-blur/,
   'settings header actions should stay sticky while scrolling long settings pages',
 );

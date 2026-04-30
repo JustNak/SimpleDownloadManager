@@ -1,6 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React from 'react';
 import {
-  Download,
   ExternalLink,
   FolderOpen,
   Link2,
@@ -9,45 +8,20 @@ import {
   RotateCw,
   X,
 } from 'lucide-react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { JobState, type DownloadJob } from './types';
 import {
-  cancelJob,
-  getAppSnapshot,
   openJobFile,
   pauseJob,
   resumeJob,
   retryJob,
   revealJobInFolder,
   swapFailedDownloadToBrowser,
-  subscribeToStateChanged,
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, formatTime, getHost } from './popupShared';
-import { applyAppearance } from './appearance';
-import { runPopupAction } from './popupActions';
-import {
-  calculateDownloadProgressMetrics,
-  recordProgressSample,
-  shouldShowCompletedFileAction,
-  type DownloadProgressMetrics,
-  type ProgressSample,
-} from './downloadProgressMetrics';
-import {
-  isTorrentCheckingFiles,
-  isTorrentMetadataPending,
-  isTorrentSeedingRestore,
-  formatTorrentFetchedSize,
-  formatTorrentVerifiedSize,
-  torrentActivitySummary,
-  torrentDisplayName,
-} from './queueRowPresentation';
+import { shouldShowCompletedFileAction, type DownloadProgressMetrics } from './downloadProgressMetrics';
 import { canSwapFailedDownloadToBrowser } from './queueCommands';
-
-type PopupActionRunner = (
-  action: () => Promise<void>,
-  options?: { closeOnSuccess?: boolean },
-) => Promise<void>;
+import { useProgressPopup, type PopupActionRunner } from './useProgressPopup';
 
 interface ProgressViewProps {
   job: DownloadJob;
@@ -62,75 +36,9 @@ interface ProgressViewProps {
 }
 
 export function DownloadProgressWindow() {
-  const [job, setJob] = useState<DownloadJob | null>(null);
-  const [isBusy, setIsBusy] = useState(false);
-  const [isConfirmingCancel, setIsConfirmingCancel] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
-  const progressSamplesRef = useRef<ProgressSample[]>([]);
-  const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
-  const jobId = useMemo(() => new URLSearchParams(window.location.search).get('jobId') || '', []);
+  const popup = useProgressPopup();
 
-  useEffect(() => {
-    let dispose: (() => void | Promise<void>) | undefined;
-    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
-
-    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
-      latestSettings = snapshot.settings;
-      applyAppearance(snapshot.settings);
-    };
-    const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
-      const nextJob = snapshot.jobs.find((candidate) => candidate.id === jobId) ?? null;
-      if (nextJob) {
-        progressSamplesRef.current = recordProgressSample(progressSamplesRef.current, nextJob);
-      }
-      setJob(nextJob);
-    };
-
-    const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-    const handleSystemThemeChange = () => {
-      if (latestSettings) applyAppearance(latestSettings);
-    };
-    media?.addEventListener('change', handleSystemThemeChange);
-
-    async function initialize() {
-      const snapshot = await getAppSnapshot();
-      applySnapshotAppearance(snapshot);
-      applySnapshotJob(snapshot);
-      dispose = await subscribeToStateChanged((nextSnapshot) => {
-        applySnapshotAppearance(nextSnapshot);
-        applySnapshotJob(nextSnapshot);
-      });
-    }
-
-    void initialize();
-    return () => {
-      media?.removeEventListener('change', handleSystemThemeChange);
-      void dispose?.();
-    };
-  }, [jobId]);
-
-  useEffect(() => {
-    setIsConfirmingCancel(false);
-  }, [job?.id]);
-
-  async function runAction(
-    action: () => Promise<void>,
-    { closeOnSuccess = false }: { closeOnSuccess?: boolean } = {},
-  ) {
-    setIsBusy(true);
-    setIsConfirmingCancel(false);
-    setErrorMessage('');
-    const result = await runPopupAction({
-      action,
-      close: closeOnSuccess && currentWindow ? () => currentWindow.close() : undefined,
-    });
-    if (!result.ok) {
-      setErrorMessage(result.message);
-    }
-    setIsBusy(false);
-  }
-
-  if (!job) {
+  if (!popup.job) {
     return (
       <ProgressShell title="Download progress">
         <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-muted-foreground">
@@ -140,31 +48,19 @@ export function DownloadProgressWindow() {
     );
   }
 
-  const progress = clampProgress(job.progress);
-  const progressMetrics = calculateDownloadProgressMetrics(job, progressSamplesRef.current);
-  const activeJobId = job.id;
   const sharedProps = {
-    job,
-    progress,
-    progressMetrics,
-    isBusy,
-    isConfirmingCancel,
-    errorMessage,
-    runAction,
-    onCancelClick: () => {
-      if (!isConfirmingCancel) {
-        setIsConfirmingCancel(true);
-        return;
-      }
-
-      void runAction(() => cancelJob(activeJobId));
-    },
-    onClose: () => {
-      void currentWindow?.close();
-    },
+    job: popup.job,
+    progress: popup.progress,
+    progressMetrics: popup.progressMetrics,
+    isBusy: popup.isBusy,
+    isConfirmingCancel: popup.isConfirmingCancel,
+    errorMessage: popup.errorMessage,
+    runAction: popup.runAction,
+    onCancelClick: popup.onCancelClick,
+    onClose: popup.onClose,
   };
 
-  return job.transferKind === 'torrent' ? <TorrentingProgressView {...sharedProps} /> : <CompactDownloadProgressView {...sharedProps} />;
+  return <CompactDownloadProgressView {...sharedProps} />;
 }
 
 function CompactDownloadProgressView({
@@ -199,64 +95,6 @@ function CompactDownloadProgressView({
           <Metric label="ETA" value={job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--'} />
           <Metric label="Size" value={job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'} />
         </MetricRail>
-
-        <DetailRows job={job} />
-        <ErrorMessage message={errorMessage} />
-        <ActionBar
-          job={job}
-          isBusy={isBusy}
-          isConfirmingCancel={isConfirmingCancel}
-          runAction={runAction}
-          onCancelClick={onCancelClick}
-          onClose={onClose}
-        />
-      </CompactMain>
-    </ProgressShell>
-  );
-}
-
-function TorrentingProgressView({
-  job,
-  progress,
-  progressMetrics,
-  isBusy,
-  isConfirmingCancel,
-  errorMessage,
-  runAction,
-  onCancelClick,
-  onClose,
-}: ProgressViewProps) {
-  const metadataPending = isTorrentMetadataPending(job);
-  const checkingFiles = isTorrentCheckingFiles(job);
-
-  return (
-    <ProgressShell title="Torrenting">
-      <CompactMain>
-        <HeaderStrip
-          job={job}
-          title={torrentDisplayName(job)}
-          subtitle={torrentStatusLine(job)}
-          status={statusText(job)}
-        />
-
-        {!metadataPending ? (
-          <>
-            <ProgressStrip
-              progress={progress}
-              progressLabel={`Verified ${progress.toFixed(0)}%`}
-              bytesText={verifiedTorrentText(job)}
-              colorClass={progressColor(job)}
-            />
-
-            <MetricRail>
-              <Metric label="Speed" value={job.state === JobState.Downloading && !checkingFiles ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--'} />
-              <Metric label="ETA" value={job.state === JobState.Downloading && !checkingFiles ? formatTime(progressMetrics.timeRemaining) : '--'} />
-              <Metric label="Peers" value={torrentPeerCount(job)} />
-            </MetricRail>
-
-            {checkingFiles ? null : <TorrentDownloadedRow job={job} />}
-          </>
-        ) : null}
 
         <DetailRows job={job} />
         <ErrorMessage message={errorMessage} />
@@ -343,16 +181,6 @@ function ProgressStrip({
   );
 }
 
-function TorrentDownloadedRow({ job }: { job: DownloadJob }) {
-  const value = torrentFetchedText(job);
-  return (
-    <div className="mt-1 grid grid-cols-[70px_minmax(0,1fr)] gap-x-1.5 text-[10px] leading-4">
-      <div className="flex items-center gap-1 text-muted-foreground"><Download size={12} /> Downloaded</div>
-      <div className="truncate text-foreground" title={value}>{value}</div>
-    </div>
-  );
-}
-
 function MetricRail({ children }: { children: React.ReactNode }) {
   return (
     <section className="mt-1.5 grid grid-cols-3 gap-2 bg-background/30 border-t border-border/35 px-2 py-1">
@@ -376,7 +204,7 @@ function DetailRows({ job }: { job: DownloadJob }) {
       <div className="flex items-center gap-1 text-muted-foreground"><FolderOpen size={12} /> Path</div>
       <div className="truncate text-foreground" title={job.targetPath}>{job.targetPath || 'No destination recorded yet.'}</div>
       <div className="flex items-center gap-1 text-muted-foreground"><Link2 size={12} /> Source</div>
-      <div className="truncate text-primary" title={job.url}>{job.transferKind === 'torrent' ? torrentSourceText(job) : job.url}</div>
+      <div className="truncate text-primary" title={job.url}>{job.url}</div>
     </div>
   );
 }
@@ -406,7 +234,7 @@ function ActionBar({
   onCancelClick: () => void;
   onClose: () => void;
 }) {
-  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
+  const isActive = [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
   const isPaused = job.state === JobState.Paused;
   const isCompleted = job.state === JobState.Completed;
   const isFailed = job.state === JobState.Failed;
@@ -500,10 +328,6 @@ function ActionButton({
 }
 
 function statusText(job: DownloadJob) {
-  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
-  if (isTorrentCheckingFiles(job)) return 'Checking files';
-  if (isTorrentMetadataPending(job)) return 'Finding metadata';
-
   switch (job.state) {
     case JobState.Seeding:
       return 'Seeding';
@@ -529,7 +353,7 @@ function statusText(job: DownloadJob) {
 function statusClass(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
   if (job.state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
-  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentCheckingFiles(job) || isTorrentMetadataPending(job)) return 'border-warning/40 bg-warning/10 text-warning';
+  if (job.state === JobState.Queued) return 'border-warning/40 bg-warning/10 text-warning';
   if (job.state === JobState.Paused || job.state === JobState.Canceled) return 'border-border bg-muted text-muted-foreground';
   return 'border-primary/40 bg-primary/10 text-primary';
 }
@@ -537,46 +361,10 @@ function statusClass(job: DownloadJob) {
 function progressColor(job: DownloadJob) {
   if (job.state === JobState.Completed) return 'bg-success';
   if (job.state === JobState.Failed) return 'bg-destructive';
-  if (job.state === JobState.Queued || isTorrentSeedingRestore(job) || isTorrentCheckingFiles(job) || isTorrentMetadataPending(job)) return 'bg-warning';
-  if (job.transferKind === 'torrent') return 'bg-warning';
+  if (job.state === JobState.Queued) return 'bg-warning';
   return 'bg-primary';
 }
 
 function downloadedText(job: DownloadJob) {
   return `${formatBytes(job.downloadedBytes)} / ${job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}`;
-}
-
-function verifiedTorrentText(job: DownloadJob) {
-  return formatTorrentVerifiedSize(job, formatBytes);
-}
-
-function torrentFetchedText(job: DownloadJob) {
-  return formatTorrentFetchedSize(job, formatBytes);
-}
-
-function torrentStatusLine(job: DownloadJob) {
-  if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
-  if (isTorrentCheckingFiles(job)) return `Checking files - ${verifiedTorrentText(job)}`;
-  if (isTorrentMetadataPending(job)) return 'Finding metadata';
-  if (job.state === JobState.Seeding) return `Seeding - ${verifiedTorrentText(job)}`;
-  const activity = torrentActivitySummary(job);
-  return activity === 'No peer activity yet' ? statusText(job) : `${statusText(job)} - ${activity}`;
-}
-
-function torrentPeerCount(job: DownloadJob) {
-  return typeof job.torrent?.peers === 'number' ? job.torrent.peers.toLocaleString() : '--';
-}
-
-function torrentSourceText(job: DownloadJob) {
-  if (job.url.startsWith('magnet:')) return 'Magnet link';
-  return job.url;
-}
-
-function clampProgress(progress: number) {
-  if (!Number.isFinite(progress)) return 0;
-  return Math.max(0, Math.min(100, progress));
-}
-
-function isTauriRuntime(): boolean {
-  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }

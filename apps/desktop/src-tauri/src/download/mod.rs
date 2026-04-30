@@ -1,12 +1,12 @@
 use crate::commands::emit_snapshot;
 use crate::state::{
     should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
-    WorkerControl,
+    TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, DiagnosticLevel,
     DownloadPerformanceMode, FailureCategory, HandoffAuth, ResumeSupport, TorrentInfo,
-    TorrentSettings, TransferKind,
+    TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
 };
 use crate::torrent::{
     pending_torrent_cleanup_info_hash, prepare_torrent_source, PreparedTorrentSource,
@@ -42,6 +42,13 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+const TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD: u32 = 10;
+const TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND: u64 = 256 * 1024;
+const TORRENT_LOW_THROUGHPUT_REPORT_WINDOW: Duration = Duration::from_secs(30);
+const TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL: Duration = Duration::from_secs(60);
+const TORRENT_RESTORE_RECHECK_IDLE_WINDOW: Duration = Duration::from_secs(45);
+const TORRENT_RESTORE_STALLED_IDLE_WINDOW: Duration = Duration::from_secs(90);
+const TORRENT_PEER_WATCHDOG_WINDOW: Duration = Duration::from_secs(60);
 const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 pub const EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS: u64 = 60;
@@ -474,6 +481,234 @@ impl LowSpeedMonitor {
             LowSpeedDecision::Continue
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct TorrentLowThroughputMonitor {
+    slow_since: Option<Instant>,
+    last_reported_at: Option<Instant>,
+}
+
+impl TorrentLowThroughputMonitor {
+    fn should_report(&mut self, update: &TorrentRuntimeSnapshot, now: Instant) -> bool {
+        if !is_torrent_low_throughput_sample(update) {
+            self.slow_since = None;
+            return false;
+        }
+
+        let slow_since = *self.slow_since.get_or_insert(now);
+        if now.duration_since(slow_since) < TORRENT_LOW_THROUGHPUT_REPORT_WINDOW {
+            return false;
+        }
+
+        if self.last_reported_at.is_some_and(|reported_at| {
+            now.duration_since(reported_at) < TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL
+        }) {
+            return false;
+        }
+
+        self.last_reported_at = Some(now);
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorrentRestoreWatchdogDecision {
+    Continue,
+    Recheck,
+    Stalled,
+}
+
+#[derive(Debug)]
+struct TorrentRestoreWatchdog {
+    idle_since: Instant,
+    recheck_attempted: bool,
+}
+
+impl TorrentRestoreWatchdog {
+    fn new(now: Instant) -> Self {
+        Self {
+            idle_since: now,
+            recheck_attempted: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        update: &TorrentRuntimeSnapshot,
+        now: Instant,
+    ) -> TorrentRestoreWatchdogDecision {
+        if torrent_restore_has_validation_signal(update) {
+            self.idle_since = now;
+            return TorrentRestoreWatchdogDecision::Continue;
+        }
+
+        let idle_for = now.duration_since(self.idle_since);
+        if !self.recheck_attempted && idle_for >= TORRENT_RESTORE_RECHECK_IDLE_WINDOW {
+            self.recheck_attempted = true;
+            self.idle_since = now;
+            return TorrentRestoreWatchdogDecision::Recheck;
+        }
+
+        if self.recheck_attempted && idle_for >= TORRENT_RESTORE_STALLED_IDLE_WINDOW {
+            return TorrentRestoreWatchdogDecision::Stalled;
+        }
+
+        TorrentRestoreWatchdogDecision::Continue
+    }
+}
+
+fn torrent_restore_has_validation_signal(update: &TorrentRuntimeSnapshot) -> bool {
+    update.finished || update.total_bytes > 0 || update.downloaded_bytes > 0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorrentPeerConnectionWatchdogDecision {
+    Continue,
+    Report,
+    RefreshPeers,
+    ReaddTorrent,
+}
+
+#[derive(Debug)]
+struct TorrentPeerConnectionWatchdog {
+    mode: TorrentPeerConnectionWatchdogMode,
+    unhealthy_since: Option<Instant>,
+    last_reported_at: Option<Instant>,
+    refreshed: bool,
+    readded: bool,
+}
+
+impl TorrentPeerConnectionWatchdog {
+    fn new(mode: TorrentPeerConnectionWatchdogMode, now: Instant) -> Self {
+        Self {
+            mode,
+            unhealthy_since: Some(now),
+            last_reported_at: None,
+            refreshed: false,
+            readded: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        update: &TorrentRuntimeSnapshot,
+        now: Instant,
+    ) -> TorrentPeerConnectionWatchdogDecision {
+        if !is_torrent_low_throughput_sample(update) {
+            self.unhealthy_since = None;
+            return TorrentPeerConnectionWatchdogDecision::Continue;
+        }
+
+        let unhealthy_since = *self.unhealthy_since.get_or_insert(now);
+        if now.duration_since(unhealthy_since) < TORRENT_PEER_WATCHDOG_WINDOW {
+            return TorrentPeerConnectionWatchdogDecision::Continue;
+        }
+
+        if matches!(self.mode, TorrentPeerConnectionWatchdogMode::Experimental) {
+            if !self.refreshed {
+                self.refreshed = true;
+                self.unhealthy_since = Some(now);
+                return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
+            }
+            if !self.readded {
+                self.readded = true;
+                self.unhealthy_since = Some(now);
+                return TorrentPeerConnectionWatchdogDecision::ReaddTorrent;
+            }
+        }
+
+        if self.last_reported_at.is_some_and(|reported_at| {
+            now.duration_since(reported_at) < TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL
+        }) {
+            return TorrentPeerConnectionWatchdogDecision::Continue;
+        }
+
+        self.last_reported_at = Some(now);
+        TorrentPeerConnectionWatchdogDecision::Report
+    }
+}
+
+fn is_torrent_low_throughput_sample(update: &TorrentRuntimeSnapshot) -> bool {
+    if update.finished || !matches!(update.phase, TorrentRuntimePhase::Live) {
+        return false;
+    }
+
+    let live_peers = update
+        .diagnostics
+        .as_ref()
+        .map(|diagnostics| diagnostics.live_peers)
+        .or(update.peers)
+        .unwrap_or(0);
+
+    live_peers >= TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD
+        && update.download_speed < TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND
+}
+
+fn torrent_low_throughput_message(update: &TorrentRuntimeSnapshot) -> String {
+    let Some(diagnostics) = update.diagnostics.as_ref() else {
+        let live_peers = update.peers.unwrap_or(0);
+        return format!(
+            "Torrent throughput low: {live_peers} live peers, job down {} B/s",
+            update.download_speed
+        );
+    };
+
+    let listen_port = diagnostics
+        .listen_port
+        .map(|port| format!("listen port {port}"))
+        .unwrap_or_else(|| "listen port unavailable".into());
+    let listener_state = if diagnostics.listener_fallback {
+        "listener fallback active"
+    } else {
+        "listener fallback inactive"
+    };
+    let classification = torrent_low_throughput_classification(update);
+
+    format!(
+        "Torrent throughput low ({classification}): {} live peers, {} seen, {} queued, {} connecting, {} contributing, {} peer error events across {} peers, {} connection attempts, {} dead, {} not needed, job down {} B/s, session down {} B/s, session up {} B/s, {listen_port}, {listener_state}",
+        diagnostics.live_peers,
+        diagnostics.seen_peers,
+        diagnostics.queued_peers,
+        diagnostics.connecting_peers,
+        diagnostics.contributing_peers,
+        diagnostics.peer_errors,
+        diagnostics.peers_with_errors,
+        diagnostics.peer_connection_attempts,
+        diagnostics.dead_peers,
+        diagnostics.not_needed_peers,
+        update.download_speed,
+        diagnostics.session_download_speed,
+        diagnostics.session_upload_speed
+    )
+}
+
+fn torrent_low_throughput_classification(update: &TorrentRuntimeSnapshot) -> &'static str {
+    let Some(diagnostics) = update.diagnostics.as_ref() else {
+        return "peer health unknown";
+    };
+
+    if diagnostics.listen_port.is_none() || diagnostics.listener_fallback {
+        return "listener unavailable or fallback active";
+    }
+
+    if diagnostics.contributing_peers == 0
+        || diagnostics.contributing_peers.saturating_mul(4) < diagnostics.live_peers
+    {
+        return "few contributing peers";
+    }
+
+    if diagnostics.peers_with_errors.saturating_mul(2) >= diagnostics.live_peers
+        || diagnostics.peer_errors >= diagnostics.live_peers
+    {
+        return "high peer churn";
+    }
+
+    if diagnostics.session_upload_speed == 0 && update.upload_speed == 0 {
+        return "upload reciprocity risk";
+    }
+
+    "peer throughput constrained"
 }
 
 #[derive(Debug, Clone)]
@@ -967,6 +1202,13 @@ async fn run_torrent_download_attempt(
     let mut first_snapshot = true;
     let mut last_persisted_at = Instant::now();
     let mut restored_seeding_unpaused = false;
+    let mut low_throughput_monitor = TorrentLowThroughputMonitor::default();
+    let mut restore_watchdog =
+        restoring_seeding.then(|| TorrentRestoreWatchdog::new(Instant::now()));
+    let mut peer_connection_watchdog = TorrentPeerConnectionWatchdog::new(
+        settings.torrent.peer_connection_watchdog_mode,
+        Instant::now(),
+    );
     loop {
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
@@ -1081,6 +1323,7 @@ async fn run_torrent_download_attempt(
             emit_snapshot(app, &snapshot);
             return Ok(DownloadOutcome::Paused);
         }
+        let now = Instant::now();
         if restoring_seeding {
             if let Some(message) = torrent_restore_validation_failure(&update) {
                 let _ = state
@@ -1098,6 +1341,84 @@ async fn run_torrent_download_attempt(
                 ));
             }
 
+            if let Some(watchdog) = restore_watchdog.as_mut() {
+                match watchdog.observe(&update, now) {
+                    TorrentRestoreWatchdogDecision::Continue => {}
+                    TorrentRestoreWatchdogDecision::Recheck => {
+                        forget_stale_torrent_session(
+                            engine.as_ref(),
+                            engine_id,
+                            Some(&update.info_hash),
+                        )
+                        .await
+                        .map_err(|message| {
+                            download_error(FailureCategory::Torrent, message, false)
+                        })?;
+                        let snapshot = state
+                            .reset_torrent_restore_runtime_for_recheck(
+                                &task.id,
+                                Some(update.info_hash.clone()),
+                            )
+                            .await
+                            .map_err(|message| {
+                                download_error(FailureCategory::Torrent, message, false)
+                            })?;
+                        emit_snapshot(app, &snapshot);
+
+                        let prepared_source = prepare_torrent_source(&task.url);
+                        if prepared_source.fallback_trackers_added > 0 {
+                            record_fallback_tracker_usage(
+                                state,
+                                &task.id,
+                                prepared_source.fallback_trackers_added,
+                                prepared_source.source_kind.label(),
+                            )
+                            .await;
+                        }
+                        let readd_outcome = add_prepared_torrent_with_controls(
+                            state,
+                            &task.id,
+                            engine.as_ref(),
+                            &prepared_source,
+                            &output_folder,
+                            settings.torrent.upload_limit_kib_per_second,
+                            false,
+                            None,
+                        )
+                        .await?;
+                        match readd_outcome {
+                            TorrentAddOutcome::Added(outcome) => {
+                                engine_id = outcome.engine_id;
+                                prepared_source_for_recheck = Some(prepared_source);
+                                first_snapshot = true;
+                                restored_seeding_unpaused = false;
+                                continue;
+                            }
+                            TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                        }
+                    }
+                    TorrentRestoreWatchdogDecision::Stalled => {
+                        let message = torrent_restore_validation_stalled_message();
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Warning,
+                                "torrent",
+                                message,
+                                Some(task.id.clone()),
+                            )
+                            .await;
+                        engine.forget(engine_id).await.map_err(|message| {
+                            download_error(FailureCategory::Torrent, message, false)
+                        })?;
+                        return Err(download_error(
+                            FailureCategory::Torrent,
+                            message.into(),
+                            false,
+                        ));
+                    }
+                }
+            }
+
             if update.finished
                 && !restored_seeding_unpaused
                 && matches!(update.phase, TorrentRuntimePhase::Paused)
@@ -1109,7 +1430,106 @@ async fn run_torrent_download_attempt(
                 restored_seeding_unpaused = true;
             }
         }
-        let now = Instant::now();
+        if low_throughput_monitor.should_report(&update, now) {
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Warning,
+                    "torrent",
+                    torrent_low_throughput_message(&update),
+                    Some(task.id.clone()),
+                )
+                .await;
+        }
+        if !restoring_seeding {
+            match peer_connection_watchdog.observe(&update, now) {
+                TorrentPeerConnectionWatchdogDecision::Continue => {}
+                TorrentPeerConnectionWatchdogDecision::Report => {
+                    let _ = state
+                        .record_diagnostic_event(
+                            DiagnosticLevel::Warning,
+                            "torrent",
+                            format!(
+                                "Torrent peer watchdog diagnostic: {}",
+                                torrent_low_throughput_message(&update)
+                            ),
+                            Some(task.id.clone()),
+                        )
+                        .await;
+                }
+                TorrentPeerConnectionWatchdogDecision::RefreshPeers => {
+                    let _ = state
+                        .record_diagnostic_event(
+                            DiagnosticLevel::Warning,
+                            "torrent",
+                            format!(
+                                "Experimental peer watchdog refreshing peer connections: {}",
+                                torrent_low_throughput_message(&update)
+                            ),
+                            Some(task.id.clone()),
+                        )
+                        .await;
+                    engine.pause(engine_id).await.map_err(|message| {
+                        download_error(FailureCategory::Torrent, message, false)
+                    })?;
+                    engine.unpause(engine_id).await.map_err(|message| {
+                        download_error(FailureCategory::Torrent, message, false)
+                    })?;
+                    low_throughput_monitor = TorrentLowThroughputMonitor::default();
+                    continue;
+                }
+                TorrentPeerConnectionWatchdogDecision::ReaddTorrent => {
+                    let _ = state
+                        .record_diagnostic_event(
+                            DiagnosticLevel::Warning,
+                            "torrent",
+                            format!(
+                                "Experimental peer watchdog re-adding torrent session without deleting files: {}",
+                                torrent_low_throughput_message(&update)
+                            ),
+                            Some(task.id.clone()),
+                        )
+                        .await;
+                    forget_stale_torrent_session(
+                        engine.as_ref(),
+                        engine_id,
+                        Some(&update.info_hash),
+                    )
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+                    let prepared_source = prepare_torrent_source(&task.url);
+                    if prepared_source.fallback_trackers_added > 0 {
+                        record_fallback_tracker_usage(
+                            state,
+                            &task.id,
+                            prepared_source.fallback_trackers_added,
+                            prepared_source.source_kind.label(),
+                        )
+                        .await;
+                    }
+                    let readd_outcome = add_prepared_torrent_with_controls(
+                        state,
+                        &task.id,
+                        engine.as_ref(),
+                        &prepared_source,
+                        &output_folder,
+                        settings.torrent.upload_limit_kib_per_second,
+                        false,
+                        None,
+                    )
+                    .await?;
+                    match readd_outcome {
+                        TorrentAddOutcome::Added(outcome) => {
+                            engine_id = outcome.engine_id;
+                            prepared_source_for_recheck = Some(prepared_source);
+                            first_snapshot = true;
+                            low_throughput_monitor = TorrentLowThroughputMonitor::default();
+                            continue;
+                        }
+                        TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                    }
+                }
+            }
+        }
 
         let started_seeding = update.finished && !was_finished;
         let should_persist = torrent_progress_should_persist(
@@ -1465,6 +1885,10 @@ fn torrent_restore_incomplete_payload_message() -> &'static str {
     "Seeding restore found incomplete local files; pausing instead of downloading them again. Use restart if you want to download this torrent again."
 }
 
+fn torrent_restore_validation_stalled_message() -> &'static str {
+    "Seeding restore validation made no progress after an automatic recheck; pausing instead of staying active forever."
+}
+
 fn torrent_restore_payload_missing_message() -> &'static str {
     "Seeding restore could not find local payload files; pausing instead of downloading them again. Choose the folder containing the files or restart the torrent."
 }
@@ -1543,10 +1967,7 @@ fn torrent_restore_validation_failure(
         return None;
     }
 
-    if matches!(update.phase, TorrentRuntimePhase::Live)
-        || update.fetched_bytes > 0
-        || update.download_speed > 0
-    {
+    if update.fetched_bytes > 0 || update.download_speed > 0 {
         return Some(torrent_restore_peer_download_blocked_message());
     }
 
@@ -3621,6 +4042,32 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    fn torrent_runtime_update(
+        uploaded_bytes: u64,
+        downloaded_bytes: u64,
+        download_speed: u64,
+    ) -> TorrentRuntimeSnapshot {
+        TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Ubuntu Desktop".into()),
+            total_files: Some(1),
+            peers: Some(TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD),
+            seeds: None,
+            downloaded_bytes,
+            total_bytes: downloaded_bytes.saturating_mul(2),
+            uploaded_bytes,
+            fetched_bytes: downloaded_bytes,
+            download_speed,
+            upload_speed: 0,
+            eta: None,
+            phase: TorrentRuntimePhase::Live,
+            finished: false,
+            error: None,
+            diagnostics: None,
+        }
+    }
+
     #[test]
     fn http_status_errors_are_classified_by_recoverability() {
         let unavailable = error_for_http_status(StatusCode::SERVICE_UNAVAILABLE, false);
@@ -3799,6 +4246,7 @@ mod tests {
             phase: crate::state::TorrentRuntimePhase::Live,
             finished: true,
             error: None,
+            diagnostics: None,
         };
 
         assert!(target_payload_appears_empty(&target_dir));
@@ -3856,6 +4304,7 @@ mod tests {
             phase: crate::state::TorrentRuntimePhase::Live,
             finished: true,
             error: None,
+            diagnostics: None,
         };
 
         assert!(!is_stale_torrent_completion(
@@ -3930,12 +4379,167 @@ mod tests {
             phase: crate::state::TorrentRuntimePhase::Live,
             finished: false,
             error: None,
+            diagnostics: None,
         };
 
         assert_eq!(
             torrent_restore_validation_failure(&update),
             Some(torrent_restore_peer_download_blocked_message()),
             "prior seeding restore must not keep downloading from peers under a restore label"
+        );
+    }
+
+    #[test]
+    fn torrent_protected_restore_allows_idle_live_state_for_watchdog_recovery() {
+        let update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Ubuntu".into()),
+            total_files: None,
+            peers: Some(12),
+            seeds: None,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            uploaded_bytes: 0,
+            fetched_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            eta: None,
+            phase: crate::state::TorrentRuntimePhase::Live,
+            finished: false,
+            error: None,
+            diagnostics: None,
+        };
+
+        assert_eq!(
+            torrent_restore_validation_failure(&update),
+            None,
+            "idle live restore sessions should be handled by the restore watchdog instead of immediate peer-download failure"
+        );
+    }
+
+    #[test]
+    fn torrent_restore_watchdog_readds_once_then_stalls_after_second_idle_window() {
+        let started_at = Instant::now();
+        let idle_update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: None,
+            total_files: None,
+            peers: None,
+            seeds: None,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            uploaded_bytes: 0,
+            fetched_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            eta: None,
+            phase: crate::state::TorrentRuntimePhase::Initializing,
+            finished: false,
+            error: None,
+            diagnostics: None,
+        };
+        let mut watchdog = TorrentRestoreWatchdog::new(started_at);
+
+        assert_eq!(
+            watchdog.observe(&idle_update, started_at + Duration::from_secs(44)),
+            TorrentRestoreWatchdogDecision::Continue
+        );
+        assert_eq!(
+            watchdog.observe(&idle_update, started_at + Duration::from_secs(45)),
+            TorrentRestoreWatchdogDecision::Recheck
+        );
+        assert_eq!(
+            watchdog.observe(&idle_update, started_at + Duration::from_secs(134)),
+            TorrentRestoreWatchdogDecision::Continue
+        );
+        assert_eq!(
+            watchdog.observe(&idle_update, started_at + Duration::from_secs(135)),
+            TorrentRestoreWatchdogDecision::Stalled
+        );
+    }
+
+    #[test]
+    fn torrent_restore_watchdog_resets_when_validation_reports_local_progress() {
+        let started_at = Instant::now();
+        let mut watchdog = TorrentRestoreWatchdog::new(started_at);
+        let progress_update = crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: None,
+            total_files: None,
+            peers: None,
+            seeds: None,
+            downloaded_bytes: 1024,
+            total_bytes: 2048,
+            uploaded_bytes: 0,
+            fetched_bytes: 0,
+            download_speed: 0,
+            upload_speed: 0,
+            eta: None,
+            phase: crate::state::TorrentRuntimePhase::Paused,
+            finished: false,
+            error: None,
+            diagnostics: None,
+        };
+
+        assert_eq!(
+            watchdog.observe(&progress_update, started_at + Duration::from_secs(50)),
+            TorrentRestoreWatchdogDecision::Continue,
+            "local verification progress should reset the idle timer"
+        );
+    }
+
+    #[test]
+    fn torrent_peer_watchdog_diagnose_mode_reports_without_actions() {
+        let started_at = Instant::now();
+        let update = low_throughput_update();
+        let mut watchdog = TorrentPeerConnectionWatchdog::new(
+            TorrentPeerConnectionWatchdogMode::Diagnose,
+            started_at,
+        );
+
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(60)),
+            TorrentPeerConnectionWatchdogDecision::Report
+        );
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(121)),
+            TorrentPeerConnectionWatchdogDecision::Report,
+            "diagnose mode should keep reporting sustained peer issues without mutating the torrent session"
+        );
+    }
+
+    #[test]
+    fn torrent_peer_watchdog_experimental_mode_refreshes_then_readds_once() {
+        let started_at = Instant::now();
+        let update = low_throughput_update();
+        let mut watchdog = TorrentPeerConnectionWatchdog::new(
+            TorrentPeerConnectionWatchdogMode::Experimental,
+            started_at,
+        );
+
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(59)),
+            TorrentPeerConnectionWatchdogDecision::Continue
+        );
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(60)),
+            TorrentPeerConnectionWatchdogDecision::RefreshPeers
+        );
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(119)),
+            TorrentPeerConnectionWatchdogDecision::Continue
+        );
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(120)),
+            TorrentPeerConnectionWatchdogDecision::ReaddTorrent
+        );
+        assert_eq!(
+            watchdog.observe(&update, started_at + Duration::from_secs(240)),
+            TorrentPeerConnectionWatchdogDecision::Report,
+            "experimental mode should not keep refreshing or re-adding the same job attempt"
         );
     }
 
@@ -3971,6 +4575,45 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(target_dir);
+    }
+
+    fn low_throughput_update() -> crate::state::TorrentRuntimeSnapshot {
+        crate::state::TorrentRuntimeSnapshot {
+            engine_id: 42,
+            info_hash: "420f3778a160fbe6eb0a67c8470256be13b0ecc8".into(),
+            name: Some("Ubuntu".into()),
+            total_files: Some(1),
+            peers: Some(12),
+            seeds: None,
+            downloaded_bytes: 1024,
+            total_bytes: 10 * 1024 * 1024,
+            uploaded_bytes: 0,
+            fetched_bytes: 1024,
+            download_speed: 32 * 1024,
+            upload_speed: 0,
+            eta: None,
+            phase: crate::state::TorrentRuntimePhase::Live,
+            finished: false,
+            error: None,
+            diagnostics: Some(crate::storage::TorrentRuntimeDiagnostics {
+                queued_peers: 4,
+                connecting_peers: 3,
+                live_peers: 12,
+                seen_peers: 120,
+                dead_peers: 40,
+                not_needed_peers: 0,
+                contributing_peers: 1,
+                peer_errors: 18,
+                peers_with_errors: 6,
+                peer_connection_attempts: 24,
+                session_download_speed: 32 * 1024,
+                session_upload_speed: 0,
+                average_piece_download_millis: None,
+                listen_port: Some(42000),
+                listener_fallback: false,
+                peer_samples: Vec::new(),
+            }),
+        }
     }
 
     #[test]
@@ -4031,6 +4674,7 @@ mod tests {
             phase: crate::state::TorrentRuntimePhase::Live,
             finished: true,
             error: None,
+            diagnostics: None,
         };
 
         assert!(
@@ -4383,6 +5027,88 @@ mod tests {
             monitor.observe(0, Duration::from_secs(30), true),
             LowSpeedDecision::Continue
         );
+    }
+
+    #[test]
+    fn torrent_low_throughput_monitor_reports_after_sustained_slow_live_peers() {
+        let now = Instant::now();
+        let mut monitor = TorrentLowThroughputMonitor::default();
+        let mut update = torrent_runtime_update(1024, 4096, 32);
+        update.download_speed = TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND - 1;
+        update.diagnostics = Some(crate::storage::TorrentRuntimeDiagnostics {
+            live_peers: TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD,
+            seen_peers: 25,
+            contributing_peers: 2,
+            peer_errors: 1,
+            session_download_speed: 64 * 1024,
+            listen_port: Some(42000),
+            ..Default::default()
+        });
+
+        assert!(!monitor.should_report(&update, now));
+        assert!(!monitor.should_report(
+            &update,
+            now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW - Duration::from_millis(1)
+        ));
+        assert!(monitor.should_report(&update, now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW));
+        assert!(!monitor.should_report(
+            &update,
+            now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW + Duration::from_secs(1)
+        ));
+        assert!(monitor.should_report(
+            &update,
+            now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW + TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn torrent_low_throughput_monitor_resets_when_speed_recovers() {
+        let now = Instant::now();
+        let mut monitor = TorrentLowThroughputMonitor::default();
+        let mut update = torrent_runtime_update(1024, 4096, 32);
+        update.download_speed = TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND - 1;
+        update.diagnostics = Some(crate::storage::TorrentRuntimeDiagnostics {
+            live_peers: TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD,
+            ..Default::default()
+        });
+
+        assert!(!monitor.should_report(&update, now));
+        update.download_speed = TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND;
+        assert!(!monitor.should_report(&update, now + Duration::from_secs(10)));
+        update.download_speed = TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND - 1;
+        assert!(!monitor.should_report(&update, now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW));
+    }
+
+    #[test]
+    fn torrent_low_throughput_message_includes_peer_session_and_listener_context() {
+        let mut update = torrent_runtime_update(1024, 4096, 32);
+        update.download_speed = 64 * 1024;
+        update.diagnostics = Some(crate::storage::TorrentRuntimeDiagnostics {
+            live_peers: 12,
+            seen_peers: 30,
+            dead_peers: 4,
+            not_needed_peers: 3,
+            contributing_peers: 2,
+            peer_errors: 1,
+            peers_with_errors: 1,
+            peer_connection_attempts: 7,
+            session_download_speed: 64 * 1024,
+            session_upload_speed: 8 * 1024,
+            listen_port: Some(42000),
+            listener_fallback: true,
+            ..Default::default()
+        });
+
+        let message = torrent_low_throughput_message(&update);
+
+        assert!(message.contains("12 live peers"));
+        assert!(message.contains("30 seen"));
+        assert!(message.contains("2 contributing"));
+        assert!(message.contains("1 peer error events across 1 peers"));
+        assert!(message.contains("7 connection attempts"));
+        assert!(message.contains("session down 65536 B/s"));
+        assert!(message.contains("listen port 42000"));
+        assert!(message.contains("listener fallback active"));
     }
 
     #[test]

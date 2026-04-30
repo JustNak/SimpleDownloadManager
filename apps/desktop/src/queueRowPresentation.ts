@@ -145,6 +145,30 @@ export function formatTorrentVerifiedSize(
   return `Verified ${formatBytes(job.downloadedBytes)} / ${job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}`;
 }
 
+export function formatTorrentProgressStripText(
+  job: TorrentMetadataPendingJob,
+  progress: number,
+  formatBytes: (bytes: number) => string,
+): { progressLabel: string; bytesText: string } {
+  const progressLabel = `${clampQueueProgress(progress).toFixed(0)}%`;
+  if (isTorrentCheckingFiles(job)) {
+    return {
+      progressLabel: `Verified ${progressLabel}`,
+      bytesText: formatTorrentVerifiedSize({
+        downloadedBytes: Math.max(0, job.downloadedBytes ?? 0),
+        totalBytes: Math.max(0, job.totalBytes ?? 0),
+      }, formatBytes),
+    };
+  }
+
+  const downloaded = formatBytes(Math.max(0, job.downloadedBytes ?? 0));
+  const totalBytes = Math.max(0, job.totalBytes ?? 0);
+  return {
+    progressLabel,
+    bytesText: `${downloaded} / ${totalBytes > 0 ? formatBytes(totalBytes) : 'Unknown'}`,
+  };
+}
+
 export function formatTorrentFetchedSize(
   job: Pick<DownloadJob, 'torrent' | 'totalBytes'>,
   formatBytes: (bytes: number) => string,
@@ -152,6 +176,28 @@ export function formatTorrentFetchedSize(
   const fetched = formatBytes(job.torrent?.fetchedBytes ?? 0);
   if (job.totalBytes <= 0) return `${fetched} from peers`;
   return `${fetched} / ${formatBytes(job.totalBytes)} from peers`;
+}
+
+export function torrentDiagnosticsSummary(
+  job: Pick<DownloadJob, 'torrent'>,
+  formatBytes: (bytes: number) => string,
+): string {
+  const diagnostics = job.torrent?.diagnostics;
+  if (!diagnostics) return '--';
+
+  const liveSeen = `${diagnostics.livePeers} live / ${diagnostics.seenPeers} seen`;
+  const contribution = `${diagnostics.contributingPeers} contributing`;
+  const errors = `${diagnostics.peerErrors} peer error events`;
+  const erroredPeers = `${diagnostics.peersWithErrors} errored peers`;
+  const attempts = `${diagnostics.peerConnectionAttempts} attempts`;
+  const session = `session ${formatBytes(Math.max(0, diagnostics.sessionDownloadSpeed))} down`;
+  const listener = typeof diagnostics.listenPort === 'number'
+    ? `port ${diagnostics.listenPort}${diagnostics.listenerFallback ? ' fallback' : ''}`
+    : diagnostics.listenerFallback
+      ? 'listener fallback'
+      : 'listener unavailable';
+
+  return `${liveSeen}, ${contribution}, ${errors}, ${erroredPeers}, ${attempts}, ${session}, ${listener}`;
 }
 
 export function formatQueueSizeTitle(

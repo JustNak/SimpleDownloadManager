@@ -140,6 +140,7 @@ export default function App() {
       uploadLimitKibPerSecond: 0,
       portForwardingEnabled: false,
       portForwardingPort: 42000,
+      peerConnectionWatchdogMode: 'diagnose',
     },
     notificationsEnabled: true,
     theme: 'system',

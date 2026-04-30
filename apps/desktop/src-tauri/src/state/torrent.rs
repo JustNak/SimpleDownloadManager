@@ -92,6 +92,7 @@ impl SharedState {
                 torrent.engine_id = None;
                 torrent.last_runtime_uploaded_bytes = None;
                 torrent.last_runtime_fetched_bytes = None;
+                torrent.diagnostics = None;
             }
             state.external_reseed_jobs.clear();
             state.push_diagnostic_event(
@@ -591,6 +592,7 @@ impl SharedState {
             torrent.total_files = update.total_files;
             torrent.peers = update.peers;
             torrent.seeds = update.seeds;
+            torrent.diagnostics = update.diagnostics;
             torrent.uploaded_bytes = cumulative_torrent_runtime_bytes(
                 torrent.uploaded_bytes,
                 torrent.last_runtime_uploaded_bytes,
@@ -664,6 +666,7 @@ impl SharedState {
                 torrent.last_runtime_uploaded_bytes = None;
                 torrent.fetched_bytes = 0;
                 torrent.last_runtime_fetched_bytes = None;
+                torrent.diagnostics = None;
                 torrent.ratio = 0.0;
                 torrent.seeding_started_at = None;
 
@@ -673,6 +676,53 @@ impl SharedState {
                 DiagnosticLevel::Warning,
                 "torrent".into(),
                 format!("Cleared stale torrent verification for {filename}; rechecking files"),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    pub async fn reset_torrent_restore_runtime_for_recheck(
+        &self,
+        id: &str,
+        info_hash: Option<String>,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                job.state = JobState::Starting;
+                job.progress = 0.0;
+                job.downloaded_bytes = 0;
+                job.total_bytes = 0;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = None;
+                job.failure_category = None;
+
+                let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+                if let Some(info_hash) = info_hash {
+                    torrent.info_hash = Some(info_hash);
+                }
+                torrent.engine_id = None;
+                torrent.peers = None;
+                torrent.seeds = None;
+                torrent.last_runtime_uploaded_bytes = None;
+                torrent.last_runtime_fetched_bytes = None;
+                torrent.diagnostics = None;
+
+                job.filename.clone()
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent".into(),
+                format!("Rechecking seeding restore for {filename} after idle validation"),
                 Some(id.into()),
             );
             (state.snapshot(), state.persisted())

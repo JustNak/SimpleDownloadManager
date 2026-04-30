@@ -6,8 +6,8 @@ use crate::storage::{
     DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
     FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
     IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentSeedMode, TorrentSettings,
-    TransferKind,
+    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode,
+    TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -34,12 +34,12 @@ use progress::*;
 use runtime::*;
 pub use settings::validate_settings;
 use settings::*;
+#[cfg(test)]
+pub(crate) use torrent::pending_torrent_session_cache_clear_path;
 pub(crate) use torrent::{
     apply_pending_torrent_session_cache_clear, clear_torrent_session_cache_directory,
     should_stop_seeding,
 };
-#[cfg(test)]
-pub(crate) use torrent::pending_torrent_session_cache_clear_path;
 pub use types::{
     BackendError, BulkArchiveEntry, BulkArchiveReady, DownloadTask, DuplicatePolicy,
     EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation,

@@ -34,6 +34,7 @@ const snapshot: DesktopSnapshot = {
       uploadLimitKibPerSecond: 0,
       portForwardingEnabled: false,
       portForwardingPort: 42000,
+      peerConnectionWatchdogMode: 'diagnose',
     },
     notificationsEnabled: true,
     theme: 'system',

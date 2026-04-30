@@ -38,6 +38,7 @@ export type StartupLaunchMode = 'open' | 'tray';
 export type BulkArchiveStatus = 'pending' | 'compressing' | 'completed' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
+export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'experimental';
 export type QueueRowSize = 'compact' | 'small' | 'medium' | 'large' | 'damn';
 
 export interface DownloadSource {
@@ -75,6 +76,7 @@ export interface DownloadJob {
     lastRuntimeFetchedBytes?: number;
     ratio: number;
     seedingStartedAt?: number;
+    diagnostics?: TorrentRuntimeDiagnostics;
   };
   state: JobState;
   createdAt?: number;
@@ -135,6 +137,7 @@ export interface TorrentSettings {
   uploadLimitKibPerSecond: number;
   portForwardingEnabled: boolean;
   portForwardingPort: number;
+  peerConnectionWatchdogMode: TorrentPeerConnectionWatchdogMode;
 }
 
 export interface TorrentSessionCacheClearResult {
@@ -188,6 +191,40 @@ export interface HostRegistrationDiagnostics {
 
 export type DiagnosticLevel = 'info' | 'warning' | 'error';
 
+export interface TorrentPeerDiagnostics {
+  state: string;
+  fetchedBytes: number;
+  errors: number;
+  downloadedPieces: number;
+  connectionAttempts: number;
+}
+
+export interface TorrentRuntimeDiagnostics {
+  queuedPeers: number;
+  connectingPeers: number;
+  livePeers: number;
+  seenPeers: number;
+  deadPeers: number;
+  notNeededPeers: number;
+  contributingPeers: number;
+  peerErrors: number;
+  peersWithErrors: number;
+  peerConnectionAttempts: number;
+  sessionDownloadSpeed: number;
+  sessionUploadSpeed: number;
+  averagePieceDownloadMillis?: number;
+  listenPort?: number;
+  listenerFallback: boolean;
+  peerSamples?: TorrentPeerDiagnostics[];
+}
+
+export interface TorrentJobDiagnostics {
+  jobId: string;
+  filename: string;
+  infoHash?: string;
+  diagnostics: TorrentRuntimeDiagnostics;
+}
+
 export interface DiagnosticEvent {
   timestamp: number;
   level: DiagnosticLevel;
@@ -201,6 +238,7 @@ export interface DiagnosticsSnapshot {
   queueSummary: QueueSummary;
   lastHostContactSecondsAgo?: number;
   hostRegistration: HostRegistrationDiagnostics;
+  torrentDiagnostics?: TorrentJobDiagnostics[];
   recentEvents: DiagnosticEvent[];
 }
 

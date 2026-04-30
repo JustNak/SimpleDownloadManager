@@ -1,6 +1,6 @@
 use crate::state::{TorrentRuntimePhase, TorrentRuntimeSnapshot};
-use crate::storage::TorrentSettings;
-use librqbit::api::TorrentIdOrHash;
+use crate::storage::{TorrentPeerDiagnostics, TorrentRuntimeDiagnostics, TorrentSettings};
+use librqbit::api::{Api, TorrentIdOrHash};
 use librqbit::dht::PersistentDhtConfig;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
@@ -81,6 +81,7 @@ pub struct TorrentAddSessionOutcome {
 
 pub struct TorrentEngine {
     session: Arc<Session>,
+    api: Api,
     handles: Arc<Mutex<HashMap<usize, Arc<ManagedTorrent>>>>,
     listener_fallback_message: Option<String>,
     listener_fallback_reported: AtomicBool,
@@ -125,6 +126,7 @@ impl TorrentEngine {
         };
 
         Ok(Self {
+            api: Api::new(session.clone(), None),
             session,
             handles: Arc::new(Mutex::new(HashMap::new())),
             listener_fallback_message,
@@ -283,7 +285,8 @@ impl TorrentEngine {
             let cached_handle = self.handles.lock().await.get(&engine_id).cloned();
             if let Some(handle) = cached_handle {
                 let id = handle.id();
-                self.prepare_existing_for_resume(&handle, validate_only).await?;
+                self.prepare_existing_for_resume(&handle, validate_only)
+                    .await?;
                 return Ok(Some(id));
             }
         }
@@ -295,7 +298,8 @@ impl TorrentEngine {
 
             let id = handle.id();
             self.handles.lock().await.insert(id, handle.clone());
-            self.prepare_existing_for_resume(&handle, validate_only).await?;
+            self.prepare_existing_for_resume(&handle, validate_only)
+                .await?;
             return Ok(Some(id));
         }
 
@@ -309,10 +313,9 @@ impl TorrentEngine {
     ) -> Result<(), String> {
         if validate_only {
             if matches!(handle.stats().state, librqbit::TorrentStatsState::Live) {
-                self.session
-                    .pause(handle)
-                    .await
-                    .map_err(|error| format!("Could not pause torrent for seeding restore validation: {error:#}"))?;
+                self.session.pause(handle).await.map_err(|error| {
+                    format!("Could not pause torrent for seeding restore validation: {error:#}")
+                })?;
             }
             return Ok(());
         }
@@ -381,7 +384,15 @@ impl TorrentEngine {
 
     pub async fn snapshot(&self, id: usize) -> Result<TorrentRuntimeSnapshot, String> {
         let handle = self.handle(id).await?;
-        Ok(snapshot_from_handle(&handle))
+        let session_stats = self.session.stats_snapshot();
+        Ok(snapshot_from_handle(
+            &handle,
+            mib_per_second_to_bytes_per_second(session_stats.download_speed.mbps),
+            mib_per_second_to_bytes_per_second(session_stats.upload_speed.mbps),
+            self.session.tcp_listen_port(),
+            self.listener_fallback_message.is_some(),
+            torrent_peer_diagnostics_from_api(&self.api, id),
+        ))
     }
 
     async fn handle(&self, id: usize) -> Result<Arc<ManagedTorrent>, String> {
@@ -546,12 +557,35 @@ fn send_tracker_first_outcome(
     }
 }
 
-fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TorrentPeerDiagnosticsSummary {
+    contributing_peers: u32,
+    peer_errors: u32,
+    peers_with_errors: u32,
+    peer_connection_attempts: u32,
+    peer_samples: Vec<TorrentPeerDiagnostics>,
+}
+
+fn snapshot_from_handle(
+    handle: &ManagedTorrent,
+    session_download_speed: u64,
+    session_upload_speed: u64,
+    listen_port: Option<u16>,
+    listener_fallback: bool,
+    peer_summary: TorrentPeerDiagnosticsSummary,
+) -> TorrentRuntimeSnapshot {
     let stats = handle.stats();
-    let peers = stats
-        .live
+    let diagnostics = torrent_runtime_diagnostics(
+        &stats,
+        session_download_speed,
+        session_upload_speed,
+        listen_port,
+        listener_fallback,
+        peer_summary,
+    );
+    let peers = diagnostics
         .as_ref()
-        .map(|live| live.snapshot.peer_stats.live as u32);
+        .map(|diagnostics| diagnostics.live_peers);
     TorrentRuntimeSnapshot {
         engine_id: handle.id(),
         info_hash: handle.info_hash().as_string(),
@@ -569,7 +603,98 @@ fn snapshot_from_handle(handle: &ManagedTorrent) -> TorrentRuntimeSnapshot {
         phase: torrent_runtime_phase(&stats),
         finished: stats.finished,
         error: stats.error,
+        diagnostics,
     }
+}
+
+fn torrent_peer_diagnostics_from_api(api: &Api, id: usize) -> TorrentPeerDiagnosticsSummary {
+    let Ok(snapshot) = api.api_peer_stats(TorrentIdOrHash::Id(id), Default::default()) else {
+        return TorrentPeerDiagnosticsSummary::default();
+    };
+
+    let mut peer_samples = snapshot
+        .peers
+        .values()
+        .map(|peer| TorrentPeerDiagnostics {
+            state: peer.state.to_string(),
+            fetched_bytes: peer.counters.fetched_bytes,
+            errors: peer.counters.errors,
+            downloaded_pieces: peer.counters.downloaded_and_checked_pieces,
+            connection_attempts: peer.counters.connection_attempts,
+        })
+        .collect::<Vec<_>>();
+    let contributing_peers = usize_to_u32(
+        peer_samples
+            .iter()
+            .filter(|peer| peer.fetched_bytes > 0)
+            .count(),
+    );
+    let peer_errors = peer_samples
+        .iter()
+        .fold(0_u32, |total, peer| total.saturating_add(peer.errors));
+    let peers_with_errors =
+        usize_to_u32(peer_samples.iter().filter(|peer| peer.errors > 0).count());
+    let peer_connection_attempts = peer_samples.iter().fold(0_u32, |total, peer| {
+        total.saturating_add(peer.connection_attempts)
+    });
+
+    peer_samples.sort_by(|left, right| {
+        right
+            .fetched_bytes
+            .cmp(&left.fetched_bytes)
+            .then_with(|| right.errors.cmp(&left.errors))
+            .then_with(|| left.state.cmp(&right.state))
+    });
+    peer_samples.truncate(5);
+
+    TorrentPeerDiagnosticsSummary {
+        contributing_peers,
+        peer_errors,
+        peers_with_errors,
+        peer_connection_attempts,
+        peer_samples,
+    }
+}
+
+fn torrent_runtime_diagnostics(
+    stats: &librqbit::TorrentStats,
+    session_download_speed: u64,
+    session_upload_speed: u64,
+    listen_port: Option<u16>,
+    listener_fallback: bool,
+    peer_summary: TorrentPeerDiagnosticsSummary,
+) -> Option<TorrentRuntimeDiagnostics> {
+    let live = stats.live.as_ref()?;
+    let peers = &live.snapshot.peer_stats;
+
+    Some(TorrentRuntimeDiagnostics {
+        queued_peers: usize_to_u32(peers.queued),
+        connecting_peers: usize_to_u32(peers.connecting),
+        live_peers: usize_to_u32(peers.live),
+        seen_peers: usize_to_u32(peers.seen),
+        dead_peers: usize_to_u32(peers.dead),
+        not_needed_peers: usize_to_u32(peers.not_needed),
+        contributing_peers: peer_summary.contributing_peers,
+        peer_errors: peer_summary.peer_errors,
+        peers_with_errors: peer_summary.peers_with_errors,
+        peer_connection_attempts: peer_summary.peer_connection_attempts,
+        session_download_speed,
+        session_upload_speed,
+        average_piece_download_millis: average_piece_download_millis(live),
+        listen_port,
+        listener_fallback,
+        peer_samples: peer_summary.peer_samples,
+    })
+}
+
+fn average_piece_download_millis(live: &librqbit::api::LiveStats) -> Option<u64> {
+    live.average_piece_download_time
+        .or_else(|| live.snapshot.average_piece_download_time())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn torrent_runtime_phase(stats: &librqbit::TorrentStats) -> TorrentRuntimePhase {
@@ -1013,6 +1138,92 @@ mod tests {
         };
 
         assert_eq!(torrent_fetched_bytes(&stats), 512 * 1024);
+    }
+
+    #[test]
+    fn runtime_diagnostics_use_peer_session_and_listener_counters() {
+        let mut live = librqbit::api::LiveStats::default();
+        live.snapshot.peer_stats.queued = 3;
+        live.snapshot.peer_stats.connecting = 2;
+        live.snapshot.peer_stats.live = 12;
+        live.snapshot.peer_stats.seen = 28;
+        live.snapshot.peer_stats.dead = 4;
+        live.snapshot.peer_stats.not_needed = 5;
+        live.snapshot.downloaded_and_checked_pieces = 3;
+        live.snapshot.total_piece_download_ms = 1_500;
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Live,
+            file_progress: vec![1024],
+            error: None,
+            progress_bytes: 1024,
+            uploaded_bytes: 128,
+            total_bytes: 2048,
+            finished: false,
+            live: Some(live),
+        };
+
+        let diagnostics = torrent_runtime_diagnostics(
+            &stats,
+            512 * 1024,
+            64 * 1024,
+            Some(42000),
+            true,
+            TorrentPeerDiagnosticsSummary {
+                contributing_peers: 4,
+                peer_errors: 2,
+                peers_with_errors: 1,
+                peer_connection_attempts: 3,
+                peer_samples: vec![crate::storage::TorrentPeerDiagnostics {
+                    state: "live".into(),
+                    fetched_bytes: 256 * 1024,
+                    errors: 1,
+                    downloaded_pieces: 2,
+                    connection_attempts: 1,
+                }],
+            },
+        )
+        .expect("live torrent should have diagnostics");
+
+        assert_eq!(diagnostics.live_peers, 12);
+        assert_eq!(diagnostics.queued_peers, 3);
+        assert_eq!(diagnostics.connecting_peers, 2);
+        assert_eq!(diagnostics.seen_peers, 28);
+        assert_eq!(diagnostics.dead_peers, 4);
+        assert_eq!(diagnostics.not_needed_peers, 5);
+        assert_eq!(diagnostics.session_download_speed, 512 * 1024);
+        assert_eq!(diagnostics.session_upload_speed, 64 * 1024);
+        assert_eq!(diagnostics.average_piece_download_millis, Some(500));
+        assert_eq!(diagnostics.listen_port, Some(42000));
+        assert!(diagnostics.listener_fallback);
+        assert_eq!(diagnostics.contributing_peers, 4);
+        assert_eq!(diagnostics.peer_errors, 2);
+        assert_eq!(diagnostics.peers_with_errors, 1);
+        assert_eq!(diagnostics.peer_connection_attempts, 3);
+        assert_eq!(diagnostics.peer_samples.len(), 1);
+    }
+
+    #[test]
+    fn runtime_diagnostics_are_none_without_live_stats() {
+        let stats = librqbit::TorrentStats {
+            state: librqbit::TorrentStatsState::Paused,
+            file_progress: vec![1024],
+            error: None,
+            progress_bytes: 1024,
+            uploaded_bytes: 128,
+            total_bytes: 2048,
+            finished: false,
+            live: None,
+        };
+
+        assert!(torrent_runtime_diagnostics(
+            &stats,
+            512 * 1024,
+            64 * 1024,
+            Some(42000),
+            false,
+            TorrentPeerDiagnosticsSummary::default(),
+        )
+        .is_none());
     }
 
     #[test]

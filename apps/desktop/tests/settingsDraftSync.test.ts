@@ -19,6 +19,7 @@ function makeSettings(theme: Settings['theme']): Settings {
       uploadLimitKibPerSecond: 0,
       portForwardingEnabled: false,
       portForwardingPort: 42000,
+      peerConnectionWatchdogMode: 'diagnose',
     },
     notificationsEnabled: true,
     theme,

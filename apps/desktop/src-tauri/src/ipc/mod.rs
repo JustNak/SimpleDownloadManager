@@ -11,8 +11,8 @@ use crate::storage::{
     HostRegistrationDiagnostics, HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
-    focus_job_in_main_window, focus_main_window, show_download_prompt_window, show_progress_window,
-    DOWNLOAD_PROMPT_WINDOW,
+    focus_job_in_main_window, focus_main_window, show_download_prompt_window,
+    show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1362,7 +1362,18 @@ async fn run_prompt_download(
                     emit_snapshot(app, &result.snapshot);
                     if result.status == EnqueueStatus::Queued {
                         if show_progress {
-                            let _ = show_progress_window(app, &result.job_id);
+                            let transfer_kind = result
+                                .snapshot
+                                .jobs
+                                .iter()
+                                .find(|job| job.id == result.job_id)
+                                .map(|job| job.transfer_kind)
+                                .unwrap_or_default();
+                            let _ = show_progress_window_for_transfer_kind(
+                                app,
+                                &result.job_id,
+                                transfer_kind,
+                            );
                         }
                         schedule_downloads(app.clone(), state);
                     }

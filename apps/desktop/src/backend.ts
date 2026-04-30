@@ -54,6 +54,7 @@ const defaultSettings: Settings = {
     uploadLimitKibPerSecond: 0,
     portForwardingEnabled: false,
     portForwardingPort: 42000,
+    peerConnectionWatchdogMode: 'diagnose',
   },
   notificationsEnabled: true,
   theme: 'system',
@@ -141,6 +142,7 @@ let mockState: DesktopSnapshot = {
         peers: 28,
         seeds: 112,
         uploadedBytes: 483183820,
+        fetchedBytes: 3481846579,
         ratio: 0.18,
       },
     },
@@ -817,6 +819,12 @@ export async function cancelDownloadPrompt(id: string): Promise<void> {
 
 export async function openProgressWindow(id: string): Promise<void> {
   if (!isTauriRuntime()) {
+    const job = mockState.jobs.find((candidate) => candidate.id === id);
+    if (job && job.transferKind === 'torrent') {
+      window.open(popupUrl(`?window=torrent-progress&jobId=${encodeURIComponent(id)}`), `torrent-progress-${id}`, 'width=720,height=520');
+      return;
+    }
+
     window.open(popupUrl(`?window=download-progress&jobId=${encodeURIComponent(id)}`), `download-progress-${id}`, 'width=460,height=280');
     return;
   }

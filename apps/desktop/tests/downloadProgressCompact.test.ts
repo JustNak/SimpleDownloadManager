@@ -7,8 +7,8 @@ const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import
 
 assert.match(
   progressSource,
-  /job\.transferKind === 'torrent'\s*\?\s*<TorrentingProgressView/,
-  'download progress controller should dispatch torrent jobs to TorrentingProgressView',
+  /return <CompactDownloadProgressView \{\.\.\.sharedProps\} \/>/,
+  'download progress controller should render only the normal compact progress view',
 );
 
 assert.match(
@@ -17,16 +17,10 @@ assert.match(
   'normal downloads should render through a named compact progress view',
 );
 
-assert.match(
+assert.doesNotMatch(
   progressSource,
-  /function TorrentingProgressView/,
-  'torrent jobs should render through a dedicated TorrentingProgressView',
-);
-
-assert.match(
-  progressSource,
-  /<ProgressShell title="Torrenting">[\s\S]*function ProgressShell[\s\S]*<PopupTitlebar title=\{title\} \/>/,
-  'torrent progress popup should be titled Torrenting',
+  /TorrentingProgressView|<ProgressShell title="Torrenting">/,
+  'torrent-specific progress UI should move out of the shared download progress window',
 );
 
 assert.match(
@@ -41,58 +35,10 @@ assert.match(
   'compact download view should keep speed, ETA, and size metrics visible in a flat metric rail',
 );
 
-assert.match(
-  progressSource,
-  /<MetricRail>[\s\S]*label="Speed"[\s\S]*formatTime\(progressMetrics\.timeRemaining\)[\s\S]*label="Peers"[\s\S]*<\/MetricRail>/,
-  'torrenting view should show download speed, ETA, and peers in a flat metric rail',
-);
-
-assert.match(
-  progressSource,
-  /const metadataPending = isTorrentMetadataPending\(job\)/,
-  'torrenting view should branch on metadata-pending state',
-);
-
-assert.match(
-  progressSource,
-  /\{!metadataPending \? \([\s\S]*<ProgressStrip[\s\S]*<MetricRail>[\s\S]*label="Peers"[\s\S]*<\/MetricRail>[\s\S]*\) : null\}/,
-  'torrenting view should hide progress and metrics while metadata is pending',
-);
-
-assert.match(
-  progressSource,
-  /progressLabel=\{`Verified \$\{progress\.toFixed\(0\)\}%`\}[\s\S]*bytesText=\{verifiedTorrentText\(job\)\}/,
-  'torrenting progress strip should label checked torrent bytes as verified content',
-);
-
-assert.match(
-  progressSource,
-  /<TorrentDownloadedRow job=\{job\} \/>/,
-  'torrenting popup should show a separate peer-fetched downloaded byte row',
-);
-
-assert.match(
-  progressSource,
-  /function TorrentDownloadedRow[\s\S]*torrentFetchedText\(job\)[\s\S]*Downloaded/,
-  'torrent downloaded row should use the cumulative peer-fetched byte counter',
-);
-
-assert.match(
-  progressSource,
-  /function verifiedTorrentText[\s\S]*formatTorrentVerifiedSize\(job, formatBytes\)/,
-  'torrent verified text should make progress-byte semantics explicit',
-);
-
-assert.match(
-  progressSource,
-  /function torrentFetchedText[\s\S]*formatTorrentFetchedSize\(job, formatBytes\)/,
-  'torrent fetched text should show peer-downloaded bytes instead of checked progress bytes',
-);
-
 assert.doesNotMatch(
   progressSource,
   /label="Uploaded"|label="Ratio"/,
-  'torrenting popup should omit upload and ratio metrics while downloading',
+  'normal download progress popup should not include torrent upload or ratio metrics',
 );
 
 assert.doesNotMatch(
@@ -113,56 +59,20 @@ assert.match(
   'progress popup metric rail should use softer boxed-in shading and a muted top separator',
 );
 
-assert.match(
-  progressSource,
-  /torrentDisplayName\(job\)/,
-  'torrenting view should use torrent metadata display names',
-);
-
-assert.match(
-  progressSource,
-  /Finding metadata/,
-  'torrenting view should preserve the metadata-pending state label',
-);
-
-assert.match(
-  progressSource,
-  /isTorrentSeedingRestore/,
-  'torrenting progress popup should detect prior seeding restores',
-);
-
-assert.match(
-  progressSource,
-  /isTorrentCheckingFiles/,
-  'torrenting progress popup should detect stale verification recovery checks',
-);
-
-assert.match(
-  progressSource,
-  /Checking files/,
-  'torrenting progress popup should label stale verification recovery as checking files',
-);
-
-assert.match(
-  progressSource,
-  /Restoring seeding/,
-  'torrenting progress popup should label prior seeding jobs as restoring seeding instead of downloading',
-);
-
 assert.doesNotMatch(
   progressSource,
   /\$\{torrentPeerCount\(job\)\}\/--|\/--/,
-  'torrenting popup should display peer count without an unknown denominator',
+  'normal download progress popup should not render torrent peer ratios',
 );
 
 assert.match(
   windowsSource,
   /width:\s*460\.0,[\s\S]*height:\s*280\.0,/,
-  'single progress popup geometry should keep the compact width but provide 280px height for torrent controls',
+  'download progress popup geometry should stay compact for normal downloads',
 );
 
 assert.match(
   backendSource,
   /window\.open\(\s*popupUrl\(`\?window=download-progress&jobId=\$\{encodeURIComponent\(id\)\}`\),\s*`download-progress-\$\{id\}`,\s*'width=460,height=280'\s*\)/,
-  'browser fallback progress popup should use the same compact 460x280 geometry',
+  'browser fallback download progress popup should keep the compact 460x280 geometry',
 );

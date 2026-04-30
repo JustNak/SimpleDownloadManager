@@ -16,7 +16,7 @@ use crate::storage::{
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
-    show_download_prompt_window, show_progress_window, DOWNLOAD_PROMPT_WINDOW,
+    show_download_prompt_window, show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -657,8 +657,19 @@ pub async fn cancel_download_prompt(
 }
 
 #[tauri::command]
-pub async fn open_progress_window(app: AppHandle, id: String) -> Result<(), String> {
-    show_progress_window(&app, &id)
+pub async fn open_progress_window(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<(), String> {
+    let snapshot = state.snapshot().await;
+    let transfer_kind = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == id)
+        .map(|job| job.transfer_kind)
+        .unwrap_or_default();
+    show_progress_window_for_transfer_kind(&app, &id, transfer_kind)
 }
 
 #[tauri::command]
@@ -868,7 +879,18 @@ pub async fn test_extension_handoff(
                         emit_snapshot(&worker_app, &result.snapshot);
                         if result.status == EnqueueStatus::Queued {
                             if show_progress {
-                                let _ = show_progress_window(&worker_app, &result.job_id);
+                                let transfer_kind = result
+                                    .snapshot
+                                    .jobs
+                                    .iter()
+                                    .find(|job| job.id == result.job_id)
+                                    .map(|job| job.transfer_kind)
+                                    .unwrap_or_default();
+                                let _ = show_progress_window_for_transfer_kind(
+                                    &worker_app,
+                                    &result.job_id,
+                                    transfer_kind,
+                                );
                             }
                             schedule_downloads(worker_app, worker_state);
                         }

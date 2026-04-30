@@ -552,6 +552,19 @@ export function SettingsPage({
               <span className="text-sm text-muted-foreground">port</span>
             </div>
           </FieldRow>
+
+          <FieldRow label="Peer Connection Watchdog" description="Diagnose slow peer swarms." tooltip="Experimental auto tuning can refresh and re-add a torrent session once when peer health stays poor.">
+            <select
+              id="torrentPeerConnectionWatchdogMode"
+              value={formData.torrent.peerConnectionWatchdogMode}
+              onChange={(event) => updateTorrentSettings({ peerConnectionWatchdogMode: event.target.value as Settings['torrent']['peerConnectionWatchdogMode'] })}
+              disabled={!formData.torrent.enabled}
+              className="h-9 w-56 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="diagnose">Diagnose only</option>
+              <option value="experimental">Experimental auto tuning</option>
+            </select>
+          </FieldRow>
         </SettingsPanel>
         </section>
 

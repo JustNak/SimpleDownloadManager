@@ -4,6 +4,7 @@ import App from './App';
 import { BatchProgressWindow } from './BatchProgressWindow';
 import { DownloadProgressWindow } from './DownloadProgressWindow';
 import { DownloadPromptWindow } from './DownloadPromptWindow';
+import { TorrentProgressWindow } from './TorrentProgressWindow';
 import './app.css';
 
 const windowMode = new URLSearchParams(window.location.search).get('window');
@@ -12,6 +13,8 @@ const RootComponent =
     ? DownloadPromptWindow
     : windowMode === 'batch-progress'
       ? BatchProgressWindow
+    : windowMode === 'torrent-progress'
+      ? TorrentProgressWindow
     : windowMode === 'download-progress'
       ? DownloadProgressWindow
       : App;

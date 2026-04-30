@@ -11,6 +11,11 @@ assert.ok(
 );
 
 assert.ok(
+  capability.windows?.includes('torrent-progress-*'),
+  'torrent progress popup windows should be covered by the default capability',
+);
+
+assert.ok(
   capability.windows?.includes('batch-progress-*'),
   'batch progress popup windows should be covered by the default capability',
 );

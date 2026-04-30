@@ -15,6 +15,7 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 0,
     portForwardingEnabled: false,
     portForwardingPort: 42000,
+    peerConnectionWatchdogMode: 'diagnose',
   },
   'torrent settings should default to enabled unlimited seeding with upload cap and port forwarding disabled',
 );
@@ -41,6 +42,7 @@ assert.deepEqual(
     uploadLimitKibPerSecond: -1,
     portForwardingEnabled: true,
     portForwardingPort: 80,
+    peerConnectionWatchdogMode: 'invalid',
   }, 'E:\\Downloads'),
   {
     enabled: true,
@@ -51,6 +53,7 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 0,
     portForwardingEnabled: true,
     portForwardingPort: 42000,
+    peerConnectionWatchdogMode: 'diagnose',
   },
   'torrent settings should clamp invalid numeric limits',
 );
@@ -62,6 +65,7 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 10_000_000,
     portForwardingEnabled: true,
     portForwardingPort: 43000,
+    peerConnectionWatchdogMode: 'experimental',
   }),
   {
     enabled: true,
@@ -72,6 +76,7 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 1_048_576,
     portForwardingEnabled: true,
     portForwardingPort: 43000,
+    peerConnectionWatchdogMode: 'experimental',
   },
   'torrent settings should keep valid forwarding ports and cap upload limit to a safe maximum',
 );
