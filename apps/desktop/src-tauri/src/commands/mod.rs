@@ -1,7 +1,6 @@
 use crate::download::{
     apply_torrent_runtime_settings, forget_known_torrent_sessions,
-    forget_torrent_session_for_restart, probe_browser_handoff_access, schedule_downloads,
-    schedule_external_reseed,
+    forget_torrent_session_for_restart, schedule_downloads, schedule_external_reseed,
 };
 use crate::lifecycle::sync_autostart_setting;
 use crate::native_host::gather_host_registration_diagnostics;
@@ -30,9 +29,11 @@ pub use simple_download_manager_desktop_core::contracts::{
     ProgressBatchContext, ProgressBatchKind,
 };
 use simple_download_manager_desktop_core::state::TorrentSessionCacheClearResult;
+use simple_download_manager_desktop_core::transfer::probe_browser_handoff_access;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{plugin::PermissionState, AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -347,6 +348,25 @@ impl ShellServices for TauriShellServices {
     ) -> BackendFuture<'_, ()> {
         let app = self.app.clone();
         Box::pin(async move { run_test_extension_handoff(app, state, prompts).await })
+    }
+
+    fn notify(&self, title: String, body: String) -> BackendFuture<'_, ()> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            let notification = app.notification();
+            if matches!(notification.permission_state(), Ok(PermissionState::Prompt)) {
+                let _ = notification.request_permission();
+            }
+
+            if matches!(
+                notification.permission_state(),
+                Ok(PermissionState::Granted)
+            ) {
+                let _ = notification.builder().title(title).body(body).show();
+            }
+
+            Ok(())
+        })
     }
 }
 

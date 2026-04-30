@@ -4709,9 +4709,12 @@ name = "simple-download-manager-desktop-core"
 version = "0.3.52-alpha"
 dependencies = [
  "dirs",
+ "futures-util",
  "percent-encoding",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "url",
 ]

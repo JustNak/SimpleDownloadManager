@@ -1,4 +1,4 @@
-use crate::commands::emit_snapshot;
+use crate::commands::{emit_snapshot, TauriShellServices};
 use crate::state::{
     should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
     TorrentRuntimeSnapshot, WorkerControl,
@@ -22,6 +22,7 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use simple_download_manager_desktop_core::transfer as core_transfer;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -731,11 +732,39 @@ impl From<String> for DownloadError {
     }
 }
 
+impl From<core_transfer::DownloadError> for DownloadError {
+    fn from(error: core_transfer::DownloadError) -> Self {
+        Self {
+            category: error.category,
+            message: error.message,
+            retryable: error.retryable,
+        }
+    }
+}
+
+impl From<core_transfer::DownloadOutcome> for DownloadOutcome {
+    fn from(outcome: core_transfer::DownloadOutcome) -> Self {
+        match outcome {
+            core_transfer::DownloadOutcome::Completed => DownloadOutcome::Completed,
+            core_transfer::DownloadOutcome::Paused => DownloadOutcome::Paused,
+            core_transfer::DownloadOutcome::Canceled => DownloadOutcome::Canceled,
+        }
+    }
+}
+
 async fn run_download(
     app: &AppHandle,
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
+    if task.transfer_kind == TransferKind::Http {
+        let shell = core_transfer::TransferShell::new(TauriShellServices::new(app.clone()));
+        return core_transfer::run_http_download(&shell, state, task)
+            .await
+            .map(DownloadOutcome::from)
+            .map_err(DownloadError::from);
+    }
+
     let max_retry_attempts = state.auto_retry_attempts().await;
     let mut retry_attempts = 0;
 

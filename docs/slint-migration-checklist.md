@@ -8,7 +8,7 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | --- | --- | ---: | --- |
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
 | Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
-| Phase 2: Transfer Engines And IPC | In Progress | 25% | Native-host protocol and handoff run through `desktop-core`; HTTP and torrent engines remain in Tauri for now. |
+| Phase 2: Transfer Engines And IPC | In Progress | 45% | Native-host protocol, handoff, and HTTP transfer behavior run through `desktop-core`; torrent orchestration remains in Tauri. |
 | Phase 3: Slint Runtime Shell | In Progress | 5% | Slint app loads real state, receives events, and invokes backend commands. |
 | Phase 4: Slint UI Feature Parity | Not Started | 5% | Every current React/Tauri workflow has a Slint equivalent. |
 | Phase 5: Packaging And Updater Transition | Not Started | 5% | Signed Slint installer and updater transition are smoke-tested. |
@@ -52,17 +52,17 @@ Acceptance:
 
 ## Phase 2: Transfer Engines And IPC
 
-Status: **In Progress, 25%**
+Status: **In Progress, 45%**
 
 Tasks:
-- [ ] Move HTTP scheduling and download engine into `desktop-core`.
+- [x] Move HTTP transfer engine into `desktop-core`; keep Tauri worker dispatch as the runtime adapter for now.
 - [ ] Move torrent engine orchestration into `desktop-core`.
 - [x] Move native pipe request validation and browser handoff handling into `desktop-core`.
 - [ ] Replace direct Tauri notifications/events with `ShellServices` and `DesktopEvent`.
 - [ ] Preserve retry, pause, resume, integrity, torrent seeding, external reseed, and duplicate handling semantics.
 
 Acceptance:
-- [ ] Core tests cover HTTP jobs without starting Tauri.
+- [x] Core tests cover HTTP jobs without starting Tauri.
 - [ ] Core tests cover torrent jobs without starting Tauri.
 - [x] Core tests cover prompt and IPC handoff without starting Tauri.
 - [x] Tauri still works through adapters.

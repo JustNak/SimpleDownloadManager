@@ -16,7 +16,6 @@ for (const forbiddenDependency of [
   'rfd',
   'winreg',
   'windows-sys',
-  'reqwest',
   'librqbit',
 ]) {
   assert.doesNotMatch(
