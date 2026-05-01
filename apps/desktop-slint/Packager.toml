@@ -1,8 +1,10 @@
+name = "simple-download-manager"
 productName = "Simple Download Manager"
 version = "0.3.52-alpha"
 identifier = "com.myapp.downloadmanager"
 formats = ["nsis"]
 outDir = "../../release/slint/bundle/nsis"
+binariesDir = "target/release"
 beforePackagingCommand = "cargo build --release --manifest-path Cargo.toml"
 icons = ["../desktop/src-tauri/icons/icon.ico"]
 
@@ -12,7 +14,7 @@ icons = ["../desktop/src-tauri/icons/icon.ico"]
 template = "nsis/installer.nsi"
 
 [[binaries]]
-path = "../../target/release/simple-download-manager.exe"
+path = "simple-download-manager.exe"
 main = true
 
 [[resources]]

@@ -17,6 +17,64 @@ function Invoke-ReleaseCommand {
   }
 }
 
+function Resolve-MakensisPath {
+  $command = Get-Command -Name 'makensis' -ErrorAction SilentlyContinue
+  if ($null -ne $command) {
+    return $command.Source
+  }
+
+  $candidateRoots = @(
+    ${env:ProgramFiles(x86)},
+    $env:ProgramFiles
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  foreach ($root in $candidateRoots) {
+    foreach ($relativePath in @('NSIS\Bin\makensis.exe', 'NSIS\makensis.exe')) {
+      $candidate = Join-Path $root $relativePath
+      if (Test-Path $candidate) {
+        return $candidate
+      }
+    }
+  }
+
+  return $null
+}
+
+function Add-ExecutableDirectoryToPath {
+  param([string]$ExecutablePath)
+
+  $directory = Split-Path -Parent $ExecutablePath
+  if (($env:PATH -split ';') -notcontains $directory) {
+    $env:PATH = "$directory;$env:PATH"
+  }
+}
+
+function Import-LegacyTauriSigningEnvironment {
+  $defaultSigningKeyPath = Join-Path $env:USERPROFILE '.simple-download-manager\tauri-updater.key'
+  $signingKeyPath = $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PATH
+
+  if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+    if ([string]::IsNullOrWhiteSpace($signingKeyPath)) {
+      $signingKeyPath = $defaultSigningKeyPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($signingKeyPath) -and (Test-Path -LiteralPath $signingKeyPath)) {
+      $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $signingKeyPath -Raw
+    }
+  }
+
+  if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+    if (
+      -not [string]::IsNullOrWhiteSpace($env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH) -and
+      (Test-Path -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH)
+    ) {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH -Raw).TrimEnd()
+    } else {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+    }
+  }
+}
+
 function Test-ReleasePrerequisites {
   $missing = @()
 
@@ -24,9 +82,14 @@ function Test-ReleasePrerequisites {
     $missing += 'cargo-packager (install with: cargo install cargo-packager --locked)'
   }
 
-  if ($null -eq (Get-Command -Name 'makensis' -ErrorAction SilentlyContinue)) {
+  $makensisPath = Resolve-MakensisPath
+  if ($null -eq $makensisPath) {
     $missing += 'NSIS makensis (install NSIS and make makensis available on PATH)'
+  } else {
+    Add-ExecutableDirectoryToPath $makensisPath
   }
+
+  Import-LegacyTauriSigningEnvironment
 
   if ([string]::IsNullOrWhiteSpace($env:CARGO_PACKAGER_SIGN_PRIVATE_KEY)) {
     if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {

@@ -14,6 +14,82 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 }
 $InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
 
+function Resolve-MakensisPath {
+  $command = Get-Command 'makensis' -ErrorAction SilentlyContinue
+  if ($null -ne $command) {
+    return $command.Source
+  }
+
+  $candidateRoots = @(
+    ${env:ProgramFiles(x86)},
+    $env:ProgramFiles
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  foreach ($root in $candidateRoots) {
+    foreach ($relativePath in @('NSIS\Bin\makensis.exe', 'NSIS\makensis.exe')) {
+      $candidate = Join-Path $root $relativePath
+      if (Test-Path $candidate) {
+        return $candidate
+      }
+    }
+  }
+
+  return $null
+}
+
+function Add-ExecutableDirectoryToPath {
+  param([string]$ExecutablePath)
+
+  $directory = Split-Path -Parent $ExecutablePath
+  if (($env:PATH -split ';') -notcontains $directory) {
+    $env:PATH = "$directory;$env:PATH"
+  }
+}
+
+function Import-LegacyTauriSigningEnvironment {
+  $defaultSigningKeyPath = Join-Path $env:USERPROFILE '.simple-download-manager\tauri-updater.key'
+  $signingKeyPath = $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PATH
+
+  if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+    if ([string]::IsNullOrWhiteSpace($signingKeyPath)) {
+      $signingKeyPath = $defaultSigningKeyPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($signingKeyPath) -and (Test-Path -LiteralPath $signingKeyPath)) {
+      $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -LiteralPath $signingKeyPath -Raw
+    }
+  }
+
+  if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
+    if (
+      -not [string]::IsNullOrWhiteSpace($env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH) -and
+      (Test-Path -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH)
+    ) {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content -LiteralPath $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH -Raw).TrimEnd()
+    } else {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+    }
+  }
+}
+
+function Resolve-ExecutablePath {
+  param([string]$Command)
+
+  $resolved = Get-Command $Command -ErrorAction SilentlyContinue
+  if ($null -ne $resolved -and -not [string]::IsNullOrWhiteSpace($resolved.Source)) {
+    if ([System.IO.Path]::GetExtension($resolved.Source) -ieq '.ps1') {
+      $cmdShim = [System.IO.Path]::ChangeExtension($resolved.Source, '.cmd')
+      if (Test-Path -LiteralPath $cmdShim) {
+        return $cmdShim
+      }
+    }
+
+    return $resolved.Source
+  }
+
+  return $Command
+}
+
 function Test-SlintSmokePrerequisites {
   param([switch]$RequireBuildTools)
 
@@ -22,9 +98,13 @@ function Test-SlintSmokePrerequisites {
     if (-not (Get-Command 'cargo-packager' -ErrorAction SilentlyContinue)) {
       $missing.Add('cargo-packager (install with: cargo install cargo-packager --locked)')
     }
-    if (-not (Get-Command 'makensis' -ErrorAction SilentlyContinue)) {
+    $makensisPath = Resolve-MakensisPath
+    if ($null -eq $makensisPath) {
       $missing.Add('makensis (install NSIS and ensure makensis.exe is on PATH)')
+    } else {
+      Add-ExecutableDirectoryToPath $makensisPath
     }
+    Import-LegacyTauriSigningEnvironment
     if ([string]::IsNullOrWhiteSpace($env:CARGO_PACKAGER_SIGN_PRIVATE_KEY) -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
       $missing.Add('CARGO_PACKAGER_SIGN_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY')
     }
@@ -44,7 +124,7 @@ function Invoke-SmokeCommand {
 
   Write-Host "> $Command $($Arguments -join ' ')"
   $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-  $startInfo.FileName = $Command
+  $startInfo.FileName = Resolve-ExecutablePath $Command
   $startInfo.WorkingDirectory = $WorkingDirectory
   $startInfo.UseShellExecute = $false
   foreach ($argument in $Arguments) {

@@ -151,6 +151,14 @@ Note: Phase 5E made the updater transition explicit: `scripts/updater-release.mj
 
 Note: Phase 5F added `scripts/smoke-phase5-slint.ps1` as the explicit orchestration entrypoint for check-only, build, publish dry-run, installer smoke, and full Slint smoke modes, plus `scripts/slint-phase5-smoke-report.mjs` for normalized passed/blocked/failed JSON reports under `release/slint/smoke/`. The local check-only run currently writes a blocked report because `cargo-packager`, `makensis`, signing env, and generated Slint installer/feed artifacts are missing; real installer/updater smoke tasks remain unchecked.
 
+Note: Phase 5G ran the signed Slint release smoke orchestrator in check-only mode on 2026-05-01. The latest report is `blocked`: `cargo-packager`, `makensis`, signing env, the Slint installer, installer signature, transition feed, and Slint-native feed are missing locally. Phase 5 remains at 89%, and the signed installer plus install/uninstall/updater smoke tasks remain unchecked until those prerequisites exist and `npm run smoke:phase5:slint:full` writes a `passed` report.
+
+Note: Phase 5H installed `cargo-packager` and NSIS locally, then updated the Slint release/smoke scripts to detect standard NSIS install paths when `makensis.exe` is not on PATH yet. The latest check-only report is still `blocked` because signing env plus generated Slint installer/signature/feed artifacts are missing. Phase 5 remains at 89%, and full smoke must wait for `CARGO_PACKAGER_SIGN_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY`.
+
+Note: Phase 5I reran the completion gate in check-only mode on 2026-05-01. The latest report remains `blocked`: signing env, the Slint installer, installer signature, transition feed, and Slint-native feed are missing. `cargo-packager`, NSIS, and GitHub CLI are no longer blockers, but full smoke was intentionally not run without signing material.
+
+Note: Phase 5J reran the secret-safe signing handoff gate in check-only mode on 2026-05-01. The latest report remains `blocked`: `CARGO_PACKAGER_SIGN_PRIVATE_KEY` or `TAURI_SIGNING_PRIVATE_KEY`, the Slint installer, installer signature, transition feed, and Slint-native feed are missing. Full smoke was not run because signing material is still absent from the process environment.
+
 Acceptance:
 - [ ] A signed Slint installer can replace the Tauri installer.
 - [ ] Existing installed Tauri alpha users can update into the Slint build.

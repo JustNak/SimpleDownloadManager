@@ -5,16 +5,20 @@
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
-Name "{{productName}}"
-OutFile "{{outFile}}"
-InstallDir "$LOCALAPPDATA\Programs\{{productName}}"
+Name "{{product_name}}"
+OutFile "{{out_file}}"
+InstallDir "$LOCALAPPDATA\Programs\{{product_name}}"
 RequestExecutionLevel user
+Unicode true
 ShowInstDetails show
 ShowUninstDetails show
 
-!define PRODUCT_NAME "{{productName}}"
-!define MAIN_BINARY "{{mainBinaryName}}"
+!define PRODUCT_NAME "{{product_name}}"
+!define VERSION "{{version}}"
+!define MAIN_BINARY_NAME "{{main_binary_name}}"
+!define MAIN_BINARY_SOURCE "{{main_binary_path}}"
 !define UNINSTALLER "uninstall.exe"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -24,22 +28,48 @@ ShowUninstDetails show
 
 Section "-Application"
   SetOutPath "$INSTDIR"
-  {{#each files}}
-  File /r "{{this}}"
+
+  File "${MAIN_BINARY_SOURCE}"
+
+  {{#each resources_dirs}}
+  CreateDirectory "$INSTDIR\{{this}}"
+  {{/each}}
+
+  {{#each resources}}
+  File /a "/oname={{this}}" "{{@key}}"
+  {{/each}}
+
+  {{#each binaries}}
+  File /a "/oname={{this}}" "{{@key}}"
   {{/each}}
 
   WriteUninstaller "$INSTDIR\${UNINSTALLER}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "DisplayName" "${PRODUCT_NAME}"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}" "UninstallString" "$INSTDIR\${UNINSTALLER}"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "${PRODUCT_NAME}"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayIcon" "$\"$INSTDIR\${MAIN_BINARY_NAME}.exe$\""
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" "$\"$INSTDIR$\""
+  WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\${UNINSTALLER}$\""
+  WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" "1"
+  WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" "1"
 
   Call RegisterNativeHost
 SectionEnd
 
 Section "Uninstall"
   Call un.UnregisterNativeHost
+  Delete "$INSTDIR\${MAIN_BINARY_NAME}.exe"
+  {{#each resources}}
+  Delete "$INSTDIR\{{this}}"
+  {{/each}}
+  {{#each binaries}}
+  Delete "$INSTDIR\{{this}}"
+  {{/each}}
   Delete "$INSTDIR\${UNINSTALLER}"
+  {{#each resources_dirs}}
+  RMDir /REBOOTOK "$INSTDIR\{{this}}"
+  {{/each}}
   RMDir /r "$INSTDIR"
-  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
+  DeleteRegKey HKCU "${UNINSTKEY}"
 SectionEnd
 
 Function RegisterNativeHost

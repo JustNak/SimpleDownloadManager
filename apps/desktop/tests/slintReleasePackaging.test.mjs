@@ -8,7 +8,7 @@ const slintSmokeScript = await readFile('scripts/smoke-release-slint.ps1', 'utf8
 const slintPhase5SmokeScript = await readFile('scripts/smoke-phase5-slint.ps1', 'utf8');
 const slintPublishScript = await readFile('scripts/publish-updater-alpha-slint.mjs', 'utf8');
 const slintPhase5ReportHelper = await readFile('scripts/slint-phase5-smoke-report.mjs', 'utf8');
-const packagerConfig = await readFile('apps/desktop-slint/Packager.toml', 'utf8');
+const packagerConfig = await readFile('apps/desktop-slint/packager.toml', 'utf8');
 const slintNsisTemplate = await readFile('apps/desktop-slint/nsis/installer.nsi', 'utf8');
 
 assert.equal(
@@ -79,6 +79,12 @@ assert.match(
 
 assert.match(
   slintReleaseScript,
+  /Resolve-MakensisPath[\s\S]*NSIS\\Bin\\makensis\.exe[\s\S]*NSIS\\makensis\.exe/,
+  'Slint release script should find NSIS from standard install paths when makensis is not yet on PATH',
+);
+
+assert.match(
+  slintReleaseScript,
   /Test-ReleasePrerequisites/,
   'Slint release script should aggregate prerequisite checks before any builds',
 );
@@ -93,6 +99,18 @@ assert.match(
   slintReleaseScript,
   /TAURI_SIGNING_PRIVATE_KEY/,
   'Slint release script should fall back to the existing Tauri signing key env',
+);
+
+assert.match(
+  slintReleaseScript,
+  /\.simple-download-manager\\tauri-updater\.key/,
+  'Slint release script should also use the legacy Tauri default signing key file',
+);
+
+assert.match(
+  slintReleaseScript,
+  /SDM_TAURI_SIGNING_PRIVATE_KEY_PATH/,
+  'Slint release script should honor the existing custom Tauri signing key path env',
 );
 
 assert.match(
@@ -163,8 +181,26 @@ assert.match(
 
 assert.match(
   slintSmokeScript,
+  /Resolve-ExecutablePath[\s\S]*Get-Command[\s\S]*ChangeExtension\(\$resolved\.Source, '\.cmd'\)[\s\S]*\$startInfo\.FileName = Resolve-ExecutablePath \$Command/,
+  'Slint smoke script should resolve npm/node/pwsh through Get-Command and prefer .cmd shims before ProcessStartInfo launches them',
+);
+
+assert.match(
+  slintSmokeScript,
   /cargo-packager[\s\S]*makensis[\s\S]*CARGO_PACKAGER_SIGN_PRIVATE_KEY/,
   'Slint smoke script should report missing cargo-packager, makensis, and signing env clearly',
+);
+
+assert.match(
+  slintSmokeScript,
+  /\.simple-download-manager\\tauri-updater\.key/,
+  'Slint smoke script should use the same default Tauri signing key file as the release script',
+);
+
+assert.match(
+  slintSmokeScript,
+  /Resolve-MakensisPath[\s\S]*NSIS\\Bin\\makensis\.exe[\s\S]*NSIS\\makensis\.exe/,
+  'Slint installer smoke script should find NSIS from standard install paths when makensis is not yet on PATH',
 );
 
 assert.match(
@@ -227,6 +263,12 @@ assert.match(
   'Phase 5 smoke orchestrator should delegate installer registry mutation to the Slint installer smoke script',
 );
 
+assert.match(
+  slintPhase5SmokeScript,
+  /Resolve-ExecutablePath[\s\S]*Get-Command[\s\S]*ChangeExtension\(\$resolved\.Source, '\.cmd'\)[\s\S]*\$startInfo\.FileName = Resolve-ExecutablePath \$Command/,
+  'Phase 5 smoke orchestrator should resolve npm/node/pwsh through Get-Command and prefer .cmd shims before ProcessStartInfo launches them',
+);
+
 assert.doesNotMatch(
   slintPhase5SmokeScript,
   /release:windows(?!"?:slint)|build-release\.ps1|publish-updater-alpha\.mjs/,
@@ -243,6 +285,24 @@ assert.match(
   slintPhase5SmokeScript,
   /slint-phase5-smoke-report\.mjs/,
   'Phase 5 smoke orchestrator should write structured reports through the report helper',
+);
+
+assert.match(
+  slintPhase5SmokeScript,
+  /Resolve-MakensisPath[\s\S]*NSIS\\Bin\\makensis\.exe[\s\S]*NSIS\\makensis\.exe/,
+  'Phase 5 smoke orchestrator should find NSIS from standard install paths when makensis is not yet on PATH',
+);
+
+assert.match(
+  slintPhase5SmokeScript,
+  /\.simple-download-manager\\tauri-updater\.key/,
+  'Phase 5 smoke orchestrator should use the same default Tauri signing key file as the legacy release path',
+);
+
+assert.match(
+  slintPhase5SmokeScript,
+  /\$requireArtifactsBeforeRun\s*=\s*-not \$Build/,
+  'Phase 5 full smoke should not require installer artifacts before the build step runs',
 );
 
 assert.match(
@@ -283,6 +343,12 @@ assert.match(
 
 assert.match(
   packagerConfig,
+  /name\s*=\s*"simple-download-manager"/,
+  'Slint packager config should set name explicitly so cargo-packager 0.11.x does not drop the config during discovery',
+);
+
+assert.match(
+  packagerConfig,
   /productName\s*=\s*"Simple Download Manager"/,
   'Slint packager config should keep the product name stable',
 );
@@ -303,6 +369,12 @@ assert.match(
   packagerConfig,
   /beforePackagingCommand\s*=\s*"cargo build --release --manifest-path Cargo\.toml"/,
   'Slint packager config should use a manifest path relative to apps/desktop-slint',
+);
+
+assert.match(
+  packagerConfig,
+  /binariesDir\s*=\s*"target\/release"/,
+  'Slint packager config should resolve the Slint binary from the crate release target directory',
 );
 
 assert.doesNotMatch(
