@@ -16,7 +16,7 @@ for (const phase of [
   'Phase 3: Slint Runtime Shell',
   'Phase 4: Slint UI Feature Parity',
   'Phase 5: Packaging And Updater Transition',
-  'Phase 6: Cutover And Tauri Removal',
+  'Phase 6: Slint Primary Cutover With Tauri Retained',
 ]) {
   assert.match(tracker, new RegExp(`^## ${phase}$`, 'm'), `${phase} should be tracked`);
 }
@@ -38,3 +38,41 @@ assert.match(
   /## Recurring Verification Gates/,
   'migration tracker should include recurring verification gates',
 );
+
+assert.match(
+  tracker,
+  /\| Phase 2: Transfer Engines And IPC \| Done \| 100% \|/,
+  'Phase 2 should be consistently marked complete after transfer extraction',
+);
+
+assert.match(
+  tracker,
+  /## Phase 4: Slint UI Feature Parity[\s\S]*Status: \*\*Done, 100%\*\*/,
+  'Phase 4 section should match the complete table status',
+);
+
+assert.match(
+  tracker,
+  /legacy\/reference desktop app/i,
+  'Phase 6 should explicitly keep Tauri as a legacy/reference desktop app',
+);
+
+assert.match(
+  tracker,
+  /legacy Tauri remains buildable/i,
+  'Phase 6 acceptance should keep legacy Tauri buildable',
+);
+
+for (const forbiddenRemovalPlan of [
+  /Cutover And Tauri Removal/,
+  /Tauri is removed/i,
+  /Remove React\/Vite\/Tailwind/i,
+  /Remove Tauri config/i,
+  /Tauri-specific tests/i,
+]) {
+  assert.doesNotMatch(
+    tracker,
+    forbiddenRemovalPlan,
+    `tracker should not plan Tauri deletion: ${forbiddenRemovalPlan}`,
+  );
+}

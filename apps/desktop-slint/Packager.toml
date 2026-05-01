@@ -1,0 +1,24 @@
+productName = "Simple Download Manager"
+version = "0.3.52-alpha"
+identifier = "com.myapp.downloadmanager"
+formats = ["nsis"]
+outDir = "../../release/slint/bundle/nsis"
+beforePackagingCommand = "cargo build --release --manifest-path Cargo.toml"
+icons = ["../desktop/src-tauri/icons/icon.ico"]
+
+# Slint updater metadata is written next to this output as release/slint/latest-alpha-slint.json.
+
+[nsis]
+template = "nsis/installer.nsi"
+
+[[binaries]]
+path = "../../target/release/simple-download-manager.exe"
+main = true
+
+[[resources]]
+src = "../../release/slint/staging/simple-download-manager-native-host.exe"
+target = "simple-download-manager-native-host.exe"
+
+[[resources]]
+src = "../../release/slint/staging/resources/install"
+target = "resources/install"

@@ -17,6 +17,10 @@ export function windowsInstallerName(version) {
   return `Simple Download Manager_${version}_x64-setup.exe`;
 }
 
+export function slintWindowsInstallerName(version) {
+  return `simple-download-manager_${version}_x64-setup.exe`;
+}
+
 export function updaterAssetUrl(repository, releaseTag, assetName) {
   return `https://github.com/${repository}/releases/download/${releaseTag}/${encodeURIComponent(assetName)}`;
 }
@@ -60,9 +64,12 @@ export function createSlintLatestAlphaJson(options) {
 
 export function updaterReleasePaths(root, version, {
   metadataFilename = updaterMetadataFilename,
+  releaseSubdir = '',
+  installerName = windowsInstallerName(version),
 } = {}) {
-  const releaseRoot = path.join(root, 'release');
-  const installerName = windowsInstallerName(version);
+  const releaseRoot = releaseSubdir
+    ? path.join(root, 'release', releaseSubdir)
+    : path.join(root, 'release');
   const installerPath = path.join(releaseRoot, 'bundle', 'nsis', installerName);
   return {
     releaseRoot,
@@ -79,12 +86,18 @@ export async function writeLatestAlphaJson({
   releaseTag = updaterReleaseTag,
   metadataFilename = updaterMetadataFilename,
   createMetadata = createLatestAlphaJson,
+  installerNameForVersion = windowsInstallerName,
+  releaseSubdir = '',
   notes = 'Alpha update',
   pubDate = new Date().toISOString(),
 } = {}) {
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   const version = packageJson.version;
-  const paths = updaterReleasePaths(root, version, { metadataFilename });
+  const paths = updaterReleasePaths(root, version, {
+    metadataFilename,
+    releaseSubdir,
+    installerName: installerNameForVersion(version),
+  });
   const signature = (await readFile(paths.signaturePath, 'utf8')).trim();
   const metadata = createMetadata({
     version,
@@ -102,13 +115,38 @@ export function writeSlintLatestAlphaJson(options = {}) {
     ...options,
     metadataFilename: slintUpdaterMetadataFilename,
     createMetadata: createSlintLatestAlphaJson,
+    installerNameForVersion: slintWindowsInstallerName,
+    releaseSubdir: options.releaseSubdir ?? 'slint',
   });
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+export function writeSlintTransitionLatestAlphaJson(options = {}) {
+  return writeLatestAlphaJson({
+    ...options,
+    metadataFilename: updaterMetadataFilename,
+    createMetadata: createLatestAlphaJson,
+    installerNameForVersion: slintWindowsInstallerName,
+    releaseSubdir: options.releaseSubdir ?? 'slint',
+  });
+}
+
+export async function writeSlintReleaseFeeds(options = {}) {
+  const transition = await writeSlintTransitionLatestAlphaJson(options);
+  const native = await writeSlintLatestAlphaJson(options);
+  return { transition, native };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const __filename = fileURLToPath(import.meta.url);
   const root = path.resolve(path.dirname(__filename), '..');
   const notes = process.env.SDM_UPDATER_NOTES || 'Alpha update';
-  const { paths } = await writeLatestAlphaJson({ root, notes });
-  console.log(`Updater metadata written to ${paths.metadataPath}`);
+  const isSlint = process.argv.includes('--slint');
+  if (isSlint) {
+    const { transition, native } = await writeSlintReleaseFeeds({ root, notes });
+    console.log(`Updater metadata written to ${transition.paths.metadataPath}`);
+    console.log(`Updater metadata written to ${native.paths.metadataPath}`);
+  } else {
+    const { paths } = await writeLatestAlphaJson({ root, notes });
+    console.log(`Updater metadata written to ${paths.metadataPath}`);
+  }
 }

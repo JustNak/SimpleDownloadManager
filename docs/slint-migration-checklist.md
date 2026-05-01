@@ -8,11 +8,11 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | --- | --- | ---: | --- |
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
 | Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
-| Phase 2: Transfer Engines And IPC | In Progress | 90% | Native-host protocol, handoff, HTTP/torrent transfer, and scheduler/worker handling live in `desktop-core`; Tauri remains the app shell. |
+| Phase 2: Transfer Engines And IPC | Done | 100% | Native-host protocol, handoff, HTTP/torrent transfer, and scheduler/worker handling live in `desktop-core`; Tauri remains the app shell. |
 | Phase 3: Slint Runtime Shell | Done | 100% | Slint app loads real state, handles backend events, invokes basic queue commands, accepts native-host wake/focus requests, persists main-window geometry, delegates Windows shell effects, supports tray open/exit plus close-to-tray, owns basic prompt/progress popup lifecycle, handles notifications plus native-host registration repair, has a basic cargo-packager updater UI, and matches Tauri main-window startup/close/minimize behavior. |
 | Phase 4: Slint UI Feature Parity | Done | 100% | Every current React/Tauri workflow has a Slint equivalent. |
-| Phase 5: Packaging And Updater Transition | Not Started | 5% | Signed Slint installer and updater transition are smoke-tested. |
-| Phase 6: Cutover And Tauri Removal | Blocked | 0% | Slint is the only desktop product and Tauri is removed. |
+| Phase 5: Packaging And Updater Transition | In Progress | 89% | Parallel Slint NSIS packaging path, isolated staging, native-host installer hooks, release preflight, artifact verification, smoke harnesses, transition/native updater feeds, and Phase 5 smoke reporting exist; real installer and updater smoke tests remain. |
+| Phase 6: Slint Primary Cutover With Tauri Retained | Not Started | 0% | Slint becomes the primary shipped product while Tauri remains as a legacy/reference desktop app. |
 
 ## Phase 0: Baseline And Migration Spine
 
@@ -106,7 +106,7 @@ Note: Slint keeps a hidden `MainWindow` instance for tray mode instead of destro
 
 ## Phase 4: Slint UI Feature Parity
 
-Status: **In Progress, 96%**
+Status: **Done, 100%**
 
 Tasks:
 - [x] Main queue with search, sorting, categories, torrent views, and selection.
@@ -126,37 +126,52 @@ Acceptance:
 
 ## Phase 5: Packaging And Updater Transition
 
-Status: **Not Started, 5%**
+Status: **In Progress, 89%**
 
 Tasks:
-- [ ] Add `cargo-packager` NSIS configuration.
-- [ ] Include native-host sidecar and install resources.
-- [ ] Port installer postinstall/uninstall native-host registration hooks.
-- [ ] Update release scripts to build extension, native host, Slint app, installer, signatures, and updater metadata.
-- [ ] Preserve `latest-alpha.json` for the first Tauri-to-Slint update.
-- [ ] Add `latest-alpha-slint.json` for Slint-native updates.
+- [x] Add parallel `cargo-packager` NSIS configuration for the Slint app.
+- [x] Include native-host sidecar and install resources in the Slint packaging config.
+- [x] Add a parallel Slint release script while preserving the existing Tauri release script.
+- [x] Add isolated Slint release staging for install resources and the native-host sidecar.
+- [x] Port installer postinstall/uninstall native-host registration hooks into the Slint NSIS template.
+- [x] Add Slint release signing/preflight validation and cargo-packager signing env fallback.
+- [x] Add Slint release artifact verification for installer, signature, staged resources, extension zips, and updater metadata.
+- [x] Add Slint installer smoke harness for install/uninstall and native-host registration checks.
+- [x] Generate a Tauri-compatible Slint transition `latest-alpha.json` alongside `latest-alpha-slint.json`.
+- [x] Add explicit Slint updater publish dry-run validation for installer, signature, transition feed, and Slint-native feed.
+- [x] Add Phase 5 Slint smoke orchestrator and report helper.
+- [ ] Smoke-test the Slint release script through installer/signature generation.
+- [x] Preserve `latest-alpha.json` for the Tauri legacy release path.
+- [x] Add `latest-alpha-slint.json` generation for Slint-native updates.
 - [ ] Smoke-test install, uninstall, native-host registration, and updater transition.
+
+Note: Phase 5D added `scripts/smoke-release-slint.ps1` and `scripts/smoke-release-slint.mjs` so the Slint installer can be installed into an isolated temp directory, inspected for app/sidecar/resources/native-host manifests, checked against HKCU Chrome/Edge/Firefox native-host registry entries, uninstalled, and verified for registry cleanup. The actual installer smoke task remains unchecked because local `cargo-packager`, `makensis`, and signing prerequisites are not available in this environment.
+
+Note: Phase 5E made the updater transition explicit: `scripts/updater-release.mjs --slint` now writes both `release/slint/latest-alpha.json` for existing Tauri alpha clients and `release/slint/latest-alpha-slint.json` for Slint-native clients. `scripts/publish-updater-alpha-slint.mjs` validates and uploads only Slint artifacts to the existing `updater-alpha` release, with a dry-run mode for local checks. Real updater transition smoke remains unchecked until a signed installer exists.
+
+Note: Phase 5F added `scripts/smoke-phase5-slint.ps1` as the explicit orchestration entrypoint for check-only, build, publish dry-run, installer smoke, and full Slint smoke modes, plus `scripts/slint-phase5-smoke-report.mjs` for normalized passed/blocked/failed JSON reports under `release/slint/smoke/`. The local check-only run currently writes a blocked report because `cargo-packager`, `makensis`, signing env, and generated Slint installer/feed artifacts are missing; real installer/updater smoke tasks remain unchecked.
 
 Acceptance:
 - [ ] A signed Slint installer can replace the Tauri installer.
 - [ ] Existing installed Tauri alpha users can update into the Slint build.
 - [ ] Native host remains registered for Chrome, Edge, and Firefox.
 
-## Phase 6: Cutover And Tauri Removal
+## Phase 6: Slint Primary Cutover With Tauri Retained
 
-Status: **Blocked, 0%**
+Status: **Not Started, 0%**
 
 Tasks:
-- [ ] Make root desktop build/release scripts point to Slint as the desktop product.
-- [ ] Run full parity acceptance suite.
-- [ ] Remove React/Vite/Tailwind desktop code after tests are ported.
-- [ ] Remove Tauri config, capabilities, schemas, plugins, and Tauri-specific tests.
+- [ ] Make root desktop build/release defaults point to Slint as the primary desktop product after Phase 5 smoke tests pass.
+- [ ] Run full parity acceptance suite for the Slint primary product.
+- [ ] Keep `apps/desktop` and `apps/desktop/src-tauri` intact as the retained legacy/reference desktop app.
+- [ ] Keep legacy Tauri build and test commands available.
+- [ ] Document how to build and run Slint primary versus Tauri legacy.
 - [ ] Keep extension and native-host contracts unchanged.
 
 Acceptance:
-- [ ] Slint app is the only desktop product.
-- [ ] Full test, clippy, build, installer, and updater smoke gates pass.
-- [ ] No Tauri runtime dependency remains in the shipped desktop app.
+- [ ] Slint app is the primary shipped desktop product.
+- [ ] Full test, clippy, build, installer, and updater smoke gates pass for Slint while retained Tauri legacy checks remain available.
+- [ ] No Tauri runtime dependency remains in the shipped Slint desktop app; legacy Tauri remains buildable.
 
 ## Public Interfaces To Track
 
@@ -188,5 +203,5 @@ Final parity gates:
 
 - Windows-first remains the target.
 - Behavioral parity matters more than pixel parity.
-- Tauri stays compiling until Slint reaches functional parity.
+- Tauri remains preserved as a retained legacy/reference desktop app after Slint becomes primary.
 - Existing dirty files are user-owned unless explicitly included in migration work.

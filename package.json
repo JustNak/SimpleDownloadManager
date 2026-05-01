@@ -21,7 +21,12 @@
     "package:firefox-test": "npm run build:extension && node ./scripts/package-firefox-test.mjs",
     "prepare:release": "node ./scripts/prepare-release.mjs",
     "publish:updater-alpha": "node ./scripts/publish-updater-alpha.mjs",
+    "publish:updater-alpha:slint": "node ./scripts/publish-updater-alpha-slint.mjs",
     "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
+    "release:windows:tauri": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
+    "release:windows:slint": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release-slint.ps1\"",
+    "smoke:phase5:slint": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"./scripts/smoke-phase5-slint.ps1\" -CheckOnly",
+    "smoke:phase5:slint:full": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"./scripts/smoke-phase5-slint.ps1\" -Full",
     "typecheck": "npm run typecheck --workspace @myapp/protocol && npm run typecheck --workspace @myapp/extension && npm run typecheck --workspace @myapp/desktop"
   },
   "devDependencies": {
