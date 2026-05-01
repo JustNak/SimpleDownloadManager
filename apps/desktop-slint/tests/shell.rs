@@ -1,5 +1,5 @@
 use simple_download_manager_desktop_core::storage::{
-    HostRegistrationEntry, HostRegistrationStatus, MainWindowState,
+    HostRegistrationEntry, HostRegistrationStatus, MainWindowState, StartupLaunchMode,
 };
 use simple_download_manager_desktop_slint::shell::{
     main_window, native_host, notifications, popups, tray, windows, WindowRole, WindowSize,
@@ -51,6 +51,7 @@ fn main_window_config_preserves_tauri_dimensions_and_title() {
     let config = main_window::main_window_config();
 
     assert_eq!(config.title, "Simple Download Manager");
+    assert!(config.frameless);
     assert_eq!(
         config.preferred_size,
         WindowSize {
@@ -64,6 +65,72 @@ fn main_window_config_preserves_tauri_dimensions_and_title() {
             width: 1360,
             height: 720
         }
+    );
+}
+
+#[test]
+fn main_window_titlebar_contract_matches_tauri_shell() {
+    assert_eq!(main_window::TITLEBAR_HEIGHT, 44);
+    assert_eq!(main_window::TITLEBAR_TITLE, "Download Manager");
+    assert_eq!(
+        main_window::titlebar_action_for_drag_band(false),
+        main_window::TitlebarAction::StartDrag
+    );
+    assert_eq!(
+        main_window::titlebar_action_for_drag_band(true),
+        main_window::TitlebarAction::ToggleMaximize
+    );
+    assert_eq!(
+        main_window::titlebar_action_for_control(main_window::TitlebarControl::Minimize),
+        main_window::TitlebarAction::Minimize
+    );
+    assert_eq!(
+        main_window::titlebar_action_for_control(main_window::TitlebarControl::Maximize),
+        main_window::TitlebarAction::ToggleMaximize
+    );
+    assert_eq!(
+        main_window::titlebar_action_for_control(main_window::TitlebarControl::Close),
+        main_window::TitlebarAction::CloseToTray
+    );
+}
+
+#[test]
+fn main_window_startup_visibility_matches_tauri_policy() {
+    assert_eq!(main_window::AUTOSTART_ARG, "--autostart");
+    assert_eq!(main_window::POST_UPDATE_ARG, "--post-update");
+
+    assert!(main_window::is_autostart_launch_from_args([
+        "simple-download-manager",
+        "--autostart",
+    ]));
+    assert!(!main_window::is_autostart_launch_from_args([
+        "simple-download-manager",
+        "--flag=--autostart",
+    ]));
+    assert!(main_window::is_post_update_launch_from_args([
+        "simple-download-manager",
+        "--post-update",
+    ]));
+    assert!(!main_window::is_post_update_launch_from_args([
+        "simple-download-manager",
+        "--not-post-update",
+    ]));
+
+    assert_eq!(
+        main_window::startup_window_action(false, false, StartupLaunchMode::Tray),
+        main_window::StartupWindowAction::Show
+    );
+    assert_eq!(
+        main_window::startup_window_action(true, false, StartupLaunchMode::Tray),
+        main_window::StartupWindowAction::KeepHidden
+    );
+    assert_eq!(
+        main_window::startup_window_action(true, false, StartupLaunchMode::Open),
+        main_window::StartupWindowAction::Show
+    );
+    assert_eq!(
+        main_window::startup_window_action(true, true, StartupLaunchMode::Tray),
+        main_window::StartupWindowAction::Show
     );
 }
 

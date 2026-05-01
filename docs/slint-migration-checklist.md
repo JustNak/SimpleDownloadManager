@@ -9,8 +9,8 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | Phase 0: Baseline And Migration Spine | In Progress | 95% | Migration crates, scripts, tracker, and current tests are green. |
 | Phase 1: Core Backend Extraction | In Progress | 78% | `desktop-core` owns state, settings, diagnostics orchestration, and command backend behavior. |
 | Phase 2: Transfer Engines And IPC | In Progress | 90% | Native-host protocol, handoff, HTTP/torrent transfer, and scheduler/worker handling live in `desktop-core`; Tauri remains the app shell. |
-| Phase 3: Slint Runtime Shell | In Progress | 96% | Slint app loads real state, handles backend events, invokes basic queue commands, accepts native-host wake/focus requests, persists main-window geometry, delegates low-risk Windows shell effects, supports tray open/exit plus close-to-tray, owns basic prompt/progress popup lifecycle, handles notifications plus native-host registration repair, and has a basic cargo-packager updater UI. |
-| Phase 4: Slint UI Feature Parity | Not Started | 5% | Every current React/Tauri workflow has a Slint equivalent. |
+| Phase 3: Slint Runtime Shell | Done | 100% | Slint app loads real state, handles backend events, invokes basic queue commands, accepts native-host wake/focus requests, persists main-window geometry, delegates Windows shell effects, supports tray open/exit plus close-to-tray, owns basic prompt/progress popup lifecycle, handles notifications plus native-host registration repair, has a basic cargo-packager updater UI, and matches Tauri main-window startup/close/minimize behavior. |
+| Phase 4: Slint UI Feature Parity | In Progress | 55% | Every current React/Tauri workflow has a Slint equivalent. |
 | Phase 5: Packaging And Updater Transition | Not Started | 5% | Signed Slint installer and updater transition are smoke-tested. |
 | Phase 6: Cutover And Tauri Removal | Blocked | 0% | Slint is the only desktop product and Tauri is removed. |
 
@@ -73,7 +73,7 @@ Acceptance:
 
 ## Phase 3: Slint Runtime Shell
 
-Status: **In Progress, 96%**
+Status: **Done, 100%**
 
 Tasks:
 - [x] Compile external `.slint` files with `slint-build`.
@@ -87,6 +87,7 @@ Tasks:
 - [x] Implement prompt and progress window lifecycle.
 - [x] Implement Slint notifications and native-host registration diagnostics/repair.
 - [x] Implement updater UI.
+- [x] Implement Slint frameless main-window titlebar controls, startup visibility policy, focus/restore, and close/minimize lifecycle.
 
 Acceptance:
 - [x] Slint app loads persisted state.
@@ -99,21 +100,25 @@ Acceptance:
 - [x] Prompt and progress popup lifecycle is wired in Slint with fixed Tauri-compatible sizing.
 - [x] Slint shell services cover native notifications and native-host registration diagnostics/repair.
 - [x] Slint update checks, install delegation, and install-progress UI updates are wired through `cargo-packager-updater`.
-- [ ] Window sizing and close/minimize behavior match current Tauri behavior.
+- [x] Window sizing and close/minimize behavior match current Tauri behavior.
+
+Note: Slint keeps a hidden `MainWindow` instance for tray mode instead of destroying and recreating a Tauri webview. This is accepted as functional parity for Phase 3 because the user-visible startup, restore, minimize, and close-to-tray behavior matches the current Tauri shell.
 
 ## Phase 4: Slint UI Feature Parity
 
-Status: **Not Started, 5%**
+Status: **In Progress, 55%**
 
 Tasks:
-- [ ] Main queue with search, sorting, categories, torrent views, and selection.
-- [ ] Command bar actions: pause, resume, cancel, retry, restart, remove, delete, rename, clear completed.
-- [ ] Add-download and batch-add flows.
+- [x] Main queue with search, sorting, categories, torrent views, and selection.
+- [x] Command bar actions: pause, resume, cancel, retry, restart, remove, delete, rename, clear completed.
+- [x] Add-download and batch-add flows.
 - [ ] Settings with draft/discard/save, torrent settings, extension settings, startup, theme, updates.
 - [ ] Diagnostics report and host repair flow.
 - [ ] Download prompt duplicate handling.
 - [ ] HTTP, torrent, and batch progress windows.
 - [ ] Toasts and shell error presentation.
+
+Note: Phase 4A added the Slint queue view-model, sidebar counts, search, sort toggles, category/torrent views, selection state, basic aggregate queue commands, and controller/runtime tests. Phase 4B added delete confirmation, rename, open/reveal, progress popup, browser swap, and React-matching row action enablement. Phase 4C added Slint add-download flows for single HTTP downloads, torrents, multi-download batches, and bulk archive batches. Settings, diagnostics, prompt duplicate UX, progress-window polish, and toasts remain for later Phase 4 slices.
 
 Acceptance:
 - [ ] Every current user workflow available in React/Tauri has a Slint equivalent.

@@ -6042,6 +6042,7 @@ name = "simple-download-manager-desktop-slint"
 version = "0.3.52-alpha"
 dependencies = [
  "cargo-packager-updater",
+ "i-slint-backend-winit",
  "notify-rust",
  "rfd",
  "serde_json",

@@ -1,4 +1,4 @@
-import { Button, HorizontalBox, ListView, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, HorizontalBox, LineEdit, ListView, TextEdit, VerticalBox } from "std-widgets.slint";
 
 export struct JobRow {
     id: string,
@@ -6,6 +6,40 @@ export struct JobRow {
     state: string,
     progress: float,
     bytes-text: string,
+    selected: bool,
+    transfer-kind: string,
+    created-text: string,
+    size-text: string,
+    speed-text: string,
+    status-detail: string,
+    status-tone: string,
+    can-pause: bool,
+    can-resume: bool,
+    can-cancel: bool,
+    can-retry: bool,
+    can-restart: bool,
+    can-remove: bool,
+    can-show-progress: bool,
+    target-path: string,
+    delete-label: string,
+    can-open: bool,
+    can-reveal: bool,
+    can-swap-to-browser: bool,
+    can-rename: bool,
+}
+
+export struct QueueNavItem {
+    id: string,
+    label: string,
+    count: int,
+    active: bool,
+    section: string,
+}
+
+export struct DeletePromptJob {
+    id: string,
+    filename: string,
+    target-path: string,
 }
 
 export struct PromptDetails {
@@ -38,13 +72,59 @@ export struct BatchDetails {
 
 export component MainWindow inherits Window {
     title: "Simple Download Manager";
+    no-frame: true;
     preferred-width: 1360px;
     preferred-height: 860px;
     min-width: 1360px;
     min-height: 720px;
 
     in property <[JobRow]> jobs;
+    in property <[QueueNavItem]> nav-items;
+    in property <bool> main-window-maximized: false;
     in property <string> status-text: "No downloads";
+    in property <string> queue-view-id: "all";
+    in property <string> queue-title: "All downloads";
+    in property <string> queue-subtitle: "0 items";
+    in property <string> queue-footer-text: "0 downloads";
+    in property <string> queue-empty-text: "No downloads in this view.";
+    in property <string> queue-search-query: "";
+    in property <string> queue-sort-column: "date";
+    in property <string> queue-sort-direction: "asc";
+    in property <int> queue-selected-count: 0;
+    in property <bool> queue-all-visible-selected: false;
+    in property <bool> queue-has-visible-selection: false;
+    in property <bool> add-download-visible: false;
+    in property <string> add-download-mode: "single";
+    in property <string> add-download-single-url: "";
+    in property <string> add-download-torrent-url: "";
+    in property <string> add-download-single-sha256: "";
+    in property <string> add-download-multi-urls: "";
+    in property <string> add-download-bulk-urls: "";
+    in property <string> add-download-archive-name: "bulk-download.zip";
+    in property <bool> add-download-combine-bulk: true;
+    in property <string> add-download-submit-label: "Start Download";
+    in property <string> add-download-ready-label: "0 links ready";
+    in property <string> add-download-ready-detail: "Queue only";
+    in property <string> add-download-error-text: "";
+    in property <bool> add-download-can-submit: false;
+    in property <bool> add-download-submitting: false;
+    in property <bool> add-download-importing: false;
+    in property <bool> delete-prompt-visible: false;
+    in property <string> delete-prompt-title: "";
+    in property <string> delete-prompt-description: "";
+    in property <string> delete-prompt-checkbox-label: "";
+    in property <string> delete-prompt-confirm-label: "";
+    in property <string> delete-prompt-selected-summary: "";
+    in property <string> delete-prompt-missing-path-label: "";
+    in property <bool> delete-prompt-delete-from-disk: false;
+    in property <[DeletePromptJob]> delete-prompt-jobs;
+    in property <bool> rename-prompt-visible: false;
+    in property <string> rename-job-id: "";
+    in property <string> rename-original-filename: "";
+    in property <string> rename-base-name: "";
+    in property <string> rename-extension: "";
+    in property <string> rename-preview-filename: "";
+    in property <bool> rename-can-confirm: false;
     in property <string> update-status-text: "Updates idle";
     in property <string> update-current-version: "";
     in property <string> update-new-version: "";
@@ -55,185 +135,769 @@ export component MainWindow inherits Window {
     in property <bool> update-can-check: true;
     in property <bool> update-can-install: false;
     callback add-download-requested();
+    callback add-download-mode-changed(string);
+    callback add-download-single-url-changed(string);
+    callback add-download-torrent-url-changed(string);
+    callback add-download-single-sha256-changed(string);
+    callback add-download-multi-urls-changed(string);
+    callback add-download-bulk-urls-changed(string);
+    callback add-download-archive-name-changed(string);
+    callback add-download-combine-bulk-changed(bool);
+    callback add-download-import-torrent-requested();
+    callback add-download-submit-requested();
+    callback add-download-cancelled();
+    callback view-change-requested(string);
+    callback search-query-changed(string);
+    callback sort-column-requested(string);
+    callback job-selection-requested(string);
+    callback job-selection-toggled(string, bool);
+    callback select-all-visible-requested(bool);
+    callback clear-selection-requested();
+    callback request-delete-job(string);
+    callback request-delete-selected();
+    callback delete-from-disk-changed(bool);
+    callback delete-confirmed();
+    callback delete-cancelled();
+    callback request-rename-job(string);
+    callback rename-base-name-changed(string);
+    callback rename-extension-changed(string);
+    callback rename-confirmed();
+    callback rename-cancelled();
+    callback open-job-file-requested(string);
+    callback reveal-job-requested(string);
+    callback swap-failed-to-browser-requested(string);
     callback pause-job-requested(string);
     callback resume-job-requested(string);
     callback cancel-job-requested(string);
+    callback retry-job-requested(string);
+    callback restart-job-requested(string);
+    callback pause-all-requested();
+    callback resume-all-requested();
+    callback retry-failed-requested();
+    callback clear-completed-requested();
     callback open-progress-requested(string);
     callback check-update-requested();
     callback install-update-requested();
+    callback minimize-main-window-requested();
+    callback toggle-main-window-maximize-requested();
+    callback close-main-window-requested();
+    callback start-main-window-drag-requested();
+    callback titlebar-double-clicked();
 
     VerticalBox {
-        padding: 18px;
-        spacing: 12px;
-
-        HorizontalBox {
-            spacing: 10px;
-
-            Text {
-                text: "Simple Download Manager";
-                font-size: 22px;
-                font-weight: 700;
-                horizontal-stretch: 1;
-            }
-
-            Button {
-                text: "Add";
-                clicked => {
-                    root.add-download-requested();
-                }
-            }
-        }
-
-        Text {
-            text: root.status-text;
-            color: #586174;
-            font-size: 13px;
-        }
+        spacing: 0px;
 
         Rectangle {
-            border-color: #d5dae3;
-            border-width: 1px;
-            border-radius: 6px;
-            background: #ffffff;
-            height: 96px;
+            height: 44px;
             horizontal-stretch: 1;
+            background: #111827;
 
             HorizontalBox {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
+                spacing: 0px;
+                padding-left: 0px;
+                padding-right: 0px;
 
-                VerticalBox {
-                    horizontal-stretch: 1;
-                    spacing: 4px;
+                Rectangle {
+                    width: 220px;
+                    background: #0f766e;
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.start-main-window-drag-requested();
+                            }
+                        }
+                        double-clicked => {
+                            root.titlebar-double-clicked();
+                        }
+                    }
 
                     Text {
-                        text: root.update-status-text;
+                        text: "Download Manager";
+                        color: #ffffff;
                         font-size: 14px;
                         font-weight: 700;
-                        color: #111827;
+                        vertical-alignment: center;
+                        x: 16px;
+                        y: 0px;
+                        width: parent.width - 32px;
+                        height: parent.height;
                         overflow: elide;
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: #111827;
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.start-main-window-drag-requested();
+                            }
+                        }
+                        double-clicked => {
+                            root.titlebar-double-clicked();
+                        }
                     }
 
                     Text {
-                        text: "Current " + root.update-current-version + " | Latest " + root.update-new-version;
-                        font-size: 11px;
-                        color: #586174;
+                        text: "Simple Download Manager";
+                        color: #f9fafb;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                        x: 14px;
+                        y: 0px;
+                        width: parent.width - 28px;
+                        height: parent.height;
                         overflow: elide;
-                    }
-
-                    Text {
-                        text: root.update-body;
-                        font-size: 11px;
-                        color: #374151;
-                        overflow: elide;
-                        visible: root.update-body != "";
-                    }
-
-                    Text {
-                        text: root.update-progress-text;
-                        font-size: 11px;
-                        color: #2563eb;
-                        overflow: elide;
-                        visible: root.update-progress-text != "";
-                    }
-
-                    Text {
-                        text: root.update-error-text;
-                        font-size: 11px;
-                        color: #b91c1c;
-                        overflow: elide;
-                        visible: root.update-error-text != "";
                     }
                 }
 
                 Button {
-                    text: "Check";
-                    enabled: root.update-can-check;
+                    text: "_";
+                    width: 48px;
                     clicked => {
-                        root.check-update-requested();
+                        root.minimize-main-window-requested();
                     }
                 }
 
                 Button {
-                    text: "Install";
-                    enabled: root.update-can-install;
+                    text: root.main-window-maximized ? "Restore" : "Max";
+                    width: 72px;
                     clicked => {
-                        root.install-update-requested();
+                        root.toggle-main-window-maximize-requested();
+                    }
+                }
+
+                Button {
+                    text: "X";
+                    width: 48px;
+                    clicked => {
+                        root.close-main-window-requested();
                     }
                 }
             }
         }
 
+        VerticalBox {
+            padding: 18px;
+            spacing: 12px;
+
+            HorizontalBox {
+                spacing: 10px;
+
+                Text {
+                    text: root.queue-title;
+                    font-size: 22px;
+                    font-weight: 700;
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: "Add";
+                    clicked => {
+                        root.add-download-requested();
+                    }
+                }
+            }
+
+            Text {
+                text: root.status-text + " | " + root.queue-subtitle;
+                color: #586174;
+                font-size: 13px;
+            }
+
+            Rectangle {
+                border-color: #d5dae3;
+                border-width: 1px;
+                border-radius: 6px;
+                background: #ffffff;
+                height: 96px;
+                horizontal-stretch: 1;
+
+                HorizontalBox {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 12px;
+
+                    VerticalBox {
+                        horizontal-stretch: 1;
+                        spacing: 4px;
+
+                        Text {
+                            text: root.update-status-text;
+                            font-size: 14px;
+                            font-weight: 700;
+                            color: #111827;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: "Current " + root.update-current-version + " | Latest " + root.update-new-version;
+                            font-size: 11px;
+                            color: #586174;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            text: root.update-body;
+                            font-size: 11px;
+                            color: #374151;
+                            overflow: elide;
+                            visible: root.update-body != "";
+                        }
+
+                        Text {
+                            text: root.update-progress-text;
+                            font-size: 11px;
+                            color: #2563eb;
+                            overflow: elide;
+                            visible: root.update-progress-text != "";
+                        }
+
+                        Text {
+                            text: root.update-error-text;
+                            font-size: 11px;
+                            color: #b91c1c;
+                            overflow: elide;
+                            visible: root.update-error-text != "";
+                        }
+                    }
+
+                    Button {
+                        text: "Check";
+                        enabled: root.update-can-check;
+                        clicked => {
+                            root.check-update-requested();
+                        }
+                    }
+
+                    Button {
+                        text: "Install";
+                        enabled: root.update-can-install;
+                        clicked => {
+                            root.install-update-requested();
+                        }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                Rectangle {
+                    width: 220px;
+                    border-color: #d5dae3;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    background: #ffffff;
+
+                    ListView {
+                        viewport-width: parent.width;
+                        viewport-height: parent.height;
+
+                        for item in root.nav-items: Rectangle {
+                            height: 34px;
+                            width: parent.width;
+                            background: item.active ? #e0f2fe : #ffffff;
+
+                            TouchArea {
+                                clicked => {
+                                    root.view-change-requested(item.id);
+                                }
+                            }
+
+                            HorizontalBox {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+
+                                Text {
+                                    text: item.label;
+                                    font-size: 12px;
+                                    font-weight: item.active ? 700 : 400;
+                                    color: item.active ? #075985 : #1f2937;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: item.count;
+                                    font-size: 11px;
+                                    color: #586174;
+                                    horizontal-alignment: right;
+                                    width: 34px;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                VerticalBox {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    Rectangle {
+                        height: 42px;
+                        horizontal-stretch: 1;
+
+                        HorizontalBox {
+                            spacing: 8px;
+
+                            LineEdit {
+                                text: root.queue-search-query;
+                                placeholder-text: "Search downloads";
+                                horizontal-stretch: 1;
+                                edited => {
+                                    root.search-query-changed(self.text);
+                                }
+                            }
+
+                            Button {
+                                text: root.queue-sort-column == "name" ? "Name " + root.queue-sort-direction : "Name";
+                                clicked => {
+                                    root.sort-column-requested("name");
+                                }
+                            }
+
+                            Button {
+                                text: root.queue-sort-column == "date" ? "Date " + root.queue-sort-direction : "Date";
+                                clicked => {
+                                    root.sort-column-requested("date");
+                                }
+                            }
+
+                            Button {
+                                text: root.queue-sort-column == "size" ? "Size " + root.queue-sort-direction : "Size";
+                                clicked => {
+                                    root.sort-column-requested("size");
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 42px;
+                        horizontal-stretch: 1;
+
+                        HorizontalBox {
+                            spacing: 8px;
+
+                            Button {
+                                text: root.queue-all-visible-selected ? "Clear visible" : "Select visible";
+                                clicked => {
+                                    root.select-all-visible-requested(!root.queue-all-visible-selected);
+                                }
+                            }
+
+                            Button {
+                                text: "Clear selection";
+                                enabled: root.queue-selected-count > 0;
+                                clicked => {
+                                    root.clear-selection-requested();
+                                }
+                            }
+
+                            Text {
+                                text: root.queue-selected-count + " selected";
+                                color: #586174;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            Button { text: "Pause all"; clicked => { root.pause-all-requested(); } }
+                            Button { text: "Resume all"; clicked => { root.resume-all-requested(); } }
+                            Button { text: "Retry failed"; clicked => { root.retry-failed-requested(); } }
+                            Button { text: "Clear done"; clicked => { root.clear-completed-requested(); } }
+                            Button {
+                                text: "Delete selected";
+                                enabled: root.queue-selected-count > 0;
+                                clicked => {
+                                    root.request-delete-selected();
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        border-color: #d5dae3;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        background: #ffffff;
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+
+                        Text {
+                            text: root.queue-empty-text;
+                            visible: root.jobs.length == 0;
+                            color: #586174;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+
+                        ListView {
+                            viewport-width: parent.width;
+                            viewport-height: parent.height;
+
+                            for job in root.jobs: Rectangle {
+                                height: 92px;
+                                width: parent.width;
+                                background: job.selected ? #eef6ff : #ffffff;
+
+                                TouchArea {
+                                    clicked => {
+                                        root.job-selection-requested(job.id);
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 10px;
+
+                                    Button {
+                                        text: job.selected ? "On" : "Off";
+                                        width: 46px;
+                                        clicked => {
+                                            root.job-selection-toggled(job.id, !job.selected);
+                                        }
+                                    }
+
+                                    VerticalBox {
+                                        horizontal-stretch: 1;
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: job.filename;
+                                            font-size: 15px;
+                                            color: #111827;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: job.state + " | " + job.bytes-text + " | " + job.transfer-kind;
+                                            font-size: 12px;
+                                            color: job.status-tone == "attention" ? #b91c1c : #586174;
+                                            overflow: elide;
+                                        }
+
+                                        Text {
+                                            text: job.size-text + (job.speed-text == "" ? "" : " | " + job.speed-text) + (job.status-detail == "" ? "" : " | " + job.status-detail);
+                                            font-size: 11px;
+                                            color: #6b7280;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    Button { text: "Pause"; enabled: job.can-pause; clicked => { root.pause-job-requested(job.id); } }
+                                    Button { text: "Resume"; enabled: job.can-resume; clicked => { root.resume-job-requested(job.id); } }
+                                    Button { text: "Cancel"; enabled: job.can-cancel; clicked => { root.cancel-job-requested(job.id); } }
+                                    Button { text: "Retry"; enabled: job.can-retry; clicked => { root.retry-job-requested(job.id); } }
+                                    Button { text: "Restart"; enabled: job.can-restart; clicked => { root.restart-job-requested(job.id); } }
+                                    Button { text: "Details"; enabled: job.can-show-progress; clicked => { root.open-progress-requested(job.id); } }
+                                    Button { text: "Open"; enabled: job.can-open; clicked => { root.open-job-file-requested(job.id); } }
+                                    Button { text: "Folder"; enabled: job.can-reveal; clicked => { root.reveal-job-requested(job.id); } }
+                                    Button { text: "Swap"; visible: job.can-swap-to-browser; clicked => { root.swap-failed-to-browser-requested(job.id); } }
+                                    Button { text: "Rename"; enabled: job.can-rename; clicked => { root.request-rename-job(job.id); } }
+                                    Button { text: job.delete-label; enabled: job.can-remove; clicked => { root.request-delete-job(job.id); } }
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.queue-footer-text;
+                        color: #586174;
+                        font-size: 12px;
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.add-download-visible;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+
         Rectangle {
+            width: 600px;
+            height: 520px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
             border-color: #d5dae3;
             border-width: 1px;
             border-radius: 6px;
             background: #ffffff;
-            horizontal-stretch: 1;
-            vertical-stretch: 1;
 
-            ListView {
-                viewport-width: parent.width;
-                viewport-height: parent.height;
+            VerticalBox {
+                padding: 18px;
+                spacing: 10px;
 
-                for job in root.jobs: Rectangle {
-                    height: 72px;
-                    width: parent.width;
-                    background: #ffffff;
+                HorizontalBox {
+                    spacing: 8px;
 
-                    HorizontalBox {
-                        padding-left: 14px;
-                        padding-right: 14px;
-                        spacing: 12px;
+                    VerticalBox {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text { text: "New Download"; font-size: 16px; font-weight: 700; color: #111827; }
+                        Text { text: "Add a file, torrent, link list, or bulk archive."; font-size: 12px; color: #586174; }
+                    }
 
-                        VerticalBox {
-                            horizontal-stretch: 1;
-                            spacing: 4px;
+                    Button { text: "Close"; clicked => { root.add-download-cancelled(); } }
+                }
 
-                            Text {
-                                text: job.filename;
-                                font-size: 15px;
-                                color: #111827;
-                                overflow: elide;
-                            }
+                HorizontalBox {
+                    spacing: 6px;
+                    Button { text: "File"; checked: root.add-download-mode == "single"; clicked => { root.add-download-mode-changed("single"); } }
+                    Button { text: "Torrent"; checked: root.add-download-mode == "torrent"; clicked => { root.add-download-mode-changed("torrent"); } }
+                    Button { text: "Multi"; checked: root.add-download-mode == "multi"; clicked => { root.add-download-mode-changed("multi"); } }
+                    Button { text: "Bulk"; checked: root.add-download-mode == "bulk"; clicked => { root.add-download-mode-changed("bulk"); } }
+                }
 
-                            Text {
-                                text: job.state + " | " + job.bytes-text;
-                                font-size: 12px;
-                                color: #586174;
-                                overflow: elide;
-                            }
-                        }
-
-                        Button {
-                            text: "Pause";
-                            clicked => {
-                                root.pause-job-requested(job.id);
-                            }
-                        }
-
-                        Button {
-                            text: "Resume";
-                            clicked => {
-                                root.resume-job-requested(job.id);
-                            }
-                        }
-
-                        Button {
-                            text: "Cancel";
-                            clicked => {
-                                root.cancel-job-requested(job.id);
-                            }
-                        }
-
-                        Button {
-                            text: "Details";
-                            clicked => {
-                                root.open-progress-requested(job.id);
-                            }
+                VerticalBox {
+                    visible: root.add-download-mode == "single";
+                    spacing: 6px;
+                    Text { text: "File URL"; font-size: 12px; color: #374151; }
+                    LineEdit {
+                        text: root.add-download-single-url;
+                        placeholder-text: "https://example.com/file.zip";
+                        edited => {
+                            root.add-download-single-url-changed(self.text);
                         }
                     }
+                    Text { text: "SHA-256 Checksum"; font-size: 12px; color: #374151; }
+                    LineEdit {
+                        text: root.add-download-single-sha256;
+                        placeholder-text: "64-character hex digest";
+                        edited => {
+                            root.add-download-single-sha256-changed(self.text);
+                        }
+                    }
+                }
+
+                VerticalBox {
+                    visible: root.add-download-mode == "torrent";
+                    spacing: 6px;
+                    Text { text: "Torrent URL"; font-size: 12px; color: #374151; }
+                    LineEdit {
+                        text: root.add-download-torrent-url;
+                        placeholder-text: "magnet:?xt=urn:btih:... or C:/Downloads/file.torrent";
+                        edited => {
+                            root.add-download-torrent-url-changed(self.text);
+                        }
+                    }
+                    Button {
+                        text: root.add-download-importing ? "Importing..." : "Import";
+                        enabled: !root.add-download-importing;
+                        clicked => {
+                            root.add-download-import-torrent-requested();
+                        }
+                    }
+                }
+
+                VerticalBox {
+                    visible: root.add-download-mode == "multi";
+                    spacing: 6px;
+                    Text { text: "Download URLs"; font-size: 12px; color: #374151; }
+                    multi-urls := TextEdit {
+                        height: 172px;
+                        wrap: TextWrap.no-wrap;
+                        font-family: "monospace";
+                        font-size: 13px;
+                        text: root.add-download-multi-urls;
+                        placeholder-text: "https://example.com/file-01.zip\nhttps://example.com/file-02.zip";
+                        edited => {
+                            root.add-download-multi-urls-changed(multi-urls.text);
+                        }
+                    }
+                }
+
+                VerticalBox {
+                    visible: root.add-download-mode == "bulk";
+                    spacing: 6px;
+                    Text { text: "Bulk Links"; font-size: 12px; color: #374151; }
+                    bulk-urls := TextEdit {
+                        height: 138px;
+                        wrap: TextWrap.no-wrap;
+                        font-family: "monospace";
+                        font-size: 13px;
+                        text: root.add-download-bulk-urls;
+                        placeholder-text: "https://example.com/assets/model.fbx\nhttps://example.com/assets/textures.zip";
+                        edited => {
+                            root.add-download-bulk-urls-changed(bulk-urls.text);
+                        }
+                    }
+                    CheckBox {
+                        text: "Combine into one archive";
+                        checked: root.add-download-combine-bulk;
+                        toggled => {
+                            root.add-download-combine-bulk-changed(self.checked);
+                        }
+                    }
+                    LineEdit {
+                        enabled: root.add-download-combine-bulk;
+                        text: root.add-download-archive-name;
+                        placeholder-text: "bulk-download.zip";
+                        edited => {
+                            root.add-download-archive-name-changed(self.text);
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 36px;
+                    border-color: #d5dae3;
+                    border-width: 1px;
+                    border-radius: 4px;
+                    background: #f9fafb;
+
+                    HorizontalBox {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text { text: root.add-download-ready-label; font-size: 12px; color: #586174; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: root.add-download-ready-detail; font-size: 12px; color: #586174; vertical-alignment: center; overflow: elide; }
+                    }
+                }
+
+                Text {
+                    visible: root.add-download-error-text != "";
+                    text: root.add-download-error-text;
+                    color: #b91c1c;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Cancel"; clicked => { root.add-download-cancelled(); } }
+                    Button {
+                        text: root.add-download-submitting ? "Adding..." : root.add-download-submit-label;
+                        enabled: root.add-download-can-submit && !root.add-download-submitting;
+                        clicked => {
+                            root.add-download-submit-requested();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.rename-prompt-visible;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+
+        Rectangle {
+            width: 440px;
+            height: 260px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-color: #d5dae3;
+            border-width: 1px;
+            border-radius: 6px;
+            background: #ffffff;
+
+            VerticalBox {
+                padding: 18px;
+                spacing: 10px;
+
+                Text { text: "Rename Download"; font-size: 16px; font-weight: 700; color: #111827; }
+                Text { text: root.rename-original-filename; font-size: 12px; color: #586174; overflow: elide; }
+                Text { text: "Name"; font-size: 12px; color: #374151; }
+                LineEdit {
+                    text: root.rename-base-name;
+                    edited => {
+                        root.rename-base-name-changed(self.text);
+                    }
+                }
+                Text { text: "Extension"; font-size: 12px; color: #374151; }
+                LineEdit {
+                    text: root.rename-extension;
+                    edited => {
+                        root.rename-extension-changed(self.text);
+                    }
+                }
+                Text { text: "Result: " + (root.rename-preview-filename == "" ? "Enter a file name." : root.rename-preview-filename); font-size: 11px; color: #586174; overflow: elide; }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Cancel"; clicked => { root.rename-cancelled(); } }
+                    Button { text: "Rename"; enabled: root.rename-can-confirm; clicked => { root.rename-confirmed(); } }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.delete-prompt-visible;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+
+        Rectangle {
+            width: 460px;
+            height: 360px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-color: #d5dae3;
+            border-width: 1px;
+            border-radius: 6px;
+            background: #ffffff;
+
+            VerticalBox {
+                padding: 18px;
+                spacing: 10px;
+
+                Text { text: root.delete-prompt-title; font-size: 16px; font-weight: 700; color: #111827; }
+                Text { text: root.delete-prompt-description; font-size: 12px; color: #586174; wrap: word-wrap; }
+                Text { text: root.delete-prompt-selected-summary; font-size: 12px; color: #111827; font-weight: 700; }
+
+                ListView {
+                    height: 104px;
+                    viewport-width: parent.width;
+                    viewport-height: self.height;
+                    for item in root.delete-prompt-jobs: Rectangle {
+                        height: 34px;
+                        width: parent.width;
+                        background: #f9fafb;
+                        VerticalBox {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 1px;
+                            Text { text: item.filename; font-size: 12px; color: #111827; overflow: elide; }
+                            Text { text: item.target-path == "" ? root.delete-prompt-missing-path-label : item.target-path; font-size: 10px; color: #586174; overflow: elide; }
+                        }
+                    }
+                }
+
+                Button {
+                    text: (root.delete-prompt-delete-from-disk ? "[x] " : "[ ] ") + root.delete-prompt-checkbox-label;
+                    clicked => {
+                        root.delete-from-disk-changed(!root.delete-prompt-delete-from-disk);
+                    }
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Cancel"; clicked => { root.delete-cancelled(); } }
+                    Button { text: root.delete-prompt-confirm-label; clicked => { root.delete-confirmed(); } }
                 }
             }
         }
