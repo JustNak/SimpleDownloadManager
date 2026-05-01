@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod lifecycle;
 pub mod main_window;
 pub mod native_host;

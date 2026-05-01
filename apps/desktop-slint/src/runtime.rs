@@ -1,10 +1,19 @@
 use crate::controller::{
-    active_download_urls, add_download_form_model, add_download_outcome_for_result, build_filename,
-    delete_prompt_from_jobs, ensure_trailing_editable_line, normalize_archive_name,
-    queue_view_model_from_snapshot, slint_job_row_from_row, slint_nav_item_from_item,
-    split_filename, status_text_from_snapshot, validate_optional_sha256, view_for_job,
-    AddDownloadFormState, AddDownloadProgressIntent, AddDownloadResult, DeletePromptDetails,
-    DownloadMode, QueueUiState, SortColumn, ViewFilter,
+    active_download_urls, add_download_form_model, add_download_outcome_for_result,
+    add_excluded_hosts, build_filename, default_torrent_download_directory,
+    delete_prompt_from_jobs, diagnostics_view_model_from_snapshot, ensure_trailing_editable_line,
+    external_use_auto_reseed_message, format_diagnostics_report, handoff_mode_from_id,
+    normalize_accent_color, normalize_archive_name, normalize_torrent_settings,
+    parse_excluded_host_input, performance_mode_from_id, queue_row_size_from_id,
+    queue_view_model_from_snapshot, remove_excluded_host, settings_view_model_from_state,
+    slint_diagnostic_event_from_row, slint_host_registration_entry_from_row,
+    slint_job_row_from_row, slint_nav_item_from_item, slint_settings_nav_item_from_item,
+    slint_toast_from_message, slint_torrent_diagnostic_from_row, split_filename,
+    startup_launch_mode_from_id, status_text_from_snapshot, theme_from_id, toast_for_shell_error,
+    toast_message, torrent_peer_watchdog_mode_from_id, torrent_seed_mode_from_id,
+    validate_optional_sha256, view_for_job, AddDownloadFormState, AddDownloadProgressIntent,
+    AddDownloadResult, DeletePromptDetails, DownloadMode, QueueUiState, SettingsDraftState,
+    SettingsSection, SortColumn, ToastMessage, ToastType, ViewFilter, TOAST_AUTO_CLOSE_MS,
 };
 use crate::shell::{self, lifecycle, main_window};
 use crate::update::{self, AppUpdateState, PendingUpdateState, UpdateCheckMode, UpdateStateStore};
@@ -14,13 +23,16 @@ use simple_download_manager_desktop_core::backend::{
 };
 use simple_download_manager_desktop_core::contracts::{
     AddJobRequest, AddJobResult, AddJobsRequest, AddJobsResult, AppUpdateMetadata, BackendFuture,
-    DesktopBackend, DesktopEvent, ProgressBatchContext, ShellServices,
+    ConfirmPromptRequest, DesktopBackend, DesktopEvent, ExternalUseResult, ProgressBatchContext,
+    ShellServices,
 };
 use simple_download_manager_desktop_core::prompts::{PromptDecision, PromptRegistry};
-use simple_download_manager_desktop_core::state::{EnqueueOptions, EnqueueStatus, SharedState};
+use simple_download_manager_desktop_core::state::{
+    EnqueueOptions, EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
+};
 use simple_download_manager_desktop_core::storage::{
-    DesktopSnapshot, DownloadPrompt, DownloadSource, HostRegistrationDiagnostics, TorrentInfo,
-    TorrentSettings, TransferKind,
+    DesktopSnapshot, DiagnosticsSnapshot, DownloadPrompt, DownloadSource,
+    HostRegistrationDiagnostics, Settings, TorrentInfo, TorrentSettings, TransferKind,
 };
 use simple_download_manager_desktop_core::transfer::{self, TransferShell};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -54,10 +66,83 @@ pub enum UiAction {
     HideMainWindow,
     RequestExit,
     ApplyUpdateState(Box<AppUpdateState>),
+    ShowToast(Box<ToastMessage>),
 }
 
 pub trait UiDispatcher: Clone + Send + Sync + 'static {
     fn dispatch(&self, action: UiAction) -> Result<(), String>;
+}
+
+#[derive(Clone, Default)]
+pub struct ToastRuntimeState {
+    state: Arc<Mutex<ToastRuntimeInner>>,
+}
+
+#[derive(Default)]
+struct ToastRuntimeInner {
+    next_id: u64,
+    toasts: Vec<ToastMessage>,
+}
+
+impl ToastRuntimeState {
+    pub fn add_toast(&self, ui: &MainWindow, mut toast: ToastMessage) -> String {
+        let id = {
+            let mut state = self.state.lock().expect("toast state lock");
+            if toast.id.is_empty() {
+                state.next_id += 1;
+                toast.id = format!("toast_{}", state.next_id);
+            }
+            let id = toast.id.clone();
+            state.toasts.push(toast.clone());
+            id
+        };
+        self.render(ui);
+        if toast.auto_close {
+            self.schedule_auto_close(ui.as_weak(), id.clone());
+        }
+        id
+    }
+
+    pub fn dismiss_toast(&self, ui: &MainWindow, id: &str) {
+        self.state
+            .lock()
+            .expect("toast state lock")
+            .toasts
+            .retain(|toast| toast.id != id);
+        self.render(ui);
+    }
+
+    pub fn render(&self, ui: &MainWindow) {
+        let toasts = self
+            .state
+            .lock()
+            .expect("toast state lock")
+            .toasts
+            .clone()
+            .into_iter()
+            .map(slint_toast_from_message)
+            .collect::<Vec<_>>();
+        ui.set_toasts(ModelRc::from(Rc::new(VecModel::from(toasts))));
+    }
+
+    pub fn toasts(&self) -> Vec<ToastMessage> {
+        self.state.lock().expect("toast state lock").toasts.clone()
+    }
+
+    fn schedule_auto_close(&self, window: slint::Weak<MainWindow>, id: String) {
+        let state = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(TOAST_AUTO_CLOSE_MS));
+            let dispatch_id = id.clone();
+            if let Err(error) = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = window.upgrade() {
+                    state.dismiss_toast(&ui, &dispatch_id);
+                }
+            }) {
+                eprintln!("failed to auto-dismiss Slint toast {id}: {error}");
+            }
+        });
+    }
 }
 
 #[derive(Clone, Default)]
@@ -265,6 +350,437 @@ impl AddDownloadRuntimeState {
                 .expect("add download submitting lock"),
         );
         ui.set_add_download_importing(*self.importing.lock().expect("add download importing lock"));
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SettingsRuntimeState {
+    state: Arc<Mutex<SettingsDraftState>>,
+    section_observer: Arc<Mutex<Option<SettingsSectionObserver>>>,
+}
+
+type SettingsSectionObserver = Arc<dyn Fn(SettingsSection) + Send + Sync>;
+
+impl SettingsRuntimeState {
+    pub fn apply_snapshot_to_main_window(&self, ui: &MainWindow, snapshot: &DesktopSnapshot) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            state.adopt_incoming_settings(snapshot.settings.clone());
+        }
+        self.render(ui);
+    }
+
+    pub fn open(&self, ui: &MainWindow) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            state.visible = true;
+            state.unsaved_prompt_visible = false;
+            state.error_text.clear();
+        }
+        self.render(ui);
+    }
+
+    pub fn request_close(&self, ui: &MainWindow) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            if state.dirty() {
+                state.unsaved_prompt_visible = true;
+            } else {
+                state.visible = false;
+                state.unsaved_prompt_visible = false;
+            }
+        }
+        self.render(ui);
+    }
+
+    pub fn cancel_unsaved_prompt(&self, ui: &MainWindow) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            state.unsaved_prompt_visible = false;
+        }
+        self.render(ui);
+    }
+
+    pub fn discard_and_close(&self, ui: &MainWindow) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            state.discard();
+            state.visible = false;
+        }
+        self.render(ui);
+    }
+
+    pub fn change_section(&self, ui: &MainWindow, section_id: &str) {
+        if let Some(section) = SettingsSection::from_id(section_id) {
+            self.update(ui, |state| {
+                state.active_section = section;
+                state.unsaved_prompt_visible = false;
+            });
+            let observer = self
+                .section_observer
+                .lock()
+                .expect("settings section observer lock")
+                .clone();
+            if let Some(observer) = observer {
+                observer(section);
+            }
+        }
+    }
+
+    pub fn set_section_observer(&self, observer: impl Fn(SettingsSection) + Send + Sync + 'static) {
+        *self
+            .section_observer
+            .lock()
+            .expect("settings section observer lock") = Some(Arc::new(observer));
+    }
+
+    pub fn apply_saved_settings(&self, ui: &MainWindow, settings: Settings) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            state.saved = settings.clone();
+            state.draft = settings;
+            state.visible = false;
+            state.saving = false;
+            state.unsaved_prompt_visible = false;
+            state.error_text.clear();
+        }
+        self.render(ui);
+    }
+
+    pub fn draft_for_save(&self) -> Settings {
+        let mut settings = self
+            .state
+            .lock()
+            .expect("settings state lock")
+            .draft
+            .clone();
+        settings.accent_color = normalize_accent_color(&settings.accent_color);
+        settings.torrent =
+            normalize_torrent_settings(settings.torrent.clone(), &settings.download_directory);
+        settings
+    }
+
+    pub fn set_saving(&self, ui: &MainWindow, saving: bool) {
+        self.update(ui, |state| state.saving = saving);
+    }
+
+    pub fn set_cache_clearing(&self, ui: &MainWindow, clearing: bool) {
+        self.update(ui, |state| state.cache_clearing = clearing);
+    }
+
+    pub fn set_error(&self, ui: &MainWindow, error: String) {
+        self.update(ui, |state| {
+            state.error_text = error;
+            state.saving = false;
+            state.cache_clearing = false;
+        });
+    }
+
+    pub fn set_download_directory(&self, ui: &MainWindow, directory: String) {
+        self.update_draft(ui, |settings| {
+            update_download_directory_with_torrent_default(settings, directory);
+        });
+    }
+
+    pub fn set_torrent_download_directory(&self, ui: &MainWindow, directory: String) {
+        self.update_draft(ui, |settings| {
+            settings.torrent.download_directory = directory;
+        });
+    }
+
+    pub fn set_max_concurrent_downloads(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 1, 64, |settings, value| {
+            settings.max_concurrent_downloads = value
+        });
+    }
+
+    pub fn set_auto_retry_attempts(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 0, 25, |settings, value| {
+            settings.auto_retry_attempts = value
+        });
+    }
+
+    pub fn set_speed_limit_kib_per_second(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 0, 1_048_576, |settings, value| {
+            settings.speed_limit_kib_per_second = value
+        });
+    }
+
+    pub fn set_download_performance_mode(&self, ui: &MainWindow, value: &str) {
+        if let Some(mode) = performance_mode_from_id(value) {
+            self.update_draft(ui, |settings| settings.download_performance_mode = mode);
+        }
+    }
+
+    pub fn set_notifications_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| settings.notifications_enabled = value);
+    }
+
+    pub fn set_show_details_on_click(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| settings.show_details_on_click = value);
+    }
+
+    pub fn set_queue_row_size(&self, ui: &MainWindow, value: &str) {
+        if let Some(size) = queue_row_size_from_id(value) {
+            self.update_draft(ui, |settings| settings.queue_row_size = size);
+        }
+    }
+
+    pub fn set_start_on_startup(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| settings.start_on_startup = value);
+    }
+
+    pub fn set_startup_launch_mode(&self, ui: &MainWindow, value: &str) {
+        if let Some(mode) = startup_launch_mode_from_id(value) {
+            self.update_draft(ui, |settings| settings.startup_launch_mode = mode);
+        }
+    }
+
+    pub fn set_theme(&self, ui: &MainWindow, value: &str) {
+        if let Some(theme) = theme_from_id(value) {
+            self.update_draft(ui, |settings| settings.theme = theme);
+        }
+    }
+
+    pub fn set_accent_color(&self, ui: &MainWindow, value: String) {
+        self.update_draft(ui, |settings| {
+            settings.accent_color = normalize_accent_color(&value)
+        });
+    }
+
+    pub fn set_torrent_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| settings.torrent.enabled = value);
+    }
+
+    pub fn set_torrent_seed_mode(&self, ui: &MainWindow, value: &str) {
+        if let Some(mode) = torrent_seed_mode_from_id(value) {
+            self.update_draft(ui, |settings| settings.torrent.seed_mode = mode);
+        }
+    }
+
+    pub fn set_torrent_seed_ratio_limit(&self, ui: &MainWindow, value: String) {
+        if let Ok(parsed) = value.trim().parse::<f64>() {
+            self.update_draft(ui, |settings| settings.torrent.seed_ratio_limit = parsed);
+        }
+    }
+
+    pub fn set_torrent_seed_time_limit_minutes(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 1, 525_600, |settings, value| {
+            settings.torrent.seed_time_limit_minutes = value
+        });
+    }
+
+    pub fn set_torrent_upload_limit_kib_per_second(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 0, 1_048_576, |settings, value| {
+            settings.torrent.upload_limit_kib_per_second = value
+        });
+    }
+
+    pub fn set_torrent_port_forwarding_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.torrent.port_forwarding_enabled = value
+        });
+    }
+
+    pub fn set_torrent_port_forwarding_port(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 1, 65_535, |settings, value| {
+            settings.torrent.port_forwarding_port = value
+        });
+    }
+
+    pub fn set_torrent_peer_watchdog_mode(&self, ui: &MainWindow, value: &str) {
+        if let Some(mode) = torrent_peer_watchdog_mode_from_id(value) {
+            self.update_draft(ui, |settings| {
+                settings.torrent.peer_connection_watchdog_mode = mode
+            });
+        }
+    }
+
+    pub fn set_extension_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.enabled = value
+        });
+    }
+
+    pub fn set_extension_handoff_mode(&self, ui: &MainWindow, value: &str) {
+        if let Some(mode) = handoff_mode_from_id(value) {
+            self.update_draft(ui, |settings| {
+                settings.extension_integration.download_handoff_mode = mode
+            });
+        }
+    }
+
+    pub fn set_extension_listen_port(&self, ui: &MainWindow, value: String) {
+        self.update_draft_u32(ui, value, 1, 65_535, |settings, value| {
+            settings.extension_integration.listen_port = value
+        });
+    }
+
+    pub fn set_extension_context_menu_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.context_menu_enabled = value
+        });
+    }
+
+    pub fn set_extension_show_progress_after_handoff(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.show_progress_after_handoff = value
+        });
+    }
+
+    pub fn set_extension_show_badge_status(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.show_badge_status = value
+        });
+    }
+
+    pub fn set_extension_authenticated_handoff_enabled(&self, ui: &MainWindow, value: bool) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.authenticated_handoff_enabled = value
+        });
+    }
+
+    pub fn set_excluded_host_input(&self, ui: &MainWindow, value: String) {
+        self.update(ui, |state| state.excluded_host_input = value);
+    }
+
+    pub fn add_excluded_hosts_from_input(&self, ui: &MainWindow) {
+        self.update(ui, |state| {
+            let candidates = parse_excluded_host_input(&state.excluded_host_input);
+            let result = add_excluded_hosts(
+                state.draft.extension_integration.excluded_hosts.clone(),
+                candidates,
+            );
+            state.draft.extension_integration.excluded_hosts = result.hosts;
+            state.excluded_host_input.clear();
+        });
+    }
+
+    pub fn remove_excluded_host(&self, ui: &MainWindow, host: String) {
+        self.update_draft(ui, |settings| {
+            settings.extension_integration.excluded_hosts =
+                remove_excluded_host(&settings.extension_integration.excluded_hosts, &host);
+        });
+    }
+
+    fn update_draft(&self, ui: &MainWindow, update: impl FnOnce(&mut Settings)) {
+        self.update(ui, |state| {
+            update(&mut state.draft);
+            state.error_text.clear();
+            state.unsaved_prompt_visible = false;
+        });
+    }
+
+    fn update_draft_u32(
+        &self,
+        ui: &MainWindow,
+        value: String,
+        min: u32,
+        max: u32,
+        update: impl FnOnce(&mut Settings, u32),
+    ) {
+        if let Ok(parsed) = value.trim().parse::<u32>() {
+            self.update_draft(ui, |settings| update(settings, parsed.max(min).min(max)));
+        }
+    }
+
+    fn update(&self, ui: &MainWindow, update: impl FnOnce(&mut SettingsDraftState)) {
+        {
+            let mut state = self.state.lock().expect("settings state lock");
+            update(&mut state);
+        }
+        self.render(ui);
+    }
+
+    fn render(&self, ui: &MainWindow) {
+        let state = self.state.lock().expect("settings state lock").clone();
+        apply_settings_view_model_to_main_window(ui, settings_view_model_from_state(&state));
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DiagnosticsRuntimeState {
+    state: Arc<Mutex<DiagnosticsUiState>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DiagnosticsUiState {
+    diagnostics: Option<DiagnosticsSnapshot>,
+    loading: bool,
+    action_status_text: String,
+    error_text: String,
+}
+
+impl DiagnosticsRuntimeState {
+    pub fn render(&self, ui: &MainWindow) {
+        let state = self.state.lock().expect("diagnostics state lock").clone();
+        apply_diagnostics_view_model_to_main_window(
+            ui,
+            diagnostics_view_model_from_snapshot(
+                state.diagnostics.as_ref(),
+                state.loading,
+                &state.action_status_text,
+                &state.error_text,
+            ),
+        );
+    }
+
+    pub fn needs_refresh(&self) -> bool {
+        self.state
+            .lock()
+            .expect("diagnostics state lock")
+            .diagnostics
+            .is_none()
+    }
+
+    pub fn current_report(&self) -> Option<String> {
+        self.state
+            .lock()
+            .expect("diagnostics state lock")
+            .diagnostics
+            .as_ref()
+            .map(format_diagnostics_report)
+    }
+
+    fn set_loading(&self, ui: &MainWindow, loading: bool) {
+        {
+            let mut state = self.state.lock().expect("diagnostics state lock");
+            state.loading = loading;
+            if loading {
+                state.error_text.clear();
+            }
+        }
+        self.render(ui);
+    }
+
+    fn apply_snapshot(&self, ui: &MainWindow, diagnostics: DiagnosticsSnapshot, status: String) {
+        {
+            let mut state = self.state.lock().expect("diagnostics state lock");
+            state.diagnostics = Some(diagnostics);
+            state.loading = false;
+            state.action_status_text = status;
+            state.error_text.clear();
+        }
+        self.render(ui);
+    }
+
+    fn set_action_status(&self, ui: &MainWindow, status: String) {
+        {
+            let mut state = self.state.lock().expect("diagnostics state lock");
+            state.loading = false;
+            state.action_status_text = status;
+            state.error_text.clear();
+        }
+        self.render(ui);
+    }
+
+    fn set_error(&self, ui: &MainWindow, error: String) {
+        {
+            let mut state = self.state.lock().expect("diagnostics state lock");
+            state.loading = false;
+            state.error_text = error;
+        }
+        self.render(ui);
     }
 }
 
@@ -580,14 +1096,24 @@ pub struct MainWindowDispatcher {
     window: slint::Weak<MainWindow>,
     state: SharedState,
     queue_view: QueueViewRuntimeState,
+    settings_state: SettingsRuntimeState,
+    toast_state: ToastRuntimeState,
 }
 
 impl MainWindowDispatcher {
-    pub fn new(window: &MainWindow, state: SharedState, queue_view: QueueViewRuntimeState) -> Self {
+    pub fn new(
+        window: &MainWindow,
+        state: SharedState,
+        queue_view: QueueViewRuntimeState,
+        settings_state: SettingsRuntimeState,
+        toast_state: ToastRuntimeState,
+    ) -> Self {
         Self {
             window: window.as_weak(),
             state,
             queue_view,
+            settings_state,
+            toast_state,
         }
     }
 }
@@ -597,6 +1123,8 @@ impl UiDispatcher for MainWindowDispatcher {
         let window = self.window.clone();
         let state = self.state.clone();
         let queue_view = self.queue_view.clone();
+        let settings_state = self.settings_state.clone();
+        let toast_state = self.toast_state.clone();
         slint::invoke_from_event_loop(move || {
             let Some(ui) = window.upgrade() else {
                 return;
@@ -605,6 +1133,7 @@ impl UiDispatcher for MainWindowDispatcher {
             match action {
                 UiAction::ApplySnapshot(snapshot) => {
                     queue_view.apply_snapshot_to_main_window(&ui, &snapshot);
+                    settings_state.apply_snapshot_to_main_window(&ui, &snapshot);
                     shell::popups::with_popup_registry(|registry| {
                         registry.apply_snapshot(&snapshot);
                     });
@@ -667,6 +1196,9 @@ impl UiDispatcher for MainWindowDispatcher {
                 }
                 UiAction::ApplyUpdateState(update_state) => {
                     apply_update_state_to_main_window(&ui, &update_state);
+                }
+                UiAction::ShowToast(toast) => {
+                    toast_state.add_toast(&ui, *toast);
                 }
             }
         })
@@ -833,7 +1365,10 @@ where
                     dispatcher.dispatch(UiAction::ApplyUpdateState(Box::new(next)))?;
                 }
                 DesktopEvent::ShellError(error) => {
-                    eprintln!("shell error during {}: {}", error.operation, error.message);
+                    dispatcher.dispatch(UiAction::ShowToast(Box::new(toast_for_shell_error(
+                        &error.operation,
+                        &error.message,
+                    ))))?;
                 }
             }
             Ok(())
@@ -1242,6 +1777,11 @@ pub enum QueueCommand {
     ClearCompleted,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueCommandOutput {
+    pub external_use: Option<ExternalUseResult>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateCommand {
     Check(UpdateCheckMode),
@@ -1249,7 +1789,7 @@ pub enum UpdateCommand {
 }
 
 pub trait QueueCommandSink: Send + Sync + 'static {
-    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, ()>;
+    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, QueueCommandOutput>;
 }
 
 pub trait AddDownloadCommandSink: Send + Sync + 'static {
@@ -1263,6 +1803,37 @@ pub trait AddDownloadCommandSink: Send + Sync + 'static {
     ) -> BackendFuture<'_, String>;
 }
 
+pub trait SettingsCommandSink: Send + Sync + 'static {
+    fn save_settings_from_slint(&self, settings: Settings) -> BackendFuture<'_, Settings>;
+    fn browse_settings_directory(&self) -> BackendFuture<'_, Option<String>>;
+    fn clear_settings_torrent_session_cache(
+        &self,
+    ) -> BackendFuture<'_, TorrentSessionCacheClearResult>;
+}
+
+pub trait DiagnosticsCommandSink: Send + Sync + 'static {
+    fn get_diagnostics_for_slint(&self) -> BackendFuture<'_, DiagnosticsSnapshot>;
+    fn export_diagnostics_report_from_slint(&self) -> BackendFuture<'_, Option<String>>;
+    fn copy_diagnostics_report_from_slint(&self, report: String) -> BackendFuture<'_, ()>;
+    fn open_install_docs_from_slint(&self) -> BackendFuture<'_, ()>;
+    fn repair_host_registration_from_slint(&self) -> BackendFuture<'_, ()>;
+    fn test_extension_handoff_from_slint(&self) -> BackendFuture<'_, ()>;
+}
+
+pub trait PromptWindowCommandSink: Send + Sync + 'static {
+    fn browse_prompt_directory(&self) -> BackendFuture<'_, Option<String>>;
+    fn confirm_prompt_from_slint(&self, request: ConfirmPromptRequest) -> BackendFuture<'_, ()>;
+    fn cancel_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()>;
+    fn swap_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()>;
+}
+
+pub trait ProgressPopupCommandSink: Send + Sync + 'static {
+    fn run_progress_popup_action(
+        &self,
+        action: shell::popups::ProgressPopupAction,
+    ) -> BackendFuture<'_, ()>;
+}
+
 pub trait UpdateCommandSink: Send + Sync + 'static {
     fn run_update_command(
         &self,
@@ -1271,20 +1842,40 @@ pub trait UpdateCommandSink: Send + Sync + 'static {
 }
 
 type SlintStringCallback = Box<dyn FnMut(slint::SharedString)>;
+type SlintBoolCallback = Box<dyn FnMut(bool)>;
 type StringCommandRegistrar = fn(&MainWindow, SlintStringCallback);
+type BoolSettingsRegistrar = fn(&MainWindow, SlintBoolCallback);
 
 impl<S> QueueCommandSink for CoreDesktopBackend<S>
 where
     S: ShellServices + 'static,
 {
-    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, ()> {
+    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, QueueCommandOutput> {
         match command {
-            QueueCommand::Pause(id) => self.pause_job(id),
-            QueueCommand::Resume(id) => self.resume_job(id),
-            QueueCommand::Cancel(id) => self.cancel_job(id),
-            QueueCommand::Retry(id) => self.retry_job(id),
-            QueueCommand::Restart(id) => self.restart_job(id),
-            QueueCommand::Remove(id) => self.remove_job(id),
+            QueueCommand::Pause(id) => Box::pin(async move {
+                self.pause_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::Resume(id) => Box::pin(async move {
+                self.resume_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::Cancel(id) => Box::pin(async move {
+                self.cancel_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::Retry(id) => Box::pin(async move {
+                self.retry_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::Restart(id) => Box::pin(async move {
+                self.restart_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::Remove(id) => Box::pin(async move {
+                self.remove_job(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
             QueueCommand::DeleteMany {
                 ids,
                 delete_from_disk,
@@ -1292,23 +1883,48 @@ where
                 for id in ids {
                     self.delete_job(id, delete_from_disk).await?;
                 }
-                Ok(())
+                Ok(QueueCommandOutput::default())
             }),
-            QueueCommand::Rename { id, filename } => self.rename_job(id, filename),
+            QueueCommand::Rename { id, filename } => Box::pin(async move {
+                self.rename_job(id, filename).await?;
+                Ok(QueueCommandOutput::default())
+            }),
             QueueCommand::OpenFile(id) => Box::pin(async move {
-                self.open_job_file(id).await?;
-                Ok(())
+                let result = self.open_job_file(id).await?;
+                Ok(QueueCommandOutput {
+                    external_use: Some(result),
+                })
             }),
             QueueCommand::RevealInFolder(id) => Box::pin(async move {
-                self.reveal_job_in_folder(id).await?;
-                Ok(())
+                let result = self.reveal_job_in_folder(id).await?;
+                Ok(QueueCommandOutput {
+                    external_use: Some(result),
+                })
             }),
-            QueueCommand::SwapFailedToBrowser(id) => self.swap_failed_download_to_browser(id),
-            QueueCommand::OpenProgress(id) => self.open_progress_window(id),
-            QueueCommand::PauseAll => self.pause_all_jobs(),
-            QueueCommand::ResumeAll => self.resume_all_jobs(),
-            QueueCommand::RetryFailed => self.retry_failed_jobs(),
-            QueueCommand::ClearCompleted => self.clear_completed_jobs(),
+            QueueCommand::SwapFailedToBrowser(id) => Box::pin(async move {
+                self.swap_failed_download_to_browser(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::OpenProgress(id) => Box::pin(async move {
+                self.open_progress_window(id).await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::PauseAll => Box::pin(async move {
+                self.pause_all_jobs().await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::ResumeAll => Box::pin(async move {
+                self.resume_all_jobs().await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::RetryFailed => Box::pin(async move {
+                self.retry_failed_jobs().await?;
+                Ok(QueueCommandOutput::default())
+            }),
+            QueueCommand::ClearCompleted => Box::pin(async move {
+                self.clear_completed_jobs().await?;
+                Ok(QueueCommandOutput::default())
+            }),
         }
     }
 }
@@ -1338,6 +1954,129 @@ where
         context: ProgressBatchContext,
     ) -> BackendFuture<'_, String> {
         self.open_batch_progress_window(context)
+    }
+}
+
+impl<S> SettingsCommandSink for CoreDesktopBackend<S>
+where
+    S: ShellServices + 'static,
+{
+    fn save_settings_from_slint(&self, settings: Settings) -> BackendFuture<'_, Settings> {
+        self.save_settings(settings)
+    }
+
+    fn browse_settings_directory(&self) -> BackendFuture<'_, Option<String>> {
+        self.browse_directory()
+    }
+
+    fn clear_settings_torrent_session_cache(
+        &self,
+    ) -> BackendFuture<'_, TorrentSessionCacheClearResult> {
+        self.clear_torrent_session_cache()
+    }
+}
+
+impl<S> DiagnosticsCommandSink for CoreDesktopBackend<S>
+where
+    S: ShellServices + 'static,
+{
+    fn get_diagnostics_for_slint(&self) -> BackendFuture<'_, DiagnosticsSnapshot> {
+        self.get_diagnostics()
+    }
+
+    fn export_diagnostics_report_from_slint(&self) -> BackendFuture<'_, Option<String>> {
+        self.export_diagnostics_report()
+    }
+
+    fn copy_diagnostics_report_from_slint(&self, report: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || shell::clipboard::write_text(&report))
+                .await
+                .map_err(|error| format!("Could not start clipboard copy: {error}"))?
+        })
+    }
+
+    fn open_install_docs_from_slint(&self) -> BackendFuture<'_, ()> {
+        self.open_install_docs()
+    }
+
+    fn repair_host_registration_from_slint(&self) -> BackendFuture<'_, ()> {
+        self.run_host_registration_fix()
+    }
+
+    fn test_extension_handoff_from_slint(&self) -> BackendFuture<'_, ()> {
+        self.test_extension_handoff()
+    }
+}
+
+impl<S> PromptWindowCommandSink for CoreDesktopBackend<S>
+where
+    S: ShellServices + 'static,
+{
+    fn browse_prompt_directory(&self) -> BackendFuture<'_, Option<String>> {
+        self.browse_directory()
+    }
+
+    fn confirm_prompt_from_slint(&self, request: ConfirmPromptRequest) -> BackendFuture<'_, ()> {
+        self.confirm_download_prompt(request)
+    }
+
+    fn cancel_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()> {
+        self.cancel_download_prompt(id)
+    }
+
+    fn swap_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()> {
+        self.swap_download_prompt(id)
+    }
+}
+
+impl<S> ProgressPopupCommandSink for CoreDesktopBackend<S>
+where
+    S: ShellServices + 'static,
+{
+    fn run_progress_popup_action(
+        &self,
+        action: shell::popups::ProgressPopupAction,
+    ) -> BackendFuture<'_, ()> {
+        match action {
+            shell::popups::ProgressPopupAction::Pause(id) => self.pause_job(id),
+            shell::popups::ProgressPopupAction::Resume(id) => self.resume_job(id),
+            shell::popups::ProgressPopupAction::Retry(id) => self.retry_job(id),
+            shell::popups::ProgressPopupAction::Cancel(id) => self.cancel_job(id),
+            shell::popups::ProgressPopupAction::OpenFile(id) => Box::pin(async move {
+                self.open_job_file(id).await?;
+                Ok(())
+            }),
+            shell::popups::ProgressPopupAction::RevealInFolder(id) => Box::pin(async move {
+                self.reveal_job_in_folder(id).await?;
+                Ok(())
+            }),
+            shell::popups::ProgressPopupAction::SwapFailedToBrowser(id) => {
+                self.swap_failed_download_to_browser(id)
+            }
+            shell::popups::ProgressPopupAction::BatchPause(ids) => Box::pin(async move {
+                for id in ids {
+                    self.pause_job(id).await?;
+                }
+                Ok(())
+            }),
+            shell::popups::ProgressPopupAction::BatchResume(ids) => Box::pin(async move {
+                for id in ids {
+                    self.resume_job(id).await?;
+                }
+                Ok(())
+            }),
+            shell::popups::ProgressPopupAction::BatchCancel(ids) => Box::pin(async move {
+                for id in ids {
+                    self.cancel_job(id).await?;
+                }
+                Ok(())
+            }),
+            shell::popups::ProgressPopupAction::BatchRevealCompleted(id) => Box::pin(async move {
+                self.reveal_job_in_folder(id).await?;
+                Ok(())
+            }),
+        }
     }
 }
 
@@ -1442,7 +2181,15 @@ pub fn bootstrap_main_window_with_state(
             .map_err(|error| format!("Could not initialize Slint backend runtime: {error}"))?,
     );
     let queue_view = QueueViewRuntimeState::default();
-    let dispatcher = MainWindowDispatcher::new(ui, state.clone(), queue_view.clone());
+    let settings_state = SettingsRuntimeState::default();
+    let toast_state = ToastRuntimeState::default();
+    let dispatcher = MainWindowDispatcher::new(
+        ui,
+        state.clone(),
+        queue_view.clone(),
+        settings_state.clone(),
+        toast_state.clone(),
+    );
     let progress_batches = ProgressBatchRegistry::default();
     let update_state = UpdateStateStore::default();
     let pending_update = Arc::new(PendingUpdateState::default());
@@ -1461,20 +2208,63 @@ pub fn bootstrap_main_window_with_state(
 
     let snapshot = runtime.block_on(backend.get_app_snapshot())?;
     queue_view.apply_snapshot_to_main_window(ui, &snapshot);
+    settings_state.apply_snapshot_to_main_window(ui, &snapshot);
     let add_download_state = AddDownloadRuntimeState::default();
+    let diagnostics_state = DiagnosticsRuntimeState::default();
     wire_main_window_lifecycle_callbacks(
         ui,
         Arc::new(MainWindowLifecycleController::new(ui, state.clone())),
     );
-    wire_queue_command_callbacks(ui, runtime.clone(), backend.clone(), queue_view.clone());
+    wire_queue_command_callbacks(
+        ui,
+        runtime.clone(),
+        backend.clone(),
+        queue_view.clone(),
+        toast_state.clone(),
+    );
+    wire_toast_callbacks(ui, toast_state.clone());
     wire_add_download_callbacks(
         ui,
         runtime.clone(),
         backend.clone(),
-        queue_view,
+        queue_view.clone(),
         add_download_state,
+        toast_state.clone(),
     );
-    wire_update_callbacks(ui, runtime.clone(), backend.clone(), update_state.clone());
+    wire_settings_callbacks(
+        ui,
+        runtime.clone(),
+        backend.clone(),
+        settings_state.clone(),
+        queue_view,
+        toast_state.clone(),
+    );
+    wire_diagnostics_callbacks(
+        ui,
+        runtime.clone(),
+        backend.clone(),
+        settings_state,
+        diagnostics_state.clone(),
+        toast_state.clone(),
+    );
+    wire_update_callbacks(
+        ui,
+        runtime.clone(),
+        backend.clone(),
+        update_state.clone(),
+        toast_state,
+    );
+    wire_prompt_window_action_bridge(runtime.clone(), backend.clone());
+    wire_progress_popup_action_bridge(runtime.clone(), backend.clone());
+    start_diagnostics_refresh(
+        runtime.clone(),
+        backend.clone(),
+        diagnostics_state,
+        ui.as_weak(),
+        true,
+        String::new(),
+        None,
+    );
     start_startup_update_check(runtime.clone(), backend.clone(), update_state, ui.as_weak());
 
     let startup_shell = shell.clone();
@@ -1493,6 +2283,146 @@ pub fn bootstrap_main_window_with_state(
 
 pub fn apply_snapshot_to_main_window(ui: &MainWindow, snapshot: &DesktopSnapshot) {
     QueueViewRuntimeState::default().apply_snapshot_to_main_window(ui, snapshot);
+    SettingsRuntimeState::default().apply_snapshot_to_main_window(ui, snapshot);
+}
+
+pub fn wire_prompt_window_action_bridge<C>(runtime: Arc<Runtime>, command_sink: Arc<C>)
+where
+    C: PromptWindowCommandSink,
+{
+    shell::popups::install_prompt_action_dispatcher(Arc::new(move |action| {
+        let runtime = runtime.clone();
+        let command_sink = command_sink.clone();
+        runtime.spawn(async move {
+            match action {
+                shell::popups::PromptWindowAction::BrowseDirectory => {
+                    match command_sink.browse_prompt_directory().await {
+                        Ok(directory) => {
+                            dispatch_prompt_popup_update(move |registry| {
+                                registry.apply_prompt_directory_override(directory);
+                            });
+                        }
+                        Err(error) => {
+                            dispatch_prompt_popup_update(move |registry| {
+                                registry.set_prompt_error(error);
+                            });
+                        }
+                    }
+                }
+                shell::popups::PromptWindowAction::Confirm(request) => {
+                    match command_sink.confirm_prompt_from_slint(request).await {
+                        Ok(()) => {
+                            dispatch_prompt_popup_update(|registry| {
+                                registry.set_prompt_busy(false)
+                            });
+                        }
+                        Err(error) => {
+                            dispatch_prompt_popup_update(move |registry| {
+                                registry.set_prompt_error(error);
+                            });
+                        }
+                    }
+                }
+                shell::popups::PromptWindowAction::Cancel(id) => {
+                    match command_sink.cancel_prompt_from_slint(id).await {
+                        Ok(()) => {
+                            dispatch_prompt_popup_update(|registry| {
+                                registry.set_prompt_busy(false)
+                            });
+                        }
+                        Err(error) => {
+                            dispatch_prompt_popup_update(move |registry| {
+                                registry.set_prompt_error(error);
+                            });
+                        }
+                    }
+                }
+                shell::popups::PromptWindowAction::Swap(id) => {
+                    match command_sink.swap_prompt_from_slint(id).await {
+                        Ok(()) => {
+                            dispatch_prompt_popup_update(|registry| {
+                                registry.set_prompt_busy(false)
+                            });
+                        }
+                        Err(error) => {
+                            dispatch_prompt_popup_update(move |registry| {
+                                registry.set_prompt_error(error);
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }));
+}
+
+pub fn wire_progress_popup_action_bridge<C>(runtime: Arc<Runtime>, command_sink: Arc<C>)
+where
+    C: ProgressPopupCommandSink,
+{
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    runtime.spawn(async move {
+        while let Some(action) = receiver.recv().await {
+            let target = progress_popup_action_job_target(&action);
+            let result = command_sink.run_progress_popup_action(action).await;
+            match result {
+                Ok(()) => {
+                    if let Some(id) = target {
+                        dispatch_progress_popup_update(move |registry| {
+                            registry.set_progress_action_busy(&id, false);
+                        });
+                    }
+                }
+                Err(error) => {
+                    if let Some(id) = target {
+                        dispatch_progress_popup_update(move |registry| {
+                            registry.set_progress_action_error(&id, error);
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    shell::popups::install_progress_popup_action_dispatcher(Arc::new(move |action| {
+        let _ = sender.send(action);
+    }));
+}
+
+fn progress_popup_action_job_target(action: &shell::popups::ProgressPopupAction) -> Option<String> {
+    match action {
+        shell::popups::ProgressPopupAction::Pause(id)
+        | shell::popups::ProgressPopupAction::Resume(id)
+        | shell::popups::ProgressPopupAction::Retry(id)
+        | shell::popups::ProgressPopupAction::Cancel(id)
+        | shell::popups::ProgressPopupAction::OpenFile(id)
+        | shell::popups::ProgressPopupAction::RevealInFolder(id)
+        | shell::popups::ProgressPopupAction::SwapFailedToBrowser(id)
+        | shell::popups::ProgressPopupAction::BatchRevealCompleted(id) => Some(id.clone()),
+        shell::popups::ProgressPopupAction::BatchPause(_)
+        | shell::popups::ProgressPopupAction::BatchResume(_)
+        | shell::popups::ProgressPopupAction::BatchCancel(_) => None,
+    }
+}
+
+fn dispatch_prompt_popup_update(
+    update: impl FnOnce(&mut shell::popups::PopupRegistry) + Send + 'static,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        shell::popups::with_popup_registry(update);
+    }) {
+        eprintln!("failed to update prompt popup state: {error}");
+    }
+}
+
+fn dispatch_progress_popup_update(
+    update: impl FnOnce(&mut shell::popups::PopupRegistry) + Send + 'static,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        shell::popups::with_popup_registry(update);
+    }) {
+        eprintln!("failed to update progress popup state: {error}");
+    }
 }
 
 pub fn apply_queue_view_model_to_main_window(
@@ -1523,6 +2453,104 @@ pub fn apply_queue_view_model_to_main_window(
     ui.set_queue_has_visible_selection(model.has_visible_selection);
     ui.set_queue_sort_column(model.sort_mode.column.id().into());
     ui.set_queue_sort_direction(model.sort_mode.direction.id().into());
+}
+
+pub fn apply_settings_view_model_to_main_window(
+    ui: &MainWindow,
+    model: crate::controller::SettingsViewModel,
+) {
+    let sections = model
+        .sections
+        .into_iter()
+        .map(slint_settings_nav_item_from_item)
+        .collect::<Vec<_>>();
+    let excluded_hosts = model
+        .extension_excluded_hosts
+        .into_iter()
+        .map(slint::SharedString::from)
+        .collect::<Vec<_>>();
+
+    ui.set_settings_sections(ModelRc::from(Rc::new(VecModel::from(sections))));
+    ui.set_settings_view_visible(model.visible);
+    ui.set_settings_active_section(model.active_section_id.into());
+    ui.set_settings_dirty(model.dirty);
+    ui.set_settings_saving(model.saving);
+    ui.set_settings_cache_clearing(model.cache_clearing);
+    ui.set_settings_error_text(model.error_text.into());
+    ui.set_settings_unsaved_prompt_visible(model.unsaved_prompt_visible);
+    ui.set_settings_download_directory(model.download_directory.into());
+    ui.set_settings_max_concurrent_downloads(model.max_concurrent_downloads.into());
+    ui.set_settings_auto_retry_attempts(model.auto_retry_attempts.into());
+    ui.set_settings_speed_limit_kib_per_second(model.speed_limit_kib_per_second.into());
+    ui.set_settings_download_performance_mode(model.download_performance_mode_id.into());
+    ui.set_settings_notifications_enabled(model.notifications_enabled);
+    ui.set_settings_show_details_on_click(model.show_details_on_click);
+    ui.set_settings_queue_row_size(model.queue_row_size_id.into());
+    ui.set_settings_start_on_startup(model.start_on_startup);
+    ui.set_settings_startup_launch_mode(model.startup_launch_mode_id.into());
+    ui.set_settings_theme(model.theme_id.into());
+    ui.set_settings_accent_color(model.accent_color.into());
+    ui.set_settings_torrent_enabled(model.torrent_enabled);
+    ui.set_settings_torrent_download_directory(model.torrent_download_directory.into());
+    ui.set_settings_torrent_seed_mode(model.torrent_seed_mode_id.into());
+    ui.set_settings_torrent_seed_ratio_limit(model.torrent_seed_ratio_limit.into());
+    ui.set_settings_torrent_seed_time_limit_minutes(model.torrent_seed_time_limit_minutes.into());
+    ui.set_settings_torrent_upload_limit_kib_per_second(
+        model.torrent_upload_limit_kib_per_second.into(),
+    );
+    ui.set_settings_torrent_port_forwarding_enabled(model.torrent_port_forwarding_enabled);
+    ui.set_settings_torrent_port_forwarding_port(model.torrent_port_forwarding_port.into());
+    ui.set_settings_torrent_peer_watchdog_mode(model.torrent_peer_watchdog_mode_id.into());
+    ui.set_settings_extension_enabled(model.extension_enabled);
+    ui.set_settings_extension_handoff_mode(model.extension_handoff_mode_id.into());
+    ui.set_settings_extension_listen_port(model.extension_listen_port.into());
+    ui.set_settings_extension_context_menu_enabled(model.extension_context_menu_enabled);
+    ui.set_settings_extension_show_progress_after_handoff(
+        model.extension_show_progress_after_handoff,
+    );
+    ui.set_settings_extension_show_badge_status(model.extension_show_badge_status);
+    ui.set_settings_extension_authenticated_handoff_enabled(
+        model.extension_authenticated_handoff_enabled,
+    );
+    ui.set_settings_extension_excluded_host_input(model.extension_excluded_host_input.into());
+    ui.set_settings_extension_excluded_hosts_summary(model.extension_excluded_hosts_summary.into());
+    ui.set_settings_extension_excluded_hosts(ModelRc::from(Rc::new(VecModel::from(
+        excluded_hosts,
+    ))));
+}
+
+pub fn apply_diagnostics_view_model_to_main_window(
+    ui: &MainWindow,
+    model: crate::controller::DiagnosticsViewModel,
+) {
+    let host_entries = model
+        .host_entries
+        .into_iter()
+        .map(slint_host_registration_entry_from_row)
+        .collect::<Vec<_>>();
+    let events = model
+        .recent_events
+        .into_iter()
+        .map(slint_diagnostic_event_from_row)
+        .collect::<Vec<_>>();
+    let torrents = model
+        .torrent_diagnostics
+        .into_iter()
+        .map(slint_torrent_diagnostic_from_row)
+        .collect::<Vec<_>>();
+
+    ui.set_diagnostics_loading(model.loading);
+    ui.set_diagnostics_has_snapshot(model.has_snapshot);
+    ui.set_diagnostics_status_label(model.status_label.into());
+    ui.set_diagnostics_status_message(model.status_message.into());
+    ui.set_diagnostics_status_tone(model.status_tone.into());
+    ui.set_diagnostics_last_host_contact(model.last_host_contact_text.into());
+    ui.set_diagnostics_queue_summary(model.queue_summary_text.into());
+    ui.set_diagnostics_action_status_text(model.action_status_text.into());
+    ui.set_diagnostics_error_text(model.error_text.into());
+    ui.set_diagnostics_host_entries(ModelRc::from(Rc::new(VecModel::from(host_entries))));
+    ui.set_diagnostics_recent_events(ModelRc::from(Rc::new(VecModel::from(events))));
+    ui.set_diagnostics_torrent_diagnostics(ModelRc::from(Rc::new(VecModel::from(torrents))));
 }
 
 pub fn apply_update_state_to_main_window(ui: &MainWindow, state: &AppUpdateState) {
@@ -1570,6 +2598,16 @@ pub fn apply_update_state_to_main_window(ui: &MainWindow, state: &AppUpdateState
     ui.set_update_can_install(state.status == "available" && state.available_update.is_some());
 }
 
+pub fn wire_toast_callbacks(ui: &MainWindow, toast_state: ToastRuntimeState) {
+    toast_state.render(ui);
+    let window = ui.as_weak();
+    ui.on_toast_dismiss_requested(move |id| {
+        if let Some(ui) = window.upgrade() {
+            toast_state.dismiss_toast(&ui, id.as_str());
+        }
+    });
+}
+
 fn update_status_text(state: &AppUpdateState) -> String {
     match state.status.as_str() {
         "checking" => "Checking for updates...".into(),
@@ -1591,6 +2629,7 @@ pub fn wire_queue_command_callbacks<C>(
     runtime: Arc<Runtime>,
     command_sink: Arc<C>,
     queue_view: QueueViewRuntimeState,
+    toast_state: ToastRuntimeState,
 ) where
     C: QueueCommandSink,
 {
@@ -1686,6 +2725,7 @@ pub fn wire_queue_command_callbacks<C>(
     let delete_confirm_window = ui.as_weak();
     let delete_confirm_runtime = runtime.clone();
     let delete_confirm_sink = command_sink.clone();
+    let delete_confirm_toasts = toast_state.clone();
     ui.on_delete_confirmed(move || {
         let Some(ui) = delete_confirm_window.upgrade() else {
             return;
@@ -1697,16 +2737,15 @@ pub fn wire_queue_command_callbacks<C>(
             return;
         }
         let command_sink = delete_confirm_sink.clone();
+        let window = delete_confirm_window.clone();
+        let toast_state = delete_confirm_toasts.clone();
         delete_confirm_runtime.spawn(async move {
-            if let Err(error) = command_sink
-                .run_queue_command(QueueCommand::DeleteMany {
-                    ids,
-                    delete_from_disk,
-                })
-                .await
-            {
-                eprintln!("queue delete command failed: {error}");
-            }
+            let command = QueueCommand::DeleteMany {
+                ids,
+                delete_from_disk,
+            };
+            let result = command_sink.run_queue_command(command.clone()).await;
+            dispatch_queue_command_result_to_weak(window, toast_state, command, result);
         });
     });
 
@@ -1746,6 +2785,7 @@ pub fn wire_queue_command_callbacks<C>(
     let rename_confirm_window = ui.as_weak();
     let rename_confirm_runtime = runtime.clone();
     let rename_confirm_sink = command_sink.clone();
+    let rename_confirm_toasts = toast_state.clone();
     ui.on_rename_confirmed(move || {
         let Some(ui) = rename_confirm_window.upgrade() else {
             return;
@@ -1754,13 +2794,12 @@ pub fn wire_queue_command_callbacks<C>(
             return;
         };
         let command_sink = rename_confirm_sink.clone();
+        let window = rename_confirm_window.clone();
+        let toast_state = rename_confirm_toasts.clone();
         rename_confirm_runtime.spawn(async move {
-            if let Err(error) = command_sink
-                .run_queue_command(QueueCommand::Rename { id, filename })
-                .await
-            {
-                eprintln!("queue rename command failed: {error}");
-            }
+            let command = QueueCommand::Rename { id, filename };
+            let result = command_sink.run_queue_command(command.clone()).await;
+            dispatch_queue_command_result_to_weak(window, toast_state, command, result);
         });
     });
 
@@ -1768,6 +2807,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_pause_job_requested,
         QueueCommand::Pause,
     );
@@ -1775,6 +2815,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_resume_job_requested,
         QueueCommand::Resume,
     );
@@ -1782,6 +2823,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_cancel_job_requested,
         QueueCommand::Cancel,
     );
@@ -1789,6 +2831,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_retry_job_requested,
         QueueCommand::Retry,
     );
@@ -1796,6 +2839,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_restart_job_requested,
         QueueCommand::Restart,
     );
@@ -1803,6 +2847,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_open_progress_requested,
         QueueCommand::OpenProgress,
     );
@@ -1810,6 +2855,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_open_job_file_requested,
         QueueCommand::OpenFile,
     );
@@ -1817,6 +2863,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_reveal_job_requested,
         QueueCommand::RevealInFolder,
     );
@@ -1824,6 +2871,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_swap_failed_to_browser_requested,
         QueueCommand::SwapFailedToBrowser,
     );
@@ -1831,6 +2879,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_pause_all_requested,
         QueueCommand::PauseAll,
     );
@@ -1838,6 +2887,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_resume_all_requested,
         QueueCommand::ResumeAll,
     );
@@ -1845,6 +2895,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state.clone(),
         MainWindow::on_retry_failed_requested,
         QueueCommand::RetryFailed,
     );
@@ -1852,6 +2903,7 @@ pub fn wire_queue_command_callbacks<C>(
         ui,
         runtime.clone(),
         command_sink.clone(),
+        toast_state,
         MainWindow::on_clear_completed_requested,
         QueueCommand::ClearCompleted,
     );
@@ -1863,6 +2915,7 @@ pub fn wire_add_download_callbacks<C>(
     command_sink: Arc<C>,
     queue_view: QueueViewRuntimeState,
     add_state: AddDownloadRuntimeState,
+    toast_state: ToastRuntimeState,
 ) where
     C: AddDownloadCommandSink,
 {
@@ -1952,6 +3005,7 @@ pub fn wire_add_download_callbacks<C>(
     let import_window = ui.as_weak();
     let import_runtime = runtime.clone();
     let import_sink = command_sink.clone();
+    let import_toast_state = toast_state.clone();
     ui.on_add_download_import_torrent_requested(move || {
         let Some(ui) = import_window.upgrade() else {
             return;
@@ -1960,12 +3014,18 @@ pub fn wire_add_download_callbacks<C>(
         let window = import_window.clone();
         let add_state = import_state.clone();
         let command_sink = import_sink.clone();
+        let toast_state = import_toast_state.clone();
         import_runtime.spawn(async move {
             match command_sink.browse_torrent_file_for_add_download().await {
                 Ok(path) => dispatch_add_download_import_to_weak(window, add_state, path),
-                Err(error) => {
-                    dispatch_add_download_error_to_weak(window, add_state, error, false, true)
-                }
+                Err(error) => dispatch_add_download_error_to_weak(
+                    window,
+                    add_state,
+                    Some(toast_state),
+                    error,
+                    false,
+                    true,
+                ),
             }
         });
     });
@@ -1973,6 +3033,7 @@ pub fn wire_add_download_callbacks<C>(
     let submit_state = add_state.clone();
     let submit_window = ui.as_weak();
     let submit_runtime = runtime;
+    let submit_toast_state = toast_state;
     ui.on_add_download_submit_requested(move || {
         let Some(ui) = submit_window.upgrade() else {
             return;
@@ -1989,14 +3050,635 @@ pub fn wire_add_download_callbacks<C>(
         let window = submit_window.clone();
         let add_state = submit_state.clone();
         let queue_view = queue_view.clone();
+        let toast_state = submit_toast_state.clone();
         submit_runtime.spawn(async move {
             match run_add_download_submission(command_sink, submission).await {
-                Ok(outcome) => {
-                    dispatch_add_download_success_to_weak(window, add_state, queue_view, outcome)
+                Ok(outcome) => dispatch_add_download_success_to_weak(
+                    window,
+                    add_state,
+                    queue_view,
+                    toast_state,
+                    outcome,
+                ),
+                Err(error) => dispatch_add_download_error_to_weak(
+                    window,
+                    add_state,
+                    Some(toast_state),
+                    error,
+                    true,
+                    false,
+                ),
+            }
+        });
+    });
+}
+
+pub fn wire_settings_callbacks<C>(
+    ui: &MainWindow,
+    runtime: Arc<Runtime>,
+    command_sink: Arc<C>,
+    settings_state: SettingsRuntimeState,
+    _queue_view: QueueViewRuntimeState,
+    toast_state: ToastRuntimeState,
+) where
+    C: SettingsCommandSink,
+{
+    settings_state.render(ui);
+
+    let open_state = settings_state.clone();
+    let open_window = ui.as_weak();
+    ui.on_settings_requested(move || {
+        if let Some(ui) = open_window.upgrade() {
+            open_state.open(&ui);
+        }
+    });
+
+    let section_state = settings_state.clone();
+    let section_window = ui.as_weak();
+    ui.on_settings_section_requested(move |section| {
+        if let Some(ui) = section_window.upgrade() {
+            section_state.change_section(&ui, section.as_str());
+        }
+    });
+
+    let cancel_state = settings_state.clone();
+    let cancel_window = ui.as_weak();
+    ui.on_settings_cancel_requested(move || {
+        if let Some(ui) = cancel_window.upgrade() {
+            cancel_state.request_close(&ui);
+        }
+    });
+
+    let discard_state = settings_state.clone();
+    let discard_window = ui.as_weak();
+    ui.on_settings_discard_confirmed(move || {
+        if let Some(ui) = discard_window.upgrade() {
+            discard_state.discard_and_close(&ui);
+        }
+    });
+
+    let unsaved_cancel_state = settings_state.clone();
+    let unsaved_cancel_window = ui.as_weak();
+    ui.on_settings_unsaved_cancelled(move || {
+        if let Some(ui) = unsaved_cancel_window.upgrade() {
+            unsaved_cancel_state.cancel_unsaved_prompt(&ui);
+        }
+    });
+
+    let save_state = settings_state.clone();
+    let save_window = ui.as_weak();
+    let save_runtime = runtime.clone();
+    let save_sink = command_sink.clone();
+    let save_toast_state = toast_state.clone();
+    ui.on_settings_save_requested(move || {
+        let Some(ui) = save_window.upgrade() else {
+            return;
+        };
+        let draft = save_state.draft_for_save();
+        save_state.set_saving(&ui, true);
+        let window = save_window.clone();
+        let state = save_state.clone();
+        let sink = save_sink.clone();
+        let toast_state = save_toast_state.clone();
+        save_runtime.spawn(async move {
+            match sink.save_settings_from_slint(draft).await {
+                Ok(settings) => {
+                    dispatch_settings_saved_to_weak(window, state, Some(toast_state), settings)
                 }
-                Err(error) => {
-                    dispatch_add_download_error_to_weak(window, add_state, error, true, false)
+                Err(error) => dispatch_settings_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Save Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let browse_download_state = settings_state.clone();
+    let browse_download_window = ui.as_weak();
+    let browse_download_runtime = runtime.clone();
+    let browse_download_sink = command_sink.clone();
+    let browse_download_toast_state = toast_state.clone();
+    ui.on_settings_browse_download_directory_requested(move || {
+        let window = browse_download_window.clone();
+        let state = browse_download_state.clone();
+        let sink = browse_download_sink.clone();
+        let toast_state = browse_download_toast_state.clone();
+        browse_download_runtime.spawn(async move {
+            match sink.browse_settings_directory().await {
+                Ok(Some(directory)) => dispatch_settings_directory_to_weak(
+                    window,
+                    state,
+                    directory,
+                    SettingsDirectoryTarget::Download,
+                ),
+                Ok(None) => {}
+                Err(error) => dispatch_settings_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Browse Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let browse_torrent_state = settings_state.clone();
+    let browse_torrent_window = ui.as_weak();
+    let browse_torrent_runtime = runtime.clone();
+    let browse_torrent_sink = command_sink.clone();
+    let browse_torrent_toast_state = toast_state.clone();
+    ui.on_settings_browse_torrent_directory_requested(move || {
+        let window = browse_torrent_window.clone();
+        let state = browse_torrent_state.clone();
+        let sink = browse_torrent_sink.clone();
+        let toast_state = browse_torrent_toast_state.clone();
+        browse_torrent_runtime.spawn(async move {
+            match sink.browse_settings_directory().await {
+                Ok(Some(directory)) => dispatch_settings_directory_to_weak(
+                    window,
+                    state,
+                    directory,
+                    SettingsDirectoryTarget::Torrent,
+                ),
+                Ok(None) => {}
+                Err(error) => dispatch_settings_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Browse Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let cache_state = settings_state.clone();
+    let cache_window = ui.as_weak();
+    let cache_runtime = runtime.clone();
+    let cache_sink = command_sink;
+    let cache_toast_state = toast_state;
+    ui.on_settings_clear_torrent_cache_requested(move || {
+        let Some(ui) = cache_window.upgrade() else {
+            return;
+        };
+        cache_state.set_cache_clearing(&ui, true);
+        let window = cache_window.clone();
+        let state = cache_state.clone();
+        let sink = cache_sink.clone();
+        let toast_state = cache_toast_state.clone();
+        cache_runtime.spawn(async move {
+            match sink.clear_settings_torrent_session_cache().await {
+                Ok(result) => {
+                    dispatch_settings_cache_cleared_to_weak(window, state, toast_state, result)
                 }
+                Err(error) => dispatch_settings_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Cache Clear Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_download_directory_changed,
+        SettingsRuntimeState::set_download_directory,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_max_concurrent_downloads_changed,
+        SettingsRuntimeState::set_max_concurrent_downloads,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_auto_retry_attempts_changed,
+        SettingsRuntimeState::set_auto_retry_attempts,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_speed_limit_kib_per_second_changed,
+        SettingsRuntimeState::set_speed_limit_kib_per_second,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_download_performance_mode_changed,
+        |state, ui, value| state.set_download_performance_mode(ui, &value),
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_notifications_enabled_changed,
+        SettingsRuntimeState::set_notifications_enabled,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_show_details_on_click_changed,
+        SettingsRuntimeState::set_show_details_on_click,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_queue_row_size_changed,
+        |state, ui, value| state.set_queue_row_size(ui, &value),
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_start_on_startup_changed,
+        SettingsRuntimeState::set_start_on_startup,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_startup_launch_mode_changed,
+        |state, ui, value| state.set_startup_launch_mode(ui, &value),
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_theme_changed,
+        |state, ui, value| state.set_theme(ui, &value),
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_accent_color_changed,
+        SettingsRuntimeState::set_accent_color,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_enabled_changed,
+        SettingsRuntimeState::set_torrent_enabled,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_download_directory_changed,
+        SettingsRuntimeState::set_torrent_download_directory,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_seed_mode_changed,
+        |state, ui, value| state.set_torrent_seed_mode(ui, &value),
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_seed_ratio_limit_changed,
+        SettingsRuntimeState::set_torrent_seed_ratio_limit,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_seed_time_limit_minutes_changed,
+        SettingsRuntimeState::set_torrent_seed_time_limit_minutes,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_upload_limit_kib_per_second_changed,
+        SettingsRuntimeState::set_torrent_upload_limit_kib_per_second,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_port_forwarding_enabled_changed,
+        SettingsRuntimeState::set_torrent_port_forwarding_enabled,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_port_forwarding_port_changed,
+        SettingsRuntimeState::set_torrent_port_forwarding_port,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_torrent_peer_watchdog_mode_changed,
+        |state, ui, value| state.set_torrent_peer_watchdog_mode(ui, &value),
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_enabled_changed,
+        SettingsRuntimeState::set_extension_enabled,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_handoff_mode_changed,
+        |state, ui, value| state.set_extension_handoff_mode(ui, &value),
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_listen_port_changed,
+        SettingsRuntimeState::set_extension_listen_port,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_context_menu_enabled_changed,
+        SettingsRuntimeState::set_extension_context_menu_enabled,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_show_progress_after_handoff_changed,
+        SettingsRuntimeState::set_extension_show_progress_after_handoff,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_show_badge_status_changed,
+        SettingsRuntimeState::set_extension_show_badge_status,
+    );
+    wire_settings_bool_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_authenticated_handoff_enabled_changed,
+        SettingsRuntimeState::set_extension_authenticated_handoff_enabled,
+    );
+    wire_settings_string_callback(
+        ui,
+        settings_state.clone(),
+        MainWindow::on_settings_extension_excluded_host_input_changed,
+        SettingsRuntimeState::set_excluded_host_input,
+    );
+
+    let add_host_state = settings_state.clone();
+    let add_host_window = ui.as_weak();
+    ui.on_settings_extension_excluded_host_add_requested(move || {
+        if let Some(ui) = add_host_window.upgrade() {
+            add_host_state.add_excluded_hosts_from_input(&ui);
+        }
+    });
+
+    let remove_host_state = settings_state;
+    let remove_host_window = ui.as_weak();
+    ui.on_settings_extension_excluded_host_remove_requested(move |host| {
+        if let Some(ui) = remove_host_window.upgrade() {
+            remove_host_state.remove_excluded_host(&ui, host.to_string());
+        }
+    });
+}
+
+pub fn wire_diagnostics_callbacks<C>(
+    ui: &MainWindow,
+    runtime: Arc<Runtime>,
+    command_sink: Arc<C>,
+    settings_state: SettingsRuntimeState,
+    diagnostics_state: DiagnosticsRuntimeState,
+    toast_state: ToastRuntimeState,
+) where
+    C: DiagnosticsCommandSink,
+{
+    diagnostics_state.render(ui);
+
+    let section_window = ui.as_weak();
+    let section_runtime = runtime.clone();
+    let section_sink = command_sink.clone();
+    let section_diagnostics = diagnostics_state.clone();
+    settings_state.set_section_observer(move |section| {
+        if section != SettingsSection::NativeHost || !section_diagnostics.needs_refresh() {
+            return;
+        }
+        start_diagnostics_refresh(
+            section_runtime.clone(),
+            section_sink.clone(),
+            section_diagnostics.clone(),
+            section_window.clone(),
+            false,
+            String::new(),
+            None,
+        );
+    });
+
+    let refresh_window = ui.as_weak();
+    let refresh_runtime = runtime.clone();
+    let refresh_sink = command_sink.clone();
+    let refresh_state = diagnostics_state.clone();
+    let refresh_toast_state = toast_state.clone();
+    ui.on_diagnostics_refresh_requested(move || {
+        start_diagnostics_refresh(
+            refresh_runtime.clone(),
+            refresh_sink.clone(),
+            refresh_state.clone(),
+            refresh_window.clone(),
+            false,
+            "Diagnostics refreshed.".into(),
+            Some(refresh_toast_state.clone()),
+        );
+    });
+
+    let copy_window = ui.as_weak();
+    let copy_runtime = runtime.clone();
+    let copy_sink = command_sink.clone();
+    let copy_state = diagnostics_state.clone();
+    let copy_toast_state = toast_state.clone();
+    ui.on_diagnostics_copy_requested(move || {
+        let Some(ui) = copy_window.upgrade() else {
+            return;
+        };
+        let Some(report) = copy_state.current_report() else {
+            copy_state.set_error(&ui, "Refresh diagnostics before copying the report.".into());
+            return;
+        };
+        let window = copy_window.clone();
+        let state = copy_state.clone();
+        let sink = copy_sink.clone();
+        let toast_state = copy_toast_state.clone();
+        copy_runtime.spawn(async move {
+            match sink.copy_diagnostics_report_from_slint(report).await {
+                Ok(()) => dispatch_diagnostics_status_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    Some(toast_message(
+                        ToastType::Success,
+                        "Diagnostics Copied",
+                        "The diagnostics report was copied to the clipboard.",
+                    )),
+                    "The diagnostics report was copied to the clipboard.".into(),
+                ),
+                Err(error) => dispatch_diagnostics_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Copy Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let export_window = ui.as_weak();
+    let export_runtime = runtime.clone();
+    let export_sink = command_sink.clone();
+    let export_state = diagnostics_state.clone();
+    let export_toast_state = toast_state.clone();
+    ui.on_diagnostics_export_requested(move || {
+        let window = export_window.clone();
+        let state = export_state.clone();
+        let sink = export_sink.clone();
+        let toast_state = export_toast_state.clone();
+        export_runtime.spawn(async move {
+            match sink.export_diagnostics_report_from_slint().await {
+                Ok(Some(path)) => dispatch_diagnostics_status_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    Some(toast_message(
+                        ToastType::Success,
+                        "Diagnostics Exported",
+                        format!("Saved diagnostics to {path}."),
+                    )),
+                    format!("Saved diagnostics to {path}."),
+                ),
+                Ok(None) => dispatch_diagnostics_status_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    Some(toast_message(
+                        ToastType::Info,
+                        "Export Cancelled",
+                        "No diagnostics report was saved.",
+                    )),
+                    "No diagnostics report was saved.".into(),
+                ),
+                Err(error) => dispatch_diagnostics_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Export Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let docs_window = ui.as_weak();
+    let docs_runtime = runtime.clone();
+    let docs_sink = command_sink.clone();
+    let docs_state = diagnostics_state.clone();
+    let docs_toast_state = toast_state.clone();
+    ui.on_diagnostics_open_install_docs_requested(move || {
+        let window = docs_window.clone();
+        let state = docs_state.clone();
+        let sink = docs_sink.clone();
+        let toast_state = docs_toast_state.clone();
+        docs_runtime.spawn(async move {
+            match sink.open_install_docs_from_slint().await {
+                Ok(()) => dispatch_diagnostics_status_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    None,
+                    "Opened native host installation docs.".into(),
+                ),
+                Err(error) => dispatch_diagnostics_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Open Docs Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let repair_window = ui.as_weak();
+    let repair_runtime = runtime.clone();
+    let repair_sink = command_sink.clone();
+    let repair_state = diagnostics_state.clone();
+    let repair_toast_state = toast_state.clone();
+    ui.on_diagnostics_repair_host_requested(move || {
+        let Some(ui) = repair_window.upgrade() else {
+            return;
+        };
+        repair_state.set_loading(&ui, true);
+        let window = repair_window.clone();
+        let state = repair_state.clone();
+        let sink = repair_sink.clone();
+        let toast_state = repair_toast_state.clone();
+        repair_runtime.spawn(async move {
+            match sink.repair_host_registration_from_slint().await {
+                Ok(()) => match sink.get_diagnostics_for_slint().await {
+                    Ok(diagnostics) => dispatch_diagnostics_snapshot_to_weak(
+                        window,
+                        state,
+                        diagnostics,
+                        "Native host registration was refreshed.".into(),
+                        Some(toast_state),
+                        Some(toast_message(
+                            ToastType::Success,
+                            "Native Host Repaired",
+                            "Native host registration was refreshed.",
+                        )),
+                    ),
+                    Err(error) => dispatch_diagnostics_error_to_weak(
+                        window,
+                        state,
+                        Some(toast_state),
+                        "Diagnostics Failed",
+                        error,
+                    ),
+                },
+                Err(error) => dispatch_diagnostics_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Repair Failed",
+                    error,
+                ),
+            }
+        });
+    });
+
+    let handoff_window = ui.as_weak();
+    let handoff_runtime = runtime;
+    let handoff_state = diagnostics_state;
+    let handoff_toast_state = toast_state;
+    ui.on_diagnostics_test_handoff_requested(move || {
+        let window = handoff_window.clone();
+        let state = handoff_state.clone();
+        let sink = command_sink.clone();
+        let toast_state = handoff_toast_state.clone();
+        handoff_runtime.spawn(async move {
+            match sink.test_extension_handoff_from_slint().await {
+                Ok(()) => dispatch_diagnostics_status_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    Some(toast_message(
+                        ToastType::Success,
+                        "Test Prompt Opened",
+                        "A browser-style download prompt was opened.",
+                    )),
+                    "A browser-style download prompt was opened.".into(),
+                ),
+                Err(error) => dispatch_diagnostics_error_to_weak(
+                    window,
+                    state,
+                    Some(toast_state),
+                    "Test Handoff Failed",
+                    error,
+                ),
             }
         });
     });
@@ -2007,6 +3689,7 @@ pub fn wire_update_callbacks<C>(
     runtime: Arc<Runtime>,
     command_sink: Arc<C>,
     update_state: UpdateStateStore,
+    toast_state: ToastRuntimeState,
 ) where
     C: UpdateCommandSink,
 {
@@ -2016,6 +3699,7 @@ pub fn wire_update_callbacks<C>(
     let check_state = update_state.clone();
     let check_runtime = runtime.clone();
     let check_sink = command_sink.clone();
+    let check_toast_state = toast_state.clone();
     ui.on_check_update_requested(move || {
         let next =
             check_state.update(|state| update::start_update_check(state, UpdateCheckMode::Manual));
@@ -2024,6 +3708,7 @@ pub fn wire_update_callbacks<C>(
         let window = check_window.clone();
         let update_state = check_state.clone();
         let command_sink = check_sink.clone();
+        let toast_state = check_toast_state.clone();
         check_runtime.spawn(async move {
             match command_sink
                 .run_update_command(UpdateCommand::Check(UpdateCheckMode::Manual))
@@ -2032,11 +3717,27 @@ pub fn wire_update_callbacks<C>(
                 Ok(update) => {
                     let next =
                         update_state.update(|state| update::finish_update_check(state, update));
-                    dispatch_update_state_to_weak(window, next);
+                    let toast = update_check_toast(&next);
+                    dispatch_update_state_with_toast_to_weak(
+                        window,
+                        next,
+                        Some(toast_state),
+                        toast,
+                    );
                 }
                 Err(error) => {
                     let next = update_state.update(|state| update::fail_update_check(state, error));
-                    dispatch_update_state_to_weak(window, next);
+                    dispatch_update_state_with_toast_to_weak(
+                        window,
+                        next.clone(),
+                        Some(toast_state),
+                        Some(toast_message(
+                            ToastType::Error,
+                            "Update Check Failed",
+                            next.error_message
+                                .unwrap_or_else(|| "Update check failed.".into()),
+                        )),
+                    );
                 }
             }
         });
@@ -2045,6 +3746,7 @@ pub fn wire_update_callbacks<C>(
     let install_window = ui.as_weak();
     let install_state = update_state;
     let install_runtime = runtime;
+    let install_toast_state = toast_state;
     ui.on_install_update_requested(move || {
         let next = install_state.update(update::begin_update_install);
         apply_update_state_to_weak(&install_window, &next);
@@ -2052,13 +3754,24 @@ pub fn wire_update_callbacks<C>(
         let window = install_window.clone();
         let update_state = install_state.clone();
         let command_sink = command_sink.clone();
+        let toast_state = install_toast_state.clone();
         install_runtime.spawn(async move {
             if let Err(error) = command_sink
                 .run_update_command(UpdateCommand::Install)
                 .await
             {
                 let next = update_state.update(|state| update::fail_update_install(state, error));
-                dispatch_update_state_to_weak(window, next);
+                dispatch_update_state_with_toast_to_weak(
+                    window,
+                    next.clone(),
+                    Some(toast_state),
+                    Some(ToastMessage::persistent(
+                        ToastType::Error,
+                        "Update Failed",
+                        next.error_message
+                            .unwrap_or_else(|| "Update installation failed.".into()),
+                    )),
+                );
             }
         });
     });
@@ -2067,7 +3780,7 @@ pub fn wire_update_callbacks<C>(
 async fn run_add_download_submission<C>(
     command_sink: Arc<C>,
     submission: AddDownloadSubmission,
-) -> Result<crate::controller::AddDownloadOutcome, String>
+) -> Result<AddDownloadSubmissionOutcome, String>
 where
     C: AddDownloadCommandSink,
 {
@@ -2096,12 +3809,20 @@ where
                 AddDownloadResult::Single(result),
                 None,
             );
-            if let Some(AddDownloadProgressIntent::Single { job_id }) = &outcome.progress_intent {
+            let progress_warning = if let Some(AddDownloadProgressIntent::Single { job_id }) =
+                &outcome.progress_intent
+            {
                 command_sink
                     .open_add_download_progress_window(job_id.clone())
-                    .await?;
-            }
-            Ok(outcome)
+                    .await
+                    .err()
+            } else {
+                None
+            };
+            Ok(AddDownloadSubmissionOutcome {
+                outcome,
+                progress_warning,
+            })
         }
         DownloadMode::Multi | DownloadMode::Bulk => {
             let archive_name = submission.bulk_archive_name.clone();
@@ -2116,14 +3837,27 @@ where
                 AddDownloadResult::Batch(result),
                 archive_name.as_deref(),
             );
-            if let Some(AddDownloadProgressIntent::Batch { context }) = &outcome.progress_intent {
+            let progress_warning = if let Some(AddDownloadProgressIntent::Batch { context }) =
+                &outcome.progress_intent
+            {
                 command_sink
                     .open_add_download_batch_progress_window(context.clone())
-                    .await?;
-            }
-            Ok(outcome)
+                    .await
+                    .err()
+            } else {
+                None
+            };
+            Ok(AddDownloadSubmissionOutcome {
+                outcome,
+                progress_warning,
+            })
         }
     }
+}
+
+struct AddDownloadSubmissionOutcome {
+    outcome: crate::controller::AddDownloadOutcome,
+    progress_warning: Option<String>,
 }
 
 fn dispatch_add_download_import_to_weak(
@@ -2145,13 +3879,22 @@ fn dispatch_add_download_success_to_weak(
     window: slint::Weak<MainWindow>,
     add_state: AddDownloadRuntimeState,
     queue_view: QueueViewRuntimeState,
-    outcome: crate::controller::AddDownloadOutcome,
+    toast_state: ToastRuntimeState,
+    submission_outcome: AddDownloadSubmissionOutcome,
 ) {
     if let Err(error) = slint::invoke_from_event_loop(move || {
         if let Some(ui) = window.upgrade() {
+            let outcome = submission_outcome.outcome;
             queue_view.change_view(&ui, outcome.view_id);
-            if let Some(id) = outcome.primary_job_id {
-                queue_view.select_job_in_main_window(&ui, &id);
+            if let Some(id) = outcome.primary_job_id.as_deref() {
+                queue_view.select_job_in_main_window(&ui, id);
+            }
+            toast_state.add_toast(&ui, add_download_success_toast(&outcome));
+            if let Some(error) = submission_outcome.progress_warning {
+                toast_state.add_toast(
+                    &ui,
+                    toast_message(ToastType::Warning, "Progress Popup Failed", error),
+                );
             }
             add_state.close(&ui);
         }
@@ -2163,6 +3906,7 @@ fn dispatch_add_download_success_to_weak(
 fn dispatch_add_download_error_to_weak(
     window: slint::Weak<MainWindow>,
     add_state: AddDownloadRuntimeState,
+    toast_state: Option<ToastRuntimeState>,
     error: String,
     submitting: bool,
     importing: bool,
@@ -2175,10 +3919,76 @@ fn dispatch_add_download_error_to_weak(
             if importing {
                 add_state.set_importing(&ui, false);
             }
-            add_state.set_error(&ui, error);
+            add_state.set_error(&ui, error.clone());
+            if let Some(toast_state) = toast_state {
+                toast_state.add_toast(
+                    &ui,
+                    toast_message(ToastType::Error, "Add Download Failed", error),
+                );
+            }
         }
     }) {
         eprintln!("failed to update Slint add-download error state: {dispatch_error}");
+    }
+}
+
+fn add_download_success_toast(outcome: &crate::controller::AddDownloadOutcome) -> ToastMessage {
+    if outcome.queued_count == 0 && outcome.duplicate_count > 0 {
+        return toast_message(
+            ToastType::Info,
+            "Already in Queue",
+            if outcome.total_count == 1 {
+                match outcome.primary_filename.as_deref() {
+                    Some(filename) if !filename.is_empty() => {
+                        format!("{filename} is already in the download list.")
+                    }
+                    _ => "That download is already in the download list.".into(),
+                }
+            } else {
+                "All submitted downloads are already in the list.".into()
+            },
+        );
+    }
+
+    match outcome.mode {
+        DownloadMode::Torrent => toast_message(
+            ToastType::Success,
+            "Torrent Added",
+            match outcome.primary_filename.as_deref() {
+                Some(filename) if !filename.is_empty() => {
+                    format!("{filename} was added to the queue.")
+                }
+                _ => "The torrent was added to the queue.".into(),
+            },
+        ),
+        DownloadMode::Single => toast_message(
+            ToastType::Success,
+            "Download Added",
+            match outcome.primary_filename.as_deref() {
+                Some(filename) if !filename.is_empty() => {
+                    format!("{filename} was added to the queue.")
+                }
+                _ => "The download was added to the queue.".into(),
+            },
+        ),
+        DownloadMode::Bulk => toast_message(
+            ToastType::Success,
+            "Bulk Download Added",
+            plural_downloads_added(outcome.queued_count),
+        ),
+        DownloadMode::Multi => toast_message(
+            ToastType::Success,
+            "Downloads Added",
+            plural_downloads_added(outcome.queued_count),
+        ),
+    }
+}
+
+fn plural_downloads_added(count: usize) -> String {
+    if count == 1 {
+        "1 download was added to the queue.".into()
+    } else {
+        format!("{count} downloads were added to the queue.")
     }
 }
 
@@ -2225,24 +4035,485 @@ fn dispatch_update_state_to_weak(window: slint::Weak<MainWindow>, state: AppUpda
     }
 }
 
+fn dispatch_update_state_with_toast_to_weak(
+    window: slint::Weak<MainWindow>,
+    state: AppUpdateState,
+    toast_state: Option<ToastRuntimeState>,
+    toast: Option<ToastMessage>,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        apply_update_state_to_weak(&window, &state);
+        if let Some(ui) = window.upgrade() {
+            if let (Some(toast_state), Some(toast)) = (toast_state, toast) {
+                toast_state.add_toast(&ui, toast);
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint updater panel toast: {error}");
+    }
+}
+
+fn update_check_toast(state: &AppUpdateState) -> Option<ToastMessage> {
+    match state.status.as_str() {
+        "available" => state.available_update.as_ref().map(|metadata| {
+            ToastMessage::persistent(
+                ToastType::Info,
+                "Update Available",
+                format!(
+                    "Simple Download Manager {} is ready to install.",
+                    metadata.version
+                ),
+            )
+        }),
+        "not_available" => Some(toast_message(
+            ToastType::Info,
+            "No Update Available",
+            "You are running the latest alpha build.",
+        )),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsDirectoryTarget {
+    Download,
+    Torrent,
+}
+
+fn dispatch_settings_saved_to_weak(
+    window: slint::Weak<MainWindow>,
+    settings_state: SettingsRuntimeState,
+    toast_state: Option<ToastRuntimeState>,
+    settings: Settings,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            settings_state.apply_saved_settings(&ui, settings);
+            if let Some(toast_state) = toast_state {
+                toast_state.add_toast(
+                    &ui,
+                    toast_message(
+                        ToastType::Success,
+                        "Settings Saved",
+                        "Preferences updated successfully.",
+                    ),
+                );
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint settings save state: {error}");
+    }
+}
+
+fn dispatch_settings_directory_to_weak(
+    window: slint::Weak<MainWindow>,
+    settings_state: SettingsRuntimeState,
+    directory: String,
+    target: SettingsDirectoryTarget,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            match target {
+                SettingsDirectoryTarget::Download => {
+                    settings_state.set_download_directory(&ui, directory);
+                }
+                SettingsDirectoryTarget::Torrent => {
+                    settings_state.set_torrent_download_directory(&ui, directory);
+                }
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint settings directory state: {error}");
+    }
+}
+
+fn dispatch_settings_cache_cleared_to_weak(
+    window: slint::Weak<MainWindow>,
+    settings_state: SettingsRuntimeState,
+    toast_state: ToastRuntimeState,
+    result: TorrentSessionCacheClearResult,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            settings_state.set_cache_clearing(&ui, false);
+            let (title, message) = if result.pending_restart {
+                (
+                    "Cache Clear Scheduled",
+                    format!(
+                        "Torrent session cache is locked and will be cleared on next startup: {}",
+                        result.session_path
+                    ),
+                )
+            } else {
+                (
+                    "Torrent Session Cache Cleared",
+                    format!("Torrent session cache cleared: {}", result.session_path),
+                )
+            };
+            toast_state.add_toast(&ui, toast_message(ToastType::Success, title, message));
+        }
+    }) {
+        eprintln!("failed to update Slint torrent cache clear state: {error}");
+    }
+}
+
+fn dispatch_settings_error_to_weak(
+    window: slint::Weak<MainWindow>,
+    settings_state: SettingsRuntimeState,
+    toast_state: Option<ToastRuntimeState>,
+    title: &'static str,
+    error: String,
+) {
+    if let Err(dispatch_error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            settings_state.set_error(&ui, error.clone());
+            if let Some(toast_state) = toast_state {
+                toast_state.add_toast(&ui, toast_message(ToastType::Error, title, error));
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint settings error state: {dispatch_error}");
+    }
+}
+
+fn start_diagnostics_refresh<C>(
+    runtime: Arc<Runtime>,
+    command_sink: Arc<C>,
+    diagnostics_state: DiagnosticsRuntimeState,
+    window: slint::Weak<MainWindow>,
+    silent_failure: bool,
+    success_status: String,
+    toast_state: Option<ToastRuntimeState>,
+) where
+    C: DiagnosticsCommandSink,
+{
+    if let Some(ui) = window.upgrade() {
+        diagnostics_state.set_loading(&ui, true);
+    }
+    runtime.spawn(async move {
+        match command_sink.get_diagnostics_for_slint().await {
+            Ok(diagnostics) => {
+                let toast = if success_status.is_empty() {
+                    None
+                } else {
+                    Some(toast_message(
+                        ToastType::Success,
+                        "Diagnostics Refreshed",
+                        success_status.clone(),
+                    ))
+                };
+                dispatch_diagnostics_snapshot_to_weak(
+                    window,
+                    diagnostics_state,
+                    diagnostics,
+                    success_status,
+                    toast_state,
+                    toast,
+                );
+            }
+            Err(error) if silent_failure => {
+                dispatch_diagnostics_status_to_weak(
+                    window,
+                    diagnostics_state,
+                    None,
+                    None,
+                    String::new(),
+                );
+                eprintln!("startup diagnostics refresh failed: {error}");
+            }
+            Err(error) => dispatch_diagnostics_error_to_weak(
+                window,
+                diagnostics_state,
+                toast_state,
+                "Diagnostics Failed",
+                error,
+            ),
+        }
+    });
+}
+
+fn dispatch_diagnostics_snapshot_to_weak(
+    window: slint::Weak<MainWindow>,
+    diagnostics_state: DiagnosticsRuntimeState,
+    diagnostics: DiagnosticsSnapshot,
+    status: String,
+    toast_state: Option<ToastRuntimeState>,
+    toast: Option<ToastMessage>,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            diagnostics_state.apply_snapshot(&ui, diagnostics, status);
+            if let (Some(toast_state), Some(toast)) = (toast_state, toast) {
+                toast_state.add_toast(&ui, toast);
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint diagnostics snapshot: {error}");
+    }
+}
+
+fn dispatch_diagnostics_status_to_weak(
+    window: slint::Weak<MainWindow>,
+    diagnostics_state: DiagnosticsRuntimeState,
+    toast_state: Option<ToastRuntimeState>,
+    toast: Option<ToastMessage>,
+    status: String,
+) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            diagnostics_state.set_action_status(&ui, status);
+            if let (Some(toast_state), Some(toast)) = (toast_state, toast) {
+                toast_state.add_toast(&ui, toast);
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint diagnostics status: {error}");
+    }
+}
+
+fn dispatch_diagnostics_error_to_weak(
+    window: slint::Weak<MainWindow>,
+    diagnostics_state: DiagnosticsRuntimeState,
+    toast_state: Option<ToastRuntimeState>,
+    title: &'static str,
+    error: String,
+) {
+    if let Err(dispatch_error) = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = window.upgrade() {
+            diagnostics_state.set_error(&ui, error.clone());
+            if let Some(toast_state) = toast_state {
+                toast_state.add_toast(&ui, toast_message(ToastType::Error, title, error));
+            }
+        }
+    }) {
+        eprintln!("failed to update Slint diagnostics error: {dispatch_error}");
+    }
+}
+
+fn update_download_directory_with_torrent_default(settings: &mut Settings, directory: String) {
+    let previous_default = default_torrent_download_directory(&settings.download_directory);
+    let should_update_torrent_directory = settings.torrent.download_directory.trim().is_empty()
+        || settings.torrent.download_directory == previous_default;
+    settings.download_directory = directory;
+    if should_update_torrent_directory {
+        settings.torrent.download_directory =
+            default_torrent_download_directory(&settings.download_directory);
+    }
+}
+
+fn wire_settings_string_callback(
+    ui: &MainWindow,
+    settings_state: SettingsRuntimeState,
+    register: StringCommandRegistrar,
+    update: impl Fn(&SettingsRuntimeState, &MainWindow, String) + 'static,
+) {
+    let window = ui.as_weak();
+    register(
+        ui,
+        Box::new(move |value| {
+            if let Some(ui) = window.upgrade() {
+                update(&settings_state, &ui, value.to_string());
+            }
+        }),
+    );
+}
+
+fn wire_settings_bool_callback(
+    ui: &MainWindow,
+    settings_state: SettingsRuntimeState,
+    register: BoolSettingsRegistrar,
+    update: impl Fn(&SettingsRuntimeState, &MainWindow, bool) + 'static,
+) {
+    let window = ui.as_weak();
+    register(
+        ui,
+        Box::new(move |value| {
+            if let Some(ui) = window.upgrade() {
+                update(&settings_state, &ui, value);
+            }
+        }),
+    );
+}
+
+fn dispatch_queue_command_result_to_weak(
+    window: slint::Weak<MainWindow>,
+    toast_state: ToastRuntimeState,
+    command: QueueCommand,
+    result: Result<QueueCommandOutput, String>,
+) {
+    if let Err(dispatch_error) = slint::invoke_from_event_loop(move || {
+        let Some(ui) = window.upgrade() else {
+            return;
+        };
+        match result {
+            Ok(output) => {
+                for toast in queue_command_success_toasts(&command, &output) {
+                    toast_state.add_toast(&ui, toast);
+                }
+            }
+            Err(error) => {
+                toast_state.add_toast(
+                    &ui,
+                    toast_message(ToastType::Error, queue_command_error_title(&command), error),
+                );
+            }
+        }
+    }) {
+        eprintln!("failed to dispatch Slint queue command toast: {dispatch_error}");
+    }
+}
+
+fn queue_command_error_title(command: &QueueCommand) -> &'static str {
+    match command {
+        QueueCommand::Pause(_) => "Pause Failed",
+        QueueCommand::Resume(_) => "Resume Failed",
+        QueueCommand::Cancel(_) => "Cancel Failed",
+        QueueCommand::Retry(_) => "Retry Failed",
+        QueueCommand::Restart(_) => "Restart Failed",
+        QueueCommand::Remove(_) | QueueCommand::DeleteMany { .. } => "Delete Failed",
+        QueueCommand::Rename { .. } => "Rename Failed",
+        QueueCommand::OpenFile(_) => "Open Failed",
+        QueueCommand::RevealInFolder(_) => "Reveal Failed",
+        QueueCommand::SwapFailedToBrowser(_) => "Swap Failed",
+        QueueCommand::OpenProgress(_) => "Progress Popup Failed",
+        QueueCommand::PauseAll => "Pause Queue Failed",
+        QueueCommand::ResumeAll => "Resume Queue Failed",
+        QueueCommand::RetryFailed => "Retry Failed Downloads Failed",
+        QueueCommand::ClearCompleted => "Clear Completed Failed",
+    }
+}
+
+fn queue_command_success_toasts(
+    command: &QueueCommand,
+    output: &QueueCommandOutput,
+) -> Vec<ToastMessage> {
+    let mut toasts = Vec::new();
+    match command {
+        QueueCommand::Retry(_) => toasts.push(toast_message(
+            ToastType::Info,
+            "Retrying Download",
+            "The download was added back to the queue.",
+        )),
+        QueueCommand::Restart(_) => toasts.push(toast_message(
+            ToastType::Info,
+            "Restarting Download",
+            "Partial progress was cleared and the download was queued again.",
+        )),
+        QueueCommand::DeleteMany {
+            ids,
+            delete_from_disk,
+        } => {
+            if ids.len() == 1 {
+                toasts.push(toast_message(
+                    ToastType::Success,
+                    "Download Deleted",
+                    if *delete_from_disk {
+                        "Removed from the list and deleted from disk."
+                    } else {
+                        "Removed from the download list."
+                    },
+                ));
+            } else {
+                toasts.push(toast_message(
+                    ToastType::Success,
+                    "Downloads Deleted",
+                    if *delete_from_disk {
+                        format!(
+                            "Removed {} downloads from the list and deleted their files from disk.",
+                            ids.len()
+                        )
+                    } else {
+                        format!("Removed {} downloads from the download list.", ids.len())
+                    },
+                ));
+            }
+        }
+        QueueCommand::Rename { filename, .. } => toasts.push(toast_message(
+            ToastType::Success,
+            "Download Renamed",
+            format!("Renamed to {filename}."),
+        )),
+        QueueCommand::SwapFailedToBrowser(_) => toasts.push(toast_message(
+            ToastType::Info,
+            "Swapped to Browser",
+            "The download URL was opened in your browser.",
+        )),
+        QueueCommand::PauseAll => toasts.push(toast_message(
+            ToastType::Info,
+            "Queue Paused",
+            "Active and queued downloads were paused.",
+        )),
+        QueueCommand::ResumeAll => toasts.push(toast_message(
+            ToastType::Info,
+            "Queue Resumed",
+            "Paused and interrupted downloads were queued again.",
+        )),
+        QueueCommand::RetryFailed => toasts.push(toast_message(
+            ToastType::Info,
+            "Retrying Failed Downloads",
+            "Failed downloads were added back to the queue.",
+        )),
+        QueueCommand::ClearCompleted => toasts.push(toast_message(
+            ToastType::Info,
+            "Completed Downloads Cleared",
+            "Completed downloads were removed from the list.",
+        )),
+        QueueCommand::OpenFile(_) => {
+            append_external_use_toast(&mut toasts, output, "file");
+        }
+        QueueCommand::RevealInFolder(_) => {
+            append_external_use_toast(&mut toasts, output, "folder");
+        }
+        QueueCommand::Pause(_)
+        | QueueCommand::Resume(_)
+        | QueueCommand::Cancel(_)
+        | QueueCommand::Remove(_)
+        | QueueCommand::OpenProgress(_) => {}
+    }
+    toasts
+}
+
+fn append_external_use_toast(
+    toasts: &mut Vec<ToastMessage>,
+    output: &QueueCommandOutput,
+    target: &'static str,
+) {
+    let Some(result) = output.external_use.as_ref() else {
+        return;
+    };
+    if result.paused_torrent {
+        toasts.push(toast_message(
+            ToastType::Info,
+            "Torrent Paused",
+            external_use_auto_reseed_message(
+                target,
+                result.auto_reseed_retry_seconds.unwrap_or(60),
+            ),
+        ));
+    }
+}
+
 fn wire_string_command<C>(
     ui: &MainWindow,
     runtime: Arc<Runtime>,
     command_sink: Arc<C>,
+    toast_state: ToastRuntimeState,
     register: StringCommandRegistrar,
     command: fn(String) -> QueueCommand,
 ) where
     C: QueueCommandSink,
 {
+    let window = ui.as_weak();
     register(
         ui,
         Box::new(move |id| {
             let command_sink = command_sink.clone();
             let command = command(id.to_string());
+            let window = window.clone();
+            let toast_state = toast_state.clone();
             runtime.spawn(async move {
-                if let Err(error) = command_sink.run_queue_command(command).await {
-                    eprintln!("queue command failed: {error}");
-                }
+                let result = command_sink.run_queue_command(command.clone()).await;
+                dispatch_queue_command_result_to_weak(window, toast_state, command, result);
             });
         }),
     );
@@ -2252,20 +4523,23 @@ fn wire_void_command<C>(
     ui: &MainWindow,
     runtime: Arc<Runtime>,
     command_sink: Arc<C>,
+    toast_state: ToastRuntimeState,
     register: fn(&MainWindow, Box<dyn FnMut()>),
     command: QueueCommand,
 ) where
     C: QueueCommandSink,
 {
+    let window = ui.as_weak();
     register(
         ui,
         Box::new(move || {
             let command_sink = command_sink.clone();
             let command = command.clone();
+            let window = window.clone();
+            let toast_state = toast_state.clone();
             runtime.spawn(async move {
-                if let Err(error) = command_sink.run_queue_command(command).await {
-                    eprintln!("queue command failed: {error}");
-                }
+                let result = command_sink.run_queue_command(command.clone()).await;
+                dispatch_queue_command_result_to_weak(window, toast_state, command, result);
             });
         }),
     );

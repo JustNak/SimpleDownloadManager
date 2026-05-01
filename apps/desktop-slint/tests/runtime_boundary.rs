@@ -14,6 +14,8 @@ fn slint_runtime_stays_tauri_free_and_uses_event_loop_bridge() {
         .expect("Windows shell source should load");
     let notifications_source = fs::read_to_string(manifest_dir.join("src/shell/notifications.rs"))
         .expect("notification shell source should load");
+    let clipboard_source = fs::read_to_string(manifest_dir.join("src/shell/clipboard.rs"))
+        .expect("clipboard shell source should load");
     let native_host_source = fs::read_to_string(manifest_dir.join("src/shell/native_host.rs"))
         .expect("native-host shell source should load");
     let popup_source = fs::read_to_string(manifest_dir.join("src/shell/popups.rs"))
@@ -44,8 +46,9 @@ fn slint_runtime_stays_tauri_free_and_uses_event_loop_bridge() {
     assert!(
         manifest.contains("[target.'cfg(windows)'.dependencies]")
             && manifest.contains("tray-icon = \"0.21.3\"")
-            && manifest.contains("notify-rust = \"4.14.0\""),
-        "Phase 3E/3G native shell support should keep tray-icon and notify-rust scoped to Windows builds"
+            && manifest.contains("notify-rust = \"4.14.0\"")
+            && manifest.contains("clipboard-win = \"5.4.1\""),
+        "native shell support should keep tray-icon, notify-rust, and clipboard-win scoped to Windows builds"
     );
     assert!(
         manifest.contains("cargo-packager-updater = \"0.2.3\""),
@@ -77,6 +80,10 @@ fn slint_runtime_stays_tauri_free_and_uses_event_loop_bridge() {
         "native notifications should stay isolated in shell::notifications"
     );
     assert!(
+        clipboard_source.contains("clipboard_win::set_clipboard_string"),
+        "Windows clipboard writes should stay isolated in shell::clipboard"
+    );
+    assert!(
         native_host_source.contains("winreg")
             && native_host_source.contains("NativeMessagingHosts")
             && native_host_source.contains("native_host_manifest_json"),
@@ -86,6 +93,7 @@ fn slint_runtime_stays_tauri_free_and_uses_event_loop_bridge() {
         !runtime_source.contains("windows_sys::")
             && !runtime_source.contains("winreg::")
             && !runtime_source.contains("notify_rust::")
+            && !runtime_source.contains("clipboard_win::")
             && !runtime_source.contains("tray_icon::")
             && !runtime_source.contains("cargo_packager_updater::")
             && !ipc_source.contains("windows_sys::")
@@ -128,7 +136,11 @@ fn slint_runtime_stays_tauri_free_and_uses_event_loop_bridge() {
         !popup_source.contains("tauri") && !popup_source.contains("tauri_plugin"),
         "Slint popup lifecycle must remain Tauri-free"
     );
-    for source in [&notifications_source, &native_host_source] {
+    for source in [
+        &notifications_source,
+        &clipboard_source,
+        &native_host_source,
+    ] {
         assert!(
             !source.contains("tauri::") && !source.contains("tauri_plugin"),
             "Slint native shell modules must remain Tauri-free"

@@ -1,27 +1,33 @@
 use simple_download_manager_desktop_core::backend::{CoreDesktopBackend, ProgressBatchRegistry};
 use simple_download_manager_desktop_core::contracts::{
     AddJobRequest, AddJobResult, AddJobStatus, AddJobsRequest, AddJobsResult, AppUpdateMetadata,
-    BackendFuture, DesktopBackend, DesktopEvent, ProgressBatchContext, ProgressBatchKind,
-    ShellServices, UpdateInstallProgressEvent,
+    BackendFuture, ConfirmPromptRequest, DesktopBackend, DesktopEvent, ExternalUseResult,
+    ProgressBatchContext, ProgressBatchKind, ShellError, ShellServices, UpdateInstallProgressEvent,
 };
 use simple_download_manager_desktop_core::host_protocol::HostRequest;
-use simple_download_manager_desktop_core::prompts::PromptRegistry;
-use simple_download_manager_desktop_core::state::SharedState;
+use simple_download_manager_desktop_core::prompts::{PromptDuplicateAction, PromptRegistry};
+use simple_download_manager_desktop_core::state::{SharedState, TorrentSessionCacheClearResult};
 use simple_download_manager_desktop_core::storage::{
-    ConnectionState, DesktopSnapshot, DownloadJob, DownloadPrompt, DownloadSource, JobState,
-    Settings, TorrentInfo, TransferKind,
+    ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot,
+    DownloadHandoffMode, DownloadJob, DownloadPrompt, DownloadSource, HostRegistrationDiagnostics,
+    HostRegistrationEntry, HostRegistrationStatus, JobState, QueueSummary, Settings, TorrentInfo,
+    TorrentPeerConnectionWatchdogMode, TorrentSeedMode, TransferKind,
 };
 use simple_download_manager_desktop_slint::MainWindow;
 use simple_download_manager_desktop_slint::{
     runtime::{
         apply_snapshot_to_main_window, apply_update_state_to_main_window,
-        wire_add_download_callbacks, wire_main_window_lifecycle_callbacks,
-        wire_queue_command_callbacks, wire_update_callbacks, AddDownloadCommandSink,
-        AddDownloadRuntimeState, MainWindowLifecycleCommand, MainWindowLifecycleSink, QueueCommand,
-        QueueCommandSink, QueueViewRuntimeState, SlintShellServices, UiAction, UiDispatcher,
-        UpdateCommand, UpdateCommandSink,
+        wire_add_download_callbacks, wire_diagnostics_callbacks,
+        wire_main_window_lifecycle_callbacks, wire_progress_popup_action_bridge,
+        wire_prompt_window_action_bridge, wire_queue_command_callbacks, wire_settings_callbacks,
+        wire_toast_callbacks, wire_update_callbacks, AddDownloadCommandSink,
+        AddDownloadRuntimeState, DiagnosticsCommandSink, DiagnosticsRuntimeState,
+        MainWindowLifecycleCommand, MainWindowLifecycleSink, ProgressPopupCommandSink,
+        PromptWindowCommandSink, QueueCommand, QueueCommandOutput, QueueCommandSink,
+        QueueViewRuntimeState, SettingsCommandSink, SettingsRuntimeState, SlintShellServices,
+        ToastRuntimeState, UiAction, UiDispatcher, UpdateCommand, UpdateCommandSink,
     },
-    shell::main_window,
+    shell::{main_window, popups},
     update::{AppUpdateState, UpdateCheckMode, UpdateStateStore},
 };
 use slint::{CloseRequestResponse, ComponentHandle, Model, PhysicalSize};
@@ -56,8 +62,36 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     let sink = Arc::new(RecordingQueueCommandSink::default());
 
     let queue_view = QueueViewRuntimeState::default();
+    let toast_state = ToastRuntimeState::default();
+    wire_toast_callbacks(&ui, toast_state.clone());
+    let manual_toast_id = toast_state.add_toast(
+        &ui,
+        simple_download_manager_desktop_slint::controller::toast_message(
+            simple_download_manager_desktop_slint::controller::ToastType::Info,
+            "Queue Paused",
+            "Active and queued downloads were paused.",
+        ),
+    );
+    assert_eq!(ui.get_toasts().row_count(), 1);
+    let manual_toast = ui
+        .get_toasts()
+        .row_data(0)
+        .expect("manual toast row should be visible");
+    assert_eq!(manual_toast.id.as_str(), manual_toast_id);
+    assert_eq!(manual_toast.toast_type.as_str(), "info");
+    assert_eq!(manual_toast.title.as_str(), "Queue Paused");
+    assert!(manual_toast.auto_close);
+    toast_state.dismiss_toast(&ui, &manual_toast_id);
+    assert_eq!(ui.get_toasts().row_count(), 0);
+
     queue_view.apply_snapshot_to_main_window(&ui, &snapshot);
-    wire_queue_command_callbacks(&ui, runtime.clone(), sink.clone(), queue_view.clone());
+    wire_queue_command_callbacks(
+        &ui,
+        runtime.clone(),
+        sink.clone(),
+        queue_view.clone(),
+        toast_state.clone(),
+    );
     assert_eq!(ui.get_queue_title().as_str(), "All downloads");
     assert_eq!(ui.get_queue_selected_count(), 0);
     assert_eq!(ui.get_nav_items().row_count(), 18);
@@ -107,6 +141,22 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     assert!(commands.contains(&QueueCommand::ResumeAll));
     assert!(commands.contains(&QueueCommand::RetryFailed));
     assert!(commands.contains(&QueueCommand::ClearCompleted));
+    drain_slint_events();
+    wait_for_toast_present(&toast_state, "Retrying Download", "added back to the queue");
+
+    sink.set_next_error("cancel failed");
+    ui.invoke_cancel_job_requested("job_cancel_error".into());
+    runtime.block_on(async {
+        for _ in 0..20 {
+            if sink.commands().len() == 11 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    wait_for_toast_present(&toast_state, "Cancel Failed", "cancel failed");
 
     let mixed_snapshot = test_snapshot(vec![download_job("job_http", JobState::Queued), {
         let mut job = download_job("job_torrent", JobState::Downloading);
@@ -174,7 +224,7 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     ui.invoke_delete_confirmed();
     runtime.block_on(async {
         for _ in 0..20 {
-            if sink.commands().len() == 11 {
+            if sink.commands().len() == 12 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -198,7 +248,7 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     ui.invoke_rename_confirmed();
     runtime.block_on(async {
         for _ in 0..20 {
-            if sink.commands().len() == 12 {
+            if sink.commands().len() == 13 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -229,12 +279,16 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     ui.invoke_rename_cancelled();
     assert!(!ui.get_rename_prompt_visible());
 
+    sink.set_external_use_result(ExternalUseResult {
+        paused_torrent: true,
+        auto_reseed_retry_seconds: Some(60),
+    });
     ui.invoke_open_job_file_requested("job_delete".into());
     ui.invoke_reveal_job_requested("job_delete".into());
     ui.invoke_swap_failed_to_browser_requested("job_swap".into());
     runtime.block_on(async {
         for _ in 0..20 {
-            if sink.commands().len() == 15 {
+            if sink.commands().len() == 16 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -250,6 +304,8 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     assert!(sink
         .commands()
         .contains(&QueueCommand::SwapFailedToBrowser("job_swap".into())));
+    drain_slint_events();
+    wait_for_toast_present(&toast_state, "Torrent Paused", "resume seeding every 60s");
 
     let update_state = AppUpdateState {
         status: "available".into(),
@@ -278,7 +334,13 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     let update_store = UpdateStateStore::default();
     let update_sink = Arc::new(RecordingUpdateCommandSink::default());
 
-    wire_update_callbacks(&ui, runtime.clone(), update_sink.clone(), update_store);
+    wire_update_callbacks(
+        &ui,
+        runtime.clone(),
+        update_sink.clone(),
+        update_store,
+        toast_state.clone(),
+    );
     ui.invoke_check_update_requested();
     ui.invoke_install_update_requested();
     runtime.block_on(async {
@@ -298,6 +360,7 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
             UpdateCommand::Install,
         ]
     );
+    wait_for_toast_present(&toast_state, "No Update Available", "latest alpha build");
 
     let lifecycle_sink = Arc::new(RecordingMainWindowLifecycleSink::default());
     wire_main_window_lifecycle_callbacks(&ui, lifecycle_sink.clone());
@@ -318,7 +381,19 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
         ]
     );
 
-    exercise_add_download_modal(&ui, runtime.clone(), queue_view.clone());
+    exercise_add_download_modal(
+        &ui,
+        runtime.clone(),
+        queue_view.clone(),
+        toast_state.clone(),
+    );
+    exercise_settings_view(
+        &ui,
+        runtime.clone(),
+        queue_view.clone(),
+        toast_state.clone(),
+    );
+    exercise_diagnostics_native_host_view(&ui, runtime.clone(), queue_view.clone(), toast_state);
 
     let state = SharedState::for_tests(test_storage_path("slint-main-window-close"), Vec::new());
     ui.window().set_size(PhysicalSize::new(1380, 740));
@@ -331,10 +406,333 @@ fn main_window_runtime_applies_snapshot_and_wires_queue_callbacks() {
     assert_eq!(persisted.height, 740);
 }
 
+fn exercise_settings_view(
+    ui: &MainWindow,
+    runtime: Arc<tokio::runtime::Runtime>,
+    queue_view: QueueViewRuntimeState,
+    toast_state: ToastRuntimeState,
+) {
+    let mut snapshot = test_snapshot(Vec::new());
+    snapshot.settings.download_directory = "C:/Downloads".into();
+    snapshot.settings.torrent.download_directory = "C:/Downloads/Torrent".into();
+    snapshot.settings.extension_integration.excluded_hosts = vec!["web.telegram.org".into()];
+
+    let settings_state = SettingsRuntimeState::default();
+    settings_state.apply_snapshot_to_main_window(ui, &snapshot);
+    let sink = Arc::new(RecordingSettingsCommandSink::default());
+    wire_settings_callbacks(
+        ui,
+        runtime.clone(),
+        sink.clone(),
+        settings_state.clone(),
+        queue_view,
+        toast_state.clone(),
+    );
+
+    ui.invoke_settings_requested();
+    assert!(ui.get_settings_view_visible());
+    assert_eq!(
+        ui.get_settings_download_directory().as_str(),
+        "C:/Downloads"
+    );
+    assert_eq!(
+        ui.get_settings_torrent_download_directory().as_str(),
+        "C:/Downloads/Torrent"
+    );
+    assert_eq!(ui.get_settings_sections().row_count(), 6);
+    assert_eq!(ui.get_settings_active_section().as_str(), "general");
+    assert!(!ui.get_settings_dirty());
+
+    ui.invoke_settings_theme_changed("dark".into());
+    ui.invoke_settings_accent_color_changed("ABCDEF".into());
+    assert!(ui.get_settings_dirty());
+    assert_eq!(ui.get_settings_theme().as_str(), "dark");
+    assert_eq!(ui.get_settings_accent_color().as_str(), "#abcdef");
+
+    let mut refreshed = snapshot.clone();
+    refreshed.settings.download_directory = "D:/Incoming".into();
+    settings_state.apply_snapshot_to_main_window(ui, &refreshed);
+    assert_eq!(
+        ui.get_settings_download_directory().as_str(),
+        "C:/Downloads",
+        "dirty settings draft should not be overwritten by background snapshots"
+    );
+    assert_eq!(ui.get_settings_theme().as_str(), "dark");
+
+    ui.invoke_settings_cancel_requested();
+    assert!(ui.get_settings_unsaved_prompt_visible());
+    ui.invoke_settings_unsaved_cancelled();
+    assert!(!ui.get_settings_unsaved_prompt_visible());
+    assert!(ui.get_settings_view_visible());
+    ui.invoke_settings_cancel_requested();
+    ui.invoke_settings_discard_confirmed();
+    assert!(!ui.get_settings_view_visible());
+    assert!(!ui.get_settings_dirty());
+
+    ui.invoke_settings_requested();
+    sink.set_browse_directory_result(Some("E:/Incoming".into()));
+    ui.invoke_settings_browse_download_directory_requested();
+    runtime.block_on(async {
+        for _ in 0..20 {
+            if ui.get_settings_download_directory().as_str() == "E:/Incoming" {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert_eq!(ui.get_settings_download_directory().as_str(), "E:/Incoming");
+    assert_eq!(
+        ui.get_settings_torrent_download_directory().as_str(),
+        "E:/Incoming/Torrent"
+    );
+
+    ui.invoke_settings_max_concurrent_downloads_changed("8".into());
+    ui.invoke_settings_torrent_seed_mode_changed("ratio_or_time".into());
+    ui.invoke_settings_torrent_seed_ratio_limit_changed("1.75".into());
+    ui.invoke_settings_torrent_peer_watchdog_mode_changed("experimental".into());
+    ui.invoke_settings_extension_handoff_mode_changed("auto".into());
+    ui.invoke_settings_extension_excluded_host_input_changed(
+        "Example.com, web.telegram.org".into(),
+    );
+    ui.invoke_settings_extension_excluded_host_add_requested();
+    assert_eq!(
+        ui.get_settings_extension_excluded_hosts_summary().as_str(),
+        "2 excluded sites"
+    );
+
+    ui.invoke_settings_clear_torrent_cache_requested();
+    runtime.block_on(async {
+        for _ in 0..20 {
+            if sink.clear_torrent_cache_calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    assert_eq!(sink.clear_torrent_cache_calls(), 1);
+
+    ui.invoke_settings_save_requested();
+    runtime.block_on(async {
+        for _ in 0..20 {
+            if sink.saved_settings().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    let saved_settings = sink.saved_settings();
+    assert_eq!(saved_settings.len(), 1);
+    assert_eq!(saved_settings[0].download_directory, "E:/Incoming");
+    assert_eq!(saved_settings[0].max_concurrent_downloads, 8);
+    assert_eq!(
+        saved_settings[0].torrent.download_directory,
+        "E:/Incoming/Torrent"
+    );
+    assert_eq!(
+        saved_settings[0].torrent.seed_mode,
+        TorrentSeedMode::RatioOrTime
+    );
+    assert_eq!(
+        saved_settings[0].torrent.peer_connection_watchdog_mode,
+        TorrentPeerConnectionWatchdogMode::Experimental
+    );
+    assert_eq!(
+        saved_settings[0]
+            .extension_integration
+            .download_handoff_mode,
+        DownloadHandoffMode::Auto
+    );
+    assert!(saved_settings[0]
+        .extension_integration
+        .excluded_hosts
+        .contains(&"example.com".into()));
+    assert!(!ui.get_settings_view_visible());
+    assert!(!ui.get_settings_dirty());
+    wait_for_toast_present(&toast_state, "Settings Saved", "Preferences updated");
+}
+
+fn exercise_diagnostics_native_host_view(
+    ui: &MainWindow,
+    runtime: Arc<tokio::runtime::Runtime>,
+    queue_view: QueueViewRuntimeState,
+    toast_state: ToastRuntimeState,
+) {
+    let settings_state = SettingsRuntimeState::default();
+    let settings_sink = Arc::new(RecordingSettingsCommandSink::default());
+    wire_settings_callbacks(
+        ui,
+        runtime.clone(),
+        settings_sink,
+        settings_state.clone(),
+        queue_view,
+        toast_state.clone(),
+    );
+
+    let diagnostics_state = DiagnosticsRuntimeState::default();
+    let diagnostics_sink = Arc::new(RecordingDiagnosticsCommandSink::default());
+    diagnostics_sink.push_diagnostics_result(diagnostics_snapshot(
+        HostRegistrationStatus::Configured,
+        "Chrome",
+        "Initial event",
+    ));
+    diagnostics_sink.push_export_result(Some("C:/Temp/sdm-diagnostics.txt".into()));
+    wire_diagnostics_callbacks(
+        ui,
+        runtime.clone(),
+        diagnostics_sink.clone(),
+        settings_state,
+        diagnostics_state,
+        toast_state.clone(),
+    );
+
+    ui.invoke_diagnostics_copy_requested();
+    assert_eq!(
+        ui.get_diagnostics_error_text().as_str(),
+        "Refresh diagnostics before copying the report."
+    );
+
+    ui.invoke_settings_requested();
+    ui.invoke_settings_section_requested("native_host".into());
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.get_diagnostics_calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+
+    assert_eq!(ui.get_settings_active_section().as_str(), "native_host");
+    assert_eq!(ui.get_diagnostics_status_label().as_str(), "Ready");
+    assert_eq!(
+        ui.get_diagnostics_status_message().as_str(),
+        "At least one browser has a valid native host registration and host binary path."
+    );
+    assert_eq!(ui.get_diagnostics_host_entries().row_count(), 1);
+    assert_eq!(
+        ui.get_diagnostics_host_entries()
+            .row_data(0)
+            .expect("host registration entry should render")
+            .browser
+            .as_str(),
+        "Chrome"
+    );
+    assert_eq!(ui.get_diagnostics_recent_events().row_count(), 1);
+    assert_eq!(
+        ui.get_diagnostics_recent_events()
+            .row_data(0)
+            .expect("diagnostic event should render")
+            .message
+            .as_str(),
+        "Initial event"
+    );
+
+    ui.invoke_diagnostics_copy_requested();
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.copied_reports().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert!(diagnostics_sink.copied_reports()[0].contains("Simple Download Manager Diagnostics"));
+    assert_eq!(
+        ui.get_diagnostics_action_status_text().as_str(),
+        "The diagnostics report was copied to the clipboard."
+    );
+    wait_for_toast_present(&toast_state, "Diagnostics Copied", "clipboard");
+
+    ui.invoke_diagnostics_export_requested();
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.export_calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert_eq!(
+        ui.get_diagnostics_action_status_text().as_str(),
+        "Saved diagnostics to C:/Temp/sdm-diagnostics.txt."
+    );
+
+    diagnostics_sink.push_diagnostics_result(diagnostics_snapshot(
+        HostRegistrationStatus::Broken,
+        "Firefox",
+        "Repair event",
+    ));
+    ui.invoke_diagnostics_repair_host_requested();
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.repair_calls() == 1 && diagnostics_sink.get_diagnostics_calls() == 2
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert_eq!(diagnostics_sink.repair_calls(), 1);
+    assert_eq!(ui.get_diagnostics_status_label().as_str(), "Repair");
+    assert_eq!(
+        ui.get_diagnostics_action_status_text().as_str(),
+        "Native host registration was refreshed."
+    );
+
+    ui.invoke_diagnostics_open_install_docs_requested();
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.open_docs_calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert_eq!(diagnostics_sink.open_docs_calls(), 1);
+    assert_eq!(
+        ui.get_diagnostics_action_status_text().as_str(),
+        "Opened native host installation docs."
+    );
+
+    ui.invoke_diagnostics_test_handoff_requested();
+    runtime.block_on(async {
+        for _ in 0..30 {
+            if diagnostics_sink.test_handoff_calls() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    drain_slint_events();
+    assert_eq!(diagnostics_sink.test_handoff_calls(), 1);
+    assert_eq!(
+        ui.get_diagnostics_action_status_text().as_str(),
+        "A browser-style download prompt was opened."
+    );
+    wait_for_toast_present(&toast_state, "Test Prompt Opened", "browser-style");
+}
+
 fn exercise_add_download_modal(
     ui: &MainWindow,
     runtime: Arc<tokio::runtime::Runtime>,
     queue_view: QueueViewRuntimeState,
+    toast_state: ToastRuntimeState,
 ) {
     let snapshot = test_snapshot(vec![
         download_job("job_file", JobState::Queued),
@@ -355,6 +753,7 @@ fn exercise_add_download_modal(
         sink.clone(),
         queue_view.clone(),
         AddDownloadRuntimeState::default(),
+        toast_state.clone(),
     );
 
     ui.invoke_add_download_requested();
@@ -399,6 +798,7 @@ fn exercise_add_download_modal(
     assert!(!ui.get_add_download_visible());
     assert_eq!(ui.get_queue_view_id().as_str(), "all");
     assert_eq!(ui.get_queue_selected_count(), 1);
+    wait_for_toast_present(&toast_state, "Download Added", "added to the queue");
     assert_eq!(
         sink.add_job_requests()[0],
         AddJobRequest {
@@ -563,6 +963,30 @@ async fn slint_shell_dispatches_update_progress_to_ui_bridge() {
             action,
             UiAction::ApplyUpdateState(state)
                 if state.status == "downloading" && state.downloaded_bytes == 100
+        )
+    }));
+}
+
+#[tokio::test]
+async fn slint_shell_routes_shell_errors_to_toast_actions() {
+    let dispatcher = RecordingUiDispatcher::default();
+    let shell = SlintShellServices::new(dispatcher.clone());
+
+    shell
+        .emit_event(DesktopEvent::ShellError(ShellError {
+            operation: "reveal path".into(),
+            message: "Access is denied.".into(),
+        }))
+        .await
+        .expect("shell error should dispatch toast");
+
+    assert!(dispatcher.actions().iter().any(|action| {
+        matches!(
+            action,
+            UiAction::ShowToast(toast)
+                if toast.toast_type.id() == "error"
+                    && toast.title == "Shell Error"
+                    && toast.message == "reveal path failed: Access is denied."
         )
     }));
 }
@@ -750,6 +1174,118 @@ async fn slint_shell_dispatches_prompt_and_progress_popup_actions() {
             } if batch_id == "batch_1" && context.title == "Two downloads"
         )
     }));
+}
+
+#[test]
+fn prompt_window_action_bridge_dispatches_backend_commands() {
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build"),
+    );
+    let sink = Arc::new(RecordingPromptWindowCommandSink::default());
+    sink.set_browse_directory_result(Some("D:/Incoming".into()));
+
+    wire_prompt_window_action_bridge(runtime.clone(), sink.clone());
+    popups::dispatch_prompt_window_action(popups::PromptWindowAction::BrowseDirectory)
+        .expect("browse prompt action should dispatch");
+    popups::dispatch_prompt_window_action(popups::PromptWindowAction::Confirm(
+        ConfirmPromptRequest {
+            id: "prompt_confirm".into(),
+            directory_override: Some("D:/Incoming".into()),
+            duplicate_action: PromptDuplicateAction::Overwrite,
+            renamed_filename: None,
+        },
+    ))
+    .expect("confirm prompt action should dispatch");
+    popups::dispatch_prompt_window_action(popups::PromptWindowAction::Cancel(
+        "prompt_cancel".into(),
+    ))
+    .expect("cancel prompt action should dispatch");
+    popups::dispatch_prompt_window_action(popups::PromptWindowAction::Swap("prompt_swap".into()))
+        .expect("swap prompt action should dispatch");
+
+    runtime.block_on(async {
+        for _ in 0..40 {
+            if sink.browse_directory_calls() == 1
+                && sink.confirm_requests().len() == 1
+                && sink.cancel_ids().len() == 1
+                && sink.swap_ids().len() == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    popups::clear_prompt_action_dispatcher_for_tests();
+
+    assert_eq!(sink.browse_directory_calls(), 1);
+    assert_eq!(
+        sink.confirm_requests(),
+        vec![ConfirmPromptRequest {
+            id: "prompt_confirm".into(),
+            directory_override: Some("D:/Incoming".into()),
+            duplicate_action: PromptDuplicateAction::Overwrite,
+            renamed_filename: None,
+        }]
+    );
+    assert_eq!(sink.cancel_ids(), vec!["prompt_cancel".to_string()]);
+    assert_eq!(sink.swap_ids(), vec!["prompt_swap".to_string()]);
+}
+
+#[test]
+fn progress_popup_action_bridge_dispatches_backend_commands() {
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build"),
+    );
+    let sink = Arc::new(RecordingProgressPopupCommandSink::default());
+
+    wire_progress_popup_action_bridge(runtime.clone(), sink.clone());
+    for action in [
+        popups::ProgressPopupAction::Pause("job_pause".into()),
+        popups::ProgressPopupAction::Resume("job_resume".into()),
+        popups::ProgressPopupAction::Retry("job_retry".into()),
+        popups::ProgressPopupAction::Cancel("job_cancel".into()),
+        popups::ProgressPopupAction::OpenFile("job_open".into()),
+        popups::ProgressPopupAction::RevealInFolder("job_reveal".into()),
+        popups::ProgressPopupAction::SwapFailedToBrowser("job_swap".into()),
+        popups::ProgressPopupAction::BatchPause(vec!["job_a".into(), "job_b".into()]),
+        popups::ProgressPopupAction::BatchCancel(vec!["job_c".into()]),
+    ] {
+        popups::dispatch_progress_popup_action(action)
+            .expect("progress popup action should dispatch");
+    }
+
+    runtime.block_on(async {
+        for _ in 0..40 {
+            if sink.actions().len() == 9 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    popups::clear_progress_popup_action_dispatcher_for_tests();
+
+    assert_eq!(
+        sink.actions(),
+        vec![
+            popups::ProgressPopupAction::Pause("job_pause".into()),
+            popups::ProgressPopupAction::Resume("job_resume".into()),
+            popups::ProgressPopupAction::Retry("job_retry".into()),
+            popups::ProgressPopupAction::Cancel("job_cancel".into()),
+            popups::ProgressPopupAction::OpenFile("job_open".into()),
+            popups::ProgressPopupAction::RevealInFolder("job_reveal".into()),
+            popups::ProgressPopupAction::SwapFailedToBrowser("job_swap".into()),
+            popups::ProgressPopupAction::BatchPause(vec!["job_a".into(), "job_b".into()]),
+            popups::ProgressPopupAction::BatchCancel(vec!["job_c".into()]),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -997,6 +1533,215 @@ fn slint_runtime_source_replaces_add_download_placeholder() {
 }
 
 #[test]
+fn slint_main_window_source_exposes_settings_workflow_callbacks() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_source = std::fs::read_to_string(manifest_dir.join("ui/main.slint"))
+        .expect("main Slint source should load");
+    let runtime_source = std::fs::read_to_string(manifest_dir.join("src/runtime.rs"))
+        .expect("runtime source should load");
+
+    for expected in [
+        "export struct SettingsNavItem",
+        "settings-requested",
+        "settings-section-requested",
+        "settings-save-requested",
+        "settings-cancel-requested",
+        "settings-discard-confirmed",
+        "settings-unsaved-cancelled",
+        "settings-browse-download-directory-requested",
+        "settings-browse-torrent-directory-requested",
+        "settings-clear-torrent-cache-requested",
+        "settings-download-directory-changed",
+        "settings-max-concurrent-downloads-changed",
+        "settings-auto-retry-attempts-changed",
+        "settings-speed-limit-kib-per-second-changed",
+        "settings-download-performance-mode-changed",
+        "settings-notifications-enabled-changed",
+        "settings-show-details-on-click-changed",
+        "settings-queue-row-size-changed",
+        "settings-start-on-startup-changed",
+        "settings-startup-launch-mode-changed",
+        "settings-theme-changed",
+        "settings-accent-color-changed",
+        "settings-torrent-enabled-changed",
+        "settings-torrent-download-directory-changed",
+        "settings-torrent-seed-mode-changed",
+        "settings-torrent-seed-ratio-limit-changed",
+        "settings-torrent-seed-time-limit-minutes-changed",
+        "settings-torrent-upload-limit-kib-per-second-changed",
+        "settings-torrent-port-forwarding-enabled-changed",
+        "settings-torrent-port-forwarding-port-changed",
+        "settings-torrent-peer-watchdog-mode-changed",
+        "settings-extension-enabled-changed",
+        "settings-extension-handoff-mode-changed",
+        "settings-extension-listen-port-changed",
+        "settings-extension-context-menu-enabled-changed",
+        "settings-extension-show-progress-after-handoff-changed",
+        "settings-extension-show-badge-status-changed",
+        "settings-extension-authenticated-handoff-enabled-changed",
+        "settings-extension-excluded-host-input-changed",
+        "settings-extension-excluded-host-add-requested",
+        "settings-extension-excluded-host-remove-requested",
+        "native_host",
+        "diagnostics-refresh-requested",
+        "diagnostics-copy-requested",
+        "diagnostics-export-requested",
+        "diagnostics-open-install-docs-requested",
+        "diagnostics-repair-host-requested",
+        "diagnostics-test-handoff-requested",
+    ] {
+        assert!(
+            ui_source.contains(expected),
+            "Slint settings/native-host UI should expose {expected}"
+        );
+    }
+
+    assert!(
+        runtime_source.contains("wire_settings_callbacks"),
+        "runtime should wire settings callbacks through the controller state"
+    );
+    assert!(
+        runtime_source.contains("wire_diagnostics_callbacks")
+            && runtime_source.contains("DiagnosticsCommandSink"),
+        "Phase 4E should wire diagnostics/native-host callbacks through runtime command sinks"
+    );
+}
+
+#[test]
+fn slint_prompt_window_source_exposes_duplicate_prompt_callbacks() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_source = std::fs::read_to_string(manifest_dir.join("ui/main.slint"))
+        .expect("main Slint source should load");
+    let runtime_source = std::fs::read_to_string(manifest_dir.join("src/runtime.rs"))
+        .expect("runtime source should load");
+    let popup_source = std::fs::read_to_string(manifest_dir.join("src/shell/popups.rs"))
+        .expect("popup source should load");
+
+    for expected in [
+        "change-directory-requested",
+        "cancel-requested",
+        "download-requested",
+        "swap-requested",
+        "duplicate-menu-toggled",
+        "duplicate-action-requested",
+        "duplicate-rename-started",
+        "duplicate-renamed-filename-changed",
+        "duplicate-rename-confirmed",
+        "duplicate-rename-cancelled",
+        "Choose Action",
+        "Overwrite",
+        "Rename",
+        "Download Anyway",
+    ] {
+        assert!(
+            ui_source.contains(expected),
+            "Slint prompt UI should expose {expected}"
+        );
+    }
+
+    assert!(
+        !ui_source.contains("Show Existing"),
+        "Slint compact prompt should not reintroduce the removed Show Existing action"
+    );
+    assert!(
+        runtime_source.contains("wire_prompt_window_action_bridge")
+            && runtime_source.contains("PromptWindowCommandSink"),
+        "runtime should wire prompt popup actions through a command sink"
+    );
+    assert!(
+        popup_source.contains("PromptWindowAction")
+            && popup_source.contains("install_prompt_action_dispatcher")
+            && popup_source.contains("prompt_confirm_request"),
+        "prompt action handling should stay isolated in shell::popups"
+    );
+}
+
+#[test]
+fn slint_progress_window_source_exposes_progress_actions_and_metrics() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_source = std::fs::read_to_string(manifest_dir.join("ui/main.slint"))
+        .expect("main Slint source should load");
+    let runtime_source = std::fs::read_to_string(manifest_dir.join("src/runtime.rs"))
+        .expect("runtime source should load");
+    let popup_source = std::fs::read_to_string(manifest_dir.join("src/shell/popups.rs"))
+        .expect("popup source should load");
+
+    for expected in [
+        "progress-pause-requested",
+        "progress-resume-requested",
+        "progress-retry-requested",
+        "progress-cancel-requested",
+        "progress-open-requested",
+        "progress-reveal-requested",
+        "progress-swap-requested",
+        "batch-pause-requested",
+        "batch-resume-requested",
+        "batch-cancel-requested",
+        "batch-reveal-completed-requested",
+        "Speed",
+        "ETA",
+        "Size",
+        "Down",
+        "Up",
+        "Peers",
+        "Seeds",
+        "Ratio",
+        "Pause all",
+        "Resume all",
+        "Cancel active",
+        "Reveal completed",
+    ] {
+        assert!(
+            ui_source.contains(expected),
+            "Slint progress UI should expose {expected}"
+        );
+    }
+
+    assert!(
+        runtime_source.contains("wire_progress_popup_action_bridge")
+            && runtime_source.contains("ProgressPopupCommandSink"),
+        "runtime should wire progress popup actions through a command sink"
+    );
+    assert!(
+        popup_source.contains("ProgressPopupAction")
+            && popup_source.contains("install_progress_popup_action_dispatcher")
+            && popup_source.contains("progress_details_from_job_with_state"),
+        "progress popup action handling should stay isolated in shell::popups"
+    );
+}
+
+#[test]
+fn slint_toast_source_exposes_toast_area_and_shell_error_wiring() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ui_source =
+        std::fs::read_to_string(manifest_dir.join("ui/main.slint")).expect("Slint UI should load");
+    let runtime_source = std::fs::read_to_string(manifest_dir.join("src/runtime.rs"))
+        .expect("runtime source should load");
+
+    for expected in [
+        "export struct ToastMessage",
+        "in property <[ToastMessage]> toasts",
+        "callback toast-dismiss-requested(string)",
+        "ToastArea",
+    ] {
+        assert!(
+            ui_source.contains(expected),
+            "MainWindow should expose toast UI contract: {expected}"
+        );
+    }
+    assert!(
+        runtime_source.contains("ToastRuntimeState")
+            && runtime_source.contains("UiAction::ShowToast")
+            && runtime_source.contains("toast_for_shell_error"),
+        "runtime should route shell/backend feedback through toast state"
+    );
+    assert!(
+        !runtime_source.contains("eprintln!(\"shell error during"),
+        "ShellError should no longer be handled only by logging"
+    );
+}
+
+#[test]
 fn slint_shell_services_delegate_native_shell_effects_through_shell_module() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let runtime_source = std::fs::read_to_string(manifest_dir.join("src/runtime.rs"))
@@ -1046,19 +1791,38 @@ impl UiDispatcher for RecordingUiDispatcher {
 #[derive(Default)]
 struct RecordingQueueCommandSink {
     commands: Mutex<Vec<QueueCommand>>,
+    next_error: Mutex<Option<String>>,
+    external_use_result: Mutex<Option<ExternalUseResult>>,
 }
 
 impl RecordingQueueCommandSink {
     fn commands(&self) -> Vec<QueueCommand> {
         self.commands.lock().unwrap().clone()
     }
+
+    fn set_next_error(&self, error: &str) {
+        *self.next_error.lock().unwrap() = Some(error.into());
+    }
+
+    fn set_external_use_result(&self, result: ExternalUseResult) {
+        *self.external_use_result.lock().unwrap() = Some(result);
+    }
 }
 
 impl QueueCommandSink for RecordingQueueCommandSink {
-    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, ()> {
+    fn run_queue_command(&self, command: QueueCommand) -> BackendFuture<'_, QueueCommandOutput> {
         Box::pin(async move {
-            self.commands.lock().unwrap().push(command);
-            Ok(())
+            self.commands.lock().unwrap().push(command.clone());
+            if let Some(error) = self.next_error.lock().unwrap().take() {
+                return Err(error);
+            }
+            let external_use = match command {
+                QueueCommand::OpenFile(_) | QueueCommand::RevealInFolder(_) => {
+                    self.external_use_result.lock().unwrap().clone()
+                }
+                _ => None,
+            };
+            Ok(QueueCommandOutput { external_use })
         })
     }
 }
@@ -1151,6 +1915,237 @@ impl AddDownloadCommandSink for RecordingAddDownloadCommandSink {
 }
 
 #[derive(Default)]
+struct RecordingSettingsCommandSink {
+    saved_settings: Mutex<Vec<Settings>>,
+    browse_directory_result: Mutex<Option<String>>,
+    clear_torrent_cache_calls: Mutex<usize>,
+}
+
+impl RecordingSettingsCommandSink {
+    fn set_browse_directory_result(&self, result: Option<String>) {
+        *self.browse_directory_result.lock().unwrap() = result;
+    }
+
+    fn saved_settings(&self) -> Vec<Settings> {
+        self.saved_settings.lock().unwrap().clone()
+    }
+
+    fn clear_torrent_cache_calls(&self) -> usize {
+        *self.clear_torrent_cache_calls.lock().unwrap()
+    }
+}
+
+impl SettingsCommandSink for RecordingSettingsCommandSink {
+    fn save_settings_from_slint(&self, settings: Settings) -> BackendFuture<'_, Settings> {
+        Box::pin(async move {
+            self.saved_settings.lock().unwrap().push(settings.clone());
+            Ok(settings)
+        })
+    }
+
+    fn browse_settings_directory(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async move { Ok(self.browse_directory_result.lock().unwrap().clone()) })
+    }
+
+    fn clear_settings_torrent_session_cache(
+        &self,
+    ) -> BackendFuture<'_, TorrentSessionCacheClearResult> {
+        Box::pin(async move {
+            *self.clear_torrent_cache_calls.lock().unwrap() += 1;
+            Ok(TorrentSessionCacheClearResult {
+                cleared: true,
+                pending_restart: false,
+                session_path: "E:/Incoming/Torrent/.sdm-session".into(),
+            })
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingDiagnosticsCommandSink {
+    diagnostics_results: Mutex<Vec<DiagnosticsSnapshot>>,
+    export_results: Mutex<Vec<Option<String>>>,
+    copied_reports: Mutex<Vec<String>>,
+    get_diagnostics_calls: Mutex<usize>,
+    export_calls: Mutex<usize>,
+    open_docs_calls: Mutex<usize>,
+    repair_calls: Mutex<usize>,
+    test_handoff_calls: Mutex<usize>,
+}
+
+impl RecordingDiagnosticsCommandSink {
+    fn push_diagnostics_result(&self, snapshot: DiagnosticsSnapshot) {
+        self.diagnostics_results.lock().unwrap().push(snapshot);
+    }
+
+    fn push_export_result(&self, result: Option<String>) {
+        self.export_results.lock().unwrap().push(result);
+    }
+
+    fn copied_reports(&self) -> Vec<String> {
+        self.copied_reports.lock().unwrap().clone()
+    }
+
+    fn get_diagnostics_calls(&self) -> usize {
+        *self.get_diagnostics_calls.lock().unwrap()
+    }
+
+    fn export_calls(&self) -> usize {
+        *self.export_calls.lock().unwrap()
+    }
+
+    fn open_docs_calls(&self) -> usize {
+        *self.open_docs_calls.lock().unwrap()
+    }
+
+    fn repair_calls(&self) -> usize {
+        *self.repair_calls.lock().unwrap()
+    }
+
+    fn test_handoff_calls(&self) -> usize {
+        *self.test_handoff_calls.lock().unwrap()
+    }
+}
+
+impl DiagnosticsCommandSink for RecordingDiagnosticsCommandSink {
+    fn get_diagnostics_for_slint(&self) -> BackendFuture<'_, DiagnosticsSnapshot> {
+        Box::pin(async move {
+            *self.get_diagnostics_calls.lock().unwrap() += 1;
+            let mut diagnostics = self.diagnostics_results.lock().unwrap();
+            if diagnostics.is_empty() {
+                Err("missing diagnostics result".into())
+            } else {
+                Ok(diagnostics.remove(0))
+            }
+        })
+    }
+
+    fn export_diagnostics_report_from_slint(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async move {
+            *self.export_calls.lock().unwrap() += 1;
+            let mut results = self.export_results.lock().unwrap();
+            if results.is_empty() {
+                Ok(None)
+            } else {
+                Ok(results.remove(0))
+            }
+        })
+    }
+
+    fn copy_diagnostics_report_from_slint(&self, report: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.copied_reports.lock().unwrap().push(report);
+            Ok(())
+        })
+    }
+
+    fn open_install_docs_from_slint(&self) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            *self.open_docs_calls.lock().unwrap() += 1;
+            Ok(())
+        })
+    }
+
+    fn repair_host_registration_from_slint(&self) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            *self.repair_calls.lock().unwrap() += 1;
+            Ok(())
+        })
+    }
+
+    fn test_extension_handoff_from_slint(&self) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            *self.test_handoff_calls.lock().unwrap() += 1;
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingPromptWindowCommandSink {
+    browse_directory_calls: Mutex<usize>,
+    browse_directory_result: Mutex<Option<String>>,
+    confirm_requests: Mutex<Vec<ConfirmPromptRequest>>,
+    cancel_ids: Mutex<Vec<String>>,
+    swap_ids: Mutex<Vec<String>>,
+}
+
+impl RecordingPromptWindowCommandSink {
+    fn set_browse_directory_result(&self, result: Option<String>) {
+        *self.browse_directory_result.lock().unwrap() = result;
+    }
+
+    fn browse_directory_calls(&self) -> usize {
+        *self.browse_directory_calls.lock().unwrap()
+    }
+
+    fn confirm_requests(&self) -> Vec<ConfirmPromptRequest> {
+        self.confirm_requests.lock().unwrap().clone()
+    }
+
+    fn cancel_ids(&self) -> Vec<String> {
+        self.cancel_ids.lock().unwrap().clone()
+    }
+
+    fn swap_ids(&self) -> Vec<String> {
+        self.swap_ids.lock().unwrap().clone()
+    }
+}
+
+impl PromptWindowCommandSink for RecordingPromptWindowCommandSink {
+    fn browse_prompt_directory(&self) -> BackendFuture<'_, Option<String>> {
+        Box::pin(async move {
+            *self.browse_directory_calls.lock().unwrap() += 1;
+            Ok(self.browse_directory_result.lock().unwrap().clone())
+        })
+    }
+
+    fn confirm_prompt_from_slint(&self, request: ConfirmPromptRequest) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.confirm_requests.lock().unwrap().push(request);
+            Ok(())
+        })
+    }
+
+    fn cancel_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.cancel_ids.lock().unwrap().push(id);
+            Ok(())
+        })
+    }
+
+    fn swap_prompt_from_slint(&self, id: String) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.swap_ids.lock().unwrap().push(id);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingProgressPopupCommandSink {
+    actions: Mutex<Vec<popups::ProgressPopupAction>>,
+}
+
+impl RecordingProgressPopupCommandSink {
+    fn actions(&self) -> Vec<popups::ProgressPopupAction> {
+        self.actions.lock().unwrap().clone()
+    }
+}
+
+impl ProgressPopupCommandSink for RecordingProgressPopupCommandSink {
+    fn run_progress_popup_action(
+        &self,
+        action: popups::ProgressPopupAction,
+    ) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            self.actions.lock().unwrap().push(action);
+            Ok(())
+        })
+    }
+}
+
+#[derive(Default)]
 struct RecordingUpdateCommandSink {
     commands: Mutex<Vec<UpdateCommand>>,
 }
@@ -1195,6 +2190,53 @@ fn test_snapshot(jobs: Vec<DownloadJob>) -> DesktopSnapshot {
         connection_state: ConnectionState::Connected,
         jobs,
         settings: Settings::default(),
+    }
+}
+
+fn diagnostics_snapshot(
+    status: HostRegistrationStatus,
+    browser: &str,
+    event_message: &str,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot {
+        connection_state: ConnectionState::Connected,
+        queue_summary: QueueSummary {
+            total: 1,
+            active: 0,
+            attention: usize::from(status != HostRegistrationStatus::Configured),
+            queued: 0,
+            downloading: 0,
+            completed: 1,
+            failed: 0,
+        },
+        last_host_contact_seconds_ago: Some(4),
+        host_registration: HostRegistrationDiagnostics {
+            status,
+            entries: vec![HostRegistrationEntry {
+                browser: browser.into(),
+                registry_path: format!("HKCU/{browser}/NativeMessagingHosts"),
+                manifest_path: if status == HostRegistrationStatus::Missing {
+                    None
+                } else {
+                    Some(format!("C:/Temp/{browser}.json"))
+                },
+                manifest_exists: status == HostRegistrationStatus::Configured,
+                host_binary_path: if status == HostRegistrationStatus::Configured {
+                    Some("C:/Program Files/SimpleDownloadManager/native-host.exe".into())
+                } else {
+                    None
+                },
+                host_binary_exists: status == HostRegistrationStatus::Configured,
+            }],
+        },
+        torrent_diagnostics: Vec::new(),
+        recent_events: vec![DiagnosticEvent {
+            timestamp: 0,
+            level: DiagnosticLevel::Info,
+            category: "native_host".into(),
+            message: event_message.into(),
+            job_id: None,
+        }],
     }
 }
 
@@ -1271,4 +2313,26 @@ fn drain_slint_events() {
     })
     .expect("quit callback should be queued");
     slint::run_event_loop().expect("Slint event loop should drain queued callbacks");
+}
+
+fn wait_for_toast_present(toast_state: &ToastRuntimeState, title: &str, message_fragment: &str) {
+    for _ in 0..20 {
+        if toast_present(toast_state, title, message_fragment) {
+            return;
+        }
+        drain_slint_events();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        toast_present(toast_state, title, message_fragment),
+        "expected toast '{title}' containing '{message_fragment}', got {:?}",
+        toast_state.toasts()
+    );
+}
+
+fn toast_present(toast_state: &ToastRuntimeState, title: &str, message_fragment: &str) -> bool {
+    toast_state
+        .toasts()
+        .iter()
+        .any(|toast| toast.title == title && toast.message.contains(message_fragment))
 }

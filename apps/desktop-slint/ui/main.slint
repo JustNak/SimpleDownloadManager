@@ -36,6 +36,39 @@ export struct QueueNavItem {
     section: string,
 }
 
+export struct SettingsNavItem {
+    id: string,
+    label: string,
+    active: bool,
+}
+
+export struct HostRegistrationEntryRow {
+    browser: string,
+    registry-path: string,
+    manifest-path: string,
+    host-binary-path: string,
+    manifest-exists: bool,
+    host-binary-exists: bool,
+    status-label: string,
+    status-tone: string,
+}
+
+export struct DiagnosticEventRow {
+    level: string,
+    level-tone: string,
+    timestamp-text: string,
+    message: string,
+    category: string,
+    job-id: string,
+}
+
+export struct TorrentDiagnosticRow {
+    job-id: string,
+    filename: string,
+    info-hash: string,
+    summary: string,
+}
+
 export struct DeletePromptJob {
     id: string,
     filename: string,
@@ -50,6 +83,18 @@ export struct PromptDetails {
     destination: string,
     size-text: string,
     duplicate-text: string,
+    is-duplicate: bool,
+    duplicate-label: string,
+    duplicate-message: string,
+    overwrite-label: string,
+    source-label: string,
+    can-swap-to-browser: bool,
+    duplicate-menu-open: bool,
+    renaming-duplicate: bool,
+    renamed-filename: string,
+    rename-can-confirm: bool,
+    busy: bool,
+    error-text: string,
 }
 
 export struct ProgressDetails {
@@ -60,14 +105,146 @@ export struct ProgressDetails {
     bytes-text: string,
     progress: float,
     error-text: string,
+    subtitle: string,
+    destination: string,
+    status-tone: string,
+    progress-label: string,
+    speed-text: string,
+    eta-text: string,
+    size-text: string,
+    source-summary: string,
+    info-hash: string,
+    remaining-text: string,
+    upload-speed-text: string,
+    peers-text: string,
+    seeds-text: string,
+    ratio-text: string,
+    files-text: string,
+    peer-health-tones: [string],
+    can-open: bool,
+    can-reveal: bool,
+    can-pause: bool,
+    can-resume: bool,
+    can-retry: bool,
+    can-cancel: bool,
+    can-swap-to-browser: bool,
+    can-close: bool,
+    busy: bool,
+    cancel-confirming: bool,
+    action-error-text: string,
+}
+
+export struct BatchProgressJobRow {
+    id: string,
+    filename: string,
+    subtitle: string,
+    status-text: string,
+    status-tone: string,
+    progress: float,
+    progress-label: string,
+    speed-text: string,
+    size-text: string,
 }
 
 export struct BatchDetails {
     batch-id: string,
     title: string,
+    display-title: string,
     summary: string,
     bytes-text: string,
     progress: float,
+    completed-count: int,
+    failed-count: int,
+    active-count: int,
+    total-count: int,
+    phase-id: string,
+    phase-label: string,
+    phase-tone: string,
+    archive-error: string,
+    rows: [BatchProgressJobRow],
+    can-pause: bool,
+    can-resume: bool,
+    can-cancel: bool,
+    can-reveal-completed: bool,
+    reveal-completed-job-id: string,
+    can-close: bool,
+    busy: bool,
+    action-error-text: string,
+}
+
+export struct ToastMessage {
+    id: string,
+    toast-type: string,
+    tone: string,
+    title: string,
+    message: string,
+    auto-close: bool,
+}
+
+component ToastArea inherits Rectangle {
+    in property <[ToastMessage]> toasts;
+    callback dismiss-requested(string);
+
+    visible: root.toasts.length > 0;
+    width: 360px;
+    height: 360px;
+    background: transparent;
+
+    VerticalBox {
+        spacing: 8px;
+
+        Rectangle { vertical-stretch: 1; }
+
+        for toast in root.toasts: Rectangle {
+            height: 82px;
+            border-width: 1px;
+            border-radius: 6px;
+            border-color: toast.tone == "success" ? #16a34a : toast.tone == "error" ? #dc2626 : toast.tone == "warning" ? #d97706 : #2563eb;
+            background: #ffffff;
+
+            HorizontalBox {
+                padding-left: 12px;
+                padding-right: 8px;
+                spacing: 10px;
+
+                Rectangle {
+                    width: 8px;
+                    height: 46px;
+                    border-radius: 4px;
+                    background: toast.tone == "success" ? #16a34a : toast.tone == "error" ? #dc2626 : toast.tone == "warning" ? #d97706 : #2563eb;
+                }
+
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    spacing: 4px;
+
+                    Text {
+                        text: toast.title;
+                        font-size: 13px;
+                        font-weight: 700;
+                        color: #111827;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: toast.message;
+                        font-size: 12px;
+                        color: #586174;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+
+                Button {
+                    text: "X";
+                    width: 34px;
+                    clicked => {
+                        root.dismiss-requested(toast.id);
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component MainWindow inherits Window {
@@ -134,6 +311,58 @@ export component MainWindow inherits Window {
     in property <float> update-progress: 0;
     in property <bool> update-can-check: true;
     in property <bool> update-can-install: false;
+    in property <[SettingsNavItem]> settings-sections;
+    in property <bool> settings-view-visible: false;
+    in property <string> settings-active-section: "general";
+    in property <bool> settings-dirty: false;
+    in property <bool> settings-saving: false;
+    in property <bool> settings-cache-clearing: false;
+    in property <string> settings-error-text: "";
+    in property <bool> settings-unsaved-prompt-visible: false;
+    in property <string> settings-download-directory: "";
+    in property <string> settings-max-concurrent-downloads: "3";
+    in property <string> settings-auto-retry-attempts: "3";
+    in property <string> settings-speed-limit-kib-per-second: "0";
+    in property <string> settings-download-performance-mode: "balanced";
+    in property <bool> settings-notifications-enabled: true;
+    in property <bool> settings-show-details-on-click: true;
+    in property <string> settings-queue-row-size: "medium";
+    in property <bool> settings-start-on-startup: false;
+    in property <string> settings-startup-launch-mode: "open";
+    in property <string> settings-theme: "system";
+    in property <string> settings-accent-color: "#3b82f6";
+    in property <bool> settings-torrent-enabled: true;
+    in property <string> settings-torrent-download-directory: "";
+    in property <string> settings-torrent-seed-mode: "forever";
+    in property <string> settings-torrent-seed-ratio-limit: "1";
+    in property <string> settings-torrent-seed-time-limit-minutes: "60";
+    in property <string> settings-torrent-upload-limit-kib-per-second: "0";
+    in property <bool> settings-torrent-port-forwarding-enabled: false;
+    in property <string> settings-torrent-port-forwarding-port: "42000";
+    in property <string> settings-torrent-peer-watchdog-mode: "diagnose";
+    in property <bool> settings-extension-enabled: true;
+    in property <string> settings-extension-handoff-mode: "ask";
+    in property <string> settings-extension-listen-port: "1420";
+    in property <bool> settings-extension-context-menu-enabled: true;
+    in property <bool> settings-extension-show-progress-after-handoff: true;
+    in property <bool> settings-extension-show-badge-status: true;
+    in property <bool> settings-extension-authenticated-handoff-enabled: true;
+    in property <string> settings-extension-excluded-host-input: "";
+    in property <string> settings-extension-excluded-hosts-summary: "No excluded sites";
+    in property <[string]> settings-extension-excluded-hosts;
+    in property <bool> diagnostics-loading: false;
+    in property <bool> diagnostics-has-snapshot: false;
+    in property <string> diagnostics-status-label: "Checking";
+    in property <string> diagnostics-status-message: "Diagnostics are still loading.";
+    in property <string> diagnostics-status-tone: "neutral";
+    in property <string> diagnostics-last-host-contact: "Never";
+    in property <string> diagnostics-queue-summary: "No diagnostics loaded";
+    in property <string> diagnostics-action-status-text: "";
+    in property <string> diagnostics-error-text: "";
+    in property <[HostRegistrationEntryRow]> diagnostics-host-entries;
+    in property <[DiagnosticEventRow]> diagnostics-recent-events;
+    in property <[TorrentDiagnosticRow]> diagnostics-torrent-diagnostics;
+    in property <[ToastMessage]> toasts;
     callback add-download-requested();
     callback add-download-mode-changed(string);
     callback add-download-single-url-changed(string);
@@ -178,6 +407,53 @@ export component MainWindow inherits Window {
     callback open-progress-requested(string);
     callback check-update-requested();
     callback install-update-requested();
+    callback settings-requested();
+    callback settings-section-requested(string);
+    callback settings-save-requested();
+    callback settings-cancel-requested();
+    callback settings-discard-confirmed();
+    callback settings-unsaved-cancelled();
+    callback settings-browse-download-directory-requested();
+    callback settings-browse-torrent-directory-requested();
+    callback settings-clear-torrent-cache-requested();
+    callback settings-download-directory-changed(string);
+    callback settings-max-concurrent-downloads-changed(string);
+    callback settings-auto-retry-attempts-changed(string);
+    callback settings-speed-limit-kib-per-second-changed(string);
+    callback settings-download-performance-mode-changed(string);
+    callback settings-notifications-enabled-changed(bool);
+    callback settings-show-details-on-click-changed(bool);
+    callback settings-queue-row-size-changed(string);
+    callback settings-start-on-startup-changed(bool);
+    callback settings-startup-launch-mode-changed(string);
+    callback settings-theme-changed(string);
+    callback settings-accent-color-changed(string);
+    callback settings-torrent-enabled-changed(bool);
+    callback settings-torrent-download-directory-changed(string);
+    callback settings-torrent-seed-mode-changed(string);
+    callback settings-torrent-seed-ratio-limit-changed(string);
+    callback settings-torrent-seed-time-limit-minutes-changed(string);
+    callback settings-torrent-upload-limit-kib-per-second-changed(string);
+    callback settings-torrent-port-forwarding-enabled-changed(bool);
+    callback settings-torrent-port-forwarding-port-changed(string);
+    callback settings-torrent-peer-watchdog-mode-changed(string);
+    callback settings-extension-enabled-changed(bool);
+    callback settings-extension-handoff-mode-changed(string);
+    callback settings-extension-listen-port-changed(string);
+    callback settings-extension-context-menu-enabled-changed(bool);
+    callback settings-extension-show-progress-after-handoff-changed(bool);
+    callback settings-extension-show-badge-status-changed(bool);
+    callback settings-extension-authenticated-handoff-enabled-changed(bool);
+    callback settings-extension-excluded-host-input-changed(string);
+    callback settings-extension-excluded-host-add-requested();
+    callback settings-extension-excluded-host-remove-requested(string);
+    callback diagnostics-refresh-requested();
+    callback diagnostics-copy-requested();
+    callback diagnostics-export-requested();
+    callback diagnostics-open-install-docs-requested();
+    callback diagnostics-repair-host-requested();
+    callback diagnostics-test-handoff-requested();
+    callback toast-dismiss-requested(string);
     callback minimize-main-window-requested();
     callback toggle-main-window-maximize-requested();
     callback close-main-window-requested();
@@ -298,6 +574,13 @@ export component MainWindow inherits Window {
                     text: "Add";
                     clicked => {
                         root.add-download-requested();
+                    }
+                }
+
+                Button {
+                    text: "Settings";
+                    clicked => {
+                        root.settings-requested();
                     }
                 }
             }
@@ -623,6 +906,359 @@ export component MainWindow inherits Window {
     }
 
     Rectangle {
+        visible: root.settings-view-visible;
+        width: root.width;
+        height: root.height - 44px;
+        y: 44px;
+        background: #f8fafc;
+
+        VerticalBox {
+            padding: 18px;
+            spacing: 12px;
+
+            HorizontalBox {
+                spacing: 10px;
+
+                VerticalBox {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    Text { text: "Settings"; font-size: 22px; font-weight: 700; color: #111827; }
+                    Text { text: root.settings-dirty ? "Unsaved changes" : "Preferences are up to date"; font-size: 12px; color: root.settings-dirty ? #b45309 : #586174; }
+                }
+
+                Button { text: "Cancel"; clicked => { root.settings-cancel-requested(); } }
+                Button { text: root.settings-saving ? "Saving..." : "Save"; enabled: root.settings-dirty && !root.settings-saving; clicked => { root.settings-save-requested(); } }
+            }
+
+            Text {
+                visible: root.settings-error-text != "";
+                text: root.settings-error-text;
+                color: #b91c1c;
+                font-size: 12px;
+            }
+
+            HorizontalBox {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                Rectangle {
+                    width: 220px;
+                    border-color: #d5dae3;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    background: #ffffff;
+
+                    ListView {
+                        viewport-width: parent.width;
+                        viewport-height: parent.height;
+
+                        for section in root.settings-sections: Rectangle {
+                            height: 36px;
+                            width: parent.width;
+                            background: section.active ? #e0f2fe : #ffffff;
+
+                            TouchArea {
+                                clicked => {
+                                    root.settings-section-requested(section.id);
+                                }
+                            }
+
+                            Text {
+                                text: section.label;
+                                font-size: 12px;
+                                font-weight: section.active ? 700 : 400;
+                                color: section.active ? #075985 : #1f2937;
+                                x: 10px;
+                                y: 0px;
+                                width: parent.width - 20px;
+                                height: parent.height;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    border-color: #d5dae3;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    background: #ffffff;
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+
+                    VerticalBox {
+                        padding: 16px;
+                        spacing: 10px;
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "general";
+                            spacing: 8px;
+                            Text { text: "General"; font-size: 16px; font-weight: 700; color: #111827; }
+                            Text { text: "Download directory"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-download-directory; horizontal-stretch: 1; edited => { root.settings-download-directory-changed(self.text); } }
+                                Button { text: "Browse"; clicked => { root.settings-browse-download-directory-requested(); } }
+                            }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-max-concurrent-downloads; placeholder-text: "Concurrent"; edited => { root.settings-max-concurrent-downloads-changed(self.text); } }
+                                LineEdit { text: root.settings-auto-retry-attempts; placeholder-text: "Retries"; edited => { root.settings-auto-retry-attempts-changed(self.text); } }
+                                LineEdit { text: root.settings-speed-limit-kib-per-second; placeholder-text: "KiB/s limit"; edited => { root.settings-speed-limit-kib-per-second-changed(self.text); } }
+                            }
+                            Text { text: "Performance mode"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "Stable"; checked: root.settings-download-performance-mode == "stable"; clicked => { root.settings-download-performance-mode-changed("stable"); } }
+                                Button { text: "Balanced"; checked: root.settings-download-performance-mode == "balanced"; clicked => { root.settings-download-performance-mode-changed("balanced"); } }
+                                Button { text: "Fast"; checked: root.settings-download-performance-mode == "fast"; clicked => { root.settings-download-performance-mode-changed("fast"); } }
+                            }
+                            CheckBox { text: "Show notifications"; checked: root.settings-notifications-enabled; toggled => { root.settings-notifications-enabled-changed(self.checked); } }
+                            CheckBox { text: "Show details when clicking a download"; checked: root.settings-show-details-on-click; toggled => { root.settings-show-details-on-click-changed(self.checked); } }
+                            Text { text: "Queue row size"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "Compact"; checked: root.settings-queue-row-size == "compact"; clicked => { root.settings-queue-row-size-changed("compact"); } }
+                                Button { text: "Small"; checked: root.settings-queue-row-size == "small"; clicked => { root.settings-queue-row-size-changed("small"); } }
+                                Button { text: "Medium"; checked: root.settings-queue-row-size == "medium"; clicked => { root.settings-queue-row-size-changed("medium"); } }
+                                Button { text: "Large"; checked: root.settings-queue-row-size == "large"; clicked => { root.settings-queue-row-size-changed("large"); } }
+                                Button { text: "Damn"; checked: root.settings-queue-row-size == "damn"; clicked => { root.settings-queue-row-size-changed("damn"); } }
+                            }
+                        }
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "updates";
+                            spacing: 8px;
+                            Text { text: "App Updates"; font-size: 16px; font-weight: 700; color: #111827; }
+                            Text { text: root.update-status-text; font-size: 13px; color: #111827; }
+                            Text { text: "Current " + root.update-current-version + " | Latest " + root.update-new-version; font-size: 12px; color: #586174; }
+                            Text { text: root.update-error-text; visible: root.update-error-text != ""; font-size: 12px; color: #b91c1c; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                Button { text: "Check"; enabled: root.update-can-check; clicked => { root.check-update-requested(); } }
+                                Button { text: "Install"; enabled: root.update-can-install; clicked => { root.install-update-requested(); } }
+                            }
+                        }
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "torrenting";
+                            spacing: 8px;
+                            Text { text: "Torrenting"; font-size: 16px; font-weight: 700; color: #111827; }
+                            CheckBox { text: "Enable torrents"; checked: root.settings-torrent-enabled; toggled => { root.settings-torrent-enabled-changed(self.checked); } }
+                            Text { text: "Torrent directory"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-torrent-download-directory; horizontal-stretch: 1; edited => { root.settings-torrent-download-directory-changed(self.text); } }
+                                Button { text: "Browse"; clicked => { root.settings-browse-torrent-directory-requested(); } }
+                            }
+                            Text { text: "Seed stop policy"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "Forever"; checked: root.settings-torrent-seed-mode == "forever"; clicked => { root.settings-torrent-seed-mode-changed("forever"); } }
+                                Button { text: "Ratio"; checked: root.settings-torrent-seed-mode == "ratio"; clicked => { root.settings-torrent-seed-mode-changed("ratio"); } }
+                                Button { text: "Time"; checked: root.settings-torrent-seed-mode == "time"; clicked => { root.settings-torrent-seed-mode-changed("time"); } }
+                                Button { text: "Ratio or time"; checked: root.settings-torrent-seed-mode == "ratio_or_time"; clicked => { root.settings-torrent-seed-mode-changed("ratio_or_time"); } }
+                            }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-torrent-seed-ratio-limit; placeholder-text: "Ratio"; edited => { root.settings-torrent-seed-ratio-limit-changed(self.text); } }
+                                LineEdit { text: root.settings-torrent-seed-time-limit-minutes; placeholder-text: "Minutes"; edited => { root.settings-torrent-seed-time-limit-minutes-changed(self.text); } }
+                                LineEdit { text: root.settings-torrent-upload-limit-kib-per-second; placeholder-text: "Upload KiB/s"; edited => { root.settings-torrent-upload-limit-kib-per-second-changed(self.text); } }
+                            }
+                            CheckBox { text: "Enable port forwarding"; checked: root.settings-torrent-port-forwarding-enabled; toggled => { root.settings-torrent-port-forwarding-enabled-changed(self.checked); } }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-torrent-port-forwarding-port; placeholder-text: "Port"; edited => { root.settings-torrent-port-forwarding-port-changed(self.text); } }
+                                Button { text: "Diagnose"; checked: root.settings-torrent-peer-watchdog-mode == "diagnose"; clicked => { root.settings-torrent-peer-watchdog-mode-changed("diagnose"); } }
+                                Button { text: "Experimental"; checked: root.settings-torrent-peer-watchdog-mode == "experimental"; clicked => { root.settings-torrent-peer-watchdog-mode-changed("experimental"); } }
+                            }
+                            Button { text: root.settings-cache-clearing ? "Clearing..." : "Clear torrent session cache"; clicked => { root.settings-clear-torrent-cache-requested(); } }
+                        }
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "appearance";
+                            spacing: 8px;
+                            Text { text: "Appearance/Behavior"; font-size: 16px; font-weight: 700; color: #111827; }
+                            CheckBox { text: "Start on startup"; checked: root.settings-start-on-startup; toggled => { root.settings-start-on-startup-changed(self.checked); } }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "Open"; checked: root.settings-startup-launch-mode == "open"; clicked => { root.settings-startup-launch-mode-changed("open"); } }
+                                Button { text: "Tray"; checked: root.settings-startup-launch-mode == "tray"; clicked => { root.settings-startup-launch-mode-changed("tray"); } }
+                            }
+                            Text { text: "Theme"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "System"; checked: root.settings-theme == "system"; clicked => { root.settings-theme-changed("system"); } }
+                                Button { text: "Light"; checked: root.settings-theme == "light"; clicked => { root.settings-theme-changed("light"); } }
+                                Button { text: "Dark"; checked: root.settings-theme == "dark"; clicked => { root.settings-theme-changed("dark"); } }
+                                Button { text: "OLED"; checked: root.settings-theme == "oled_dark"; clicked => { root.settings-theme-changed("oled_dark"); } }
+                            }
+                            Text { text: "Accent color"; font-size: 12px; color: #374151; }
+                            LineEdit { text: root.settings-accent-color; edited => { root.settings-accent-color-changed(self.text); } }
+                        }
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "extension";
+                            spacing: 8px;
+                            Text { text: "Web Extension"; font-size: 16px; font-weight: 700; color: #111827; }
+                            CheckBox { text: "Enable browser extension integration"; checked: root.settings-extension-enabled; toggled => { root.settings-extension-enabled-changed(self.checked); } }
+                            Text { text: "Download handoff mode"; font-size: 12px; color: #374151; }
+                            HorizontalBox {
+                                spacing: 6px;
+                                Button { text: "Off"; checked: root.settings-extension-handoff-mode == "off"; clicked => { root.settings-extension-handoff-mode-changed("off"); } }
+                                Button { text: "Ask"; checked: root.settings-extension-handoff-mode == "ask"; clicked => { root.settings-extension-handoff-mode-changed("ask"); } }
+                                Button { text: "Auto"; checked: root.settings-extension-handoff-mode == "auto"; clicked => { root.settings-extension-handoff-mode-changed("auto"); } }
+                            }
+                            LineEdit { text: root.settings-extension-listen-port; placeholder-text: "Listen port"; edited => { root.settings-extension-listen-port-changed(self.text); } }
+                            CheckBox { text: "Browser context menu"; checked: root.settings-extension-context-menu-enabled; toggled => { root.settings-extension-context-menu-enabled-changed(self.checked); } }
+                            CheckBox { text: "Show progress after handoff"; checked: root.settings-extension-show-progress-after-handoff; toggled => { root.settings-extension-show-progress-after-handoff-changed(self.checked); } }
+                            CheckBox { text: "Show badge status"; checked: root.settings-extension-show-badge-status; toggled => { root.settings-extension-show-badge-status-changed(self.checked); } }
+                            CheckBox { text: "Protected download handoff"; checked: root.settings-extension-authenticated-handoff-enabled; toggled => { root.settings-extension-authenticated-handoff-enabled-changed(self.checked); } }
+                            Text { text: root.settings-extension-excluded-hosts-summary; font-size: 12px; color: #586174; }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { text: root.settings-extension-excluded-host-input; horizontal-stretch: 1; placeholder-text: "example.com, *.example.org"; edited => { root.settings-extension-excluded-host-input-changed(self.text); } }
+                                Button { text: "Add"; clicked => { root.settings-extension-excluded-host-add-requested(); } }
+                            }
+                            ListView {
+                                height: 120px;
+                                for host in root.settings-extension-excluded-hosts: Rectangle {
+                                    height: 30px;
+                                    HorizontalBox {
+                                        spacing: 8px;
+                                        Text { text: host; font-size: 12px; color: #1f2937; horizontal-stretch: 1; overflow: elide; }
+                                        Button { text: "Remove"; clicked => { root.settings-extension-excluded-host-remove-requested(host); } }
+                                    }
+                                }
+                            }
+                        }
+
+                        VerticalBox {
+                            visible: root.settings-active-section == "native_host";
+                            spacing: 10px;
+                            HorizontalBox {
+                                spacing: 8px;
+                                Text { text: "Native Host"; font-size: 16px; font-weight: 700; color: #111827; horizontal-stretch: 1; }
+                                Button { text: root.diagnostics-loading ? "Refreshing..." : "Refresh"; clicked => { root.diagnostics-refresh-requested(); } }
+                            }
+
+                            Rectangle {
+                                border-color: #d5dae3;
+                                border-width: 1px;
+                                border-radius: 6px;
+                                background: #f8fafc;
+                                min-height: 94px;
+                                VerticalBox {
+                                    padding: 12px;
+                                    spacing: 6px;
+                                    HorizontalBox {
+                                        spacing: 8px;
+                                        Text { text: root.diagnostics-status-label; font-size: 14px; font-weight: 700; color: root.diagnostics-status-tone == "error" ? #b91c1c : root.diagnostics-status-tone == "warning" ? #b45309 : root.diagnostics-status-tone == "success" ? #047857 : #586174; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Button { text: "Open Docs"; clicked => { root.diagnostics-open-install-docs-requested(); } }
+                                    }
+                                    Text { text: root.diagnostics-status-message; font-size: 12px; color: #374151; wrap: word-wrap; }
+                                    Text { text: root.diagnostics-queue-summary + " | Last host contact: " + root.diagnostics-last-host-contact; font-size: 12px; color: #586174; }
+                                }
+                            }
+
+                            HorizontalBox {
+                                spacing: 8px;
+                                Button { text: "Copy Diagnostics"; clicked => { root.diagnostics-copy-requested(); } }
+                                Button { text: "Export Report"; clicked => { root.diagnostics-export-requested(); } }
+                                Button { text: "Repair Host Registration"; clicked => { root.diagnostics-repair-host-requested(); } }
+                                Button { text: "Test Handoff"; clicked => { root.diagnostics-test-handoff-requested(); } }
+                            }
+
+                            Text { visible: root.diagnostics-action-status-text != ""; text: root.diagnostics-action-status-text; font-size: 12px; color: #047857; }
+                            Text { visible: root.diagnostics-error-text != ""; text: root.diagnostics-error-text; font-size: 12px; color: #b91c1c; wrap: word-wrap; }
+
+                            Text { text: "Browser registrations"; font-size: 13px; font-weight: 700; color: #111827; }
+                            ListView {
+                                height: 155px;
+                                for entry in root.diagnostics-host-entries: Rectangle {
+                                    height: 66px;
+                                    border-color: #e5e7eb;
+                                    border-width: 1px;
+                                    border-radius: 4px;
+                                    background: #ffffff;
+                                    VerticalBox {
+                                        padding: 8px;
+                                        spacing: 3px;
+                                        HorizontalBox {
+                                            Text { text: entry.browser; font-size: 13px; font-weight: 700; color: #111827; horizontal-stretch: 1; overflow: elide; }
+                                            Text { text: entry.status-label; font-size: 12px; color: entry.status-tone == "warning" ? #b45309 : entry.status-tone == "success" ? #047857 : #586174; }
+                                        }
+                                        Text { text: "Registry: " + entry.registry-path; font-size: 11px; color: #586174; overflow: elide; }
+                                        Text { text: "Manifest: " + entry.manifest-path; font-size: 11px; color: #586174; overflow: elide; }
+                                        Text { text: "Host: " + entry.host-binary-path; font-size: 11px; color: #586174; overflow: elide; }
+                                    }
+                                }
+                            }
+
+                            Text { text: "Recent diagnostic events"; font-size: 13px; font-weight: 700; color: #111827; }
+                            ListView {
+                                height: 150px;
+                                for event in root.diagnostics-recent-events: Rectangle {
+                                    height: 54px;
+                                    border-color: #e5e7eb;
+                                    border-width: 1px;
+                                    border-radius: 4px;
+                                    background: #ffffff;
+                                    VerticalBox {
+                                        padding: 8px;
+                                        spacing: 3px;
+                                        HorizontalBox {
+                                            Text { text: event.level; font-size: 11px; font-weight: 700; color: event.level-tone == "error" ? #b91c1c : event.level-tone == "warning" ? #b45309 : #047857; }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            Text { text: event.timestamp-text; font-size: 11px; color: #586174; }
+                                        }
+                                        Text { text: event.message; font-size: 12px; color: #111827; overflow: elide; }
+                                        Text { text: event.job-id == "" ? event.category : event.category + " / " + event.job-id; font-size: 11px; color: #586174; overflow: elide; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            visible: root.settings-unsaved-prompt-visible;
+            width: parent.width;
+            height: parent.height;
+            background: #00000080;
+
+            Rectangle {
+                width: 420px;
+                height: 190px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-color: #d5dae3;
+                border-width: 1px;
+                border-radius: 6px;
+                background: #ffffff;
+
+                VerticalBox {
+                    padding: 18px;
+                    spacing: 12px;
+                    Text { text: "Discard settings changes?"; font-size: 16px; font-weight: 700; color: #111827; }
+                    Text { text: "Your settings draft has unsaved changes."; font-size: 12px; color: #586174; }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: "Keep Editing"; clicked => { root.settings-unsaved-cancelled(); } }
+                        Button { text: "Discard"; clicked => { root.settings-discard-confirmed(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
         visible: root.add-download-visible;
         width: root.width;
         height: root.height;
@@ -902,6 +1538,15 @@ export component MainWindow inherits Window {
             }
         }
     }
+
+    ToastArea {
+        x: root.width - self.width - 24px;
+        y: root.height - self.height - 24px;
+        toasts: root.toasts;
+        dismiss-requested(id) => {
+            root.toast-dismiss-requested(id);
+        }
+    }
 }
 
 component PopupHeader inherits Rectangle {
@@ -972,6 +1617,16 @@ export component DownloadPromptWindow inherits Window {
     max-height: 280px;
 
     in property <PromptDetails> prompt;
+    callback change-directory-requested();
+    callback cancel-requested();
+    callback download-requested();
+    callback swap-requested();
+    callback duplicate-menu-toggled();
+    callback duplicate-action-requested(string);
+    callback duplicate-rename-started();
+    callback duplicate-renamed-filename-changed(string);
+    callback duplicate-rename-confirmed();
+    callback duplicate-rename-cancelled();
 
     VerticalBox {
         PopupHeader {
@@ -990,16 +1645,101 @@ export component DownloadPromptWindow inherits Window {
                 overflow: elide;
             }
 
-            MetaLine { label: "Source"; value: prompt.url; }
+            MetaLine { label: "Source"; value: prompt.source-label; }
             MetaLine { label: "Destination"; value: prompt.destination; }
             MetaLine { label: "File size"; value: prompt.size-text; }
+            MetaLine { label: "Detected by"; value: prompt.url; }
 
             Text {
-                text: prompt.duplicate-text;
+                text: prompt.duplicate-message + prompt.duplicate-label;
                 color: #92400e;
                 font-size: 11px;
                 overflow: elide;
-                visible: prompt.duplicate-text != "";
+                visible: prompt.is-duplicate;
+            }
+
+            Text {
+                text: prompt.error-text;
+                color: #b91c1c;
+                font-size: 11px;
+                overflow: elide;
+                visible: prompt.error-text != "";
+            }
+
+            Rectangle {
+                height: prompt.is-duplicate && prompt.renaming-duplicate ? 34px : 0px;
+                visible: prompt.is-duplicate && prompt.renaming-duplicate;
+                HorizontalBox {
+                    spacing: 6px;
+                    LineEdit {
+                        text: prompt.renamed-filename;
+                        placeholder-text: "New file name";
+                        horizontal-stretch: 1;
+                        edited => {
+                            root.duplicate-renamed-filename-changed(self.text);
+                        }
+                    }
+                    Button { text: "Cancel"; clicked => { root.duplicate-rename-cancelled(); } }
+                    Button {
+                        text: prompt.busy ? "Renaming..." : "Rename";
+                        enabled: prompt.rename-can-confirm && !prompt.busy;
+                        clicked => { root.duplicate-rename-confirmed(); }
+                    }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+
+                Button {
+                    text: "Change";
+                    enabled: !prompt.busy;
+                    clicked => { root.change-directory-requested(); }
+                }
+                Button {
+                    text: "Cancel";
+                    enabled: !prompt.busy;
+                    clicked => { root.cancel-requested(); }
+                }
+                Button {
+                    text: "Swap";
+                    visible: prompt.can-swap-to-browser;
+                    enabled: !prompt.busy;
+                    clicked => { root.swap-requested(); }
+                }
+                Button {
+                    text: prompt.busy ? "Starting..." : "Download";
+                    visible: !prompt.is-duplicate;
+                    enabled: !prompt.busy;
+                    clicked => { root.download-requested(); }
+                }
+                Button {
+                    text: "Choose Action";
+                    visible: prompt.is-duplicate && !prompt.renaming-duplicate;
+                    enabled: !prompt.busy;
+                    clicked => { root.duplicate-menu-toggled(); }
+                }
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                visible: prompt.is-duplicate && prompt.duplicate-menu-open && !prompt.renaming-duplicate;
+
+                Button {
+                    text: "Overwrite";
+                    enabled: !prompt.busy;
+                    clicked => { root.duplicate-action-requested("overwrite"); }
+                }
+                Button {
+                    text: "Rename";
+                    enabled: !prompt.busy;
+                    clicked => { root.duplicate-rename-started(); }
+                }
+                Button {
+                    text: "Download Anyway";
+                    enabled: !prompt.busy;
+                    clicked => { root.duplicate-action-requested("download_anyway"); }
+                }
             }
         }
     }
@@ -1015,13 +1755,21 @@ export component HttpProgressWindow inherits Window {
     max-height: 280px;
 
     in property <ProgressDetails> details;
+    callback progress-pause-requested(string);
+    callback progress-resume-requested(string);
+    callback progress-retry-requested(string);
+    callback progress-cancel-requested(string);
+    callback progress-open-requested(string);
+    callback progress-reveal-requested(string);
+    callback progress-swap-requested(string);
+    callback progress-close-requested(string);
 
     VerticalBox {
         PopupHeader { title: details.title; }
 
         VerticalBox {
             padding: 12px;
-            spacing: 8px;
+            spacing: 7px;
 
             Text {
                 text: details.filename;
@@ -1032,15 +1780,47 @@ export component HttpProgressWindow inherits Window {
             }
 
             MetaLine { label: "State"; value: details.state; }
-            MetaLine { label: "Bytes"; value: details.bytes-text; }
+            MetaLine { label: "Source"; value: details.subtitle; }
+            MetaLine { label: "Path"; value: details.destination; }
             ProgressLine { progress: details.progress; }
 
+            HorizontalBox {
+                spacing: 8px;
+                MetaLine { label: "Speed"; value: details.speed-text; horizontal-stretch: 1; }
+                MetaLine { label: "ETA"; value: details.eta-text; horizontal-stretch: 1; }
+                MetaLine { label: "Size"; value: details.size-text; horizontal-stretch: 1; }
+            }
+
             Text {
-                text: details.error-text;
+                text: details.progress-label + " | " + details.bytes-text;
+                color: #586174;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Text {
+                text: details.action-error-text != "" ? details.action-error-text : details.error-text;
                 color: #b91c1c;
                 font-size: 11px;
                 overflow: elide;
-                visible: details.error-text != "";
+                visible: details.action-error-text != "" || details.error-text != "";
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                Button { text: "Open"; enabled: details.can-open && !details.busy; clicked => { root.progress-open-requested(details.id); } }
+                Button { text: "Show"; enabled: details.can-reveal && !details.busy; clicked => { root.progress-reveal-requested(details.id); } }
+                Button { text: "Pause"; visible: details.can-pause; enabled: !details.busy; clicked => { root.progress-pause-requested(details.id); } }
+                Button { text: "Resume"; visible: details.can-resume; enabled: !details.busy; clicked => { root.progress-resume-requested(details.id); } }
+                Button { text: "Retry"; visible: details.can-retry; enabled: !details.busy; clicked => { root.progress-retry-requested(details.id); } }
+                Button { text: "Swap"; visible: details.can-swap-to-browser; enabled: !details.busy; clicked => { root.progress-swap-requested(details.id); } }
+                Button {
+                    text: details.cancel-confirming ? "Confirm cancel" : "Cancel";
+                    visible: details.can-cancel;
+                    enabled: !details.busy;
+                    clicked => { root.progress-cancel-requested(details.id); }
+                }
+                Button { text: "Close"; enabled: !details.busy; clicked => { root.progress-close-requested(details.id); } }
             }
         }
     }
@@ -1056,6 +1836,14 @@ export component TorrentProgressWindow inherits Window {
     max-height: 520px;
 
     in property <ProgressDetails> details;
+    callback progress-pause-requested(string);
+    callback progress-resume-requested(string);
+    callback progress-retry-requested(string);
+    callback progress-cancel-requested(string);
+    callback progress-open-requested(string);
+    callback progress-reveal-requested(string);
+    callback progress-swap-requested(string);
+    callback progress-close-requested(string);
 
     VerticalBox {
         PopupHeader { title: details.title; }
@@ -1073,15 +1861,57 @@ export component TorrentProgressWindow inherits Window {
             }
 
             MetaLine { label: "State"; value: details.state; }
-            MetaLine { label: "Bytes"; value: details.bytes-text; }
+            MetaLine { label: "Source"; value: details.source-summary; }
+            MetaLine { label: "Hash"; value: details.info-hash; }
+            MetaLine { label: "Files"; value: details.files-text; }
             ProgressLine { progress: details.progress; }
 
+            HorizontalBox {
+                spacing: 8px;
+                MetaLine { label: "Down"; value: details.speed-text; horizontal-stretch: 1; }
+                MetaLine { label: "Up"; value: details.upload-speed-text; horizontal-stretch: 1; }
+                MetaLine { label: "ETA"; value: details.eta-text; horizontal-stretch: 1; }
+            }
+
+            HorizontalBox {
+                spacing: 8px;
+                MetaLine { label: "Peers"; value: details.peers-text; horizontal-stretch: 1; }
+                MetaLine { label: "Seeds"; value: details.seeds-text; horizontal-stretch: 1; }
+                MetaLine { label: "Ratio"; value: details.ratio-text; horizontal-stretch: 1; }
+            }
+
+            MetaLine { label: "Path"; value: details.destination; }
+
             Text {
-                text: details.error-text;
+                text: details.progress-label + " | " + details.bytes-text + " | " + details.remaining-text;
+                color: #586174;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            Text {
+                text: details.action-error-text != "" ? details.action-error-text : details.error-text;
                 color: #b91c1c;
                 font-size: 11px;
                 overflow: elide;
-                visible: details.error-text != "";
+                visible: details.action-error-text != "" || details.error-text != "";
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                Button { text: "Open"; enabled: details.can-open && !details.busy; clicked => { root.progress-open-requested(details.id); } }
+                Button { text: "Show"; enabled: details.can-reveal && !details.busy; clicked => { root.progress-reveal-requested(details.id); } }
+                Button { text: "Pause"; visible: details.can-pause; enabled: !details.busy; clicked => { root.progress-pause-requested(details.id); } }
+                Button { text: "Resume"; visible: details.can-resume; enabled: !details.busy; clicked => { root.progress-resume-requested(details.id); } }
+                Button { text: "Retry"; visible: details.can-retry; enabled: !details.busy; clicked => { root.progress-retry-requested(details.id); } }
+                Button { text: "Swap"; visible: details.can-swap-to-browser; enabled: !details.busy; clicked => { root.progress-swap-requested(details.id); } }
+                Button {
+                    text: details.cancel-confirming ? "Confirm cancel" : "Cancel";
+                    visible: details.can-cancel;
+                    enabled: !details.busy;
+                    clicked => { root.progress-cancel-requested(details.id); }
+                }
+                Button { text: "Close"; enabled: !details.busy; clicked => { root.progress-close-requested(details.id); } }
             }
         }
     }
@@ -1097,6 +1927,11 @@ export component BatchProgressWindow inherits Window {
     max-height: 430px;
 
     in property <BatchDetails> details;
+    callback batch-pause-requested(string);
+    callback batch-resume-requested(string);
+    callback batch-cancel-requested(string);
+    callback batch-reveal-completed-requested(string);
+    callback batch-close-requested(string);
 
     VerticalBox {
         PopupHeader { title: details.title; }
@@ -1106,16 +1941,52 @@ export component BatchProgressWindow inherits Window {
             spacing: 10px;
 
             Text {
-                text: details.summary;
+                text: details.display-title;
                 font-size: 15px;
                 font-weight: 700;
                 color: #111827;
                 overflow: elide;
             }
 
-            MetaLine { label: "Batch"; value: details.batch-id; }
+            MetaLine { label: "Batch"; value: details.summary; }
+            MetaLine { label: "Phase"; value: details.phase-label; }
             MetaLine { label: "Bytes"; value: details.bytes-text; }
             ProgressLine { progress: details.progress; }
+
+            ListView {
+                height: 204px;
+                viewport-width: parent.width;
+                viewport-height: self.height;
+                for row in details.rows: Rectangle {
+                    height: 46px;
+                    width: parent.width;
+                    background: #f9fafb;
+                    VerticalBox {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 2px;
+                        Text { text: row.filename; font-size: 12px; color: #111827; overflow: elide; }
+                        Text { text: row.status-text + " | " + row.progress-label + " | " + row.size-text; font-size: 10px; color: #586174; overflow: elide; }
+                    }
+                }
+            }
+
+            Text {
+                text: details.action-error-text != "" ? details.action-error-text : details.archive-error;
+                color: #b91c1c;
+                font-size: 11px;
+                overflow: elide;
+                visible: details.action-error-text != "" || details.archive-error != "";
+            }
+
+            HorizontalBox {
+                spacing: 6px;
+                Button { text: "Pause all"; enabled: details.can-pause && !details.busy; clicked => { root.batch-pause-requested(details.batch-id); } }
+                Button { text: "Resume all"; enabled: details.can-resume && !details.busy; clicked => { root.batch-resume-requested(details.batch-id); } }
+                Button { text: "Cancel active"; enabled: details.can-cancel && !details.busy; clicked => { root.batch-cancel-requested(details.batch-id); } }
+                Button { text: "Reveal completed"; enabled: details.can-reveal-completed && !details.busy; clicked => { root.batch-reveal-completed-requested(details.batch-id); } }
+                Button { text: "Close"; enabled: !details.busy; clicked => { root.batch-close-requested(details.batch-id); } }
+            }
         }
     }
 }
