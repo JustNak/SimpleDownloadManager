@@ -53,14 +53,14 @@ assert.match(
 
 assert.match(
   tracker,
-  /\| Phase 6: Slint Primary Cutover With Tauri Retained \| In Progress \| 55% \|/,
-  'Phase 6 should show the Slint primary cutover is underway after default build/release changes',
+  /\| Phase 6: Slint Primary Cutover With Tauri Retained \| Done \| 100% \|/,
+  'Phase 6 should be complete after the passed Slint primary runtime smoke evidence',
 );
 
 assert.match(
   tracker,
-  /## Phase 6: Slint Primary Cutover With Tauri Retained[\s\S]*Status: \*\*In Progress, 55%\*\*/,
-  'Phase 6 section should match the in-progress table status',
+  /## Phase 6: Slint Primary Cutover With Tauri Retained[\s\S]*Status: \*\*Done, 100%\*\*/,
+  'Phase 6 section should match the complete table status',
 );
 
 assert.match(
@@ -74,6 +74,37 @@ assert.match(
   /updater publishing remains on the legacy Tauri default/i,
   'Phase 6 should record that updater publishing default is intentionally not cut over yet',
 );
+
+assert.match(
+  tracker,
+  /Phase 6B added `scripts\/smoke-phase6-slint\.ps1` and `scripts\/slint-phase6-smoke-report\.mjs`/,
+  'Phase 6 should record the Slint runtime acceptance harness',
+);
+assert.match(
+  tracker,
+  /Phase 6C ran strict full runtime smoke[\s\S]*Tray open\/exit behavior was not confirmed/,
+  'Phase 6 should record the strict runtime completion gate evidence and remaining tray blocker',
+);
+
+assert.match(
+  tracker,
+  /Phase 6D recorded the manual tray confirmation[\s\S]*slint-phase6-smoke-2026-05-02T04-09-06\.6553272Z\.json/,
+  'Phase 6 should record the passed strict runtime smoke report after tray confirmation',
+);
+
+for (const finalGate of [
+  'Native-host end-to-end browser handoff',
+  'Single-instance wake',
+  'Tray open/exit',
+  'Startup registration',
+  'State migration from existing Tauri install',
+]) {
+  assert.match(
+    tracker,
+    new RegExp(`- \\[x\\] ${finalGate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    `final parity gate should be checked after Phase 6D: ${finalGate}`,
+  );
+}
 
 assert.match(
   tracker,

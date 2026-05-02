@@ -12,7 +12,7 @@ Progress values are gate-based estimates, not a count of checkboxes. Update a ph
 | Phase 3: Slint Runtime Shell | Done | 100% | Slint app loads real state, handles backend events, invokes basic queue commands, accepts native-host wake/focus requests, persists main-window geometry, delegates Windows shell effects, supports tray open/exit plus close-to-tray, owns basic prompt/progress popup lifecycle, handles notifications plus native-host registration repair, has a basic cargo-packager updater UI, and matches Tauri main-window startup/close/minimize behavior. |
 | Phase 4: Slint UI Feature Parity | Done | 100% | Every current React/Tauri workflow has a Slint equivalent. |
 | Phase 5: Packaging And Updater Transition | Done | 100% | Parallel Slint NSIS packaging path builds a signed Slint installer, verifies transition/native updater feeds, passes publish dry-run, installs/uninstalls into an isolated smoke root, and validates native-host registration cleanup. |
-| Phase 6: Slint Primary Cutover With Tauri Retained | In Progress | 55% | Slint is now the primary local build/release target while Tauri remains as a legacy/reference desktop app. |
+| Phase 6: Slint Primary Cutover With Tauri Retained | Done | 100% | Slint is now the primary local build/release target, full runtime acceptance evidence is recorded, and Tauri remains as a legacy/reference desktop app. |
 
 ## Phase 0: Baseline And Migration Spine
 
@@ -168,22 +168,29 @@ Acceptance:
 
 ## Phase 6: Slint Primary Cutover With Tauri Retained
 
-Status: **In Progress, 55%**
+Status: **Done, 100%**
 
 Tasks:
 - [x] Make root desktop build/release defaults point to Slint as the primary desktop product after Phase 5 smoke tests pass.
-- [ ] Run full parity acceptance suite for the Slint primary product.
+- [x] Run full parity acceptance suite for the Slint primary product.
 - [x] Keep `apps/desktop` and `apps/desktop/src-tauri` intact as the retained legacy/reference desktop app.
 - [x] Keep legacy Tauri build and test commands available.
 - [x] Document how to build and run Slint primary versus Tauri legacy.
 - [x] Keep extension and native-host contracts unchanged.
+- [x] Add Phase 6 Slint runtime acceptance smoke orchestrator and report helper.
 
 Note: Phase 6A changed `npm run build:desktop` and `npm run release:windows` to target Slint by default after the passed Phase 5 smoke report. Tauri remains available through `npm run build:desktop:tauri` and `npm run release:windows:tauri`, and updater publishing remains on the legacy Tauri default until a separate publish cutover is planned.
 
+Note: Phase 6B added `scripts/smoke-phase6-slint.ps1` and `scripts/slint-phase6-smoke-report.mjs` to record Slint primary runtime acceptance evidence for native-host handoff, duplicate-instance wake, startup command shape, state migration, cleanup, and tray/manual status. `npm run smoke:phase6:slint` runs check-only validation; `npm run smoke:phase6:slint:full` is the explicit full runtime smoke. Final Phase 6 acceptance remains open until a passed full report and tray evidence are recorded.
+
+Note: Phase 6C ran strict full runtime smoke with `-StartupRegistrySmoke -RequireCompletionEvidence` on 2026-05-02. The run rebuilt the signed Slint installer, installed into an isolated temp root, verified native-host ping/enqueue handoff, duplicate-instance wake, state migration, startup registry enable/disable through the installed Slint smoke command, uninstall cleanup, and wrote a `blocked` report at `release/slint/smoke/slint-phase6-smoke-2026-05-02T03-46-33.9162855Z.json`. Tray open/exit behavior was not confirmed, so Phase 6 remains at 88% and final acceptance stays open.
+
+Note: Phase 6D recorded the manual tray confirmation and reran strict full runtime smoke with `-StartupRegistrySmoke -TrayConfirmed -RequireCompletionEvidence` on 2026-05-02. The run rebuilt and signed the Slint installer, verified installer artifacts and both updater feeds, installed into an isolated temp root, verified native-host ping/enqueue handoff, duplicate-instance wake, state migration, startup registry enable/disable through the installed Slint smoke command, tray open/exit evidence, uninstall cleanup, and wrote a `passed` report at `release/slint/smoke/slint-phase6-smoke-2026-05-02T04-09-06.6553272Z.json`.
+
 Acceptance:
-- [ ] Slint app is the primary shipped desktop product.
-- [ ] Full test, clippy, build, installer, and updater smoke gates pass for Slint while retained Tauri legacy checks remain available.
-- [ ] No Tauri runtime dependency remains in the shipped Slint desktop app; legacy Tauri remains buildable.
+- [x] Slint app is the primary shipped desktop product.
+- [x] Full test, clippy, build, installer, and updater smoke gates pass for Slint while retained Tauri legacy checks remain available.
+- [x] No Tauri runtime dependency remains in the shipped Slint desktop app; legacy Tauri remains buildable.
 
 ## Public Interfaces To Track
 
@@ -204,11 +211,11 @@ Acceptance:
 Final parity gates:
 - [x] Slint release build.
 - [x] NSIS package build.
-- [ ] Native-host end-to-end browser handoff.
-- [ ] Single-instance wake.
-- [ ] Tray open/exit.
-- [ ] Startup registration.
-- [ ] State migration from existing Tauri install.
+- [x] Native-host end-to-end browser handoff.
+- [x] Single-instance wake.
+- [x] Tray open/exit.
+- [x] Startup registration.
+- [x] State migration from existing Tauri install.
 - [x] Tauri-to-Slint updater smoke test.
 
 ## Assumptions
