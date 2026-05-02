@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import {
   compareDownloadsForSort,
+  DEFAULT_SORT_MODE,
   nextSortModeForColumn,
+  readStoredSortMode,
+  SORT_MODE_STORAGE_KEY,
   sortModeDirection,
   sortModeKey,
+  writeStoredSortMode,
 } from '../src/downloadSorting.ts';
 import type { DownloadJob } from '../src/types.ts';
 
@@ -67,3 +71,22 @@ assert.equal(sortModeDirection('date:asc'), 'asc');
 assert.equal(nextSortModeForColumn('date:desc', 'date'), 'date:asc');
 assert.equal(nextSortModeForColumn('date:asc', 'name'), 'name:asc');
 assert.equal(nextSortModeForColumn('name:asc', 'size'), 'size:desc');
+
+const storage = new Map<string, string>();
+const sortStorage = {
+  getItem(key: string) {
+    return storage.get(key) ?? null;
+  },
+  setItem(key: string, value: string) {
+    storage.set(key, value);
+  },
+};
+
+assert.equal(DEFAULT_SORT_MODE, 'date:asc', 'fresh app sessions should still start with date ascending when no sort is stored');
+assert.equal(readStoredSortMode(sortStorage), DEFAULT_SORT_MODE, 'missing stored sort mode should fall back to the default');
+storage.set(SORT_MODE_STORAGE_KEY, 'date:desc');
+assert.equal(readStoredSortMode(sortStorage), 'date:desc', 'stored sort direction should be restored from local storage');
+storage.set(SORT_MODE_STORAGE_KEY, 'speed:desc');
+assert.equal(readStoredSortMode(sortStorage), DEFAULT_SORT_MODE, 'invalid stored sort mode should be ignored');
+writeStoredSortMode('size:desc', sortStorage);
+assert.equal(storage.get(SORT_MODE_STORAGE_KEY), 'size:desc', 'clicked sort mode should be written back to local storage');

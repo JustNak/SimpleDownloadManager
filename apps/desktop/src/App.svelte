@@ -40,7 +40,7 @@
   import AddDownloadModal from './AddDownloadModal.svelte';
   import type { AddDownloadOutcome } from './AddDownloadModal.svelte';
   import Titlebar from './Titlebar.svelte';
-  import { compareDownloadsForSort, type SortMode } from './downloadSorting';
+  import { compareDownloadsForSort, readStoredSortMode, writeStoredSortMode, type SortMode } from './downloadSorting';
   import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
   import { DOWNLOAD_CATEGORIES, type DownloadCategory } from './downloadCategories';
   import {
@@ -127,7 +127,7 @@
   let toasts = $state<ToastMessage[]>([]);
   let view = $state<ViewState>('all');
   let searchQuery = $state('');
-  let sortMode = $state<SortMode>('date:asc');
+  let sortMode = $state<SortMode>(readStoredSortMode());
   let isDownloadSectionExpanded = $state(true);
   let isTorrentSectionExpanded = $state(true);
   let selectedJobId = $state<string | null>(initialSelectedJobIdFromSearch(window.location.search));
@@ -151,7 +151,8 @@
   let lastDiagnosticsRefreshAt = 0;
 
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
-  const appearanceSettings = $derived(settingsDraft ?? settings);
+  const liveSettings = $derived(settingsDraft ?? settings);
+  const activeSettingsSection = $derived(SETTINGS_SECTIONS.find((section) => section.id === activeSettingsSectionId) ?? SETTINGS_SECTIONS[0]);
   const counts = $derived(getQueueCounts(jobs));
   const torrentFooterStats = $derived(getTorrentFooterStats(jobs));
   const displayedJobs = $derived.by(() => {
@@ -283,7 +284,7 @@
   });
 
   $effect(() => {
-    const nextAppearance = appearanceSettings;
+    const nextAppearance = liveSettings;
     function applyTheme() {
       applyAppearance(nextAppearance);
     }
@@ -453,6 +454,25 @@
     }
 
     view = nextView;
+  }
+
+  function handleSettingsSectionClick(sectionId: SettingsSectionId) {
+    const section = SETTINGS_SECTIONS.find((candidate) => candidate.id === sectionId);
+    if (!section) return;
+
+    activeSettingsSectionId = section.id;
+    window.history.replaceState(null, '', section.href);
+    requestAnimationFrame(() => {
+      const scrollRoot = settingsScrollRoot;
+      const target = scrollRoot?.querySelector<HTMLElement>(section.href);
+      if (!scrollRoot || !target) return;
+
+      const rootTop = scrollRoot.getBoundingClientRect().top;
+      const targetTop = target.getBoundingClientRect().top;
+      const nextScrollTop = scrollRoot.scrollTop + targetTop - rootTop;
+      scrollRoot.scrollTo({ top: Math.max(0, nextScrollTop), behavior: 'auto' });
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
   }
 
   function applyDesktopSnapshot(snapshot: DesktopSnapshot) {
@@ -920,6 +940,11 @@
     settingsDraft = draft;
   }
 
+  function handleSortModeChange(nextSortMode: SortMode) {
+    sortMode = nextSortMode;
+    writeStoredSortMode(nextSortMode);
+  }
+
   function runCommandMenuAction(action: () => void) {
     commandMenuOpen = false;
     action();
@@ -1058,12 +1083,24 @@
           </label>
         </div>
       </div>
+    {:else}
+      <div class="settings-titlebar flex h-full min-w-0 flex-1 items-center justify-between gap-3">
+        <div class="flex min-w-0 items-center gap-2 text-sm">
+          <SettingsIcon size={16} class="shrink-0 text-primary" />
+          <span class="font-medium text-foreground">Settings</span>
+          <span class="text-muted-foreground">/</span>
+          <span class="truncate text-muted-foreground">{activeSettingsSection.label}</span>
+        </div>
+        <div class="hidden min-w-0 items-center text-xs text-muted-foreground md:flex">
+          <span class="truncate">Configure downloads, appearance, notifications, and diagnostics.</span>
+        </div>
+      </div>
     {/if}
   </Titlebar>
 
   <div class="flex min-h-0 flex-1 overflow-hidden">
     {#if view === 'settings'}
-      {@render SettingsSidebar(activeSettingsSectionId, () => requestViewChange('all'), (id) => activeSettingsSectionId = id)}
+      {@render SettingsSidebar(activeSettingsSectionId, () => requestViewChange('all'), handleSettingsSectionClick)}
     {:else}
       <aside class="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
         <nav class="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 flex flex-col gap-0.5">
@@ -1155,9 +1192,9 @@
           {view}
           {sortMode}
           {progressMetricsByJobId}
-          showDetailsOnClick={settings.showDetailsOnClick}
-          queueRowSize={settings.queueRowSize}
-          onSortChange={(nextSortMode) => sortMode = nextSortMode}
+          showDetailsOnClick={liveSettings.showDetailsOnClick}
+          queueRowSize={liveSettings.queueRowSize}
+          onSortChange={handleSortModeChange}
           {selectedJobId}
           onSelectJob={(id) => selectedJobId = id}
           onClearSelection={() => selectedJobId = null}
@@ -1229,7 +1266,7 @@
 
 {#snippet SettingsSidebar(activeSectionId: SettingsSectionId, onBack: () => void, onSettingsSectionClick: (sectionId: SettingsSectionId) => void)}
   <aside class="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
-    <div class="shrink-0 space-y-2 border-b border-border/70 pb-2">
+    <div class="shrink-0 space-y-2 border-b border-border/35 pb-2">
       <button
         type="button"
         aria-label="Back to downloads"
@@ -1249,7 +1286,10 @@
         <a
           href={section.href}
           aria-current={active ? 'location' : undefined}
-          onclick={() => onSettingsSectionClick(section.id)}
+          onclick={(event) => {
+            event.preventDefault();
+            onSettingsSectionClick(section.id);
+          }}
           class={`group relative flex min-h-[54px] w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition ${active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted hover:text-foreground'}`}
         >
           <span class={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition ${active ? 'bg-primary/15 text-primary' : 'bg-primary/10 text-primary/80 group-hover:bg-primary/15 group-hover:text-primary'}`}>

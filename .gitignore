@@ -4,6 +4,7 @@ target/
 release/
 test-runtime/
 .tmp/
+.codex-tmp/
 .cargo-temp/
 .codex-*.log
 apps/desktop/src-tauri/binaries/

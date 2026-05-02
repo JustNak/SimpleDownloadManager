@@ -147,6 +147,7 @@
   const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
+  const normalizedAccentColor = $derived(normalizeAccentColor(accentColorInput));
 
   $effect(() => {
     const nextSettings = settings;
@@ -387,14 +388,14 @@
     }
   }
 
-  function diagnosticLevelClass(level: DiagnosticsSnapshot['recentEvents'][number]['level']) {
+  function diagnosticLevelConsoleClass(level: DiagnosticsSnapshot['recentEvents'][number]['level']) {
     switch (level) {
       case 'error':
-        return 'text-destructive';
+        return 'text-red-300';
       case 'warning':
-        return 'text-warning';
+        return 'text-amber-300';
       default:
-        return 'text-success';
+        return 'text-emerald-300';
     }
   }
 
@@ -418,16 +419,45 @@
 
   const accentPresets = [
     DEFAULT_ACCENT_COLOR,
+    '#2563eb',
     '#06b6d4',
+    '#14b8a6',
     '#22c55e',
+    '#84cc16',
+    '#eab308',
     '#f97316',
     '#e11d48',
+    '#ec4899',
     '#a855f7',
+    '#6366f1',
+  ];
+
+  const accentGradientPresets = [
+    {
+      name: 'Aurora',
+      value: '#22c55e',
+      gradient: 'linear-gradient(135deg, #06b6d4 0%, #22c55e 52%, #a3e635 100%)',
+    },
+    {
+      name: 'Ember',
+      value: '#f97316',
+      gradient: 'linear-gradient(135deg, #f43f5e 0%, #f97316 48%, #facc15 100%)',
+    },
+    {
+      name: 'Violet',
+      value: '#a855f7',
+      gradient: 'linear-gradient(135deg, #6366f1 0%, #a855f7 52%, #ec4899 100%)',
+    },
+    {
+      name: 'Lagoon',
+      value: '#06b6d4',
+      gradient: 'linear-gradient(135deg, #2563eb 0%, #06b6d4 46%, #14b8a6 100%)',
+    },
   ];
 </script>
 
 {#snippet generalContent()}
-  <div class="space-y-3">
+  <div>
     {@render FieldRow('Download Directory', 'Default save path.', directoryControl)}
     {@render FieldRow('Max Concurrent Downloads', 'Active job limit.', maxConcurrentControl)}
     {@render FieldRow('Auto Retry Attempts', 'Failure retries.', autoRetryControl)}
@@ -437,8 +467,8 @@
 {/snippet}
 
 {#snippet updateContent()}
-  <div class="rounded-md border border-border bg-surface p-4">
-    <div class="mb-4 flex items-start justify-between gap-3">
+  <div class="space-y-4">
+    <div class="flex items-start justify-between gap-3">
       <div class="min-w-0">
         <div class="font-semibold text-foreground">Alpha channel updates</div>
         <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderUpdateStatus(updateState)}</div>
@@ -449,13 +479,13 @@
       </button>
     </div>
 
-    <div class="grid gap-3 md:grid-cols-2">
+    <div class="grid gap-3 border-y border-border/40 py-3 md:grid-cols-2">
       {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.3.54-alpha', 'current')}
       {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
     </div>
 
     {#if updateState.status === 'downloading' || updateState.status === 'installing'}
-      <div class="mt-4">
+      <div>
         <div class="mb-1 flex items-center justify-between text-xs text-muted-foreground">
           <span>{updateState.status === 'installing' ? 'Installing update' : 'Downloading update'}</span>
           <span>{formatUpdateProgress(updateState)}</span>
@@ -467,21 +497,21 @@
     {/if}
 
     {#if updateState.availableUpdate}
-      <div class="mt-4 flex justify-end">
+      <div class="flex justify-end">
         <button type="button" onclick={onInstallUpdate} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
           <Download size={16} />
           Install Update
         </button>
       </div>
     {:else if updateState.errorMessage}
-      <div class="mt-4 rounded-md border border-destructive/35 bg-destructive/10 px-3 py-2 text-sm text-destructive">{updateState.errorMessage}</div>
+      <div class="border-l-2 border-destructive/60 bg-destructive/10 px-3 py-2 text-sm text-destructive">{updateState.errorMessage}</div>
     {/if}
   </div>
 {/snippet}
 
 {#snippet torrentingContent()}
-  <div class="space-y-3">
-    {@render CompactSetting(Gauge, 'Enable torrent downloads', 'Allow magnet and .torrent transfers.', torrentEnabledControl)}
+  <div>
+    {@render SwitchFieldRow(Gauge, 'Enable torrent downloads', 'Allow magnet and .torrent transfers.', torrentEnabledControl)}
     {@render FieldRow('Torrent Directory', 'Default save path for torrents.', torrentDirectoryControl)}
     {@render FieldRow('Seed Mode', 'Stop policy after completion.', seedModeControl)}
     {#if usesTorrentRatioLimit(formData.torrent.seedMode)}
@@ -491,48 +521,55 @@
       {@render FieldRow('Seed Time Limit', 'Minutes to seed.', seedTimeControl)}
     {/if}
     {@render FieldRow('Upload Limit', 'Seeding cap.', uploadLimitControl)}
-    {@render CompactSetting(Globe, 'Port forwarding', 'Use the configured listen port when available.', portForwardingControl)}
+    {@render SwitchFieldRow(Globe, 'Port forwarding', 'Use the configured listen port when available.', portForwardingControl)}
     {#if formData.torrent.portForwardingEnabled}
       {@render FieldRow('Forwarded Port', 'Router listen port.', forwardingPortControl)}
     {/if}
     {@render FieldRow('Peer Watchdog', 'Peer connection diagnostics.', peerWatchdogControl)}
-    <div class="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+    <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
       <div class="text-sm text-muted-foreground">
         {hasActiveTorrentJobs ? 'Active torrents are running. Clearing the cache may require a restart.' : 'Clear stale torrent engine session data.'}
       </div>
-      <button type="button" onclick={() => void clearTorrentSessionCache()} disabled={isClearingTorrentSessionCache} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
-        <RotateCw size={16} class={isClearingTorrentSessionCache ? 'animate-spin' : ''} />
-        Clear torrent session cache
-      </button>
+      <div class="flex justify-start">
+        <button type="button" onclick={() => void clearTorrentSessionCache()} disabled={isClearingTorrentSessionCache} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+          <RotateCw size={16} class={isClearingTorrentSessionCache ? 'animate-spin' : ''} />
+          Clear torrent session cache
+        </button>
+      </div>
     </div>
   </div>
 {/snippet}
 
 {#snippet appearanceContent()}
-  <div class="space-y-3">
+  <div>
     {@render FieldRow('Theme', 'Application color scheme.', themeControl)}
-    {@render FieldRow('Accent Color', 'Primary highlight color.', accentControl)}
+    {@render FieldRow('Accent Color', 'Primary highlight color.', accentControl, 'Primary highlight color.', true)}
     {@render FieldRow('Queue Row Size', 'Main list density.', rowSizeControl)}
-    {@render CompactSetting(Bell, 'Notifications', 'Show desktop notifications for completed or failed downloads.', notificationsControl)}
-    {@render CompactSetting(Clock3, 'Show details on click', 'Selecting a row opens the details pane.', showDetailsControl)}
+    {@render SwitchFieldRow(Bell, 'Notifications', 'Show desktop notifications for completed or failed downloads.', notificationsControl)}
+    {@render SwitchFieldRow(Clock3, 'Show details on click', 'Selecting a row opens the details pane.', showDetailsControl)}
   </div>
 {/snippet}
 
 {#snippet extensionContent()}
-  <div class="space-y-3">
-    {@render CompactSetting(PlugZap, 'Enable extension integration', 'Accept browser handoff requests.', extensionEnabledControl)}
+  <div>
+    {@render SwitchFieldRow(PlugZap, 'Enable extension integration', 'Accept browser handoff requests.', extensionEnabledControl)}
     {@render FieldRow('Handoff Mode', 'How browser downloads are handled.', handoffModeControl)}
     {@render FieldRow('Listen Port', 'Extension bridge port.', listenPortControl)}
-    {@render CompactSetting(Globe, 'Context menu', 'Show Send to Simple Download Manager in the browser.', contextMenuControl)}
-    {@render CompactSetting(Download, 'Progress after handoff', 'Open a progress window after accepting a browser download.', progressAfterHandoffControl)}
-    {@render CompactSetting(CheckCircle2, 'Badge status', 'Show extension status in the browser toolbar.', badgeStatusControl)}
-    {@render CompactSetting(ShieldCheck, 'Authenticated handoff', 'Require signed browser handoff requests.', authenticatedHandoffControl)}
-    <div class="rounded-md border border-border bg-surface p-3">
-      <div class="flex items-center justify-between gap-3">
-        <div>
-          <div class="text-sm font-semibold text-foreground">Excluded Sites</div>
-          <div class="mt-0.5 text-xs text-muted-foreground">{formatExcludedSitesSummary(excludedHosts)}</div>
+    {@render SwitchFieldRow(Globe, 'Context menu', 'Show Send to Simple Download Manager in the browser.', contextMenuControl)}
+    {@render SwitchFieldRow(Download, 'Progress after handoff', 'Open a progress window after accepting a browser download.', progressAfterHandoffControl)}
+    {@render SwitchFieldRow(CheckCircle2, 'Badge status', 'Show extension status in the browser toolbar.', badgeStatusControl)}
+    {@render SwitchFieldRow(ShieldCheck, 'Authenticated handoff', 'Require signed browser handoff requests.', authenticatedHandoffControl)}
+    <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
+      <div>
+        <div class="flex min-w-0 items-start gap-3">
+          <span class="mt-0.5 text-primary"><Ban size={18} /></span>
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-foreground">Excluded Sites</div>
+            <div class="mt-0.5 text-xs text-muted-foreground">{formatExcludedSitesSummary(excludedHosts)}</div>
+          </div>
         </div>
+      </div>
+      <div class="flex justify-start">
         <button type="button" onclick={() => isExcludedSitesDialogOpen = true} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
           <Ban size={16} />
           Manage
@@ -545,8 +582,8 @@
 {#snippet nativeHostContent()}
   {@const registration = diagnostics?.hostRegistration}
   {@const RegistrationIcon = renderRegistrationIcon(registration?.status)}
-  <div class="space-y-3">
-    <div class="rounded-md border border-border bg-surface p-4">
+  <div class="space-y-4">
+    <div class="border-b border-border/40 pb-4">
       <div class="flex items-start justify-between gap-3">
         <div class="flex min-w-0 items-start gap-3">
           <RegistrationIcon size={24} class={registration?.status === 'configured' ? 'text-success' : registration?.status === 'broken' ? 'text-warning' : 'text-muted-foreground'} />
@@ -565,13 +602,13 @@
       </div>
     </div>
 
-    <div class="grid gap-3 md:grid-cols-3">
-      {@render StatCard('Queue', diagnostics ? String(diagnostics.queueSummary.total) : '--')}
-      {@render StatCard('Active', diagnostics ? String(diagnostics.queueSummary.active) : '--')}
-      {@render StatCard('Recent events', diagnostics ? String(diagnostics.recentEvents.length) : '--')}
+    <div class="grid gap-3 border-b border-border/40 pb-4 md:grid-cols-3">
+      {@render StatMetric('Queue', diagnostics ? String(diagnostics.queueSummary.total) : '--')}
+      {@render StatMetric('Active', diagnostics ? String(diagnostics.queueSummary.active) : '--')}
+      {@render StatMetric('Recent events', diagnostics ? String(diagnostics.recentEvents.length) : '--')}
     </div>
 
-    <div class="rounded-md border border-border bg-surface p-4">
+    <div class="border-b border-border/40 pb-4">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div class="text-sm font-semibold text-foreground">Tools</div>
         <div class="flex flex-wrap gap-2">
@@ -583,9 +620,9 @@
         </div>
       </div>
       {#if registration?.entries?.length}
-        <div class="space-y-2">
+        <div class="border-y border-border/40">
           {#each registration.entries as entry}
-            <div class="rounded-md border border-border bg-card px-3 py-2">
+            <div class="border-b border-border/35 py-2 last:border-b-0">
               <div class="flex items-center justify-between gap-3">
                 <div class="text-sm font-semibold text-foreground">{entry.browser}</div>
                 <span class={`rounded-full px-2 py-0.5 text-xs ${entry.hostBinaryExists && entry.manifestExists ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
@@ -599,24 +636,24 @@
           {/each}
         </div>
       {:else}
-        <div class="rounded-md border border-border bg-card px-3 py-3 text-sm text-muted-foreground">No native host registration entries are loaded.</div>
+        <div class="border-y border-border/40 py-3 text-sm text-muted-foreground">No native host registration entries are loaded.</div>
       {/if}
     </div>
 
-    <div class="rounded-md border border-border bg-surface p-4">
+    <div>
       <div class="mb-3 text-sm font-semibold text-foreground">Recent Events</div>
       {#if diagnostics?.recentEvents?.length}
-        <div class="max-h-52 overflow-auto rounded-md border border-border bg-card">
+        <div class="max-h-56 overflow-auto rounded-md border border-border/55 bg-zinc-950 font-mono shadow-inner">
           {#each diagnostics.recentEvents as event}
-            <div class="grid grid-cols-[130px_80px_minmax(0,1fr)] gap-3 border-b border-border/70 px-3 py-2 text-xs last:border-b-0">
-              <span class="text-muted-foreground">{formatDiagnosticEventTime(event.timestamp)}</span>
-              <span class={diagnosticLevelClass(event.level)}>{event.level}</span>
-              <span class="min-w-0 truncate text-foreground" title={event.message}>{event.message}</span>
+            <div class="grid grid-cols-[132px_76px_minmax(0,1fr)] gap-3 border-b border-white/10 px-3 py-2 text-[11px] leading-5 last:border-b-0">
+              <span class="text-zinc-500">{formatDiagnosticEventTime(event.timestamp)}</span>
+              <span class={`uppercase tracking-[0.08em] ${diagnosticLevelConsoleClass(event.level)}`}>{event.level}</span>
+              <span class="min-w-0 truncate text-zinc-100" title={event.message}>{event.message}</span>
             </div>
           {/each}
         </div>
       {:else}
-        <div class="rounded-md border border-border bg-card px-3 py-3 text-sm text-muted-foreground">No recent diagnostics events.</div>
+        <div class="rounded-md border border-border/55 bg-zinc-950 px-3 py-3 font-mono text-xs text-zinc-500">No recent diagnostics events.</div>
       {/if}
     </div>
   </div>
@@ -639,27 +676,27 @@
 
   <div class="mt-3 min-w-0 space-y-3">
     <section id="settings-general" class="scroll-mt-4">
-      {@render SettingsPanel('General', Settings2, generalContent)}
+      {@render CategorySettingsCard('General', Settings2, generalContent)}
     </section>
 
     <section id="settings-updates" class="scroll-mt-4">
-      {@render SettingsPanel('App Updates', Download, updateContent)}
+      {@render CategorySettingsCard('App Updates', Download, updateContent)}
     </section>
 
     <section id="settings-torrenting" class="scroll-mt-4">
-      {@render SettingsPanel('Torrenting', Gauge, torrentingContent)}
+      {@render CategorySettingsCard('Torrenting', Gauge, torrentingContent)}
     </section>
 
     <section id="settings-appearance" class="scroll-mt-4">
-      {@render SettingsPanel('Appearance', Palette, appearanceContent)}
+      {@render CategorySettingsCard('Appearance', Palette, appearanceContent)}
     </section>
 
     <section id="settings-extension" class="scroll-mt-4">
-      {@render SettingsPanel('Web Extension', PlugZap, extensionContent)}
+      {@render CategorySettingsCard('Web Extension', PlugZap, extensionContent)}
     </section>
 
     <section id="settings-native-host" class="scroll-mt-4">
-      {@render SettingsPanel('Native Host', Wrench, nativeHostContent)}
+      {@render CategorySettingsCard('Native Host', Wrench, nativeHostContent)}
     </section>
   </div>
 </form>
@@ -764,13 +801,45 @@
 {/snippet}
 
 {#snippet accentControl()}
-  <div class="flex flex-wrap items-center gap-2">
-    <input type="color" bind:value={accentColorInput} class="h-9 w-12 rounded-md border border-input bg-background p-1" />
-    <input bind:value={accentColorInput} placeholder={DEFAULT_ACCENT_COLOR} class="h-9 w-32 rounded-md border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
-    <div class="flex gap-1">
+  <div class="grid gap-3">
+    <div class="space-y-2">
+      <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Gradient options</div>
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(118px,1fr))] gap-2">
+        {#each accentGradientPresets as preset}
+          <button
+            type="button"
+            aria-label={`Use ${preset.name} gradient accent`}
+            title={`${preset.name} gradient`}
+            onclick={() => accentColorInput = preset.value}
+            class={`group flex h-12 items-center gap-2 rounded-md border px-2 text-left transition hover:border-primary/70 ${normalizeAccentColor(accentColorInput) === preset.value ? 'border-primary bg-primary-soft' : 'border-border/55 bg-background'}`}
+          >
+            <span class="h-7 w-12 rounded border border-white/15 shadow-inner" style={`background: ${preset.gradient};`}></span>
+            <span class="min-w-0 truncate text-xs font-semibold text-foreground">{preset.name}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="grid gap-2 border-t border-border/35 pt-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="mr-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Custom accent</span>
+        <input type="color" bind:value={accentColorInput} class="h-8 w-10 rounded-md border border-input bg-background p-1" aria-label="Custom accent color" />
+        <input bind:value={accentColorInput} placeholder={DEFAULT_ACCENT_COLOR} class="h-8 w-32 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" aria-label="Accent color hex value" />
+      </div>
+
+      <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+        <span class="mr-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Solid palette</span>
       {#each accentPresets as preset}
-        <button type="button" aria-label={`Use accent ${preset}`} title={preset} onclick={() => accentColorInput = preset} class="h-7 w-7 rounded-md border border-border" style={`background: ${preset};`}></button>
+          <button
+            type="button"
+            aria-label={`Use accent ${preset}`}
+            title={preset}
+            onclick={() => accentColorInput = preset}
+            class={`h-6 w-6 rounded-md border transition hover:scale-105 ${normalizeAccentColor(accentColorInput) === preset ? 'border-primary ring-2 ring-primary/25' : 'border-border/60'}`}
+            style={`background: ${preset};`}
+          ></button>
       {/each}
+      </div>
     </div>
   </div>
 {/snippet}
@@ -823,26 +892,26 @@
   {@render ToggleSwitch('authenticatedHandoffEnabled', formData.extensionIntegration.authenticatedHandoffEnabled, (checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked }), !formData.extensionIntegration.enabled)}
 {/snippet}
 
-{#snippet SettingsPanel(title: string, icon: IconComponent, content: Snippet)}
+{#snippet CategorySettingsCard(title: string, icon: IconComponent, content: Snippet)}
   {@const Icon = icon}
-  <div class="rounded-md border border-border bg-card">
-    <header class="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-header px-4 py-2">
+  <div class="rounded-md border border-border/60 bg-card">
+    <header class="flex min-h-11 items-center justify-between gap-3 border-b border-border/45 bg-header px-4 py-2">
       <div class="flex items-center gap-2 font-semibold text-foreground">
         <span class="text-primary"><Icon size={20} /></span>
         {title}
       </div>
     </header>
-    <div class="space-y-3 p-4">
+    <div class="p-4">
       {@render content()}
     </div>
   </div>
 {/snippet}
 
-{#snippet FieldRow(label: string, description: string, control: Snippet, tooltip = description)}
-  <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4">
+{#snippet FieldRow(label: string, description: string, control: Snippet, tooltip = description, wide = false)}
+  <div class={`grid ${wide ? 'grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-start' : 'grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center'} gap-4 border-t border-border/35 py-3 first:border-t-0 first:pt-0`}>
     <div>
-      <div class="text-sm font-semibold text-foreground">{label}</div>
-      <p class="mt-0.5 text-xs leading-4 text-muted-foreground" title={tooltip}>{description}</p>
+      <div title={description} aria-label={`${label}: ${tooltip}`} class="cursor-help truncate text-sm font-semibold text-foreground">{label}</div>
+      <span class="sr-only">{description}</span>
     </div>
     <div class="min-w-0">
       {@render control()}
@@ -858,17 +927,17 @@
   </label>
 {/snippet}
 
-{#snippet CompactSetting(icon: IconComponent, title: string, description: string, control: Snippet)}
+{#snippet SwitchFieldRow(icon: IconComponent, title: string, description: string, control: Snippet)}
   {@const Icon = icon}
-  <div class="flex min-h-16 items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+  <div class="grid min-h-12 grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3 first:border-t-0 first:pt-0">
     <div class="flex min-w-0 items-start gap-3">
-      <span class="mt-0.5 text-primary"><Icon size={18} /></span>
+      <span class="mt-0.5 shrink-0 text-primary"><Icon size={18} /></span>
       <div class="min-w-0">
-        <div class="text-sm font-semibold text-foreground">{title}</div>
-        <div class="mt-0.5 text-xs leading-4 text-muted-foreground" title={description}>{description}</div>
+        <div title={description} aria-label={`${title}: ${description}`} class="cursor-help truncate text-sm font-semibold text-foreground">{title}</div>
+        <span class="sr-only">{description}</span>
       </div>
     </div>
-    <div class="shrink-0">
+    <div class="flex min-w-0 justify-start">
       {@render control()}
     </div>
   </div>
@@ -889,8 +958,8 @@
   </div>
 {/snippet}
 
-{#snippet StatCard(label: string, value: string)}
-  <div class="rounded-md border border-border bg-surface px-3 py-2">
+{#snippet StatMetric(label: string, value: string)}
+  <div class="min-w-0 border-l border-border pl-3">
     <div class="text-xs text-muted-foreground">{label}</div>
     <div class="mt-1 text-lg font-semibold tabular-nums text-foreground">{value}</div>
   </div>
@@ -942,7 +1011,7 @@
           <div class="max-h-56 overflow-auto rounded-md border border-border bg-surface">
             {#if filteredExcludedHosts.length > 0}
               {#each filteredExcludedHosts as host}
-                <div class="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3 last:border-b-0">
+                <div class="flex h-10 items-center justify-between gap-3 border-b border-border/35 px-3 last:border-b-0">
                   <div class="flex min-w-0 items-center gap-2">
                     <Ban size={14} class="shrink-0 text-muted-foreground" />
                     <span class="truncate text-sm font-medium text-foreground">{host}</span>

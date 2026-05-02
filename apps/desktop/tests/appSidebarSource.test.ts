@@ -17,7 +17,13 @@ assert.match(source, /import SettingsPage, \{ SETTINGS_SECTIONS, type SettingsSe
 assert.match(source, /let activeSettingsSectionId = \$state<SettingsSectionId>\(SETTINGS_SECTIONS\[0\]\.id\)/, 'settings view should track the active settings section');
 assert.match(source, /SettingsSidebar\(activeSettingsSectionId/, 'settings view should restore the React settings sidebar outside the settings form');
 assert.match(source, /Back to downloads/, 'settings sidebar should expose the React back action');
-assert.match(source, /SettingsSidebar\(activeSettingsSectionId[\s\S]*\(id\) => activeSettingsSectionId = id\)/, 'settings sidebar should update the active section from the shell');
+assert.match(source, /shrink-0 space-y-2 border-b border-border\/35 pb-2/, 'settings sidebar header divider should use the softened settings separator');
+assert.match(source, /function handleSettingsSectionClick\(sectionId: SettingsSectionId\)[\s\S]*activeSettingsSectionId = section\.id/, 'settings sidebar should update the active section from the shell');
+assert.match(source, /SettingsSidebar\(activeSettingsSectionId[\s\S]*handleSettingsSectionClick/, 'settings sidebar section clicks should go through the guarded section-navigation helper');
+assert.match(source, /function handleSettingsSectionClick\(sectionId: SettingsSectionId\)[\s\S]*window\.history\.replaceState\(null, '', section\.href\)[\s\S]*settingsScrollRoot[\s\S]*querySelector<HTMLElement>\(section\.href\)[\s\S]*scrollRoot\.scrollTo/, 'settings section navigation should update the hash and scroll only the settings pane');
+assert.match(source, /function handleSettingsSectionClick\(sectionId: SettingsSectionId\)[\s\S]*window\.scrollTo\(\{ top: 0, left: 0, behavior: 'auto' \}\)/, 'settings section navigation should keep the app titlebar pinned after hash updates');
+assert.doesNotMatch(source, /scrollIntoView\(\{ block: 'start' \}\)/, 'settings section navigation should not use document-level scrollIntoView');
+assert.match(source, /onclick=\{\(event\) => \{[\s\S]*event\.preventDefault\(\)[\s\S]*onSettingsSectionClick\(section\.id\)/, 'settings sidebar anchors should prevent default browser hash scrolling so the titlebar remains visible');
 assert.match(source, /bind:this=\{settingsScrollRoot\}/, 'settings page should live inside the scroll root used for active-section tracking');
 assert.match(source, /new IntersectionObserver/, 'settings active section should still update from scroll position');
 assert.match(source, /onCancel=\{\(\) => requestViewChange\('all'\)\}/, 'settings page cancel should leave through the app dirty-state guard');

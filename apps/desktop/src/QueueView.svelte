@@ -63,13 +63,16 @@
   import { JobState } from './types';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
+  type DetailsLevel = 'compact' | 'standard' | 'expanded';
+  type QueueTableAlignment = 'start' | 'center' | 'end';
 
   const DETAILS_MIN_HEIGHT = 104;
   const DETAILS_CLOSE_THRESHOLD = 84;
-  const DETAILS_DEFAULT_HEIGHT = 128;
+  const DETAILS_DEFAULT_HEIGHT = 164;
   const DETAILS_EXPANDED_HEIGHT = 220;
   const DETAILS_MAX_HEIGHT = 300;
   const TABLE_MIN_HEIGHT = 180;
+  const QUEUE_TABLE_GRID_CLASS = 'grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px]';
 
   interface Props {
     jobs: DownloadJob[];
@@ -141,6 +144,7 @@
   const tableColumns = $derived(queueTableColumnsForView(view));
   const isTorrentTable = $derived(tableColumns[2] === 'Seed');
   const rowClass = $derived(queueRowSizeClass(queueRowSize));
+  const detailsLevel = $derived(detailsLevelForHeight(detailsHeight));
   const visibleJobIds = $derived(jobs.map((job) => job.id));
   const allVisibleSelected = $derived(jobs.length > 0 && jobs.every((job) => selectedJobIds.has(job.id)));
   const hasVisibleSelection = $derived(jobs.some((job) => selectedJobIds.has(job.id)));
@@ -553,16 +557,32 @@
     return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0;
   }
 
-  function queueDateCellClass(isTorrent: boolean) {
-    return isTorrent
-      ? 'truncate text-center text-muted-foreground tabular-nums'
-      : 'truncate pr-4 text-muted-foreground tabular-nums';
+  function queueAlignmentClass(align: QueueTableAlignment) {
+    if (align === 'center') return 'justify-center text-center';
+    if (align === 'end') return 'justify-end text-right';
+    return 'justify-start text-left';
   }
 
-  function queueMetricCellClass(isTorrent: boolean) {
-    return isTorrent
-      ? 'text-center tabular-nums text-muted-foreground'
-      : 'tabular-nums text-muted-foreground';
+  function queueHeaderSelfClass(align: QueueTableAlignment) {
+    if (align === 'center') return 'justify-self-center';
+    if (align === 'end') return 'justify-self-end';
+    return 'justify-self-start';
+  }
+
+  function queueHeaderCellClass(align: QueueTableAlignment = 'start') {
+    return `flex min-w-0 items-center px-1.5 ${queueAlignmentClass(align)}`;
+  }
+
+  function queueTableCellClass(align: QueueTableAlignment = 'start') {
+    return `flex min-w-0 items-center px-1.5 tabular-nums text-muted-foreground ${queueAlignmentClass(align)} truncate`;
+  }
+
+  function queueDateCellClass() {
+    return queueTableCellClass('center');
+  }
+
+  function queueMetricCellClass() {
+    return queueTableCellClass('center');
   }
 
   function torrentMetricValue(metric: ReturnType<typeof torrentDetailMetrics>[number]) {
@@ -589,6 +609,21 @@
     return sortModeDirection(sortMode) === 'asc' ? ArrowUp : ArrowDown;
   }
 
+  function sortableHeaderClass(column: SortColumn, alignment: QueueTableAlignment = 'start') {
+    const active = sortModeKey(sortMode) === column;
+    return `inline-flex w-fit max-w-full items-center gap-1 transition ${queueHeaderSelfClass(alignment)} ${queueAlignmentClass(alignment)} ${
+      active
+        ? 'text-primary'
+        : 'text-muted-foreground hover:text-foreground'
+    }`;
+  }
+
+  function sortableHeaderTitle(column: SortColumn) {
+    const active = sortModeKey(sortMode) === column;
+    const nextDirection = active && sortModeDirection(sortMode) === 'asc' ? 'descending' : 'ascending';
+    return `Sort by ${column} ${nextDirection}`;
+  }
+
   function columnToSortColumn(column: string): SortColumn | null {
     if (column === 'Name') return 'name';
     if (column === 'Date') return 'date';
@@ -599,6 +634,12 @@
   function getDetailsMaxHeight(containerHeight: number) {
     if (!Number.isFinite(containerHeight) || containerHeight <= 0) return DETAILS_MAX_HEIGHT;
     return Math.max(DETAILS_MIN_HEIGHT, Math.min(DETAILS_MAX_HEIGHT, containerHeight - TABLE_MIN_HEIGHT));
+  }
+
+  function detailsLevelForHeight(height: number): 'compact' | 'standard' | 'expanded' {
+    if (height < DETAILS_DEFAULT_HEIGHT) return 'compact';
+    if (height < DETAILS_EXPANDED_HEIGHT) return 'standard';
+    return 'expanded';
   }
 
   function snapDetailsHeight(value: number, maxHeight: number) {
@@ -651,7 +692,7 @@
       }}
     >
       <div class="download-table min-w-[980px] overflow-visible border-b border-t border-border bg-card">
-        <div class="grid grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground">
+        <div class={`grid ${QUEUE_TABLE_GRID_CLASS} border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground`}>
           <div class="flex items-center gap-3">
             <input
               type="checkbox"
@@ -664,7 +705,7 @@
             />
             {#each [tableColumns[0]] as column}
               {@const SortIcon = sortIcon(column)}
-              <button type="button" class="inline-flex items-center gap-1 hover:text-foreground" onclick={() => setSort('name')}>
+              <button type="button" aria-pressed={sortModeKey(sortMode) === 'name'} title={sortableHeaderTitle('name')} class={sortableHeaderClass('name')} onclick={() => setSort('name')}>
                 {column}
                 <SortIcon size={12} />
               </button>
@@ -672,16 +713,16 @@
           </div>
           {#each [tableColumns[1]] as column}
             {@const SortIcon = sortIcon(column)}
-            <button type="button" class={`inline-flex items-center gap-1 hover:text-foreground ${isTorrentTable ? 'w-full justify-center text-center' : ''}`} onclick={() => setSort('date')}>
+            <button type="button" aria-pressed={sortModeKey(sortMode) === 'date'} title={sortableHeaderTitle('date')} class={sortableHeaderClass('date', 'center')} onclick={() => setSort('date')}>
               {column}
               <SortIcon size={12} />
             </button>
           {/each}
-          <div title={isTorrentTable ? 'Seed upload speed' : undefined} class={isTorrentTable ? 'w-full text-center' : ''}>{tableColumns[2]}</div>
-          <div title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
+          <div class={queueHeaderCellClass('center')} title={isTorrentTable ? 'Seed upload speed' : undefined}>{tableColumns[2]}</div>
+          <div class={queueHeaderCellClass('center')} title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
           {#each [tableColumns[4]] as column}
             {@const SortIcon = sortIcon(column)}
-            <button type="button" class="inline-flex items-center gap-1 hover:text-foreground" onclick={() => setSort('size')}>
+            <button type="button" aria-pressed={sortModeKey(sortMode) === 'size'} title={sortableHeaderTitle('size')} class={sortableHeaderClass('size', 'center')} onclick={() => setSort('size')}>
               {column}
               <SortIcon size={12} />
             </button>
@@ -715,7 +756,7 @@
             {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
             {@const statusPresentation = queueStatusPresentation(job)}
             <div
-              class={`grid w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-3 text-left transition ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
+              class={`grid w-full ${QUEUE_TABLE_GRID_CLASS} items-center gap-0 px-3 text-left transition ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
               role="button"
               tabindex="0"
               style={virtualQueue.enabled ? `height: ${virtualQueue.rowHeight}px;` : undefined}
@@ -762,17 +803,17 @@
                 {@render InlineNameProgress(job, statusPresentation, artifactMissing, blurIdentity, queueRowSize)}
               </div>
 
-              <div class={queueDateCellClass(isTorrentTable)} title={formatFullJobDate(job.createdAt)}>
+              <div class={queueDateCellClass()} title={formatFullJobDate(job.createdAt)}>
                 {formatJobDate(job.createdAt)}
               </div>
 
-              <div class={queueMetricCellClass(isTorrentTable)}>
+              <div class={queueMetricCellClass()}>
                 {isTorrentTable ? formatTorrentSeedMetric(job) : formatQueueSpeed(job, averageSpeed)}
               </div>
-              <div class="tabular-nums text-muted-foreground">
+              <div class={queueTableCellClass('center')}>
                 {isTorrentTable ? formatTorrentRatio(job) : formatQueueTime(job, timeRemaining)}
               </div>
-              <div class="tabular-nums text-muted-foreground" title={formatQueueSizeTitle(job, formatBytes)}>
+              <div class={queueTableCellClass('center')} title={formatQueueSizeTitle(job, formatBytes)}>
                 {formatQueueSize(job, formatBytes)}
               </div>
 
@@ -822,29 +863,31 @@
     </div>
 
     {#if selectedJob && showDetailsOnClick}
-      <aside class="details-pane relative shrink-0 overflow-hidden border-t border-border bg-surface px-4 pb-2 pt-3" style={`height: ${detailsHeight}px;`}>
-        <button type="button" class="absolute left-0 right-0 top-0 flex h-3 cursor-row-resize items-center justify-center text-muted-foreground hover:text-foreground" title="Resize details" aria-label="Resize details" onpointerdown={(event) => startDetailsResize(event.clientY)}>
+      <aside class="details-pane relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-card/95 px-4 pb-2 pt-3 shadow-[0_-10px_24px_rgba(0,0,0,0.22)]" style={`height: ${detailsHeight}px;`}>
+        <button type="button" class="absolute left-0 right-0 top-0 flex h-3 cursor-row-resize items-center justify-center text-muted-foreground hover:text-foreground focus:outline-none focus-visible:text-primary" title="Resize details" aria-label="Resize details" onpointerdown={(event) => startDetailsResize(event.clientY)}>
           <GripHorizontal size={16} />
         </button>
-        <div class="mb-1 flex items-center justify-between">
-          <div class="truncate text-sm font-semibold" title={selectedJob.filename}>{torrentDisplayName(selectedJob)}</div>
+        <div class="mb-2 flex items-start justify-between gap-4">
+          <div class="flex min-w-0 items-start gap-3">
+            <FileBadge
+              filename={selectedJob.filename}
+              transferKind={selectedJob.transferKind}
+              activityState={fileBadgeActivityState(selectedJob, false)}
+            />
+            <div class="min-w-0">
+              <div class="truncate text-sm font-semibold" title={selectedJob.filename}>{torrentDisplayName(selectedJob)}</div>
+              {@render DetailsHeaderMetrics(selectedJob)}
+            </div>
+          </div>
           <button class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="Close details" onclick={clearJobSelection}><X size={14} /></button>
         </div>
-        <div class="grid min-w-[1080px] grid-flow-col auto-cols-[minmax(260px,1fr)] grid-rows-2 gap-x-3 gap-y-2 text-xs">
-          {@render CompactDetailItem(HardDrive, 'Path', selectedJob.targetPath || 'No destination recorded yet.')}
-          {@render CompactDetailItem(Globe, 'Source', selectedJob.url)}
-          {@render CompactDetailItem(Clock3, 'State', queueStatusPresentation(selectedJob).label)}
-          {@render CompactDetailItem(Download, 'Size', formatQueueSize(selectedJob, formatBytes))}
-          {@render CompactDetailItem(Users, 'Peers', selectedJob.torrent?.peers ? String(selectedJob.torrent.peers) : '--')}
-          {@render CompactDetailItem(Upload, 'ETA', selectedJob.transferKind === 'torrent' ? formatTorrentRatio(selectedJob) : formatTime(selectedJob.eta), selectedJob.transferKind === 'torrent')}
+        <div class="min-h-0 flex-1 overflow-auto border-t border-border/45 pt-2">
+          {#if detailsLevel === 'compact'}
+            {@render DetailsCompactLine(selectedJob)}
+          {:else}
+            {@render DetailsGrid(selectedJob, detailsLevel)}
+          {/if}
         </div>
-        {#if selectedJob.transferKind === 'torrent'}
-          <div class="mt-2 flex gap-4 text-xs text-muted-foreground">
-            {#each torrentDetailMetrics(selectedJob) as metric}
-              <span>{metric.label}: <span class="text-foreground">{metric.kind === 'upload' ? `${formatBytes(metric.value)}/s` : metric.value}</span></span>
-            {/each}
-          </div>
-        {/if}
       </aside>
     {/if}
   </section>
@@ -990,11 +1033,96 @@
   </button>
 {/snippet}
 
+{#snippet DetailsHeaderMetrics(job: DownloadJob)}
+  {@const metrics = progressMetricsByJobId[job.id]}
+  {@const averageSpeed = metrics?.averageSpeed ?? job.speed}
+  {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
+  <div class="mt-1 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+    <span>Status <span class="ml-1 text-foreground">{queueStatusPresentation(job).label}</span></span>
+    <span>Size <span class="ml-1 text-foreground">{formatQueueSize(job, formatBytes)}</span></span>
+    <span>Speed <span class="ml-1 text-foreground">{formatQueueSpeed(job, averageSpeed)}</span></span>
+    <span>ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+  </div>
+{/snippet}
+
+{#snippet DetailsCompactLine(job: DownloadJob)}
+  {@const metrics = progressMetricsByJobId[job.id]}
+  {@const averageSpeed = metrics?.averageSpeed ?? job.speed}
+  {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
+  <div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-xs">
+    <span class="min-w-0 truncate text-muted-foreground" title={job.targetPath || 'No destination recorded yet.'}>
+      Path <span class="ml-1 text-foreground">{job.targetPath || 'No destination recorded yet.'}</span>
+    </span>
+    <span class="text-muted-foreground">State <span class="ml-1 text-foreground">{queueStatusPresentation(job).label}</span></span>
+    <span class="text-muted-foreground">Size <span class="ml-1 text-foreground">{formatQueueSize(job, formatBytes)}</span></span>
+    <span class="text-muted-foreground">Speed <span class="ml-1 text-foreground">{formatQueueSpeed(job, averageSpeed)}</span></span>
+    <span class="text-muted-foreground">ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+    {#if job.transferKind === 'torrent'}
+      <span class="text-muted-foreground">Ratio <span class="ml-1 text-primary">{formatTorrentRatio(job)}</span></span>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet DetailsGrid(job: DownloadJob, level: DetailsLevel)}
+  {@const metrics = progressMetricsByJobId[job.id]}
+  {@const averageSpeed = metrics?.averageSpeed ?? job.speed}
+  {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
+  {#if level === 'expanded'}
+    <div class="grid min-h-0 gap-y-3 text-xs lg:grid-cols-[minmax(320px,1.35fr)_minmax(220px,0.85fr)_minmax(220px,0.8fr)] lg:divide-x lg:divide-border/35">
+      <div class="min-w-0 lg:pr-5">
+        {@render DetailSectionLabel('File')}
+        {@render CompactDetailItem(HardDrive, 'Path', job.targetPath || 'No destination recorded yet.')}
+        {@render CompactDetailItem(Globe, 'Source', job.url)}
+        {@render CompactDetailItem(Clock3, 'Created', formatFullJobDate(job.createdAt))}
+      </div>
+      <div class="min-w-0 lg:px-5">
+        {@render DetailSectionLabel('Transfer')}
+        {@render CompactDetailItem(Clock3, 'State', queueStatusPresentation(job).label)}
+        {@render CompactDetailItem(Download, 'Size', formatQueueSize(job, formatBytes))}
+        {@render CompactDetailItem(Upload, 'Speed', formatQueueSpeed(job, averageSpeed))}
+        {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+      </div>
+      <div class="min-w-0 lg:pl-5">
+        {@render DetailSectionLabel(job.transferKind === 'torrent' ? 'Torrent' : 'Network')}
+        {@render CompactDetailItem(Users, 'Peers', job.torrent?.peers ? String(job.torrent.peers) : '--')}
+        {@render CompactDetailItem(Upload, 'Ratio', job.transferKind === 'torrent' ? formatTorrentRatio(job) : '--', job.transferKind === 'torrent')}
+        {#if job.transferKind === 'torrent'}
+          {#each torrentDetailMetrics(job) as metric}
+            {@render CompactDetailItem(metric.kind === 'peers' ? Users : Upload, metric.label, torrentMetricValue(metric), metric.kind !== 'peers')}
+          {/each}
+        {:else}
+          {@render CompactDetailItem(Globe, 'Host', getHost(job.url))}
+        {/if}
+      </div>
+    </div>
+  {:else}
+    <div class="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-x-6 gap-y-1 text-xs">
+      {@render CompactDetailItem(HardDrive, 'Path', job.targetPath || 'No destination recorded yet.')}
+      {@render CompactDetailItem(Globe, 'Source', job.url)}
+      {@render CompactDetailItem(Clock3, 'State', queueStatusPresentation(job).label)}
+      {@render CompactDetailItem(Download, 'Size', formatQueueSize(job, formatBytes))}
+      {@render CompactDetailItem(Upload, 'Speed', formatQueueSpeed(job, averageSpeed))}
+      {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+      {#if job.transferKind === 'torrent'}
+        {@render CompactDetailItem(Users, 'Peers', job.torrent?.peers ? String(job.torrent.peers) : '--')}
+        {@render CompactDetailItem(Upload, 'Ratio', formatTorrentRatio(job), true)}
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet DetailSectionLabel(label: string)}
+  <div class="mb-1 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+    <span>{label}</span>
+    <span class="h-px flex-1 bg-border/35"></span>
+  </div>
+{/snippet}
+
 {#snippet CompactDetailItem(icon: IconComponent, label: string, value: string, accent = false)}
   {@const Icon = icon}
-  <div class="min-w-0 px-1 py-1">
-    <div class="mb-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&>svg]:h-3.5 [&>svg]:w-3.5">
-      <Icon size={14} />
+  <div class="grid grid-cols-[minmax(84px,110px)_minmax(0,1fr)] items-baseline gap-3 border-t border-border/25 py-1 first:border-t-0">
+    <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground [&>svg]:h-3.5 [&>svg]:w-3.5">
+      <Icon size={13} />
       <span class="truncate">{label}</span>
     </div>
     <div class={`truncate text-xs ${accent ? 'text-primary' : 'text-foreground'}`} title={value}>{value}</div>

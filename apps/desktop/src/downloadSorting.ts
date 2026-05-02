@@ -4,6 +4,14 @@ export type SortColumn = 'name' | 'date' | 'size';
 export type SortDirection = 'asc' | 'desc';
 export type SortMode = `${SortColumn}:${SortDirection}`;
 
+export const DEFAULT_SORT_MODE: SortMode = 'date:asc';
+export const SORT_MODE_STORAGE_KEY = 'simple-download-manager.sortMode';
+
+export interface SortModeStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
 export function compareDownloadsForSort(a: DownloadJob, b: DownloadJob, sortMode: SortMode): number {
   const key = sortModeKey(sortMode);
   const direction = sortModeDirection(sortMode);
@@ -37,8 +45,38 @@ export function nextSortModeForColumn(currentSortMode: SortMode, column: SortCol
   return `${column}:${defaultSortDirection(column)}`;
 }
 
+export function isSortMode(value: string | null | undefined): value is SortMode {
+  return /^(name|date|size):(asc|desc)$/.test(value ?? '');
+}
+
+export function readStoredSortMode(storage: SortModeStorage | null = getBrowserSortStorage()): SortMode {
+  if (!storage) return DEFAULT_SORT_MODE;
+
+  try {
+    const storedSortMode = storage.getItem(SORT_MODE_STORAGE_KEY);
+    return isSortMode(storedSortMode) ? storedSortMode : DEFAULT_SORT_MODE;
+  } catch {
+    return DEFAULT_SORT_MODE;
+  }
+}
+
+export function writeStoredSortMode(sortMode: SortMode, storage: SortModeStorage | null = getBrowserSortStorage()): void {
+  if (!storage) return;
+
+  try {
+    storage.setItem(SORT_MODE_STORAGE_KEY, sortMode);
+  } catch {
+    // Non-critical preference persistence can fail in restricted browser storage modes.
+  }
+}
+
 function defaultSortDirection(column: SortColumn): SortDirection {
   return column === 'name' ? 'asc' : 'desc';
+}
+
+function getBrowserSortStorage(): SortModeStorage | null {
+  if (typeof globalThis.localStorage === 'undefined') return null;
+  return globalThis.localStorage;
 }
 
 function compareCreatedAt(a: DownloadJob, b: DownloadJob, direction: SortDirection): number {

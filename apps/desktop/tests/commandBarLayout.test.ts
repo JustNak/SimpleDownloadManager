@@ -17,7 +17,11 @@ assert.match(source, /class="flex w-\[310px\] max-w-\[42vw\] shrink-0 items-cent
 assert.match(source, /class="relative w-full min-w-0"/, 'command-bar search label should fill only the capped search container');
 assert.match(source, /const queueRowSizeOptions[\s\S]*Compact[\s\S]*Small[\s\S]*Medium[\s\S]*Large[\s\S]*DAMN/, 'queue menu should expose all requested row-size choices including DAMN');
 assert.match(source, /handleQueueRowSizeChange\(option\.value\)/, 'command bar should persist row-size choices through the desktop settings path');
-assert.match(source, /let sortMode = \$state<SortMode>\('date:asc'\)/, 'fresh app sessions should default to Date ascending sort');
+assert.match(source, /let sortMode = \$state<SortMode>\(readStoredSortMode\(\)\)/, 'app sessions should restore the last clicked queue sort mode');
+assert.match(source, /function handleSortModeChange\(nextSortMode: SortMode\)[\s\S]*sortMode = nextSortMode[\s\S]*writeStoredSortMode\(nextSortMode\)/, 'queue sort changes should be remembered in local storage');
+assert.match(source, /const activeSettingsSection = \$derived\(SETTINGS_SECTIONS\.find/, 'settings titlebar should know the active settings section instead of leaving the center titlebar blank');
+assert.match(source, /class="settings-titlebar flex h-full min-w-0 flex-1 items-center justify-between gap-3"/, 'settings view should keep visible titlebar content when section navigation changes');
+assert.match(source, /activeSettingsSection\.label/, 'settings titlebar should show the current section label');
 assert.match(source, /event\.key !== 'F11'[\s\S]*mainWindow\.toggleMaximize\(\)/, 'F11 should toggle the native main window maximize state');
 assert.match(source, /event\.key !== 'Escape' \|\| view !== 'settings'[\s\S]*requestViewChange\('all'\)/, 'Escape in Settings should return to All Downloads through the guarded view-change path');
 assert.match(source, /strong[\s\S]*border border-primary\/60 bg-primary text-primary-foreground shadow-sm/, 'the strong toolbar variant should use the primary accent treatment');
