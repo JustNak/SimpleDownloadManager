@@ -8,23 +8,21 @@
     "dev": "node ../../node_modules/vite/bin/vite.js",
     "tauri:build": "node ../../node_modules/@tauri-apps/cli/tauri.js build",
     "tauri:dev": "node ../../node_modules/@tauri-apps/cli/tauri.js dev",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "svelte-check --tsconfig tsconfig.json && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@lucide/svelte": "^0.544.0",
     "@tauri-apps/api": "^2.4.0",
-    "lucide-react": "^1.8.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "svelte": "^5.55.5"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.4",
     "@tailwindcss/postcss": "^4.2.2",
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/cli": "^2.4.1",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.4.1",
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.9",
+    "svelte-check": "^4.4.7",
     "tailwindcss": "^4.2.2",
     "vite": "^5.4.11"
   }

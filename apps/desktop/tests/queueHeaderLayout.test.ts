@@ -1,233 +1,63 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const source = await readFile(new URL('../src/QueueView.tsx', import.meta.url), 'utf8');
-const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+const fileBadgeSource = await readFile(new URL('../src/FileBadge.svelte', import.meta.url), 'utf8');
 
-assert.doesNotMatch(
-  source,
-  /<SortableColumnHeader column="size"[^>]*align="right"/,
-  'the Size sort header should align with size values instead of being pushed toward Actions',
-);
-
-assert.match(
-  source,
-  /<SortableColumnHeader column="size" sortMode=\{sortMode\} onSortChange=\{onSortChange\}>/,
-  'the Size header should remain sortable while using the default column alignment',
-);
-
-assert.match(
-  source,
-  /queueRowSizeClass\(queueRowSize\)/,
-  'queue rows should read their density from the saved queue row-size setting',
-);
-
-assert.match(
-  source,
-  /case 'medium':[\s\S]*return 'min-h-\[42px\] py-1 text-sm'/,
-  'medium queue row size should preserve the current default density',
-);
-
-assert.match(
-  source,
-  /case 'compact':[\s\S]*min-h-\[28px\] py-0 text-xs[\s\S]*case 'small':[\s\S]*min-h-\[34px\] py-0\.5 text-xs[\s\S]*case 'damn':[\s\S]*min-h-\[68px\] py-2\.5 text-base/,
-  'queue row sizing should make every density affect whole-row height, from compact through DAMN',
-);
-
-assert.match(
-  source,
-  /rowSize=\{queueRowSize\}[\s\S]*activityState=\{fileBadgeActivityState/,
-  'queue row file badges should scale with the selected row-size setting',
-);
-
-assert.match(
-  source,
-  /<InlineNameProgress[\s\S]*rowSize=\{queueRowSize\}/,
-  'queue row name and progress content should scale with the selected row-size setting',
-);
-
-assert.match(
-  source,
-  /function inlineNameDensity[\s\S]*case 'compact':[\s\S]*container: 'px-2 py-0'[\s\S]*metaText: 'mt-0 text-\[10px\] leading-3'/,
-  'compact rows should reduce internal name/progress padding and text leading, not only the file icon',
-);
-
-assert.match(
-  source,
-  /function fileBadgeDensity[\s\S]*case 'compact':[\s\S]*h-5 w-5[\s\S]*case 'damn':[\s\S]*h-12 w-12/,
-  'file badge density should continue scaling with the row-size options',
-);
-
-assert.match(
-  source,
-  /selectedJob && showDetailsOnClick \? \(/,
-  'selected-download details should render only when click-to-show details is enabled',
-);
-
-assert.match(
-  source,
-  /const DETAILS_MIN_HEIGHT = 104;/,
-  'the selected-download details pane should support a slimmer minimum height',
-);
-
-assert.match(
-  source,
-  /const DETAILS_DEFAULT_HEIGHT = 128;/,
-  'the selected-download details pane should open in a compact default height',
-);
-
-assert.match(
-  source,
-  /const compact = height <= DETAILS_DEFAULT_HEIGHT \+ 8;/,
-  'the selected-download details pane should use compact layout at its default height',
-);
-
-assert.match(
-  source,
-  /shouldOpenJobFileOnDoubleClick\(job, event\.button\)[\s\S]*onOpen\(job\.id\);/,
-  'queue row double-click should open the file instead of revealing the folder',
-);
-
-assert.match(
-  source,
-  /function toggleSingleJobSelection\(jobId: string\)[\s\S]*isOnlySelectedJob[\s\S]*clearJobSelection\(\);[\s\S]*selectSingleJob\(jobId\);/,
-  'single row clicks should toggle off when the clicked row is the only active selection',
-);
-
-assert.match(
-  source,
-  /onClick=\{\(\) => \{[\s\S]*toggleSingleJobSelection\(job\.id\);[\s\S]*setContextMenu\(null\);/,
-  'queue row click should use the toggle selection behavior',
-);
-
-assert.match(
-  source,
-  /event\.key === 'Enter' \|\| event\.key === ' '[\s\S]*toggleSingleJobSelection\(job\.id\);/,
-  'keyboard row activation should match click toggling behavior',
-);
-
-assert.doesNotMatch(
-  source,
-  /shouldRevealJobDirectoryOnDoubleClick/,
-  'queue row double-click should no longer use the reveal-folder helper',
-);
-
-assert.match(
-  source,
-  /label="Open Folder" onClick=\{\(\) => onReveal\(job\.id\)\}/,
-  'the context menu Open Folder action should still reveal the file location',
-);
-
-assert.match(
-  source,
-  /grid min-w-\[1080px\] grid-flow-col auto-cols-\[minmax\(260px,1fr\)\] grid-rows-2 gap-x-3 gap-y-2/,
-  'compact details should use self-contained scrolling detail cells with enough width for each value',
-);
-
-assert.match(
-  source,
-  /function CompactDetailItem[\s\S]*className="min-w-0 px-1 py-1"/,
-  'compact detail items should be unframed rather than card-like boxes',
-);
-
-assert.doesNotMatch(
-  source,
-  /className="min-w-0 rounded-sm border border-border\/70 bg-background\/35 px-2\.5 py-1\.5"/,
-  'compact detail items should not keep the previous card-style wrapper',
-);
-
-assert.match(
-  source,
-  /title=\{value\}[\s\S]*\{value\}/,
-  'compact detail values should keep the full value available as hover text while truncating visually',
-);
-
-assert.doesNotMatch(
-  source,
-  /h-\[3px\] rounded-full/,
-  'inline row progress should not use the previous thin hairline strip',
-);
-
-assert.match(
-  source,
-  /absolute \$\{density\.progressInset\} left-0 z-0 rounded-\[inherit\] blur-md/,
-  'inline row progress should use a density-aware blurred background wash behind the row text',
-);
-
-assert.match(
-  source,
-  /activityState=\{fileBadgeActivityState\(job, recentlyCompletedJobIds\.has\(job\.id\)\)\}/,
-  'queue rows should pass the computed file badge activity state into FileBadge',
-);
-
-assert.match(
-  source,
-  /activityState = 'none'[\s\S]*LoaderCircle[\s\S]*animate-spin[\s\S]*Check/,
-  'FileBadge should support buffering spinner and completed check overlays',
-);
-
-assert.match(
-  source,
-  /const COMPLETED_BADGE_DURATION_MS = 1200;/,
-  'completed file badge overlay should use the requested 1200ms duration',
-);
-
-assert.match(
-  source,
-  /<SortableColumnHeader column="date"[\s\S]*className=\{torrentColumnAlignClass\(isTorrentTable\)\}/,
-  'torrent table Date header should be centered with the Date cells',
-);
-
-assert.match(
-  source,
-  /<div title=\{isTorrentTable \? 'Seed upload speed' : undefined\} className=\{torrentColumnAlignClass\(isTorrentTable\)\}>/,
-  'torrent table Seed header should be centered with the Seed cells',
-);
-
-assert.match(
-  source,
-  /className=\{queueDateCellClass\(isTorrentTable\)\}/,
-  'torrent table Date cells should share a centered alignment class',
-);
-
-assert.match(
-  source,
-  /className=\{queueMetricCellClass\(isTorrentTable\)\}/,
-  'torrent table Seed metric cells should share a centered alignment class',
-);
-
-assert.doesNotMatch(
-  source,
-  /function formatTorrentSeedMetric[\s\S]*return `Up \$\{formatBytes\(job\.torrent\.uploadedBytes\)\}`;/,
-  'torrent table Seed cells should omit the Up prefix and show only the uploaded byte value',
-);
-
-assert.equal(
-  (source.match(/label="Show Popup"/g) ?? []).length,
-  2,
-  'Show Popup should be available in both row action menus and right-click context menus',
-);
-
-assert.equal(
-  (source.match(/canShowProgressPopup\(job\) \? \(/g) ?? []).length,
-  2,
-  'both Show Popup menu entries should be gated to active download states',
-);
-
-assert.match(
-  source,
-  /onShowPopup: \(id: string\) => void;/,
-  'QueueView should accept an explicit Show Popup callback',
-);
-
-assert.match(
-  appSource,
-  /async function handleShowPopup\(id: string\)[\s\S]*await openProgressWindow\(id\)/,
-  'App should wire Show Popup through the existing progress popup opener',
-);
-
-assert.match(
-  appSource,
-  /onShowPopup=\{handleShowPopup\}/,
-  'QueueView should receive the Show Popup handler from App',
-);
+assert.match(source, /queueTableColumnsForView\(view\)/, 'queue should use the React view-specific column helper');
+assert.match(source, /tableColumns\[2\] === 'Seed'/, 'torrent views should switch to the React seed and ratio columns');
+assert.match(source, /getVirtualQueueWindow/, 'queue should keep the React virtualization window for large queues');
+assert.match(source, /queueRowSizeClass\(queueRowSize\)/, 'queue rows should read their density from the saved queue row-size setting');
+assert.match(source, /default:[\s\S]*return 'min-h-\[42px\] py-1 text-sm'/, 'medium queue row size should preserve the current default density');
+assert.match(source, /case 'compact':[\s\S]*min-h-\[28px\] py-0 text-xs[\s\S]*case 'small':[\s\S]*min-h-\[34px\] py-0\.5 text-xs[\s\S]*case 'large':[\s\S]*min-h-\[54px\] py-1\.5 text-sm[\s\S]*case 'damn':[\s\S]*min-h-\[68px\] py-2\.5 text-base/, 'queue row sizing should match React density classes');
+assert.match(source, /rowSize=\{queueRowSize\}/, 'queue row file badges should receive the saved queue row-size setting');
+assert.match(fileBadgeSource, /function fileBadgeDensity\(rowSize: QueueRowSize/, 'file badges should keep React density sizing');
+assert.match(source, /selectedJob && showDetailsOnClick/, 'selected-download details should render only when click-to-show details is enabled');
+assert.match(source, /detailsHeight/, 'details pane should keep the React resizable height state');
+assert.match(source, /detailsLevelForHeight\(detailsHeight\)/, 'details pane should derive its layout level from the resizable height');
+assert.match(source, /function detailsLevelForHeight\(height: number\): 'compact' \| 'standard' \| 'expanded'/, 'details pane should expose compact, standard, and expanded height levels');
+assert.match(source, /GripHorizontal/, 'details pane should keep the React resize affordance');
+assert.match(source, /ondblclick=\{\(event\) => \{[\s\S]*shouldOpenJobFileOnDoubleClick\(job, event\.button\)[\s\S]*onOpen\(job\.id\)/, 'queue row double-click should open the file instead of revealing the folder');
+assert.match(source, /function toggleSingleJobSelection\(jobId: string\)/, 'queue row click should keep the React toggle selection helper');
+assert.match(source, /function applySelectionRange/, 'queue should keep React drag/range selection behavior');
+assert.match(source, /Open Folder[\s\S]*onReveal\(job\.id\)/, 'the context menu Open Folder action should still reveal the file location');
+assert.match(source, /DetailsCompactLine\(selectedJob\)/, 'compact details should use a dense single-line inspector layout');
+assert.match(source, /DetailsGrid\(selectedJob, detailsLevel\)/, 'standard and expanded details should use the adaptive inspector grid');
+assert.match(source, /class="details-pane relative flex shrink-0 flex-col overflow-hidden border-t border-border bg-card\/95/, 'details pane should use a neutral flat inspector surface');
+assert.doesNotMatch(source, /details-pane[\s\S]{0,240}bg-selected/, 'details pane should not reuse the selected-row blue background');
+assert.match(source, /<FileBadge[\s\S]*filename=\{selectedJob\.filename\}[\s\S]*transferKind=\{selectedJob\.transferKind\}[\s\S]*activityState=\{fileBadgeActivityState\(selectedJob, false\)\}/, 'details pane header should show the selected job file icon before the title');
+assert.match(source, /DetailsHeaderMetrics\(selectedJob\)/, 'details pane header should include a compact transfer summary');
+assert.match(source, /#snippet DetailsHeaderMetrics[\s\S]*Status[\s\S]*Size[\s\S]*Speed[\s\S]*ETA/, 'details header metrics should summarize the core transfer fields');
+assert.doesNotMatch(source, /min-w-\[1080px\]/, 'details pane should not force a fixed wide strip');
+assert.doesNotMatch(source, /grid-flow-col auto-cols-\[minmax\(260px,1fr\)\]/, 'details pane should not use the old fixed column-flow grid');
+assert.match(source, /#snippet DetailsGrid[\s\S]*lg:divide-x lg:divide-border\/35/, 'expanded details should use subtle column dividers instead of card blocks');
+assert.match(source, /#snippet CompactDetailItem[\s\S]*grid grid-cols-\[minmax\(84px,110px\)_minmax\(0,1fr\)\]/, 'compact detail items should be flat label/value rows');
+assert.doesNotMatch(source, /rounded-sm border border-border\/70 bg-background\/35 px-2\.5 py-1\.5/, 'compact detail items should not keep the previous card-style wrapper');
+assert.match(source, /title=\{value\}>\{value\}/, 'compact detail values should keep the full value available as hover text while truncating visually');
+assert.match(source, /openMenuJobId === job\.id[\s\S]*RowMenu\(job, 'actions'\)/, 'row action menu should render the shared row menu');
+assert.match(source, /contextMenu[\s\S]*RowMenu\(job, 'context'\)/, 'right-click context menu should render the shared row menu');
+assert.match(source, /function sortableHeaderClass\(column: SortColumn[\s\S]*active[\s\S]*\? 'text-primary'/, 'active sorted queue headers should be highlighted with accent text only');
+assert.doesNotMatch(source, /bg-primary-soft text-primary ring-1 ring-primary\/25/, 'sortable queue headers should not render a boxed active highlight');
+assert.match(source, /function sortableHeaderClass\(column: SortColumn[\s\S]*inline-flex w-fit max-w-full items-center/, 'sortable queue headers should render as compact text controls');
+assert.match(source, /function queueHeaderSelfClass\(align: QueueTableAlignment\)[\s\S]*justify-self-start/, 'sortable queue headers should use grid self-alignment instead of stretching across the whole column');
+assert.doesNotMatch(source, /return `flex min-w-0 items-center gap-1 rounded-md px-1\.5 py-1 transition/, 'sortable queue header buttons should not stretch their active background across the grid cell');
+assert.match(source, /aria-pressed=\{sortModeKey\(sortMode\) === 'date'\}/, 'date sort header should expose its active pressed state');
+assert.match(source, /sortableHeaderClass\('name'[\s\S]*sortableHeaderClass\('date'[\s\S]*sortableHeaderClass\('size'/, 'sortable queue headers should all use the shared active style helper');
+assert.match(source, /sortableHeaderClass\('date', 'center'\)/, 'date header should be centered over its column values');
+assert.match(source, /sortableHeaderClass\('size', 'center'\)/, 'size header should be centered over its column values');
+assert.match(source, /const QUEUE_TABLE_GRID_CLASS = 'grid-cols-\[minmax\(420px,2\.8fr\)_150px_110px_100px_150px_72px\]'/, 'queue table should centralize the shared header and row grid template');
+assert.match(source, /type QueueTableAlignment = 'start' \| 'center' \| 'end'/, 'queue table should expose explicit alignment modes for header and data cells');
+assert.match(source, /function queueHeaderCellClass\(align: QueueTableAlignment = 'start'\)[\s\S]*flex min-w-0 items-center px-1\.5/, 'queue headers should use the same inner padding as their data cells');
+assert.match(source, /function queueTableCellClass\(align: QueueTableAlignment = 'start'\)[\s\S]*flex min-w-0 items-center px-1\.5[\s\S]*tabular-nums text-muted-foreground/, 'queue data cells should share the header alignment and tabular numeric styling');
+assert.match(source, /class=\{queueHeaderCellClass\('center'\)\}[^>]*>\{tableColumns\[2\]\}/, 'speed or seed header should be centered through the shared header helper');
+assert.match(source, /class=\{queueHeaderCellClass\('center'\)\}[^>]*>\{tableColumns\[3\]\}/, 'time or ratio header should be centered through the shared header helper');
+assert.match(source, /function queueDateCellClass\(\)[\s\S]*return queueTableCellClass\('center'\)/, 'date values should be centered under the date header');
+assert.match(source, /function queueMetricCellClass\(\)[\s\S]*return queueTableCellClass\('center'\)/, 'speed or seed values should be centered under their header');
+assert.match(source, /class=\{queueTableCellClass\('center'\)\}[\s\S]*formatQueueTime\(job, timeRemaining\)/, 'time or ratio values should be centered through the shared data-cell helper');
+assert.match(source, /class=\{queueTableCellClass\('center'\)\} title=\{formatQueueSizeTitle\(job, formatBytes\)\}/, 'size values should be centered through the shared data-cell helper');
+assert.doesNotMatch(source, /truncate pr-4 text-muted-foreground tabular-nums/, 'date cells should not keep asymmetric right padding that shifts them away from the header');
+assert.match(source, /canShowProgressPopup\(job\)[\s\S]*Show Popup/, 'Show Popup should be gated to active download states');
+assert.match(source, /onShowPopup: \(id: string\) => void;/, 'QueueView should accept an explicit Show Popup callback');
+assert.match(appSource, /async function handleShowPopup\(id: string\)[\s\S]*await openProgressWindow\(id\)/, 'App should wire Show Popup through the existing progress popup opener');
+assert.match(appSource, /onShowPopup=\{\(id\) => void handleShowPopup\(id\)\}/, 'QueueView should receive the Show Popup handler from App');

@@ -1,29 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
-const toastAreaSource = await readFile(new URL('../src/ToastArea.tsx', import.meta.url), 'utf8');
+const appSource = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
+const toastAreaSource = await readFile(new URL('../src/ToastArea.svelte', import.meta.url), 'utf8');
 
-assert.match(
-  appSource,
-  /const removeToast = useCallback\(\(id: string\) => \{/,
-  'toast dismissal should be stable across unrelated App renders',
-);
-
-assert.doesNotMatch(
-  toastAreaSource,
-  /onDismiss=\{\(\) => onDismiss\(toast\.id\)\}/,
-  'ToastArea should not create a fresh dismiss closure for each toast on every render',
-);
-
-assert.match(
-  toastAreaSource,
-  /setTimeout\(\(\) => onDismiss\(toast\.id\), TOAST_AUTO_CLOSE_MS\)/,
-  'toast auto-close should dismiss by toast id from inside the timer',
-);
-
-assert.match(
-  toastAreaSource,
-  /\[toast\.id, toast\.autoClose, onDismiss\]/,
-  'toast auto-close effect should not reset when unrelated toast object fields are re-rendered',
-);
+assert.match(appSource, /function removeToast\(id: string\)/, 'toast dismissal should be centralized in the app shell');
+assert.match(appSource, /toasts = toasts\.filter\(\(toast\) => toast\.id !== id\)/, 'toast dismissal should remove by toast id');
+assert.match(toastAreaSource, /TOAST_AUTO_CLOSE_MS = 3000/, 'toast auto-close should match the React toast duration');
+assert.match(toastAreaSource, /window\.setTimeout\(\(\) => onRemove\(toast\.id\), TOAST_AUTO_CLOSE_MS\)/, 'toast auto-close should dismiss by toast id from inside the timer');
+assert.match(toastAreaSource, /return \(\) => timers\.forEach\(\(timer\) => window\.clearTimeout\(timer\)\)/, 'toast auto-close timers should be cleaned up by the Svelte effect');

@@ -69,14 +69,10 @@ assert.match(element.style.getPropertyValue('--color-accent'), /#06b6d4 20%/);
 assert.match(element.style.getPropertyValue('--color-selected'), /#06b6d4 24%/);
 
 for (const file of [
-  '../src/DownloadPromptWindow.tsx',
-  '../src/DownloadProgressWindow.tsx',
-  '../src/BatchProgressWindow.tsx',
+  '../src/DownloadPromptWindow.svelte',
+  '../src/DownloadProgressWindow.svelte',
+  '../src/BatchProgressWindow.svelte',
 ]) {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
-  assert.equal(
-    source.includes("classList.add('dark')"),
-    false,
-    `${file} should use shared appearance settings instead of forcing dark mode`,
-  );
+  assert.equal(source.includes("classList.add('dark')"), false, `${file} should use shared appearance settings instead of forcing dark mode`);
 }
