@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
   browserDownloadUrl,
+  classifyBrowserDownloadHandoffResolution,
   cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadHandoffMetadata,
   createBrowserDownloadBypassState,
@@ -9,6 +10,8 @@ import {
   detachBrowserDownloadForDesktopPrompt,
   discardBrowserDownloadBeforeFilenameRelease,
   discardBrowserDownload,
+  markBrowserDownloadBypassId,
+  markBrowserDownloadBypassUrl,
   restartBrowserDownload,
   restoreBrowserDownloadAfterPromptFallback,
   selectFilenameInterceptionApi,
@@ -215,6 +218,54 @@ async function main() {
     true,
     'protected-download auth failures should leave the browser fallback path active',
   );
+  assert.deepEqual(
+    classifyBrowserDownloadHandoffResolution({
+      ok: false,
+      requestId: 'request_app_unreachable',
+      type: 'app_unreachable',
+      code: 'APP_UNREACHABLE',
+      message: 'app did not respond',
+    }),
+    {
+      action: 'record_error_and_restore',
+      response: {
+        ok: false,
+        requestId: 'request_app_unreachable',
+        type: 'app_unreachable',
+        code: 'APP_UNREACHABLE',
+        message: 'app did not respond',
+      },
+    },
+    'failed handoffs should record the error and restore the browser download after detachment',
+  );
+  assert.deepEqual(
+    classifyBrowserDownloadHandoffResolution({
+      ok: true,
+      requestId: 'request_prompt_canceled',
+      type: 'accepted',
+      payload: {
+        appState: 'running',
+        status: 'canceled',
+      },
+    }),
+    { action: 'restore' },
+    'prompt-canceled handoffs should restore the detached browser download',
+  );
+  for (const status of ['queued', 'duplicate_existing_job', 'dismissed'] as const) {
+    assert.deepEqual(
+      classifyBrowserDownloadHandoffResolution({
+        ok: true,
+        requestId: `request_${status}`,
+        type: 'accepted',
+        payload: {
+          appState: 'running',
+          status,
+        },
+      }),
+      { action: 'discard' },
+      `${status} handoffs should leave the detached browser download discarded`,
+    );
+  }
   assert.deepEqual(
     createBrowserDownloadHandoffMetadata(
       {
@@ -452,6 +503,30 @@ async function main() {
     shouldBypassBrowserDownload({ id: 502, url: 'https://cdn.example.com/File%20Name.zip' }, bypass),
     false,
     'fallback bypass should be one-shot',
+  );
+
+  const staleUrlBypass = createBrowserDownloadBypassState(10);
+  markBrowserDownloadBypassUrl(staleUrlBypass, 'https://example.com/stale-url.zip', 1_000);
+  assert.equal(
+    shouldBypassBrowserDownload({ id: 601, url: 'https://example.com/stale-url.zip' }, staleUrlBypass, 1_011),
+    false,
+    'stale fallback URL bypasses should expire when no matching browser event consumes them',
+  );
+
+  const staleIdBypass = createBrowserDownloadBypassState(10);
+  markBrowserDownloadBypassId(staleIdBypass, 602, 2_000);
+  assert.equal(
+    shouldBypassBrowserDownload({ id: 602, url: 'https://example.com/stale-id.zip' }, staleIdBypass, 2_011),
+    false,
+    'stale fallback download-id bypasses should expire when no matching browser event consumes them',
+  );
+
+  const freshIdBypass = createBrowserDownloadBypassState(10);
+  markBrowserDownloadBypassId(freshIdBypass, 603, 3_000);
+  assert.equal(
+    shouldBypassBrowserDownload({ id: 603, url: 'https://example.com/fresh-id.zip' }, freshIdBypass, 3_010),
+    true,
+    'fresh fallback download-id bypasses should still be consumed once',
   );
 
   const promptFallbackBypass = createBrowserDownloadBypassState();

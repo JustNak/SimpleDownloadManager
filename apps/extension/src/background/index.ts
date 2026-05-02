@@ -2,6 +2,7 @@ import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings
 import browser from './browser';
 import {
   browserDownloadUrl,
+  classifyBrowserDownloadHandoffResolution,
   createBrowserDownloadHandoffMetadata,
   createBrowserDownloadBypassState,
   createAsyncFilenameInterceptionListener,
@@ -16,8 +17,6 @@ import {
   shouldBypassBrowserDownload,
   shouldBypassBrowserDownloadUrl,
   shouldHandleBrowserDownload,
-  shouldDiscardBrowserDownloadAfterHandoff,
-  shouldRestoreBrowserDownloadAfterPromptSwap,
   type BrowserDownloadFilenameInterceptionApi,
   type BrowserDownloadFilenameInterceptionCandidate,
   type BrowserDownloadFilenameSuggest,
@@ -40,6 +39,8 @@ const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
 const activeBrowserDownloadIds = new Set<number>();
 const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
 let cachedExtensionSettings: ExtensionIntegrationSettings | null = null;
+let nativeHostPingPromise: Promise<HostToExtensionResponse> | null = null;
+let refreshConnectionStatePromise: Promise<HostToExtensionResponse> | null = null;
 
 async function ensureContextMenu() {
   const settings = await getCachedExtensionSettings();
@@ -57,7 +58,15 @@ async function ensureContextMenu() {
 }
 
 async function refreshConnectionState() {
-  const response = await pingNativeHost();
+  refreshConnectionStatePromise ??= refreshConnectionStateNow().finally(() => {
+    refreshConnectionStatePromise = null;
+  });
+
+  return refreshConnectionStatePromise;
+}
+
+async function refreshConnectionStateNow() {
+  const response = await pingNativeHostCoalesced();
   if (isErrorResponse(response)) {
     const connection = connectionForErrorCode(response.code);
     const state = await setHostError(response.code, toUserFacingMessage(response.code, response.message), connection);
@@ -69,6 +78,14 @@ async function refreshConnectionState() {
   await ensureContextMenu();
   await updateBrowserBadge(state);
   return response;
+}
+
+async function pingNativeHostCoalesced(): Promise<HostToExtensionResponse> {
+  nativeHostPingPromise ??= pingNativeHost().finally(() => {
+    nativeHostPingPromise = null;
+  });
+
+  return nativeHostPingPromise;
 }
 
 async function handleContextMenuClick(info: browser.contextMenus.OnClickData, tab?: browser.tabs.Tab) {
@@ -117,7 +134,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
   try {
     await browser.downloads.cancel(item.id).catch(() => undefined);
 
-    const pingResponse = await pingNativeHost();
+    const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
       await restoreBrowserDownloadFallback(item);
@@ -133,13 +150,14 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
 
     const response = await handOffBrowserDownload(url, item, settings);
 
-    if (isErrorResponse(response)) {
-      await recordHostError(response);
+    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
+    if (handoffResolution.action === 'record_error_and_restore') {
+      await recordHostError(handoffResolution.response);
       await restoreBrowserDownloadFallback(item);
       return;
     }
 
-    if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
+    if (handoffResolution.action === 'discard') {
       await discardBrowserDownload(browser.downloads, item.id);
       const state = rememberStateSettings(await setLastResult('connected', response));
       await updateBrowserBadge(state);
@@ -191,9 +209,10 @@ async function handleBrowserDownloadDeterminingFilename(
   try {
     await detachBrowserDownloadForDesktopPrompt(browser.downloads, item.id, releaseFilename);
 
-    const pingResponse = await pingNativeHost();
+    const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
+      await restoreBrowserDownloadFallback(item);
       return;
     }
 
@@ -201,19 +220,22 @@ async function handleBrowserDownloadDeterminingFilename(
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
       await updateBrowserBadge(pingState);
+      await restoreBrowserDownloadFallback(item);
       return;
     }
 
     const response = await handOffBrowserDownload(url, item, settings);
 
-    if (isErrorResponse(response)) {
-      await recordHostError(response);
+    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
+    if (handoffResolution.action === 'record_error_and_restore') {
+      await recordHostError(handoffResolution.response);
+      await restoreBrowserDownloadFallback(item);
       return;
     }
 
     const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
-    if (shouldRestoreBrowserDownloadAfterPromptSwap(response)) {
+    if (handoffResolution.action === 'restore') {
       await restoreBrowserDownloadFallback(item);
     }
   } catch (error) {
@@ -223,6 +245,7 @@ async function handleBrowserDownloadDeterminingFilename(
       'error',
     );
     await updateBrowserBadge(state);
+    await restoreBrowserDownloadFallback(item);
   } finally {
     activeBrowserDownloadIds.delete(item.id);
   }
@@ -320,7 +343,6 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   }
 });
 
-void refreshConnectionState();
 registerHandoffAuthHeaderCapture();
 
 function shouldSkipBrowserDownloadInterception(item: browser.downloads.DownloadItem): boolean {
@@ -407,7 +429,7 @@ async function handleFirefoxWebRequestDownload(
   let settings = rememberSettings(initialSettings);
 
   try {
-    const pingResponse = await pingNativeHost();
+    const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
       await restoreFirefoxWebRequestFallback(candidate);
@@ -423,21 +445,18 @@ async function handleFirefoxWebRequestDownload(
 
     const response = await handOffBrowserDownload(candidate.url, candidate, settings);
 
-    if (isErrorResponse(response)) {
-      await recordHostError(response);
-      await restoreFirefoxWebRequestFallback(candidate);
-      return;
-    }
-
-    if (!shouldDiscardBrowserDownloadAfterHandoff(response)) {
-      const state = rememberStateSettings(await setLastResult('connected', response));
-      await updateBrowserBadge(state);
+    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
+    if (handoffResolution.action === 'record_error_and_restore') {
+      await recordHostError(handoffResolution.response);
       await restoreFirefoxWebRequestFallback(candidate);
       return;
     }
 
     const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
+    if (handoffResolution.action === 'restore') {
+      await restoreFirefoxWebRequestFallback(candidate);
+    }
   } catch (error) {
     const state = await setHostError(
       'HOST_NOT_AVAILABLE',

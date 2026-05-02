@@ -3,10 +3,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const repoRoot = path.resolve();
-const expectedVersion = '0.3.53-alpha';
+const expectedVersion = '0.3.54-alpha';
 const expectedProtocolVersion = '0.3.48-alpha';
 const expectedNativeHostVersion = '0.3.48-alpha';
-const expectedExtensionVersion = '0.3.47-alpha';
+const expectedExtensionVersion = '0.3.48-beta';
 
 for (const manifestPath of [
   'package.json',

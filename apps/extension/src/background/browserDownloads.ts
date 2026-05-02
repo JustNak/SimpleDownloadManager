@@ -85,57 +85,102 @@ export type BrowserDownloadHandoffMetadata = {
   handoffAuth?: HandoffAuth;
 };
 
-export type BrowserDownloadBypassState = {
-  downloadIds: Set<number>;
-  urls: Map<string, number>;
+type BrowserDownloadBypassUrlEntry = {
+  count: number;
+  expiresAt: number;
 };
 
+export type BrowserDownloadBypassState = {
+  downloadIds: Map<number, number>;
+  urls: Map<string, BrowserDownloadBypassUrlEntry>;
+  ttlMs: number;
+};
+
+export type BrowserDownloadHandoffResolution =
+  | { action: 'discard' }
+  | { action: 'restore' }
+  | { action: 'record_error_and_restore'; response: Extract<HostToExtensionResponse, { ok: false }> };
+
+const DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS = 60_000;
 const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame']);
 const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
   'application/octet-stream',
   'application/zip',
   'application/x-zip-compressed',
+  'application/vnd.rar',
   'application/x-7z-compressed',
   'application/x-rar-compressed',
   'application/x-tar',
   'application/gzip',
   'application/x-bzip2',
   'application/x-xz',
+  'application/zstd',
   'application/pdf',
+  'application/java-archive',
+  'application/vnd.android.package-archive',
+  'application/vnd.ms-cab-compressed',
+  'application/vnd.microsoft.portable-executable',
+  'application/x-apple-diskimage',
+  'application/x-debian-package',
+  'application/x-iso9660-image',
   'application/x-msdownload',
   'application/x-msi',
+  'application/x-msdos-program',
+  'application/x-redhat-package-manager',
 ]);
 
-export function createBrowserDownloadBypassState(): BrowserDownloadBypassState {
+export function createBrowserDownloadBypassState(ttlMs = DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS): BrowserDownloadBypassState {
   return {
-    downloadIds: new Set<number>(),
-    urls: new Map<string, number>(),
+    downloadIds: new Map<number, number>(),
+    urls: new Map<string, BrowserDownloadBypassUrlEntry>(),
+    ttlMs,
   };
 }
 
 export function shouldBypassBrowserDownload(
   item: BrowserDownloadReplayItem,
   bypass: BrowserDownloadBypassState,
+  now = Date.now(),
 ): boolean {
-  if (bypass.downloadIds.delete(item.id)) {
-    consumeBypassUrl(bypass, item.finalUrl);
-    consumeBypassUrl(bypass, item.url);
+  pruneExpiredBypassEntries(bypass, now);
+
+  if (consumeBypassId(bypass, item.id, now)) {
+    consumeBypassUrl(bypass, item.finalUrl, now);
+    consumeBypassUrl(bypass, item.url, now);
     return true;
   }
 
-  return consumeBypassUrl(bypass, item.finalUrl) || consumeBypassUrl(bypass, item.url);
+  return consumeBypassUrl(bypass, item.finalUrl, now) || consumeBypassUrl(bypass, item.url, now);
 }
 
-export function markBrowserDownloadBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
-  addBypassUrl(bypass, url);
+export function markBrowserDownloadBypassUrl(
+  bypass: BrowserDownloadBypassState,
+  url: string,
+  now = Date.now(),
+): void {
+  addBypassUrl(bypass, url, now);
+}
+
+export function markBrowserDownloadBypassId(
+  bypass: BrowserDownloadBypassState,
+  downloadId: number,
+  now = Date.now(),
+): void {
+  pruneExpiredBypassEntries(bypass, now);
+  bypass.downloadIds.set(downloadId, now + bypass.ttlMs);
 }
 
 export function revokeBrowserDownloadBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
   revokeBypassUrl(bypass, url);
 }
 
-export function shouldBypassBrowserDownloadUrl(url: string | undefined, bypass: BrowserDownloadBypassState): boolean {
-  return consumeBypassUrl(bypass, url);
+export function shouldBypassBrowserDownloadUrl(
+  url: string | undefined,
+  bypass: BrowserDownloadBypassState,
+  now = Date.now(),
+): boolean {
+  pruneExpiredBypassEntries(bypass, now);
+  return consumeBypassUrl(bypass, url, now);
 }
 
 export function browserDownloadUrl(item: BrowserDownloadPolicyItem): string | undefined {
@@ -250,6 +295,20 @@ export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response
   return isErrorResponse(response) && response.code === 'PROTECTED_DOWNLOAD_AUTH_REQUIRED';
 }
 
+export function classifyBrowserDownloadHandoffResolution(
+  response: HostToExtensionResponse,
+): BrowserDownloadHandoffResolution {
+  if (isErrorResponse(response)) {
+    return { action: 'record_error_and_restore', response };
+  }
+
+  if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
+    return { action: 'discard' };
+  }
+
+  return { action: 'restore' };
+}
+
 export function createBrowserDownloadHandoffMetadata(
   item: { filename?: string; totalBytes?: number },
   handoffAuth?: HandoffAuth,
@@ -339,7 +398,7 @@ export async function restartBrowserDownload(
     }
 
     const downloadId = await downloads.download(options);
-    bypass.downloadIds.add(downloadId);
+    markBrowserDownloadBypassId(bypass, downloadId);
     return downloadId;
   } catch (error) {
     revokeBypassUrl(bypass, url);
@@ -372,32 +431,66 @@ async function removeCompletedBrowserDownloadFile(
   await downloads.removeFile?.(downloadId).catch(() => undefined);
 }
 
-function addBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
-  bypass.urls.set(url, (bypass.urls.get(url) ?? 0) + 1);
+function addBypassUrl(bypass: BrowserDownloadBypassState, url: string, now = Date.now()): void {
+  pruneExpiredBypassEntries(bypass, now);
+  const existing = bypass.urls.get(url);
+  bypass.urls.set(url, {
+    count: (existing?.count ?? 0) + 1,
+    expiresAt: now + bypass.ttlMs,
+  });
 }
 
 function revokeBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
-  const count = bypass.urls.get(url) ?? 0;
-  if (count <= 1) {
+  const entry = bypass.urls.get(url);
+  if (!entry || entry.count <= 1) {
     bypass.urls.delete(url);
     return;
   }
 
-  bypass.urls.set(url, count - 1);
+  bypass.urls.set(url, { count: entry.count - 1, expiresAt: entry.expiresAt });
 }
 
-function consumeBypassUrl(bypass: BrowserDownloadBypassState, url: string | undefined): boolean {
+function consumeBypassUrl(bypass: BrowserDownloadBypassState, url: string | undefined, now = Date.now()): boolean {
   if (!url) {
     return false;
   }
 
-  const count = bypass.urls.get(url) ?? 0;
-  if (count === 0) {
+  const entry = bypass.urls.get(url);
+  if (!entry) {
+    return false;
+  }
+
+  if (entry.expiresAt < now) {
+    bypass.urls.delete(url);
     return false;
   }
 
   revokeBypassUrl(bypass, url);
   return true;
+}
+
+function consumeBypassId(bypass: BrowserDownloadBypassState, downloadId: number, now: number): boolean {
+  const expiresAt = bypass.downloadIds.get(downloadId);
+  if (expiresAt === undefined) {
+    return false;
+  }
+
+  bypass.downloadIds.delete(downloadId);
+  return expiresAt >= now;
+}
+
+function pruneExpiredBypassEntries(bypass: BrowserDownloadBypassState, now: number): void {
+  for (const [downloadId, expiresAt] of bypass.downloadIds) {
+    if (expiresAt < now) {
+      bypass.downloadIds.delete(downloadId);
+    }
+  }
+
+  for (const [url, entry] of bypass.urls) {
+    if (entry.expiresAt < now) {
+      bypass.urls.delete(url);
+    }
+  }
 }
 
 function headerValue(headers: FirefoxWebRequestHeader[] | undefined, name: string): string | undefined {
@@ -424,9 +517,9 @@ function filenameFromContentDisposition(value: string | undefined): string | und
     return undefined;
   }
 
-  const encodedFilename = /(?:^|;)\s*filename\*\s*=\s*(?:UTF-8''|)([^;]+)/i.exec(value)?.[1];
+  const encodedFilename = /(?:^|;)\s*filename\*\s*=\s*([^;]+)/i.exec(value)?.[1];
   if (encodedFilename) {
-    return decodeFilename(encodedFilename);
+    return decodeFilenameStar(encodedFilename);
   }
 
   const quotedFilename = /(?:^|;)\s*filename\s*=\s*"([^"]+)"/i.exec(value)?.[1];
@@ -436,6 +529,12 @@ function filenameFromContentDisposition(value: string | undefined): string | und
 
   const plainFilename = /(?:^|;)\s*filename\s*=\s*([^;]+)/i.exec(value)?.[1];
   return plainFilename ? basenameOnly(plainFilename) : undefined;
+}
+
+function decodeFilenameStar(value: string): string | undefined {
+  const cleaned = value.trim().replace(/^"|"$/g, '');
+  const match = /^([^']*)'[^']*'(.*)$/.exec(cleaned);
+  return decodeFilename(match?.[2] ?? cleaned);
 }
 
 function decodeFilename(value: string): string | undefined {

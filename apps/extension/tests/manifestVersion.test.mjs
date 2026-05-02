@@ -12,10 +12,10 @@ assert.equal(extensionManifestVersion('1.4.7-beta.2'), '1.4.7');
 assert.equal(extensionManifestVersion('2.0.0'), '2.0.0');
 assert.equal(extensionDisplayVersion('0.2.9-alpha'), '0.2.9-alpha');
 assert.deepEqual(
-  extensionVersionsFromPackage({ version: '0.3.47-alpha' }),
+  extensionVersionsFromPackage({ version: '0.3.48-beta' }),
   {
-    browserExtensionVersion: '0.3.47',
-    displayVersion: '0.3.47-alpha',
+    browserExtensionVersion: '0.3.48',
+    displayVersion: '0.3.48-beta',
   },
   'extension manifest versions should come from the extension package version, not the app package version',
 );
@@ -33,7 +33,7 @@ const buildScript = await readFile(
 assert.equal(firefoxManifest.manifest_version, 2);
 assert.equal(
   extensionPackage.version,
-  '0.3.47-alpha',
+  '0.3.48-beta',
   'extension package version should remain on its own release version even when the desktop app is bumped',
 );
 assert.equal(firefoxManifest.version_name, extensionPackage.version);

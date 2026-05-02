@@ -115,3 +115,66 @@ assert.deepEqual(
   },
   'known downloadable MIME types should use the URL basename when no attachment filename is present',
 );
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/report',
+      responseHeaders: [
+        {
+          name: 'Content-Disposition',
+          value: "attachment; filename*=UTF-8'en-us'report%20final.zip",
+        },
+        {
+          name: 'Content-Length',
+          value: '2048',
+        },
+      ],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://downloads.example.com/report',
+    filename: 'report final.zip',
+    totalBytes: 2048,
+    incognito: false,
+  },
+  'Firefox attachment filenames should decode RFC 5987 filename* values with a language tag',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/installer.dmg',
+      responseHeaders: [{ name: 'Content-Type', value: 'application/x-apple-diskimage' }],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://downloads.example.com/installer.dmg',
+    filename: 'installer.dmg',
+    totalBytes: undefined,
+    incognito: false,
+  },
+  'Firefox should intercept common disk-image installer downloads even without Content-Disposition',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/archive',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="archive.custom"' },
+        { name: 'Content-Type', value: 'application/x-custom-download' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://downloads.example.com/archive',
+    filename: 'archive.custom',
+    totalBytes: undefined,
+    incognito: false,
+  },
+  'Firefox attachment responses should be intercepted even when the MIME type is unknown',
+);

@@ -1410,7 +1410,7 @@ mod tests {
         json!({
             "entryPoint": "browser_download",
             "browser": "firefox",
-            "extensionVersion": "0.3.47-alpha"
+            "extensionVersion": "0.3.48-beta"
         })
     }
 
@@ -1482,7 +1482,7 @@ mod tests {
                 "source": {
                     "entryPoint": "popup",
                     "browser": "firefox",
-                    "extensionVersion": "0.3.47-alpha"
+                    "extensionVersion": "0.3.48-beta"
                 },
                 "handoffAuth": {
                     "headers": [{ "name": "Cookie", "value": "session=abc" }]

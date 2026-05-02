@@ -33,8 +33,8 @@ assert.ok(
 );
 assert.match(
   handlerSource,
-  /shouldRestoreBrowserDownloadAfterPromptSwap\(response\)/,
-  'detached prompt flow should restore the browser download only for the Swap prompt result',
+  /classifyBrowserDownloadHandoffResolution\(response\)/,
+  'detached prompt flow should classify desktop handoff outcomes before deciding whether to restore',
 );
 assert.doesNotMatch(
   handlerSource,
@@ -42,18 +42,18 @@ assert.doesNotMatch(
   'detached prompt flow should not keep the filename callback open until after the desktop prompt resolves',
 );
 
-const restoreFallbackMatches = [...handlerSource.matchAll(/restoreBrowserDownloadFallback\(/g)];
-assert.equal(
-  restoreFallbackMatches.length,
-  1,
-  'captured Chrome filename flow should only restore the browser download for Swap',
+assert.match(
+  handlerSource,
+  /if \(isErrorResponse\(pingResponse\)\) \{[\s\S]*?await recordHostError\(pingResponse\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
+  'native-host ping failures after detachment should restore the browser download',
 );
-
-const swapGateIndex = handlerSource.indexOf('if (shouldRestoreBrowserDownloadAfterPromptSwap(response))');
-const restoreFallbackIndex = handlerSource.indexOf('await restoreBrowserDownloadFallback(item);');
-assert.notEqual(swapGateIndex, -1, 'Swap gate should be present');
-assert.notEqual(restoreFallbackIndex, -1, 'Swap should still restore the browser download');
-assert.ok(
-  swapGateIndex < restoreFallbackIndex,
-  'browser restore should be gated by the Swap prompt result',
+assert.match(
+  handlerSource,
+  /if \(!shouldHandleBrowserDownload\(item, settings\)\) \{[\s\S]*?await updateBrowserBadge\(pingState\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
+  'settings synced from the desktop app after detachment should restore when capture becomes disabled',
+);
+assert.match(
+  handlerSource,
+  /if \(handoffResolution\.action === 'record_error_and_restore'\) \{[\s\S]*?await recordHostError\(handoffResolution\.response\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
+  'native handoff errors after detachment should record the error and restore the browser download',
 );
