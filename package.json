@@ -9,7 +9,8 @@
   ],
   "scripts": {
     "build:extension": "npm run build --workspace @myapp/extension",
-    "build:desktop": "npm run build --workspace @myapp/desktop",
+    "build:desktop": "npm run build:desktop:slint",
+    "build:desktop:tauri": "npm run build --workspace @myapp/desktop",
     "build:desktop:slint": "cargo build --manifest-path apps/desktop-slint/Cargo.toml",
     "test": "npm run test:ts && npm run test:rust",
     "test:ts": "node ./scripts/run-ts-tests.mjs",
@@ -22,7 +23,7 @@
     "prepare:release": "node ./scripts/prepare-release.mjs",
     "publish:updater-alpha": "node ./scripts/publish-updater-alpha.mjs",
     "publish:updater-alpha:slint": "node ./scripts/publish-updater-alpha-slint.mjs",
-    "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
+    "release:windows": "npm run release:windows:slint",
     "release:windows:tauri": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
     "release:windows:slint": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release-slint.ps1\"",
     "smoke:phase5:slint": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"./scripts/smoke-phase5-slint.ps1\" -CheckOnly",

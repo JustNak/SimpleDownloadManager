@@ -171,6 +171,22 @@ function Test-RegistryValueMissing {
   }
 }
 
+function Wait-RegistryValueMissing {
+  param(
+    [string]$Path,
+    [int]$Attempts = 60
+  )
+
+  for ($index = 0; $index -lt $Attempts; $index += 1) {
+    if (-not (Test-Path $Path)) {
+      return
+    }
+    Start-Sleep -Milliseconds 250
+  }
+
+  throw "Registry key should have been removed by uninstall: $Path"
+}
+
 Test-SlintSmokePrerequisites -RequireBuildTools:($Build -or $CheckOnly)
 
 if ($Build) {
@@ -217,8 +233,8 @@ if (-not (Test-Path $uninstallerPath)) {
 Write-Host 'Running Slint uninstaller smoke step.'
 Invoke-SmokeCommand $uninstallerPath @('/S')
 
-Test-RegistryValueMissing 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.myapp.download_manager'
-Test-RegistryValueMissing 'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.myapp.download_manager'
-Test-RegistryValueMissing 'HKCU:\Software\Mozilla\NativeMessagingHosts\com.myapp.download_manager'
+Wait-RegistryValueMissing 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.myapp.download_manager'
+Wait-RegistryValueMissing 'HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.myapp.download_manager'
+Wait-RegistryValueMissing 'HKCU:\Software\Mozilla\NativeMessagingHosts\com.myapp.download_manager'
 
 Write-Host 'Slint installer smoke completed successfully.'

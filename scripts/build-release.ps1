@@ -56,7 +56,7 @@ $env:TEMP = $releaseTempRoot
 Push-Location $workspaceRoot
 try {
   Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:extension')
-  Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:desktop')
+  Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:desktop:tauri')
 
   Invoke-ReleaseCommand -FilePath 'cargo' -ArgumentList @('build', '--release', '--manifest-path', "$hostRoot\Cargo.toml")
   Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @('.\scripts\prepare-release.mjs')

@@ -12,15 +12,33 @@ const packagerConfig = await readFile('apps/desktop-slint/packager.toml', 'utf8'
 const slintNsisTemplate = await readFile('apps/desktop-slint/nsis/installer.nsi', 'utf8');
 
 assert.equal(
+  packageJson.scripts['build:desktop'],
+  'npm run build:desktop:slint',
+  'default desktop build should target the primary Slint desktop app',
+);
+
+assert.equal(
+  packageJson.scripts['build:desktop:tauri'],
+  'npm run build --workspace @myapp/desktop',
+  'legacy Tauri desktop build should remain available explicitly',
+);
+
+assert.equal(
+  packageJson.scripts['build:desktop:slint'],
+  'cargo build --manifest-path apps/desktop-slint/Cargo.toml',
+  'Slint desktop build should remain available explicitly',
+);
+
+assert.equal(
   packageJson.scripts['release:windows'],
-  'pwsh -ExecutionPolicy Bypass -File "./scripts/build-release.ps1"',
-  'default Windows release path should remain the legacy Tauri script until Slint smoke tests pass',
+  'npm run release:windows:slint',
+  'default Windows release path should target Slint after the passed Phase 5 smoke gate',
 );
 
 assert.equal(
   packageJson.scripts['release:windows:tauri'],
-  packageJson.scripts['release:windows'],
-  'explicit Tauri release script should preserve the existing default release command',
+  'pwsh -ExecutionPolicy Bypass -File "./scripts/build-release.ps1"',
+  'explicit Tauri release script should preserve the legacy Tauri release command',
 );
 
 assert.equal(
@@ -42,6 +60,12 @@ assert.equal(
 );
 
 assert.equal(
+  packageJson.scripts['publish:updater-alpha'],
+  'node ./scripts/publish-updater-alpha.mjs',
+  'default updater publishing should remain on the legacy Tauri path until a separate publish cutover',
+);
+
+assert.equal(
   packageJson.scripts['publish:updater-alpha:slint'],
   'node ./scripts/publish-updater-alpha-slint.mjs',
   'Slint updater publishing should stay behind an explicit command',
@@ -51,6 +75,18 @@ assert.match(
   tauriReleaseScript,
   /tauri:build/,
   'legacy Tauri release script should still build through Tauri',
+);
+
+assert.match(
+  tauriReleaseScript,
+  /build:desktop:tauri/,
+  'legacy Tauri release script should use the explicit Tauri desktop build alias after Slint becomes the default desktop build',
+);
+
+assert.doesNotMatch(
+  tauriReleaseScript,
+  /@\('run', 'build:desktop'\)/,
+  'legacy Tauri release script should not call the Slint-default desktop build alias',
 );
 
 assert.doesNotMatch(
@@ -116,7 +152,25 @@ assert.match(
 assert.match(
   slintReleaseScript,
   /CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD[\s\S]*TAURI_SIGNING_PRIVATE_KEY_PASSWORD/,
-  'Slint release script should map the existing signing password env for cargo-packager',
+  'Slint release script should accept both cargo-packager and Tauri signing password env names',
+);
+
+assert.match(
+  slintReleaseScript,
+  /\$null -eq \$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD[\s\S]*\$null -ne \$env:CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD[\s\S]*\$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = \$env:CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD/,
+  'Slint release script should map cargo-packager password env into Tauri signer env when needed',
+);
+
+assert.match(
+  slintReleaseScript,
+  /Test-TauriSigningConfiguration[\s\S]*node \$tauriCli signer sign \$probePath/,
+  'Slint release script should validate signing material with the Tauri signer that owns the existing updater key format',
+);
+
+assert.match(
+  slintReleaseScript,
+  /Remove-Item Env:CARGO_PACKAGER_SIGN_PRIVATE_KEY[\s\S]*Remove-Item Env:CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD[\s\S]*Invoke-ReleaseCommand 'cargo' @\('packager', '--release'\)[\s\S]*node_modules\/@tauri-apps\/cli\/tauri\.js', 'signer', 'sign'/,
+  'Slint release script should package unsigned with cargo-packager and create updater signatures through the Tauri signer',
 );
 
 assert.match(
@@ -240,6 +294,12 @@ assert.match(
 );
 
 assert.match(
+  slintSmokeScript,
+  /Wait-RegistryValueMissing[\s\S]*Start-Sleep -Milliseconds 250[\s\S]*Wait-RegistryValueMissing 'HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\com\.myapp\.download_manager'/,
+  'Slint smoke script should wait for silent NSIS uninstall registry cleanup before failing',
+);
+
+assert.match(
   slintPhase5SmokeScript,
   /param\([\s\S]*\[switch\]\$CheckOnly[\s\S]*\[switch\]\$Build[\s\S]*\[switch\]\$InstallSmoke[\s\S]*\[switch\]\$PublishDryRun[\s\S]*\[switch\]\$Full/,
   'Phase 5 smoke orchestrator should expose check-only, build, install-smoke, publish-dry-run, and full modes',
@@ -297,6 +357,12 @@ assert.match(
   slintPhase5SmokeScript,
   /\.simple-download-manager\\tauri-updater\.key/,
   'Phase 5 smoke orchestrator should use the same default Tauri signing key file as the legacy release path',
+);
+
+assert.match(
+  slintPhase5SmokeScript,
+  /Test-TauriSigningConfiguration[\s\S]*node \$tauriCli signer sign \$probePath/,
+  'Phase 5 smoke orchestrator should probe signing with the Tauri signer instead of cargo-packager signer',
 );
 
 assert.match(
@@ -447,6 +513,12 @@ assert.match(
   slintNsisTemplate,
   /\$INSTDIR/,
   'Slint NSIS template should use the install directory for hook paths',
+);
+
+assert.doesNotMatch(
+  slintNsisTemplate,
+  /(?<!\\)\\\{\{/,
+  'Slint NSIS template should not escape Handlebars path expressions with a single backslash',
 );
 
 assert.doesNotMatch(

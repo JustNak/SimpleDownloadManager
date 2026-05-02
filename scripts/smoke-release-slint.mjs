@@ -144,7 +144,7 @@ async function requireFile(filePath, label) {
 }
 
 async function readJsonFile(filePath, label) {
-  const content = await readFile(filePath, 'utf8');
+  const content = (await readFile(filePath, 'utf8')).replace(/^\uFEFF/, '');
   try {
     return JSON.parse(content);
   } catch (error) {

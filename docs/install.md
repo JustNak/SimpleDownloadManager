@@ -60,13 +60,22 @@ Notes:
 
 ## Release Build
 
-The full Windows release pipeline is:
+The primary Windows release pipeline now builds the Slint desktop app:
 
 ```powershell
 npm run release:windows
 ```
 
-Signed updater artifacts require the Tauri updater private key. The release script reads it from the first available source:
+Equivalent explicit commands:
+
+```powershell
+npm run release:windows:slint
+npm run release:windows:tauri
+```
+
+Use `release:windows:slint` for the primary native desktop product. Use `release:windows:tauri` only for the retained legacy/reference Tauri app.
+
+Signed updater artifacts require the existing Tauri updater private key so installed alpha users keep update continuity. The release scripts read it from the first available source:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `SDM_TAURI_SIGNING_PRIVATE_KEY_PATH`
@@ -74,12 +83,20 @@ Signed updater artifacts require the Tauri updater private key. The release scri
 
 If the key has a password, set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` or `SDM_TAURI_SIGNING_PRIVATE_KEY_PASSWORD_PATH`. Keep the private key outside the repository; only the public key belongs in app configuration.
 
-That command will:
+The primary Slint release command will:
 
 - build Chromium and Firefox extension bundles
-- build the desktop frontend
+- build the Slint desktop binary in release mode
 - build the native host in release mode
-- stage the native host as a Tauri sidecar
-- bundle installer resources and native-host manifest templates
-- build the Tauri NSIS installer
-- zip the extension outputs into the top-level `release/` directory
+- stage isolated Slint installer resources and native-host manifest templates
+- build the Slint NSIS installer with `cargo-packager`
+- sign the Slint installer for updater feeds with the existing Tauri signer
+- write `release/slint/latest-alpha.json` and `release/slint/latest-alpha-slint.json`
+- zip the extension outputs into `release/slint/`
+
+Legacy Tauri remains buildable for reference:
+
+```powershell
+npm run build:desktop:tauri
+npm run release:windows:tauri
+```

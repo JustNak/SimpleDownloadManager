@@ -7,7 +7,7 @@
 
 Name "{{product_name}}"
 OutFile "{{out_file}}"
-InstallDir "$LOCALAPPDATA\Programs\{{product_name}}"
+InstallDir "$LOCALAPPDATA\Programs\\{{product_name}}"
 RequestExecutionLevel user
 Unicode true
 ShowInstDetails show
@@ -32,7 +32,7 @@ Section "-Application"
   File "${MAIN_BINARY_SOURCE}"
 
   {{#each resources_dirs}}
-  CreateDirectory "$INSTDIR\{{this}}"
+  CreateDirectory "$INSTDIR\\{{this}}"
   {{/each}}
 
   {{#each resources}}
@@ -59,14 +59,14 @@ Section "Uninstall"
   Call un.UnregisterNativeHost
   Delete "$INSTDIR\${MAIN_BINARY_NAME}.exe"
   {{#each resources}}
-  Delete "$INSTDIR\{{this}}"
+  Delete "$INSTDIR\\{{this}}"
   {{/each}}
   {{#each binaries}}
-  Delete "$INSTDIR\{{this}}"
+  Delete "$INSTDIR\\{{this}}"
   {{/each}}
   Delete "$INSTDIR\${UNINSTALLER}"
   {{#each resources_dirs}}
-  RMDir /REBOOTOK "$INSTDIR\{{this}}"
+  RMDir /REBOOTOK "$INSTDIR\\{{this}}"
   {{/each}}
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "${UNINSTKEY}"

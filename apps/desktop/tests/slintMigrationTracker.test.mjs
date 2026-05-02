@@ -53,6 +53,30 @@ assert.match(
 
 assert.match(
   tracker,
+  /\| Phase 6: Slint Primary Cutover With Tauri Retained \| In Progress \| 55% \|/,
+  'Phase 6 should show the Slint primary cutover is underway after default build/release changes',
+);
+
+assert.match(
+  tracker,
+  /## Phase 6: Slint Primary Cutover With Tauri Retained[\s\S]*Status: \*\*In Progress, 55%\*\*/,
+  'Phase 6 section should match the in-progress table status',
+);
+
+assert.match(
+  tracker,
+  /`npm run build:desktop` and `npm run release:windows` to target Slint by default[\s\S]*`npm run build:desktop:tauri` and `npm run release:windows:tauri`/,
+  'Phase 6 should document Slint defaults and explicit retained Tauri commands',
+);
+
+assert.match(
+  tracker,
+  /updater publishing remains on the legacy Tauri default/i,
+  'Phase 6 should record that updater publishing default is intentionally not cut over yet',
+);
+
+assert.match(
+  tracker,
   /legacy\/reference desktop app/i,
   'Phase 6 should explicitly keep Tauri as a legacy/reference desktop app',
 );

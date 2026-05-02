@@ -60,6 +60,31 @@ function Add-ExecutableDirectoryToPath {
   }
 }
 
+function Test-TauriSigningConfiguration {
+  $probeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "SimpleDownloadManager-SlintSigningProbe-$PID"
+  $probePath = Join-Path $probeRoot 'probe.txt'
+
+  New-Item -ItemType Directory -Force -Path $probeRoot | Out-Null
+  Set-Content -LiteralPath $probePath -Value 'signing probe'
+
+  try {
+    $tauriCli = Join-Path $workspaceRoot 'node_modules\@tauri-apps\cli\tauri.js'
+    $output = & node $tauriCli signer sign $probePath 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      return $null
+    }
+
+    $message = ($output | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($message)) {
+      return 'usable Tauri updater signing configuration'
+    }
+
+    return "usable Tauri updater signing configuration ($message)"
+  } finally {
+    Remove-Item -Recurse -Force -LiteralPath $probeRoot -ErrorAction SilentlyContinue
+  }
+}
+
 function Import-LegacyTauriSigningEnvironment {
   $defaultSigningKeyPath = Join-Path $env:USERPROFILE '.simple-download-manager\tauri-updater.key'
   $signingKeyPath = $env:SDM_TAURI_SIGNING_PRIVATE_KEY_PATH
@@ -188,6 +213,17 @@ function Get-PrerequisiteGaps {
   Import-LegacyTauriSigningEnvironment
   if ([string]::IsNullOrWhiteSpace($env:CARGO_PACKAGER_SIGN_PRIVATE_KEY) -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
     $missing.Add('CARGO_PACKAGER_SIGN_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY')
+  } else {
+    if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and -not [string]::IsNullOrWhiteSpace($env:CARGO_PACKAGER_SIGN_PRIVATE_KEY)) {
+      $env:TAURI_SIGNING_PRIVATE_KEY = $env:CARGO_PACKAGER_SIGN_PRIVATE_KEY
+    }
+    if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -and $null -ne $env:CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD) {
+      $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $env:CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD
+    }
+    $signingConfigurationError = Test-TauriSigningConfiguration
+    if ($null -ne $signingConfigurationError) {
+      $missing.Add($signingConfigurationError)
+    }
   }
   if (-not (Get-Command 'gh' -ErrorAction SilentlyContinue)) {
     $missing.Add('GitHub CLI gh (install from https://cli.github.com/ and run gh auth login)')

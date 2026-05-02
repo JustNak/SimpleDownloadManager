@@ -71,6 +71,25 @@ try {
   assert.equal(validation.manifests.length, 3);
   assert.equal(validation.manifests[0].browser, 'Chrome');
 
+  await createValidInstalledFixture();
+  await writeFile(
+    layout.manifests.chrome,
+    `\uFEFF${JSON.stringify({
+      name: 'com.myapp.download_manager',
+      description: 'Simple Download Manager native messaging host',
+      path: layout.sidecar,
+      type: 'stdio',
+      allowed_origins: ['chrome-extension://pkaojpfpjieklhinoibjibmjldohlmbb/'],
+    }, null, 2)}`,
+    'utf8',
+  );
+  const bomValidation = await validateInstalledNativeHostLayout({ installRoot });
+  assert.equal(
+    bomValidation.manifests[0].browser,
+    'Chrome',
+    'smoke validation should accept PowerShell UTF-8 BOM manifest JSON',
+  );
+
   await rm(layout.sidecar);
   await assert.rejects(
     () => validateInstalledNativeHostLayout({ installRoot }),
