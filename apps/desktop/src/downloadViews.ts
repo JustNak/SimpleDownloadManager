@@ -41,6 +41,7 @@ export interface TorrentFooterStats {
   active: number;
   seeding: number;
   uploadedBytes: number;
+  downloadedBytes: number;
   totalRatio: number;
 }
 
@@ -116,14 +117,15 @@ export function isTorrentView(view: ViewState): view is TorrentViewState {
 export function getTorrentFooterStats(jobs: readonly DownloadJob[]): TorrentFooterStats {
   const torrentJobs = jobs.filter(isTorrentDownload);
   const uploadedBytes = torrentJobs.reduce((total, job) => total + (job.torrent?.uploadedBytes ?? 0), 0);
-  const verifiedBytes = torrentJobs.reduce((total, job) => total + Math.max(0, job.downloadedBytes), 0);
+  const downloadedBytes = torrentJobs.reduce((total, job) => total + Math.max(0, job.downloadedBytes), 0);
 
   return {
     all: torrentJobs.length,
     active: torrentJobs.filter((job) => stateIn(job.state, activeDownloadStates)).length,
     seeding: torrentJobs.filter((job) => job.state === 'seeding').length,
     uploadedBytes,
-    totalRatio: verifiedBytes > 0 ? uploadedBytes / verifiedBytes : 0,
+    downloadedBytes,
+    totalRatio: downloadedBytes > 0 ? uploadedBytes / downloadedBytes : 0,
   };
 }
 

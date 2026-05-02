@@ -52,6 +52,51 @@ const ACCENT_COLOR_PRESETS = [
 
 const DESKTOP_APP_VERSION = desktopPackage.version;
 
+export const SETTINGS_SECTIONS = [
+  {
+    id: 'settings-general',
+    href: '#settings-general',
+    label: 'General',
+    description: 'Folders and limits.',
+    iconName: 'general',
+  },
+  {
+    id: 'settings-updates',
+    href: '#settings-updates',
+    label: 'App Updates',
+    description: 'Version controls.',
+    iconName: 'updates',
+  },
+  {
+    id: 'settings-torrenting',
+    href: '#settings-torrenting',
+    label: 'Torrenting',
+    description: 'Seeding and peers.',
+    iconName: 'torrenting',
+  },
+  {
+    id: 'settings-appearance',
+    href: '#settings-appearance',
+    label: 'Appearance',
+    description: 'Theme and rows.',
+    iconName: 'appearance',
+  },
+  {
+    id: 'settings-extension',
+    href: '#settings-extension',
+    label: 'Web Extension',
+    description: 'Browser handoff.',
+    iconName: 'extension',
+  },
+  {
+    id: 'settings-native-host',
+    href: '#settings-native-host',
+    label: 'Native Host',
+    description: 'Diagnostics tools.',
+    iconName: 'native-host',
+  },
+] as const;
+
 interface SettingsPageProps {
   settings: Settings;
   diagnostics: DiagnosticsSnapshot | null;
@@ -246,8 +291,8 @@ export function SettingsPage({
 
   return (
     <>
-    <form onSubmit={handleSubmit} className="settings-surface mx-auto grid w-full max-w-6xl grid-cols-[160px_minmax(0,1fr)] gap-3 p-4">
-      <header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/95 pb-3 pt-4 backdrop-blur">
+    <form onSubmit={handleSubmit} className="settings-surface mx-auto w-full max-w-6xl p-4">
+      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/95 pb-3 pt-4 backdrop-blur">
         <div>
           <h1 className="text-xl font-semibold tracking-normal text-foreground">Settings</h1>
           <p className="mt-0.5 text-xs text-muted-foreground">Configure downloads, appearance, notifications, and native host diagnostics.</p>
@@ -263,16 +308,7 @@ export function SettingsPage({
         </div>
       </header>
 
-      <nav className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-1.5" aria-label="Settings sections">
-        <SettingsNavLink href="#settings-general" label="General" />
-        <SettingsNavLink href="#settings-updates" label="App Updates" />
-        <SettingsNavLink href="#settings-torrenting" label="Torrenting" />
-        <SettingsNavLink href="#settings-appearance" label="Appearance" />
-        <SettingsNavLink href="#settings-extension" label="Web Extension" />
-        <SettingsNavLink href="#settings-native-host" label="Native Host" />
-      </nav>
-
-      <div className="min-w-0 space-y-3">
+      <div className="mt-3 min-w-0 space-y-3">
         <section id="settings-general" className="scroll-mt-4">
         <SettingsPanel icon={<Settings2 size={20} />} title="General">
           <FieldRow label="Download Directory" description="Default save path." tooltip="Files are saved here by default.">
@@ -1124,17 +1160,6 @@ function MetricCard({ label, value }: { label: string; value: string }) {
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 text-lg font-semibold tabular-nums text-foreground">{value}</div>
     </div>
-  );
-}
-
-function SettingsNavLink({ href, label }: { href: string; label: string }) {
-  return (
-    <a
-      href={href}
-      className="flex h-8 items-center rounded-md px-2.5 text-xs font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground"
-    >
-      {label}
-    </a>
   );
 }
 

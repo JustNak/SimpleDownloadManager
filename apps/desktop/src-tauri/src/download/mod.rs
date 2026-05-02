@@ -5,7 +5,7 @@ use crate::state::{
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, DiagnosticLevel,
-    DownloadPerformanceMode, FailureCategory, HandoffAuth, ResumeSupport, TorrentInfo,
+    DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState, ResumeSupport, TorrentInfo,
     TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
 };
 use crate::torrent::{
@@ -1200,6 +1200,7 @@ async fn run_torrent_download_attempt(
         existing_torrent.and_then(|torrent| torrent.seeding_started_at);
     let mut was_finished = persisted_seeding_started_at.is_some();
     let mut first_snapshot = true;
+    let mut last_snapshot_job_state = JobState::Starting;
     let mut last_persisted_at = Instant::now();
     let mut restored_seeding_unpaused = false;
     let mut low_throughput_monitor = TorrentLowThroughputMonitor::default();
@@ -1548,6 +1549,20 @@ async fn run_torrent_download_attempt(
             .await
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
         emit_snapshot(app, &snapshot);
+        let next_snapshot_job_state = snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == task.id)
+            .map(|job| job.state)
+            .unwrap_or(last_snapshot_job_state);
+        let released_download_slot = seeding_transition_releases_download_slot(
+            last_snapshot_job_state,
+            next_snapshot_job_state,
+        );
+        last_snapshot_job_state = next_snapshot_job_state;
+        if released_download_slot {
+            schedule_downloads(app.clone(), state.clone());
+        }
         first_snapshot = false;
 
         if update.finished {
@@ -1648,6 +1663,10 @@ fn torrent_progress_should_persist(
         || started_seeding
         || stopping
         || now.saturating_duration_since(last_persisted_at) >= PROGRESS_PERSIST_INTERVAL
+}
+
+fn seeding_transition_releases_download_slot(previous: JobState, next: JobState) -> bool {
+    next == JobState::Seeding && previous != JobState::Seeding
 }
 
 fn torrent_seed_elapsed_seconds(
@@ -4143,6 +4162,38 @@ mod tests {
     #[test]
     fn torrent_metadata_timeout_is_sixty_seconds() {
         assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn seeding_transition_releases_download_scheduler_slot_once() {
+        assert!(seeding_transition_releases_download_slot(
+            JobState::Queued,
+            JobState::Seeding,
+        ));
+        assert!(seeding_transition_releases_download_slot(
+            JobState::Starting,
+            JobState::Seeding,
+        ));
+        assert!(seeding_transition_releases_download_slot(
+            JobState::Downloading,
+            JobState::Seeding,
+        ));
+        assert!(!seeding_transition_releases_download_slot(
+            JobState::Seeding,
+            JobState::Seeding,
+        ));
+        assert!(!seeding_transition_releases_download_slot(
+            JobState::Starting,
+            JobState::Downloading,
+        ));
+        assert!(!seeding_transition_releases_download_slot(
+            JobState::Downloading,
+            JobState::Paused,
+        ));
+        assert!(!seeding_transition_releases_download_slot(
+            JobState::Downloading,
+            JobState::Completed,
+        ));
     }
 
     #[test]

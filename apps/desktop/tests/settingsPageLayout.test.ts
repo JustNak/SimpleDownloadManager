@@ -5,14 +5,35 @@ const source = readFileSync(new URL('../src/SettingsPage.tsx', import.meta.url),
 
 assert.match(
   source,
-  /settings-surface[\s\S]*grid[\s\S]*max-w-6xl[\s\S]*grid-cols-\[160px_minmax\(0,1fr\)\][\s\S]*gap-3[\s\S]*p-4/,
-  'settings surface should use the slimmer two-column navigator layout tokens',
+  /settings-surface[\s\S]*mx-auto[\s\S]*w-full[\s\S]*max-w-6xl[\s\S]*p-4/,
+  'settings surface should keep a centered single-column content layout',
 );
 
 assert.match(
   source,
+  /export const SETTINGS_SECTIONS = \[/,
+  'settings should export its section anchors for the app sidebar',
+);
+
+for (const [sectionId, iconName] of [
+  ['settings-general', 'general'],
+  ['settings-updates', 'updates'],
+  ['settings-torrenting', 'torrenting'],
+  ['settings-appearance', 'appearance'],
+  ['settings-extension', 'extension'],
+  ['settings-native-host', 'native-host'],
+]) {
+  assert.match(
+    source,
+    new RegExp(`id: '${sectionId}'[\\s\\S]*href: '#${sectionId}'[\\s\\S]*iconName: '${iconName}'[\\s\\S]*description:`),
+    `settings section metadata for ${sectionId} should include id, href, icon, and sidebar description`,
+  );
+}
+
+assert.doesNotMatch(
+  source,
   /settings-nav/,
-  'settings should include a dedicated left-side navigator',
+  'settings page should not render an internal section navigator',
 );
 
 for (const sectionId of [
@@ -28,30 +49,7 @@ for (const sectionId of [
     new RegExp(`id="${sectionId}"`),
     `settings navigator target ${sectionId} should exist`,
   );
-  assert.match(
-    source,
-    new RegExp(`href="#${sectionId}"`),
-    `settings navigator should link to ${sectionId}`,
-  );
 }
-
-assert.match(
-  source,
-  /settings-nav sticky top-24/,
-  'settings navigator should stay visible below the sticky settings header while scrolling long settings pages',
-);
-
-assert.match(
-  source,
-  /className="settings-nav sticky top-24 h-fit rounded-md border border-border bg-card p-1\.5"/,
-  'settings navigator should use slimmer padding',
-);
-
-assert.match(
-  source,
-  /className="flex h-8 items-center rounded-md px-2\.5 text-xs font-medium/,
-  'settings navigator links should use slimmer height and padding',
-);
 
 assert.match(
   source,
@@ -73,7 +71,7 @@ assert.match(
 
 assert.match(
   source,
-  /<header className="col-span-2 sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface\/95 pb-3 pt-4 backdrop-blur/,
+  /<header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface\/95 pb-3 pt-4 backdrop-blur/,
   'settings header actions should stay sticky while scrolling long settings pages',
 );
 

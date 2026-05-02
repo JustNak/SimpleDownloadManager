@@ -3,7 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ConnectionState, JobState } from './types';
 import type { DownloadJob, QueueRowSize, Settings, ToastMessage } from './types';
 import { QueueView } from './QueueView';
-import { SettingsPage } from './SettingsPage';
+import { SettingsPage, SETTINGS_SECTIONS } from './SettingsPage';
 import { ToastArea } from './ToastArea';
 import { AddDownloadModal, type AddDownloadOutcome } from './AddDownloadModal';
 import { Titlebar } from './Titlebar';
@@ -65,6 +65,7 @@ import type { AddJobsResult } from './backend';
 import {
   Box,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CheckCircle2,
   Check,
@@ -79,14 +80,18 @@ import {
   Gauge,
   Magnet,
   MoreHorizontal,
+  Palette,
   Pause,
   Play,
+  PlugZap,
   RotateCw,
   Search,
+  Settings2,
   Settings as SettingsIcon,
   Upload,
   Wifi,
   WifiOff,
+  Wrench,
 } from 'lucide-react';
 import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
@@ -114,6 +119,7 @@ import {
 
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
+type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 export function initialSelectedJobIdFromSearch(search: string): string | null {
   const selectedJobId = new URLSearchParams(search).get('selectJob')?.trim();
@@ -182,9 +188,11 @@ export default function App() {
   const [pendingSettingsView, setPendingSettingsView] = useState<ViewState | null>(null);
   const [isUnsavedSettingsPromptOpen, setIsUnsavedSettingsPromptOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [activeSettingsSectionId, setActiveSettingsSectionId] = useState<SettingsSection['id']>(SETTINGS_SECTIONS[0].id);
   const [updateState, setUpdateState] = useState<AppUpdateState>(initialAppUpdateState);
   const [isUpdatePromptOpen, setIsUpdatePromptOpen] = useState(false);
   const progressSamplesRef = useRef<ProgressSample[]>([]);
+  const settingsScrollRef = useRef<HTMLDivElement | null>(null);
   const startupUpdateCheckStartedRef = useRef(false);
   const pendingVisibleSnapshotRef = useRef<DesktopSnapshot | null>(null);
   const lastDiagnosticsRefreshAtRef = useRef(0);
@@ -336,6 +344,57 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isUnsavedSettingsPromptOpen, settingsDirty, view]);
+
+  useEffect(() => {
+    if (view !== 'settings') {
+      setActiveSettingsSectionId(SETTINGS_SECTIONS[0].id);
+      return;
+    }
+
+    const scrollRoot = settingsScrollRef.current;
+    if (!scrollRoot) return;
+
+    const updateActiveSectionFromScroll = () => {
+      if (scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 2) {
+        setActiveSettingsSectionId(SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1].id);
+        return;
+      }
+
+      const rootTop = scrollRoot.getBoundingClientRect().top;
+      const activationLine = rootTop + 132;
+      const nextSectionId = SETTINGS_SECTIONS.reduce<SettingsSection['id']>((currentSectionId, section) => {
+        const sectionElement = document.getElementById(section.id);
+        if (!sectionElement) return currentSectionId;
+        return sectionElement.getBoundingClientRect().top <= activationLine ? section.id : currentSectionId;
+      }, SETTINGS_SECTIONS[0].id);
+
+      setActiveSettingsSectionId(nextSectionId);
+    };
+
+    const observer = new IntersectionObserver(
+      () => updateActiveSectionFromScroll(),
+      {
+        root: scrollRoot,
+        rootMargin: '-120px 0px -55% 0px',
+        threshold: [0, 0.1, 0.4, 0.8],
+      },
+    );
+
+    SETTINGS_SECTIONS.forEach((section) => {
+      const sectionElement = document.getElementById(section.id);
+      if (sectionElement) observer.observe(sectionElement);
+    });
+
+    updateActiveSectionFromScroll();
+    scrollRoot.addEventListener('scroll', updateActiveSectionFromScroll, { passive: true });
+    window.addEventListener('resize', updateActiveSectionFromScroll);
+
+    return () => {
+      observer.disconnect();
+      scrollRoot.removeEventListener('scroll', updateActiveSectionFromScroll);
+      window.removeEventListener('resize', updateActiveSectionFromScroll);
+    };
+  }, [view]);
 
   function requestViewChange(nextView: ViewState) {
     if (nextView === view) return;
@@ -878,70 +937,78 @@ export default function App() {
       </Titlebar>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
-          <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 flex flex-col gap-0.5">
-            <div className="flex items-center gap-1">
-              <SectionCollapseButton
-                expanded={isDownloadSectionExpanded}
-                collapseLabel="Collapse downloads section"
-                expandLabel="Expand downloads section"
-                onToggle={() => setIsDownloadSectionExpanded((expanded) => !expanded)}
-              />
-              <div className="min-w-0 flex-1">
-                <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
-              </div>
-            </div>
-            {isDownloadSectionExpanded ? (
-              <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
-                {DOWNLOAD_CATEGORIES.map((category) => (
-                  <NavItem
-                    key={category.id}
-                    icon={categoryIcon(category.iconName, 15)}
-                    label={category.label}
-                    count={counts.categories[category.id]}
-                    active={view === categoryView(category.id)}
-                    onClick={() => requestViewChange(categoryView(category.id))}
-                    branch
-                  />
-                ))}
-              </div>
-            ) : null}
-            <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
-            <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
-            <div className="mt-2 border-t border-border/70 pt-2">
-              <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                Torrents
-              </div>
+        {view === 'settings' ? (
+          <SettingsSidebar
+            activeSectionId={activeSettingsSectionId}
+            onBack={() => requestViewChange('all')}
+            onSectionClick={setActiveSettingsSectionId}
+          />
+        ) : (
+          <aside className="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
+            <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 flex flex-col gap-0.5">
               <div className="flex items-center gap-1">
                 <SectionCollapseButton
-                  expanded={isTorrentSectionExpanded}
-                  collapseLabel="Collapse torrents section"
-                  expandLabel="Expand torrents section"
-                  onToggle={() => setIsTorrentSectionExpanded((expanded) => !expanded)}
+                  expanded={isDownloadSectionExpanded}
+                  collapseLabel="Collapse downloads section"
+                  expandLabel="Expand downloads section"
+                  onToggle={() => setIsDownloadSectionExpanded((expanded) => !expanded)}
                 />
                 <div className="min-w-0 flex-1">
-                  <NavItem icon={<Magnet size={18} />} label="All Torrents" count={counts.torrents.all} active={view === 'torrents'} onClick={() => requestViewChange('torrents')} />
+                  <NavItem icon={<Download size={18} />} label="All Downloads" count={counts.all} active={view === 'all'} onClick={() => requestViewChange('all')} />
                 </div>
               </div>
-              {isTorrentSectionExpanded ? (
+              {isDownloadSectionExpanded ? (
                 <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
-                  <NavItem icon={<Gauge size={15} />} label="Active" count={counts.torrents.active} active={view === 'torrent-active'} onClick={() => requestViewChange('torrent-active')} branch />
-                  <NavItem icon={<Upload size={15} />} label="Seeding" count={counts.torrents.seeding} active={view === 'torrent-seeding'} onClick={() => requestViewChange('torrent-seeding')} branch />
-                  <NavItem icon={<CheckCircle2 size={15} />} label="Completed" count={counts.torrents.completed} active={view === 'torrent-completed'} onClick={() => requestViewChange('torrent-completed')} branch />
+                  {DOWNLOAD_CATEGORIES.map((category) => (
+                    <NavItem
+                      key={category.id}
+                      icon={categoryIcon(category.iconName, 15)}
+                      label={category.label}
+                      count={counts.categories[category.id]}
+                      active={view === categoryView(category.id)}
+                      onClick={() => requestViewChange(categoryView(category.id))}
+                      branch
+                    />
+                  ))}
                 </div>
               ) : null}
-            </div>
-          </nav>
+              <NavItem icon={<Gauge size={18} />} label="Active" count={counts.active} active={view === 'active'} onClick={() => requestViewChange('active')} />
+              <NavItem icon={<CheckCircle2 size={18} />} label="Completed" count={counts.completed} active={view === 'completed'} onClick={() => requestViewChange('completed')} />
+              <div className="mt-2 border-t border-border/70 pt-2">
+                <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Torrents
+                </div>
+                <div className="flex items-center gap-1">
+                  <SectionCollapseButton
+                    expanded={isTorrentSectionExpanded}
+                    collapseLabel="Collapse torrents section"
+                    expandLabel="Expand torrents section"
+                    onToggle={() => setIsTorrentSectionExpanded((expanded) => !expanded)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <NavItem icon={<Magnet size={18} />} label="All Torrents" count={counts.torrents.all} active={view === 'torrents'} onClick={() => requestViewChange('torrents')} />
+                  </div>
+                </div>
+                {isTorrentSectionExpanded ? (
+                  <div className="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+                    <NavItem icon={<Gauge size={15} />} label="Active" count={counts.torrents.active} active={view === 'torrent-active'} onClick={() => requestViewChange('torrent-active')} branch />
+                    <NavItem icon={<Upload size={15} />} label="Seeding" count={counts.torrents.seeding} active={view === 'torrent-seeding'} onClick={() => requestViewChange('torrent-seeding')} branch />
+                    <NavItem icon={<CheckCircle2 size={15} />} label="Completed" count={counts.torrents.completed} active={view === 'torrent-completed'} onClick={() => requestViewChange('torrent-completed')} branch />
+                  </div>
+                ) : null}
+              </div>
+            </nav>
 
-          <div className="shrink-0 space-y-2">
-            <div className="h-px bg-border" />
-            <NavItem icon={<SettingsIcon size={18} />} label="Settings" active={view === 'settings'} onClick={() => requestViewChange('settings')} />
-          </div>
-        </aside>
+            <div className="shrink-0 space-y-2">
+              <div className="h-px bg-border" />
+              <NavItem icon={<SettingsIcon size={18} />} label="Settings" active={false} onClick={() => requestViewChange('settings')} />
+            </div>
+          </aside>
+        )}
 
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
           {view === 'settings' ? (
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div ref={settingsScrollRef} className="min-h-0 flex-1 overflow-y-auto">
               <SettingsPage
                 settings={settings}
                 diagnostics={diagnostics}
@@ -1030,6 +1097,83 @@ export default function App() {
       ) : null}
     </div>
   );
+}
+
+function SettingsSidebar({
+  activeSectionId,
+  onBack,
+  onSectionClick,
+}: {
+  activeSectionId: SettingsSection['id'];
+  onBack: () => void;
+  onSectionClick: (sectionId: SettingsSection['id']) => void;
+}) {
+  return (
+    <aside className="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
+      <div className="shrink-0 space-y-2 border-b border-border/70 pb-2">
+        <button
+          type="button"
+          aria-label="Back to downloads"
+          onClick={onBack}
+          className="flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-medium text-foreground transition hover:bg-muted"
+        >
+          <ChevronLeft size={18} className="text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate">Back</span>
+        </button>
+        <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+          Settings
+        </div>
+      </div>
+      <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pt-2 flex flex-col gap-0.5" aria-label="Settings sections">
+        {SETTINGS_SECTIONS.map((section) => {
+          const active = section.id === activeSectionId;
+
+          return (
+            <a
+              key={section.href}
+              href={section.href}
+              aria-current={active ? 'location' : undefined}
+              onClick={() => onSectionClick(section.id)}
+              className={`group relative flex min-h-[54px] w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition ${
+                active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted hover:text-foreground'
+              }`}
+            >
+              <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition ${
+                active ? 'bg-primary/15 text-primary' : 'bg-primary/10 text-primary/80 group-hover:bg-primary/15 group-hover:text-primary'
+              }`}>
+                {settingsSectionIcon(section.iconName)}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-xs font-semibold leading-4">{section.label}</span>
+                <span className={`mt-0.5 block truncate text-[11px] font-normal leading-4 ${
+                  active ? 'text-primary/80' : 'text-muted-foreground'
+                }`}>
+                  {section.description}
+                </span>
+              </span>
+            </a>
+          );
+        })}
+      </nav>
+    </aside>
+  );
+}
+
+function settingsSectionIcon(iconName: SettingsSection['iconName']): React.ReactNode {
+  switch (iconName) {
+    case 'general':
+      return <Settings2 size={17} />;
+    case 'updates':
+      return <Download size={17} />;
+    case 'torrenting':
+      return <Gauge size={17} />;
+    case 'appearance':
+      return <Palette size={17} />;
+    case 'extension':
+      return <PlugZap size={17} />;
+    case 'native-host':
+      return <Wrench size={17} />;
+  }
 }
 
 function UpdateAvailablePrompt({
@@ -1402,6 +1546,11 @@ function StatusBar({
             <span className="flex items-center gap-2 text-foreground">
               <Upload size={16} className="text-fuchsia-400" />
               {formatBytes(torrentStats.uploadedBytes)}
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <span className="flex items-center gap-2 text-foreground">
+              <Download size={16} className="text-primary" />
+              {formatBytes(torrentStats.downloadedBytes)}
             </span>
             <span className="h-4 w-px bg-border" />
             <span className="flex items-center gap-2 text-muted-foreground">

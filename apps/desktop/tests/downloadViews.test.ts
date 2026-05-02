@@ -93,9 +93,10 @@ assert.deepEqual(
     active: 1,
     seeding: 1,
     uploadedBytes: 1024,
+    downloadedBytes: 2560,
     totalRatio: 0.4,
   },
-  'torrent footer stats should summarize total uploaded bytes and total ratio without sharing regular download counts',
+  'torrent footer stats should summarize total torrent downloaded bytes, uploaded bytes, and total ratio without sharing regular download counts',
 );
 
 assert.deepEqual(
