@@ -1,26 +1,32 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App';
-import { BatchProgressWindow } from './BatchProgressWindow';
-import { DownloadProgressWindow } from './DownloadProgressWindow';
-import { DownloadPromptWindow } from './DownloadPromptWindow';
-import { TorrentProgressWindow } from './TorrentProgressWindow';
 import './app.css';
 
-const windowMode = new URLSearchParams(window.location.search).get('window');
-const RootComponent =
-  windowMode === 'download-prompt'
-    ? DownloadPromptWindow
-    : windowMode === 'batch-progress'
-      ? BatchProgressWindow
-    : windowMode === 'torrent-progress'
-      ? TorrentProgressWindow
-    : windowMode === 'download-progress'
-      ? DownloadProgressWindow
-      : App;
+type RootComponent = React.ComponentType;
 
-ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
-  <React.StrictMode>
-    <RootComponent />
-  </React.StrictMode>,
-);
+const windowMode = new URLSearchParams(window.location.search).get('window');
+
+async function resolveRootComponent(): Promise<RootComponent> {
+  if (windowMode === 'download-prompt') {
+    return (await import('./DownloadPromptWindow')).DownloadPromptWindow;
+  }
+  if (windowMode === 'batch-progress') {
+    return (await import('./BatchProgressWindow')).BatchProgressWindow;
+  }
+  if (windowMode === 'torrent-progress') {
+    return (await import('./TorrentProgressWindow')).TorrentProgressWindow;
+  }
+  if (windowMode === 'download-progress') {
+    return (await import('./DownloadProgressWindow')).DownloadProgressWindow;
+  }
+
+  return (await import('./App')).default;
+}
+
+void resolveRootComponent().then((RootComponent) => {
+  ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
+    <React.StrictMode>
+      <RootComponent />
+    </React.StrictMode>,
+  );
+});

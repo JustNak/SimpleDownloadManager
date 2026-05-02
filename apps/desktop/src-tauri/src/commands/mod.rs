@@ -15,15 +15,16 @@ use crate::storage::{
     DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
-    close_download_prompt_window, focus_job_in_main_window, show_batch_progress_window,
-    show_download_prompt_window, show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
+    close_download_prompt_window, focus_job_in_main_window, progress_window_label,
+    show_batch_progress_window, show_download_prompt_window, show_progress_window_for_transfer_kind,
+    torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -44,6 +45,9 @@ use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 pub const STATE_CHANGED_EVENT: &str = "app://state-changed";
+const PROGRESS_JOB_SNAPSHOT_EVENT: &str = "app://progress-job-snapshot";
+const BATCH_PROGRESS_SNAPSHOT_EVENT: &str = "app://batch-progress-snapshot";
+const SETTINGS_SNAPSHOT_EVENT: &str = "app://settings-snapshot";
 const INSTALL_RESOURCE_DIR: &str = "resources\\install";
 const NATIVE_HOST_NAME: &str = "com.myapp.download_manager";
 const DEFAULT_CHROMIUM_EXTENSION_ID: &str = "pkaojpfpjieklhinoibjibmjldohlmbb";
@@ -107,6 +111,27 @@ pub struct AddJobsResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProgressJobSnapshot {
+    pub job: Option<DownloadJob>,
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchProgressSnapshot {
+    pub context: Option<ProgressBatchContext>,
+    pub jobs: Vec<DownloadJob>,
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshot {
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExternalUseResult {
     pub paused_torrent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,9 +177,98 @@ impl ProgressBatchRegistry {
 }
 
 pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
-    if let Err(error) = app.emit(STATE_CHANGED_EVENT, snapshot.clone()) {
+    if let Err(error) = app.emit_to("main", STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
     }
+    emit_popup_snapshots(app, snapshot);
+}
+
+fn emit_popup_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+    emit_settings_snapshot(app, snapshot);
+    emit_progress_job_snapshots(app, snapshot);
+    emit_batch_progress_snapshots(app, snapshot);
+}
+
+fn emit_settings_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
+    if app.get_webview_window(DOWNLOAD_PROMPT_WINDOW).is_none() {
+        return;
+    }
+
+    if let Err(error) = app.emit_to(
+        DOWNLOAD_PROMPT_WINDOW,
+        SETTINGS_SNAPSHOT_EVENT,
+        SettingsSnapshot {
+            settings: snapshot.settings.clone(),
+        },
+    ) {
+        eprintln!("failed to emit settings snapshot: {error}");
+    }
+}
+
+fn emit_progress_job_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+    for label in app.webview_windows().keys() {
+        if !is_progress_window_label(label) {
+            continue;
+        }
+
+        let job = snapshot
+            .jobs
+            .iter()
+            .find(|job| {
+                progress_window_label(&job.id).as_str() == label.as_str()
+                    || torrent_progress_window_label(&job.id).as_str() == label.as_str()
+            })
+            .cloned();
+        let payload = ProgressJobSnapshot {
+            job,
+            settings: snapshot.settings.clone(),
+        };
+        if let Err(error) = app.emit_to(label, PROGRESS_JOB_SNAPSHOT_EVENT, payload) {
+            eprintln!("failed to emit progress job snapshot: {error}");
+        }
+    }
+}
+
+fn emit_batch_progress_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+    let Some(registry) = app.try_state::<ProgressBatchRegistry>() else {
+        return;
+    };
+
+    for label in app.webview_windows().keys() {
+        let Some(batch_id) = label.strip_prefix("batch-progress-") else {
+            continue;
+        };
+        let context = registry.get(batch_id);
+        let jobs = filter_batch_jobs(snapshot, context.as_ref());
+        let payload = BatchProgressSnapshot {
+            context,
+            jobs,
+            settings: snapshot.settings.clone(),
+        };
+        if let Err(error) = app.emit_to(label, BATCH_PROGRESS_SNAPSHOT_EVENT, payload) {
+            eprintln!("failed to emit batch progress snapshot: {error}");
+        }
+    }
+}
+
+fn is_progress_window_label(label: &str) -> bool {
+    label.starts_with("download-progress-") || label.starts_with("torrent-progress-")
+}
+
+fn filter_batch_jobs(
+    snapshot: &DesktopSnapshot,
+    context: Option<&ProgressBatchContext>,
+) -> Vec<DownloadJob> {
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    let selected_ids = context.job_ids.iter().collect::<std::collections::HashSet<_>>();
+    snapshot
+        .jobs
+        .iter()
+        .filter(|job| selected_ids.contains(&job.id))
+        .cloned()
+        .collect()
 }
 
 async fn complete_prompt_action(
@@ -178,6 +292,43 @@ async fn complete_prompt_action(
 #[tauri::command]
 pub async fn get_app_snapshot(state: State<'_, SharedState>) -> Result<DesktopSnapshot, String> {
     Ok(state.snapshot().await)
+}
+
+#[tauri::command]
+pub async fn get_progress_job_snapshot(
+    state: State<'_, SharedState>,
+    id: String,
+) -> Result<ProgressJobSnapshot, String> {
+    let snapshot = state.snapshot().await;
+    Ok(ProgressJobSnapshot {
+        job: snapshot.jobs.into_iter().find(|job| job.id == id),
+        settings: snapshot.settings,
+    })
+}
+
+#[tauri::command]
+pub async fn get_batch_progress_snapshot(
+    state: State<'_, SharedState>,
+    registry: State<'_, ProgressBatchRegistry>,
+    batch_id: String,
+) -> Result<BatchProgressSnapshot, String> {
+    let snapshot = state.snapshot().await;
+    let context = registry.get(&batch_id);
+    let jobs = filter_batch_jobs(&snapshot, context.as_ref());
+    Ok(BatchProgressSnapshot {
+        context,
+        jobs,
+        settings: snapshot.settings,
+    })
+}
+
+#[tauri::command]
+pub async fn get_settings_snapshot(
+    state: State<'_, SharedState>,
+) -> Result<SettingsSnapshot, String> {
+    Ok(SettingsSnapshot {
+        settings: state.settings().await,
+    })
 }
 
 #[tauri::command]

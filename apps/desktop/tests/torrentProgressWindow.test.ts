@@ -22,8 +22,8 @@ const capabilitySource = readFileSync(new URL('../src-tauri/capabilities/default
 
 assert.match(
   mainSource,
-  /import \{ TorrentProgressWindow \} from '\.\/TorrentProgressWindow';[\s\S]*windowMode === 'torrent-progress'\s*\?\s*TorrentProgressWindow/,
-  'main route should mount TorrentProgressWindow for ?window=torrent-progress',
+  /windowMode === 'torrent-progress'[\s\S]*import\('\.\/TorrentProgressWindow'\)[\s\S]*\.TorrentProgressWindow/,
+  'main route should lazily mount TorrentProgressWindow for ?window=torrent-progress',
 );
 
 assert.match(

@@ -12,6 +12,21 @@ export interface DesktopSnapshot {
   settings: Settings;
 }
 
+export interface ProgressJobSnapshot {
+  job: DownloadJob | null;
+  settings: Settings;
+}
+
+export interface BatchProgressSnapshot {
+  context: ProgressBatchContext | null;
+  jobs: DownloadJob[];
+  settings: Settings;
+}
+
+export interface SettingsSnapshot {
+  settings: Settings;
+}
+
 export type AddJobStatus = 'queued' | 'duplicate_existing_job';
 
 export interface AddJobResult {
@@ -32,6 +47,9 @@ export interface ExternalUseResult {
 }
 
 const STATE_CHANGED_EVENT = 'app://state-changed';
+const PROGRESS_JOB_SNAPSHOT_EVENT = 'app://progress-job-snapshot';
+const BATCH_PROGRESS_SNAPSHOT_EVENT = 'app://batch-progress-snapshot';
+const SETTINGS_SNAPSHOT_EVENT = 'app://settings-snapshot';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
 const UPDATE_INSTALL_PROGRESS_EVENT = 'app://update-install-progress';
@@ -362,6 +380,34 @@ function readMockProgressBatchContext(batchId: string): ProgressBatchContext | n
 export async function getAppSnapshot(): Promise<DesktopSnapshot> {
   if (!isTauriRuntime()) return cloneSnapshot(mockState);
   return invokeCommand<DesktopSnapshot>('get_app_snapshot');
+}
+
+export async function getProgressJobSnapshot(id: string): Promise<ProgressJobSnapshot> {
+  if (!isTauriRuntime()) {
+    return {
+      job: cloneSnapshot(mockState).jobs.find((job) => job.id === id) ?? null,
+      settings: { ...mockState.settings },
+    };
+  }
+  return invokeCommand<ProgressJobSnapshot>('get_progress_job_snapshot', { id });
+}
+
+export async function getBatchProgressSnapshot(batchId: string): Promise<BatchProgressSnapshot> {
+  if (!isTauriRuntime()) {
+    const context = readMockProgressBatchContext(batchId);
+    const ids = new Set(context?.jobIds ?? []);
+    return {
+      context,
+      jobs: cloneSnapshot(mockState).jobs.filter((job) => ids.has(job.id)),
+      settings: { ...mockState.settings },
+    };
+  }
+  return invokeCommand<BatchProgressSnapshot>('get_batch_progress_snapshot', { batchId });
+}
+
+export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
+  if (!isTauriRuntime()) return { settings: { ...mockState.settings } };
+  return invokeCommand<SettingsSnapshot>('get_settings_snapshot');
 }
 
 export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {
@@ -853,7 +899,6 @@ export async function getProgressBatchContext(batchId: string): Promise<Progress
   if (!isTauriRuntime()) return readMockProgressBatchContext(batchId);
   return invokeCommand<ProgressBatchContext | null>('get_progress_batch_context', { batchId });
 }
-
 export async function openJobFile(id: string): Promise<ExternalUseResult> {
   if (!isTauriRuntime()) return prepareMockExternalUse(id);
   return invokeCommand<ExternalUseResult>('open_job_file', { id });
@@ -903,6 +948,27 @@ export async function subscribeToStateChanged(
     return async () => mockListeners.delete(listener);
   }
   return listen<DesktopSnapshot>(STATE_CHANGED_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToProgressJobSnapshot(
+  listener: (snapshot: ProgressJobSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<ProgressJobSnapshot>(PROGRESS_JOB_SNAPSHOT_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToBatchProgressSnapshot(
+  listener: (snapshot: BatchProgressSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<BatchProgressSnapshot>(BATCH_PROGRESS_SNAPSHOT_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToSettingsSnapshot(
+  listener: (snapshot: SettingsSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<SettingsSnapshot>(SETTINGS_SNAPSHOT_EVENT, (event) => listener(event.payload));
 }
 
 export async function subscribeToDownloadPromptChanged(

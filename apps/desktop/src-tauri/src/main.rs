@@ -33,7 +33,7 @@ fn main() {
         }
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_updater::Builder::new()
                 .installer_arg(lifecycle::POST_UPDATE_ARG)
@@ -62,6 +62,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            commands::get_progress_job_snapshot,
+            commands::get_batch_progress_snapshot,
+            commands::get_settings_snapshot,
             commands::get_diagnostics,
             commands::export_diagnostics_report,
             commands::add_job,
@@ -99,6 +102,8 @@ fn main() {
             updates::check_for_update,
             updates::install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run tauri app");
+        .build(tauri::generate_context!())
+        .expect("failed to build tauri app");
+
+    app.run(|_app_handle, event| lifecycle::handle_run_event(event));
 }

@@ -3,8 +3,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { applyAppearance } from './appearance';
 import {
   cancelJob,
-  getAppSnapshot,
-  subscribeToStateChanged,
+  getProgressJobSnapshot,
+  subscribeToProgressJobSnapshot,
 } from './backend';
 import {
   calculateDownloadProgressMetrics,
@@ -13,7 +13,7 @@ import {
   type ProgressSample,
 } from './downloadProgressMetrics';
 import { runPopupAction } from './popupActions';
-import type { DownloadJob } from './types';
+import type { DownloadJob, Settings } from './types';
 
 export type PopupActionRunner = (
   action: () => Promise<void>,
@@ -43,14 +43,14 @@ export function useProgressPopup(): ProgressPopupState {
 
   useEffect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
-    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
+    let latestSettings: Settings | null = null;
 
-    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getProgressJobSnapshot>>) => {
       latestSettings = snapshot.settings;
       applyAppearance(snapshot.settings);
     };
-    const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
-      const nextJob = snapshot.jobs.find((candidate) => candidate.id === jobId) ?? null;
+    const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getProgressJobSnapshot>>) => {
+      const nextJob = snapshot.job;
       if (nextJob) {
         progressSamplesRef.current = recordProgressSample(progressSamplesRef.current, nextJob);
       }
@@ -64,10 +64,10 @@ export function useProgressPopup(): ProgressPopupState {
     media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
-      const snapshot = await getAppSnapshot();
+      const snapshot = await getProgressJobSnapshot(jobId);
       applySnapshotAppearance(snapshot);
       applySnapshotJob(snapshot);
-      dispose = await subscribeToStateChanged((nextSnapshot) => {
+      dispose = await subscribeToProgressJobSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
         applySnapshotJob(nextSnapshot);
       });
