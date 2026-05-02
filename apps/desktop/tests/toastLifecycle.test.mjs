@@ -6,5 +6,6 @@ const toastAreaSource = await readFile(new URL('../src/ToastArea.svelte', import
 
 assert.match(appSource, /function removeToast\(id: string\)/, 'toast dismissal should be centralized in the app shell');
 assert.match(appSource, /toasts = toasts\.filter\(\(toast\) => toast\.id !== id\)/, 'toast dismissal should remove by toast id');
-assert.match(toastAreaSource, /window\.setTimeout\(\(\) => onRemove\(toast\.id\), 4200\)/, 'toast auto-close should dismiss by toast id from inside the timer');
+assert.match(toastAreaSource, /TOAST_AUTO_CLOSE_MS = 3000/, 'toast auto-close should match the React toast duration');
+assert.match(toastAreaSource, /window\.setTimeout\(\(\) => onRemove\(toast\.id\), TOAST_AUTO_CLOSE_MS\)/, 'toast auto-close should dismiss by toast id from inside the timer');
 assert.match(toastAreaSource, /return \(\) => timers\.forEach\(\(timer\) => window\.clearTimeout\(timer\)\)/, 'toast auto-close timers should be cleaned up by the Svelte effect');

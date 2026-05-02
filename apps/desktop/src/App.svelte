@@ -6,6 +6,7 @@
     Check,
     CheckCircle2,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     Download,
     FileArchive,
@@ -19,13 +20,17 @@
     Magnet,
     MoreHorizontal,
     Pause,
+    Palette,
     Play,
+    PlugZap,
     RotateCw,
     Search,
+    Settings2,
     Settings as SettingsIcon,
     Upload,
     Wifi,
     WifiOff,
+    Wrench,
   } from '@lucide/svelte';
   import { ConnectionState, JobState } from './types';
   import type { DownloadJob, QueueRowSize, Settings, ToastMessage } from './types';
@@ -138,6 +143,7 @@
   let isUpdatePromptOpen = $state(false);
   let commandMenuOpen = $state(false);
   let commandMenuRoot: HTMLDivElement | null = $state(null);
+  let settingsScrollRoot: HTMLDivElement | null = $state(null);
 
   let progressSamples: ProgressSample[] = [];
   let startupUpdateCheckStarted = false;
@@ -309,6 +315,56 @@
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
+  $effect(() => {
+    if (view !== 'settings') {
+      activeSettingsSectionId = SETTINGS_SECTIONS[0].id;
+      return;
+    }
+
+    const scrollRoot = settingsScrollRoot;
+    if (!scrollRoot) return;
+
+    const updateActiveSectionFromScroll = () => {
+      if (scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 2) {
+        activeSettingsSectionId = SETTINGS_SECTIONS[SETTINGS_SECTIONS.length - 1].id;
+        return;
+      }
+
+      const rootTop = scrollRoot.getBoundingClientRect().top;
+      const activationLine = rootTop + 132;
+      const nextSectionId = SETTINGS_SECTIONS.reduce<SettingsSectionId>((currentSectionId, section) => {
+        const sectionElement = document.getElementById(section.id);
+        if (!sectionElement) return currentSectionId;
+        return sectionElement.getBoundingClientRect().top <= activationLine ? section.id : currentSectionId;
+      }, SETTINGS_SECTIONS[0].id);
+
+      activeSettingsSectionId = nextSectionId;
+    };
+
+    const observer = new IntersectionObserver(
+      () => updateActiveSectionFromScroll(),
+      {
+        root: scrollRoot,
+        rootMargin: '-120px 0px -55% 0px',
+        threshold: [0, 0.1, 0.4, 0.8],
+      },
+    );
+
+    for (const section of SETTINGS_SECTIONS) {
+      const sectionElement = document.getElementById(section.id);
+      if (sectionElement) observer.observe(sectionElement);
+    }
+
+    updateActiveSectionFromScroll();
+    scrollRoot.addEventListener('scroll', updateActiveSectionFromScroll, { passive: true });
+    window.addEventListener('resize', updateActiveSectionFromScroll);
+    return () => {
+      observer.disconnect();
+      scrollRoot.removeEventListener('scroll', updateActiveSectionFromScroll);
+      window.removeEventListener('resize', updateActiveSectionFromScroll);
+    };
   });
 
   $effect(() => {
@@ -888,6 +944,25 @@
     }
   }
 
+  function settingsSectionIcon(iconName: string): IconComponent {
+    switch (iconName) {
+      case 'general':
+        return Settings2;
+      case 'updates':
+        return Download;
+      case 'torrenting':
+        return Gauge;
+      case 'appearance':
+        return Palette;
+      case 'extension':
+        return PlugZap;
+      case 'native-host':
+        return Wrench;
+      default:
+        return SettingsIcon;
+    }
+  }
+
   function externalUseAutoReseedMessage(target: 'file' | 'folder', retrySeconds: number): string {
     if (retrySeconds === 60) {
       return `Torrent paused so Windows can use the ${target}. The app will try to reseed every 60s while Windows is still using it.`;
@@ -987,7 +1062,9 @@
   </Titlebar>
 
   <div class="flex min-h-0 flex-1 overflow-hidden">
-    {#if view !== 'settings'}
+    {#if view === 'settings'}
+      {@render SettingsSidebar(activeSettingsSectionId, () => requestViewChange('all'), (id) => activeSettingsSectionId = id)}
+    {:else}
       <aside class="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
         <nav class="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 flex flex-col gap-0.5">
           <div class="flex items-center gap-1">
@@ -1050,25 +1127,40 @@
 
     <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
       {#if view === 'settings'}
-        <SettingsPage
-          {settings}
-          activeSectionId={activeSettingsSectionId}
-          isSaving={isSavingSettings}
-          onActiveSectionChange={(id) => activeSettingsSectionId = id}
-          onSave={(newSettings) => void handleSaveSettings(newSettings, 'all')}
-          onDirtyChange={setSettingsDirtyState}
-          onBrowseDirectory={handleBrowseDirectory}
-          onClearTorrentSessionCache={() => void handleClearTorrentSessionCache()}
-        />
+        <div class="min-h-0 flex-1 overflow-y-auto bg-surface" bind:this={settingsScrollRoot}>
+          <SettingsPage
+            {settings}
+            {diagnostics}
+            hasActiveTorrentJobs={hasActiveTorrentJobs}
+            isSaving={isSavingSettings}
+            onSave={(newSettings) => void handleSaveSettings(newSettings, 'all')}
+            onCancel={() => requestViewChange('all')}
+            onDirtyChange={setSettingsDirtyState}
+            onBrowseDirectory={handleBrowseDirectory}
+            onClearTorrentSessionCache={() => void handleClearTorrentSessionCache()}
+            onRefreshDiagnostics={() => void refreshDiagnostics({ silent: false, force: true })}
+            onOpenInstallDocs={() => void handleOpenInstallDocs()}
+            onRunHostRegistrationFix={() => void handleRunHostRegistrationFix()}
+            onTestExtensionHandoff={() => void handleTestExtensionHandoff()}
+            onCopyDiagnostics={() => void handleCopyDiagnostics()}
+            onExportDiagnostics={() => void handleExportDiagnostics()}
+            {updateState}
+            onCheckForUpdates={() => void handleCheckForUpdates('manual')}
+            onInstallUpdate={() => void handleInstallUpdate()}
+          />
+        </div>
       {:else}
         <QueueView
           jobs={displayedJobs}
+          {view}
           {sortMode}
+          {progressMetricsByJobId}
           showDetailsOnClick={settings.showDetailsOnClick}
           queueRowSize={settings.queueRowSize}
           onSortChange={(nextSortMode) => sortMode = nextSortMode}
           {selectedJobId}
           onSelectJob={(id) => selectedJobId = id}
+          onClearSelection={() => selectedJobId = null}
           onPause={(id) => void handlePause(id)}
           onResume={(id) => void handleResume(id)}
           onCancel={(id) => void handleCancel(id)}
@@ -1133,6 +1225,44 @@
     <Icon size={17} strokeWidth={strong ? 2.4 : 2} />
     <span>{label}</span>
   </button>
+{/snippet}
+
+{#snippet SettingsSidebar(activeSectionId: SettingsSectionId, onBack: () => void, onSettingsSectionClick: (sectionId: SettingsSectionId) => void)}
+  <aside class="download-sidebar flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar px-2 py-2">
+    <div class="shrink-0 space-y-2 border-b border-border/70 pb-2">
+      <button
+        type="button"
+        aria-label="Back to downloads"
+        onclick={onBack}
+        class="flex h-9 w-full items-center gap-2 rounded-md px-3 text-left text-sm font-medium text-foreground transition hover:bg-muted"
+      >
+        <ChevronLeft size={18} class="text-muted-foreground" />
+        <span class="min-w-0 flex-1 truncate">Back</span>
+      </button>
+      <div class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Settings</div>
+    </div>
+
+    <nav class="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pt-2 flex flex-col gap-0.5" aria-label="Settings sections">
+      {#each SETTINGS_SECTIONS as section (section.href)}
+        {@const active = section.id === activeSectionId}
+        {@const Icon = settingsSectionIcon(section.iconName)}
+        <a
+          href={section.href}
+          aria-current={active ? 'location' : undefined}
+          onclick={() => onSettingsSectionClick(section.id)}
+          class={`group relative flex min-h-[54px] w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left transition ${active ? 'bg-primary-soft text-primary shadow-[inset_3px_0_0_var(--color-primary)]' : 'text-foreground hover:bg-muted hover:text-foreground'}`}
+        >
+          <span class={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition ${active ? 'bg-primary/15 text-primary' : 'bg-primary/10 text-primary/80 group-hover:bg-primary/15 group-hover:text-primary'}`}>
+            <Icon size={17} />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-xs font-semibold leading-4">{section.label}</span>
+            <span class={`mt-0.5 block truncate text-[11px] font-normal leading-4 ${active ? 'text-primary/80' : 'text-muted-foreground'}`}>{section.description}</span>
+          </span>
+        </a>
+      {/each}
+    </nav>
+  </aside>
 {/snippet}
 
 {#snippet CommandMenuItem(icon: IconComponent | undefined, label: string, onClick: () => void, disabled = false, active = false)}

@@ -15,6 +15,11 @@ assert.match(source, /Gauge, 'Active'[\s\S]*CheckCircle2, 'Completed'[\s\S]*Torr
 assert.match(source, /class="shrink-0 space-y-2"/, 'the Settings footer should stay fixed below the scrollable sidebar navigation');
 assert.match(source, /import SettingsPage, \{ SETTINGS_SECTIONS, type SettingsSectionId \}/, 'the app shell should consume the shared settings section list');
 assert.match(source, /let activeSettingsSectionId = \$state<SettingsSectionId>\(SETTINGS_SECTIONS\[0\]\.id\)/, 'settings view should track the active settings section');
-assert.match(source, /onActiveSectionChange=\{\(id\) => activeSettingsSectionId = id\}/, 'settings page should update the active section from the shell');
+assert.match(source, /SettingsSidebar\(activeSettingsSectionId/, 'settings view should restore the React settings sidebar outside the settings form');
+assert.match(source, /Back to downloads/, 'settings sidebar should expose the React back action');
+assert.match(source, /SettingsSidebar\(activeSettingsSectionId[\s\S]*\(id\) => activeSettingsSectionId = id\)/, 'settings sidebar should update the active section from the shell');
+assert.match(source, /bind:this=\{settingsScrollRoot\}/, 'settings page should live inside the scroll root used for active-section tracking');
+assert.match(source, /new IntersectionObserver/, 'settings active section should still update from scroll position');
+assert.match(source, /onCancel=\{\(\) => requestViewChange\('all'\)\}/, 'settings page cancel should leave through the app dirty-state guard');
 assert.doesNotMatch(source, /Needs Attention|label="Queued"|return '(?:attention|queued|torrent-attention|torrent-queued)'/, 'the sidebar should not render removed attention or queued filters');
 assert.doesNotMatch(source, /setView\(outcome\.mode === 'torrent' \? 'torrent-queued' : 'queued'\)|setView\('queued'\)/, 'new downloads should not navigate to removed queued-only views');

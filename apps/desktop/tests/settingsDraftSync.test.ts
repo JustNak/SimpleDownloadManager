@@ -52,5 +52,5 @@ assert.equal(shouldAdoptIncomingSettingsDraft(draftLight, persistedOled, makeSet
 
 const settingsPageSource = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
-assert.match(settingsPageSource, /onDirtyChange\(isDirty, isDirty \? cloneSettings\(formData\) : null\)/, 'SettingsPage should report dirty Svelte drafts to the app shell');
+assert.match(settingsPageSource, /const draft = dirty \? cloneSettings\(formData\) : null[\s\S]*onDirtyChange\(dirty, draft\)/, 'SettingsPage should report dirty Svelte drafts to the app shell');
 assert.match(appSource, /view === 'settings' && settingsDirty[\s\S]*isUnsavedSettingsPromptOpen = true/, 'App should guard navigation away from dirty settings drafts');

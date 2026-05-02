@@ -1,59 +1,183 @@
 <script module lang="ts">
   export const SETTINGS_SECTIONS = [
-    { id: 'downloads', label: 'Downloads', iconName: 'download' },
-    { id: 'torrents', label: 'Torrents', iconName: 'torrent' },
-    { id: 'extension', label: 'Extension', iconName: 'extension' },
-    { id: 'appearance', label: 'Appearance', iconName: 'appearance' },
-    { id: 'startup', label: 'Startup', iconName: 'startup' },
+    {
+      id: 'settings-general',
+      href: '#settings-general',
+      label: 'General',
+      description: 'Folders and limits.',
+      iconName: 'general',
+    },
+    {
+      id: 'settings-updates',
+      href: '#settings-updates',
+      label: 'App Updates',
+      description: 'Version controls.',
+      iconName: 'updates',
+    },
+    {
+      id: 'settings-torrenting',
+      href: '#settings-torrenting',
+      label: 'Torrenting',
+      description: 'Seeding and peers.',
+      iconName: 'torrenting',
+    },
+    {
+      id: 'settings-appearance',
+      href: '#settings-appearance',
+      label: 'Appearance',
+      description: 'Theme and rows.',
+      iconName: 'appearance',
+    },
+    {
+      id: 'settings-extension',
+      href: '#settings-extension',
+      label: 'Web Extension',
+      description: 'Browser handoff.',
+      iconName: 'extension',
+    },
+    {
+      id: 'settings-native-host',
+      href: '#settings-native-host',
+      label: 'Native Host',
+      description: 'Diagnostics tools.',
+      iconName: 'native-host',
+    },
   ] as const;
 
   export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
 </script>
 
 <script lang="ts">
-  import type { Component } from 'svelte';
-  import { Download, FolderOpen, Palette, PlugZap, Save, Shield, Wrench } from '@lucide/svelte';
-  import type { QueueRowSize, Settings } from './types';
+  import { untrack, type Component, type Snippet } from 'svelte';
+  import {
+    Ban,
+    Bell,
+    CheckCircle2,
+    Clock3,
+    Download,
+    ExternalLink,
+    FolderOpen,
+    Gauge,
+    Globe,
+    Palette,
+    Plus,
+    PlugZap,
+    RotateCw,
+    Save,
+    Search,
+    Settings2,
+    ShieldAlert,
+    ShieldCheck,
+    ShieldX,
+    Trash2,
+    Upload,
+    Wrench,
+    X,
+  } from '@lucide/svelte';
+  import type { DiagnosticsSnapshot, QueueRowSize, Settings } from './types';
+  import type { AppUpdateState, AppUpdateVersionTone } from './appUpdates';
   import { DEFAULT_ACCENT_COLOR, normalizeAccentColor } from './appearance';
-  import ToggleControl from './ToggleControl.svelte';
+  import { defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
+  import { settingsEqual, shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
+  import {
+    addExcludedHosts,
+    filterExcludedHosts,
+    formatExcludedSitesSummary,
+    normalizeHostInput,
+    parseExcludedHostInput,
+    removeExcludedHost,
+  } from './settingsExcludedSites';
 
-  type IconComponent = Component<{ size?: number; class?: string }>;
+  type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
   interface Props {
     settings: Settings;
-    activeSectionId: SettingsSectionId;
+    diagnostics: DiagnosticsSnapshot | null;
+    hasActiveTorrentJobs: boolean;
     isSaving: boolean;
-    onActiveSectionChange: (id: SettingsSectionId) => void;
-    onSave: (settings: Settings) => void;
+    onSave: (settings: Settings) => void | Promise<void | boolean>;
+    onCancel: () => void;
     onDirtyChange: (dirty: boolean, draft: Settings | null) => void;
-    onBrowseDirectory: () => Promise<string | null>;
-    onClearTorrentSessionCache: () => void;
+    onBrowseDirectory: () => Promise<string | null | void>;
+    onClearTorrentSessionCache: () => void | Promise<void>;
+    onRefreshDiagnostics: () => void;
+    onOpenInstallDocs: () => void;
+    onRunHostRegistrationFix: () => void;
+    onTestExtensionHandoff: () => void;
+    onCopyDiagnostics: () => void;
+    onExportDiagnostics: () => void;
+    updateState: AppUpdateState;
+    onCheckForUpdates: () => void;
+    onInstallUpdate: () => void;
   }
 
   let {
     settings,
-    activeSectionId,
+    diagnostics,
+    hasActiveTorrentJobs,
     isSaving,
-    onActiveSectionChange,
     onSave,
+    onCancel,
     onDirtyChange,
     onBrowseDirectory,
     onClearTorrentSessionCache,
+    onRefreshDiagnostics,
+    onOpenInstallDocs,
+    onRunHostRegistrationFix,
+    onTestExtensionHandoff,
+    onCopyDiagnostics,
+    onExportDiagnostics,
+    updateState,
+    onCheckForUpdates,
+    onInstallUpdate,
   }: Props = $props();
 
   let formData = $state<Settings>(initialSettings());
+  let previousSettings = initialSettings();
+  let lastReportedDirty = false;
+  let lastReportedDraftKey = '';
   let excludedHostInput = $state('');
+  let excludedBulkInput = $state('');
+  let excludedSearchQuery = $state('');
+  let isExcludedSitesDialogOpen = $state(false);
   let accentColorInput = $state(initialAccentColor());
+  let isClearingTorrentSessionCache = $state(false);
 
-  const isDirty = $derived(JSON.stringify(formData) !== JSON.stringify(settings));
+  const isDirty = $derived(!settingsEqual(formData, settings) || normalizeAccentColor(accentColorInput) !== normalizeAccentColor(settings.accentColor));
+  const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
+  const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
+  const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
 
   $effect(() => {
-    formData = cloneSettings(settings);
-    accentColorInput = normalizeAccentColor(settings.accentColor);
+    const nextSettings = settings;
+    untrack(() => {
+      const previous = previousSettings;
+      previousSettings = cloneSettings(nextSettings);
+
+      if (!shouldAdoptIncomingSettingsDraft(formData, previous, nextSettings)) {
+        return;
+      }
+
+      formData = cloneSettings(nextSettings);
+      excludedHostInput = '';
+      excludedBulkInput = '';
+      excludedSearchQuery = '';
+      isExcludedSitesDialogOpen = false;
+      accentColorInput = normalizeAccentColor(nextSettings.accentColor);
+    });
   });
 
   $effect(() => {
-    onDirtyChange(isDirty, isDirty ? cloneSettings(formData) : null);
+    const dirty = isDirty;
+    const draft = dirty ? cloneSettings(formData) : null;
+    const draftKey = draft ? JSON.stringify(draft) : '';
+    if (dirty === lastReportedDirty && draftKey === lastReportedDraftKey) {
+      return;
+    }
+
+    lastReportedDirty = dirty;
+    lastReportedDraftKey = draftKey;
+    untrack(() => onDirtyChange(dirty, draft));
   });
 
   function cloneSettings(value: Settings): Settings {
@@ -73,31 +197,215 @@
     onSave({
       ...cloneSettings(formData),
       accentColor: normalizeAccentColor(accentColorInput),
+      torrent: normalizeTorrentSettings(formData.torrent, formData.downloadDirectory),
+      extensionIntegration: {
+        ...formData.extensionIntegration,
+        listenPort: normalizeListenPort(String(formData.extensionIntegration.listenPort)),
+      },
     });
   }
 
   async function browseDownloadDirectory() {
     const selected = await onBrowseDirectory();
-    if (selected) formData.downloadDirectory = selected;
+    if (!selected) return;
+
+    const previousTorrentDirectory = defaultTorrentDownloadDirectory(formData.downloadDirectory);
+    const shouldUpdateTorrentDirectory = !formData.torrent.downloadDirectory
+      || formData.torrent.downloadDirectory === previousTorrentDirectory;
+
+    formData.downloadDirectory = selected;
+    if (shouldUpdateTorrentDirectory) {
+      updateTorrentSettings({ downloadDirectory: defaultTorrentDownloadDirectory(selected) });
+    }
+  }
+
+  async function browseTorrentDirectory() {
+    const selected = await onBrowseDirectory();
+    if (selected) updateTorrentSettings({ downloadDirectory: selected });
+  }
+
+  async function clearTorrentSessionCache() {
+    isClearingTorrentSessionCache = true;
+    try {
+      await onClearTorrentSessionCache();
+    } finally {
+      isClearingTorrentSessionCache = false;
+    }
+  }
+
+  function updateTorrentSettings(update: Partial<Settings['torrent']>) {
+    formData.torrent = normalizeTorrentSettings({ ...formData.torrent, ...update }, formData.downloadDirectory);
+  }
+
+  function updateExtensionIntegration(update: Partial<Settings['extensionIntegration']>) {
+    formData.extensionIntegration = {
+      ...formData.extensionIntegration,
+      ...update,
+    };
   }
 
   function addExcludedHost() {
-    const host = excludedHostInput.trim().toLowerCase();
-    if (!host || formData.extensionIntegration.excludedHosts.includes(host)) return;
-    formData.extensionIntegration.excludedHosts = [...formData.extensionIntegration.excludedHosts, host];
+    const normalized = normalizeHostInput(excludedHostInput);
+    if (!normalized) return;
+    const result = addExcludedHosts(excludedHosts, [normalized]);
+    updateExtensionIntegration({ excludedHosts: result.hosts });
     excludedHostInput = '';
   }
 
-  function removeExcludedHost(host: string) {
-    formData.extensionIntegration.excludedHosts = formData.extensionIntegration.excludedHosts.filter((item) => item !== host);
+  function addExcludedBulkHosts() {
+    const candidates = parseExcludedHostInput(excludedBulkInput);
+    if (candidates.length === 0) return;
+    const result = addExcludedHosts(excludedHosts, candidates);
+    updateExtensionIntegration({ excludedHosts: result.hosts });
+    excludedBulkInput = '';
   }
 
-  function sectionIcon(iconName: string): IconComponent {
-    if (iconName === 'download') return Download;
-    if (iconName === 'torrent') return Shield;
-    if (iconName === 'extension') return PlugZap;
-    if (iconName === 'appearance') return Palette;
-    return Wrench;
+  function removeExcludedSite(host: string) {
+    updateExtensionIntegration({ excludedHosts: removeExcludedHost(excludedHosts, host) });
+  }
+
+  function normalizeListenPort(value: string): number {
+    const port = Number.parseInt(value, 10);
+    return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+  }
+
+  function normalizeTorrentPort(value: string): number {
+    const port = Number.parseInt(value, 10);
+    return Number.isFinite(port) && port >= 1024 && port <= 65534 ? port : 42000;
+  }
+
+  function normalizeInteger(value: string, fallback: number): number {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function normalizeNumber(value: string, fallback: number): number {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function usesTorrentRatioLimit(mode: Settings['torrent']['seedMode']) {
+    return mode === 'ratio' || mode === 'ratio_or_time';
+  }
+
+  function usesTorrentTimeLimit(mode: Settings['torrent']['seedMode']) {
+    return mode === 'time' || mode === 'ratio_or_time';
+  }
+
+  function renderUpdateStatus(state: AppUpdateState): string {
+    if (state.status === 'checking') return 'Checking GitHub Releases for a newer alpha build.';
+    if (state.status === 'available' && state.availableUpdate) return `Version ${state.availableUpdate.version} is available.`;
+    if (state.status === 'not_available') return 'You are running the latest alpha build.';
+    if (state.status === 'downloading') return 'Downloading the signed update package.';
+    if (state.status === 'installing') return 'Installing the update. The app may close automatically.';
+    if (state.status === 'error') return 'The last update action failed.';
+    return 'Checks the signed alpha feed hosted on GitHub Releases.';
+  }
+
+  function versionIndicatorToneClass(tone: AppUpdateVersionTone): string {
+    switch (tone) {
+      case 'available':
+        return 'text-primary';
+      case 'error':
+        return 'text-destructive';
+      case 'pending':
+        return 'text-muted-foreground';
+      default:
+        return 'text-foreground';
+    }
+  }
+
+  function updateProgressPercent(state: AppUpdateState): number {
+    if (!state.totalBytes || state.totalBytes <= 0) return 0;
+    return Math.max(0, Math.min(100, (state.downloadedBytes / state.totalBytes) * 100));
+  }
+
+  function formatUpdateProgress(state: AppUpdateState): string {
+    if (!state.totalBytes) return `${formatCompactBytes(state.downloadedBytes)} downloaded`;
+    return `${formatCompactBytes(state.downloadedBytes)} / ${formatCompactBytes(state.totalBytes)}`;
+  }
+
+  function formatCompactBytes(value: number): string {
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    let unitIndex = 0;
+    let nextValue = value;
+    while (nextValue >= 1024 && unitIndex < units.length - 1) {
+      nextValue /= 1024;
+      unitIndex += 1;
+    }
+    return `${nextValue >= 10 || unitIndex === 0 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
+  }
+
+  function renderRegistrationIcon(status?: DiagnosticsSnapshot['hostRegistration']['status']): IconComponent {
+    switch (status) {
+      case 'configured':
+        return ShieldCheck;
+      case 'broken':
+        return ShieldAlert;
+      default:
+        return ShieldX;
+    }
+  }
+
+  function renderRegistrationMessage(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
+    switch (status) {
+      case 'configured':
+        return 'At least one browser has a valid native host registration and host binary path.';
+      case 'broken':
+        return 'A browser registration exists, but the manifest or native host binary path is broken.';
+      case 'missing':
+        return 'No browser registration was detected for the native messaging host.';
+      default:
+        return 'Diagnostics are still loading.';
+    }
+  }
+
+  function registrationStatusLabel(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
+    switch (status) {
+      case 'configured':
+        return 'Ready';
+      case 'broken':
+        return 'Repair';
+      case 'missing':
+        return 'Missing';
+      default:
+        return 'Checking';
+    }
+  }
+
+  function registrationBadgeClass(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
+    switch (status) {
+      case 'configured':
+        return 'bg-success/10 text-success';
+      case 'broken':
+        return 'bg-warning/10 text-warning';
+      case 'missing':
+        return 'bg-destructive/10 text-destructive';
+      default:
+        return 'bg-muted text-muted-foreground';
+    }
+  }
+
+  function diagnosticLevelClass(level: DiagnosticsSnapshot['recentEvents'][number]['level']) {
+    switch (level) {
+      case 'error':
+        return 'text-destructive';
+      case 'warning':
+        return 'text-warning';
+      default:
+        return 'text-success';
+    }
+  }
+
+  function formatDiagnosticEventTime(timestamp: number) {
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return 'Unknown time';
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(timestamp));
   }
 
   const queueRowSizes: Array<{ value: QueueRowSize; label: string }> = [
@@ -107,197 +415,553 @@
     { value: 'large', label: 'Large' },
     { value: 'damn', label: 'DAMN' },
   ];
+
+  const accentPresets = [
+    DEFAULT_ACCENT_COLOR,
+    '#06b6d4',
+    '#22c55e',
+    '#f97316',
+    '#e11d48',
+    '#a855f7',
+  ];
 </script>
 
-<form class="settings-surface flex min-h-0 flex-1 overflow-hidden bg-background" onsubmit={submit}>
-  <aside class="w-56 shrink-0 border-r border-border bg-sidebar p-3">
-    <div class="mb-3 text-xs font-semibold uppercase text-muted-foreground">Settings</div>
-    <nav class="space-y-1">
-      {#each SETTINGS_SECTIONS as section (section.id)}
-        {@const Icon = sectionIcon(section.iconName)}
-        <button
-          type="button"
-          class={`flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-sm ${activeSectionId === section.id ? 'bg-selected text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
-          onclick={() => onActiveSectionChange(section.id)}
-        >
-          <Icon size={16} /> {section.label}
-        </button>
-      {/each}
-    </nav>
-  </aside>
+{#snippet generalContent()}
+  <div class="space-y-3">
+    {@render FieldRow('Download Directory', 'Default save path.', directoryControl)}
+    {@render FieldRow('Max Concurrent Downloads', 'Active job limit.', maxConcurrentControl)}
+    {@render FieldRow('Auto Retry Attempts', 'Failure retries.', autoRetryControl)}
+    {@render FieldRow('Per-Download Speed Limit', 'Transfer cap.', speedLimitControl)}
+    {@render FieldRow('Download Performance', 'Connection strategy.', performanceControl)}
+  </div>
+{/snippet}
 
-  <main class="min-h-0 flex-1 overflow-y-auto p-6">
-    <div class="mx-auto max-w-4xl">
-      <div class="mb-5 flex items-center justify-between">
-        <div>
-          <h1 class="text-xl font-semibold">Settings</h1>
-          <p class="mt-1 text-sm text-muted-foreground">Manage downloads, torrents, browser handoff, and appearance.</p>
+{#snippet updateContent()}
+  <div class="rounded-md border border-border bg-surface p-4">
+    <div class="mb-4 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="font-semibold text-foreground">Alpha channel updates</div>
+        <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderUpdateStatus(updateState)}</div>
+      </div>
+      <button type="button" onclick={onCheckForUpdates} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+        <RotateCw size={16} class={updateState.status === 'checking' ? 'animate-spin' : ''} />
+        Check
+      </button>
+    </div>
+
+    <div class="grid gap-3 md:grid-cols-2">
+      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.3.54-alpha', 'current')}
+      {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
+    </div>
+
+    {#if updateState.status === 'downloading' || updateState.status === 'installing'}
+      <div class="mt-4">
+        <div class="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+          <span>{updateState.status === 'installing' ? 'Installing update' : 'Downloading update'}</span>
+          <span>{formatUpdateProgress(updateState)}</span>
         </div>
-        <button class="inline-flex items-center gap-2 rounded bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-50" disabled={!isDirty || isSaving}>
-          <Save size={15} /> {isSaving ? 'Saving...' : 'Save changes'}
+        <div class="h-2 overflow-hidden rounded-full bg-progress-track">
+          <div class="h-full rounded-full bg-primary" style={`width: ${updateProgressPercent(updateState)}%;`}></div>
+        </div>
+      </div>
+    {/if}
+
+    {#if updateState.availableUpdate}
+      <div class="mt-4 flex justify-end">
+        <button type="button" onclick={onInstallUpdate} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
+          <Download size={16} />
+          Install Update
         </button>
       </div>
+    {:else if updateState.errorMessage}
+      <div class="mt-4 rounded-md border border-destructive/35 bg-destructive/10 px-3 py-2 text-sm text-destructive">{updateState.errorMessage}</div>
+    {/if}
+  </div>
+{/snippet}
 
-      {#if activeSectionId === 'downloads'}
-        <section class="rounded border border-border bg-card p-5 text-card-foreground shadow-sm">
-          <div class="mb-4 flex items-center gap-2">
-            <Download size={18} class="text-primary" />
-            <h2 class="text-base font-semibold">Download behavior</h2>
-          </div>
-          <div class="space-y-4">
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Download directory</span>
-              <div class="flex gap-2">
-                <input class="min-w-0 flex-1 rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.downloadDirectory} />
-                <button type="button" class="inline-flex items-center gap-2 rounded border border-border px-3 text-xs font-semibold hover:bg-muted" onclick={() => void browseDownloadDirectory()}><FolderOpen size={15} /> Browse</button>
-              </div>
-            </label>
-            <div class="grid grid-cols-2 gap-4">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Concurrent downloads</span>
-                <input type="number" min="1" max="16" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.maxConcurrentDownloads} />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Auto retry attempts</span>
-                <input type="number" min="0" max="20" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.autoRetryAttempts} />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Speed limit (KiB/s)</span>
-                <input type="number" min="0" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.speedLimitKibPerSecond} />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Queue row size</span>
-                <select class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.queueRowSize}>
-                  {#each queueRowSizes as option (option.value)}<option value={option.value}>{option.label}</option>{/each}
-                </select>
-              </label>
+{#snippet torrentingContent()}
+  <div class="space-y-3">
+    {@render CompactSetting(Gauge, 'Enable torrent downloads', 'Allow magnet and .torrent transfers.', torrentEnabledControl)}
+    {@render FieldRow('Torrent Directory', 'Default save path for torrents.', torrentDirectoryControl)}
+    {@render FieldRow('Seed Mode', 'Stop policy after completion.', seedModeControl)}
+    {#if usesTorrentRatioLimit(formData.torrent.seedMode)}
+      {@render FieldRow('Seed Ratio Limit', 'Target share ratio.', seedRatioControl)}
+    {/if}
+    {#if usesTorrentTimeLimit(formData.torrent.seedMode)}
+      {@render FieldRow('Seed Time Limit', 'Minutes to seed.', seedTimeControl)}
+    {/if}
+    {@render FieldRow('Upload Limit', 'Seeding cap.', uploadLimitControl)}
+    {@render CompactSetting(Globe, 'Port forwarding', 'Use the configured listen port when available.', portForwardingControl)}
+    {#if formData.torrent.portForwardingEnabled}
+      {@render FieldRow('Forwarded Port', 'Router listen port.', forwardingPortControl)}
+    {/if}
+    {@render FieldRow('Peer Watchdog', 'Peer connection diagnostics.', peerWatchdogControl)}
+    <div class="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+      <div class="text-sm text-muted-foreground">
+        {hasActiveTorrentJobs ? 'Active torrents are running. Clearing the cache may require a restart.' : 'Clear stale torrent engine session data.'}
+      </div>
+      <button type="button" onclick={() => void clearTorrentSessionCache()} disabled={isClearingTorrentSessionCache} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+        <RotateCw size={16} class={isClearingTorrentSessionCache ? 'animate-spin' : ''} />
+        Clear torrent session cache
+      </button>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet appearanceContent()}
+  <div class="space-y-3">
+    {@render FieldRow('Theme', 'Application color scheme.', themeControl)}
+    {@render FieldRow('Accent Color', 'Primary highlight color.', accentControl)}
+    {@render FieldRow('Queue Row Size', 'Main list density.', rowSizeControl)}
+    {@render CompactSetting(Bell, 'Notifications', 'Show desktop notifications for completed or failed downloads.', notificationsControl)}
+    {@render CompactSetting(Clock3, 'Show details on click', 'Selecting a row opens the details pane.', showDetailsControl)}
+  </div>
+{/snippet}
+
+{#snippet extensionContent()}
+  <div class="space-y-3">
+    {@render CompactSetting(PlugZap, 'Enable extension integration', 'Accept browser handoff requests.', extensionEnabledControl)}
+    {@render FieldRow('Handoff Mode', 'How browser downloads are handled.', handoffModeControl)}
+    {@render FieldRow('Listen Port', 'Extension bridge port.', listenPortControl)}
+    {@render CompactSetting(Globe, 'Context menu', 'Show Send to Simple Download Manager in the browser.', contextMenuControl)}
+    {@render CompactSetting(Download, 'Progress after handoff', 'Open a progress window after accepting a browser download.', progressAfterHandoffControl)}
+    {@render CompactSetting(CheckCircle2, 'Badge status', 'Show extension status in the browser toolbar.', badgeStatusControl)}
+    {@render CompactSetting(ShieldCheck, 'Authenticated handoff', 'Require signed browser handoff requests.', authenticatedHandoffControl)}
+    <div class="rounded-md border border-border bg-surface p-3">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <div class="text-sm font-semibold text-foreground">Excluded Sites</div>
+          <div class="mt-0.5 text-xs text-muted-foreground">{formatExcludedSitesSummary(excludedHosts)}</div>
+        </div>
+        <button type="button" onclick={() => isExcludedSitesDialogOpen = true} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+          <Ban size={16} />
+          Manage
+        </button>
+      </div>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet nativeHostContent()}
+  {@const registration = diagnostics?.hostRegistration}
+  {@const RegistrationIcon = renderRegistrationIcon(registration?.status)}
+  <div class="space-y-3">
+    <div class="rounded-md border border-border bg-surface p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex min-w-0 items-start gap-3">
+          <RegistrationIcon size={24} class={registration?.status === 'configured' ? 'text-success' : registration?.status === 'broken' ? 'text-warning' : 'text-muted-foreground'} />
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <div class="font-semibold text-foreground">Native messaging host</div>
+              <span class={`rounded-full px-2 py-0.5 text-xs font-semibold ${registrationBadgeClass(registration?.status)}`}>{registrationStatusLabel(registration?.status)}</span>
             </div>
-            <ToggleControl label="Show details on click" bind:checked={formData.showDetailsOnClick} />
-            <ToggleControl label="Enable notifications" bind:checked={formData.notificationsEnabled} />
+            <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderRegistrationMessage(registration?.status)}</div>
           </div>
-        </section>
-      {:else if activeSectionId === 'torrents'}
-        <section class="rounded border border-border bg-card p-5 text-card-foreground shadow-sm">
-          <div class="mb-4 flex items-center gap-2">
-            <Shield size={18} class="text-primary" />
-            <h2 class="text-base font-semibold">Torrent engine</h2>
-          </div>
-          <div class="space-y-4">
-            <ToggleControl label="Enable torrent downloads" bind:checked={formData.torrent.enabled} />
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Torrent directory</span>
-              <input class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.torrent.downloadDirectory} />
-            </label>
-            <div class="grid grid-cols-2 gap-4">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Seed mode</span>
-                <select class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.torrent.seedMode}>
-                  <option value="forever">Forever</option>
-                  <option value="ratio">Ratio</option>
-                  <option value="time">Time</option>
-                  <option value="ratio_or_time">Ratio or time</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Seed ratio</span>
-                <input type="number" step="0.1" min="0" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.torrent.seedRatioLimit} />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Seed time minutes</span>
-                <input type="number" min="0" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.torrent.seedTimeLimitMinutes} />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Upload limit KiB/s</span>
-                <input type="number" min="0" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.torrent.uploadLimitKibPerSecond} />
-              </label>
+        </div>
+        <button type="button" onclick={onRefreshDiagnostics} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+          <RotateCw size={16} />
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    <div class="grid gap-3 md:grid-cols-3">
+      {@render StatCard('Queue', diagnostics ? String(diagnostics.queueSummary.total) : '--')}
+      {@render StatCard('Active', diagnostics ? String(diagnostics.queueSummary.active) : '--')}
+      {@render StatCard('Recent events', diagnostics ? String(diagnostics.recentEvents.length) : '--')}
+    </div>
+
+    <div class="rounded-md border border-border bg-surface p-4">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div class="text-sm font-semibold text-foreground">Tools</div>
+        <div class="flex flex-wrap gap-2">
+          {@render UtilityButton(ExternalLink, 'Install Docs', onOpenInstallDocs)}
+          {@render UtilityButton(Wrench, 'Repair Host', onRunHostRegistrationFix)}
+          {@render UtilityButton(Download, 'Test Handoff', onTestExtensionHandoff)}
+          {@render UtilityButton(Globe, 'Copy Report', onCopyDiagnostics)}
+          {@render UtilityButton(Upload, 'Export Report', onExportDiagnostics)}
+        </div>
+      </div>
+      {#if registration?.entries?.length}
+        <div class="space-y-2">
+          {#each registration.entries as entry}
+            <div class="rounded-md border border-border bg-card px-3 py-2">
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-sm font-semibold text-foreground">{entry.browser}</div>
+                <span class={`rounded-full px-2 py-0.5 text-xs ${entry.hostBinaryExists && entry.manifestExists ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}`}>
+                  {entry.hostBinaryExists && entry.manifestExists ? 'Ready' : 'Check'}
+                </span>
+              </div>
+              {@render DiagnosticRow('Registry', entry.registryPath, true)}
+              {@render DiagnosticRow('Manifest', entry.manifestPath ?? 'Missing', !entry.manifestExists)}
+              {@render DiagnosticRow('Host', entry.hostBinaryPath ?? 'Missing', !entry.hostBinaryExists)}
             </div>
-            <ToggleControl label="Enable port forwarding" bind:checked={formData.torrent.portForwardingEnabled} />
-            <button type="button" class="mt-3 rounded border border-border px-3 py-2 text-xs font-semibold hover:bg-muted" onclick={onClearTorrentSessionCache}>Clear torrent session cache</button>
-          </div>
-        </section>
-      {:else if activeSectionId === 'extension'}
-        <section class="rounded border border-border bg-card p-5 text-card-foreground shadow-sm">
-          <div class="mb-4 flex items-center gap-2">
-            <PlugZap size={18} class="text-primary" />
-            <h2 class="text-base font-semibold">Browser integration</h2>
-          </div>
-          <div class="space-y-4">
-            <ToggleControl label="Enable extension integration" bind:checked={formData.extensionIntegration.enabled} />
-            <div class="grid grid-cols-2 gap-4">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Handoff mode</span>
-                <select class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.extensionIntegration.downloadHandoffMode}>
-                  <option value="ask">Ask</option>
-                  <option value="auto">Auto</option>
-                  <option value="off">Off</option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Listen port</span>
-                <input type="number" min="1" max="65535" class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.extensionIntegration.listenPort} />
-              </label>
-            </div>
-            <ToggleControl label="Show context menu" bind:checked={formData.extensionIntegration.contextMenuEnabled} />
-            <ToggleControl label="Show progress after handoff" bind:checked={formData.extensionIntegration.showProgressAfterHandoff} />
-            <ToggleControl label="Show badge status" bind:checked={formData.extensionIntegration.showBadgeStatus} />
-            <ToggleControl label="Authenticated handoff" bind:checked={formData.extensionIntegration.authenticatedHandoffEnabled} />
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Excluded hosts</span>
-              <div class="flex gap-2">
-                <input class="min-w-0 flex-1 rounded border border-input bg-background px-3 py-2 text-sm" bind:value={excludedHostInput} placeholder="example.com" />
-                <button type="button" class="rounded border border-border px-3 text-xs font-semibold hover:bg-muted" onclick={addExcludedHost}>Add</button>
-              </div>
-              <div class="mt-2 flex flex-wrap gap-2">
-                {#each formData.extensionIntegration.excludedHosts as host}
-                  <button type="button" class="rounded border border-border bg-background px-2 py-1 text-xs hover:bg-muted" onclick={() => removeExcludedHost(host)}>{host} x</button>
-                {/each}
-              </div>
-            </label>
-          </div>
-        </section>
-      {:else if activeSectionId === 'appearance'}
-        <section class="rounded border border-border bg-card p-5 text-card-foreground shadow-sm">
-          <div class="mb-4 flex items-center gap-2">
-            <Palette size={18} class="text-primary" />
-            <h2 class="text-base font-semibold">Appearance</h2>
-          </div>
-          <div class="grid grid-cols-2 gap-4">
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Theme</span>
-              <select class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.theme}>
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-                <option value="oled_dark">OLED dark</option>
-              </select>
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Accent color</span>
-              <div class="flex gap-2">
-                <input type="color" class="h-10 w-12 rounded border border-input bg-background p-1" bind:value={accentColorInput} />
-                <input class="min-w-0 flex-1 rounded border border-input bg-background px-3 py-2 text-sm font-mono" bind:value={accentColorInput} placeholder={DEFAULT_ACCENT_COLOR} />
-              </div>
-            </label>
-          </div>
-        </section>
+          {/each}
+        </div>
       {:else}
-        <section class="rounded border border-border bg-card p-5 text-card-foreground shadow-sm">
-          <div class="mb-4 flex items-center gap-2">
-            <Wrench size={18} class="text-primary" />
-            <h2 class="text-base font-semibold">Startup</h2>
-          </div>
-          <div class="space-y-4">
-            <ToggleControl label="Start on system startup" bind:checked={formData.startOnStartup} />
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-semibold text-muted-foreground">Launch mode</span>
-              <select class="w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={formData.startupLaunchMode}>
-                <option value="open">Open main window</option>
-                <option value="tray">Start in tray</option>
-              </select>
-            </label>
-          </div>
-        </section>
+        <div class="rounded-md border border-border bg-card px-3 py-3 text-sm text-muted-foreground">No native host registration entries are loaded.</div>
       {/if}
     </div>
-  </main>
+
+    <div class="rounded-md border border-border bg-surface p-4">
+      <div class="mb-3 text-sm font-semibold text-foreground">Recent Events</div>
+      {#if diagnostics?.recentEvents?.length}
+        <div class="max-h-52 overflow-auto rounded-md border border-border bg-card">
+          {#each diagnostics.recentEvents as event}
+            <div class="grid grid-cols-[130px_80px_minmax(0,1fr)] gap-3 border-b border-border/70 px-3 py-2 text-xs last:border-b-0">
+              <span class="text-muted-foreground">{formatDiagnosticEventTime(event.timestamp)}</span>
+              <span class={diagnosticLevelClass(event.level)}>{event.level}</span>
+              <span class="min-w-0 truncate text-foreground" title={event.message}>{event.message}</span>
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="rounded-md border border-border bg-card px-3 py-3 text-sm text-muted-foreground">No recent diagnostics events.</div>
+      {/if}
+    </div>
+  </div>
+{/snippet}
+
+<form onsubmit={submit} class="settings-surface mx-auto w-full max-w-6xl p-4">
+  <header class="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/95 pb-3 pt-4 backdrop-blur">
+    <div>
+      <h1 class="text-xl font-semibold tracking-normal text-foreground">Settings</h1>
+      <p class="mt-0.5 text-xs text-muted-foreground">Configure downloads, appearance, notifications, and native host diagnostics.</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <button type="button" onclick={onCancel} class="h-9 rounded-md px-3 text-sm font-medium text-foreground transition hover:bg-muted">Cancel</button>
+      <button type="submit" disabled={isSaving} class="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
+        <Save size={16} />
+        {isSaving ? 'Saving...' : 'Save Changes'}
+      </button>
+    </div>
+  </header>
+
+  <div class="mt-3 min-w-0 space-y-3">
+    <section id="settings-general" class="scroll-mt-4">
+      {@render SettingsPanel('General', Settings2, generalContent)}
+    </section>
+
+    <section id="settings-updates" class="scroll-mt-4">
+      {@render SettingsPanel('App Updates', Download, updateContent)}
+    </section>
+
+    <section id="settings-torrenting" class="scroll-mt-4">
+      {@render SettingsPanel('Torrenting', Gauge, torrentingContent)}
+    </section>
+
+    <section id="settings-appearance" class="scroll-mt-4">
+      {@render SettingsPanel('Appearance', Palette, appearanceContent)}
+    </section>
+
+    <section id="settings-extension" class="scroll-mt-4">
+      {@render SettingsPanel('Web Extension', PlugZap, extensionContent)}
+    </section>
+
+    <section id="settings-native-host" class="scroll-mt-4">
+      {@render SettingsPanel('Native Host', Wrench, nativeHostContent)}
+    </section>
+  </div>
 </form>
+
+{#if isExcludedSitesDialogOpen}
+  {@render ExcludedSitesDialog()}
+{/if}
+
+{#snippet directoryControl()}
+  <div class="flex min-w-0 gap-2">
+    <input type="text" id="downloadDirectory" name="downloadDirectory" value={formData.downloadDirectory} readonly class="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-muted-foreground outline-none" />
+    <button type="button" onclick={() => void browseDownloadDirectory()} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+      <FolderOpen size={16} />
+      Browse
+    </button>
+  </div>
+{/snippet}
+
+{#snippet maxConcurrentControl()}
+  <input type="number" id="maxConcurrentDownloads" name="maxConcurrentDownloads" value={formData.maxConcurrentDownloads} oninput={(event) => formData.maxConcurrentDownloads = normalizeInteger(event.currentTarget.value, formData.maxConcurrentDownloads)} min="1" max="10" class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet autoRetryControl()}
+  <input type="number" id="autoRetryAttempts" name="autoRetryAttempts" value={formData.autoRetryAttempts} oninput={(event) => formData.autoRetryAttempts = normalizeInteger(event.currentTarget.value, formData.autoRetryAttempts)} min="0" max="10" class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet speedLimitControl()}
+  <div class="flex items-center gap-2">
+    <input type="number" id="speedLimitKibPerSecond" name="speedLimitKibPerSecond" value={formData.speedLimitKibPerSecond} oninput={(event) => formData.speedLimitKibPerSecond = normalizeInteger(event.currentTarget.value, formData.speedLimitKibPerSecond)} min="0" max="1048576" class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+    <span class="text-sm text-muted-foreground">KB/s</span>
+  </div>
+{/snippet}
+
+{#snippet performanceControl()}
+  <select id="downloadPerformanceMode" name="downloadPerformanceMode" bind:value={formData.downloadPerformanceMode} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="stable">Stable</option>
+    <option value="balanced">Balanced</option>
+    <option value="fast">Fast</option>
+  </select>
+{/snippet}
+
+{#snippet torrentEnabledControl()}
+  {@render ToggleSwitch('torrentEnabled', formData.torrent.enabled, (checked) => updateTorrentSettings({ enabled: checked }))}
+{/snippet}
+
+{#snippet torrentDirectoryControl()}
+  <div class="flex min-w-0 gap-2">
+    <input type="text" bind:value={formData.torrent.downloadDirectory} class="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-muted-foreground outline-none" />
+    <button type="button" onclick={() => void browseTorrentDirectory()} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+      <FolderOpen size={16} />
+      Browse
+    </button>
+  </div>
+{/snippet}
+
+{#snippet seedModeControl()}
+  <select bind:value={formData.torrent.seedMode} onchange={() => updateTorrentSettings({ seedMode: formData.torrent.seedMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="forever">Forever</option>
+    <option value="ratio">Ratio</option>
+    <option value="time">Time</option>
+    <option value="ratio_or_time">Ratio or time</option>
+  </select>
+{/snippet}
+
+{#snippet seedRatioControl()}
+  <input type="number" step="0.1" min="0.1" max="100" value={formData.torrent.seedRatioLimit} oninput={(event) => updateTorrentSettings({ seedRatioLimit: normalizeNumber(event.currentTarget.value, formData.torrent.seedRatioLimit) })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet seedTimeControl()}
+  <input type="number" min="1" max="525600" value={formData.torrent.seedTimeLimitMinutes} oninput={(event) => updateTorrentSettings({ seedTimeLimitMinutes: normalizeInteger(event.currentTarget.value, formData.torrent.seedTimeLimitMinutes) })} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet uploadLimitControl()}
+  <div class="flex items-center gap-2">
+    <input type="number" min="0" max="1048576" value={formData.torrent.uploadLimitKibPerSecond} oninput={(event) => updateTorrentSettings({ uploadLimitKibPerSecond: normalizeInteger(event.currentTarget.value, formData.torrent.uploadLimitKibPerSecond) })} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+    <span class="text-sm text-muted-foreground">KiB/s</span>
+  </div>
+{/snippet}
+
+{#snippet portForwardingControl()}
+  {@render ToggleSwitch('portForwardingEnabled', formData.torrent.portForwardingEnabled, (checked) => updateTorrentSettings({ portForwardingEnabled: checked }))}
+{/snippet}
+
+{#snippet forwardingPortControl()}
+  <input type="number" min="1024" max="65534" value={formData.torrent.portForwardingPort} oninput={(event) => updateTorrentSettings({ portForwardingPort: normalizeTorrentPort(event.currentTarget.value) })} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet peerWatchdogControl()}
+  <select bind:value={formData.torrent.peerConnectionWatchdogMode} onchange={() => updateTorrentSettings({ peerConnectionWatchdogMode: formData.torrent.peerConnectionWatchdogMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="diagnose">Diagnose</option>
+    <option value="experimental">Experimental</option>
+  </select>
+{/snippet}
+
+{#snippet themeControl()}
+  <select bind:value={formData.theme} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="system">System</option>
+    <option value="light">Light</option>
+    <option value="dark">Dark</option>
+    <option value="oled_dark">OLED dark</option>
+  </select>
+{/snippet}
+
+{#snippet accentControl()}
+  <div class="flex flex-wrap items-center gap-2">
+    <input type="color" bind:value={accentColorInput} class="h-9 w-12 rounded-md border border-input bg-background p-1" />
+    <input bind:value={accentColorInput} placeholder={DEFAULT_ACCENT_COLOR} class="h-9 w-32 rounded-md border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+    <div class="flex gap-1">
+      {#each accentPresets as preset}
+        <button type="button" aria-label={`Use accent ${preset}`} title={preset} onclick={() => accentColorInput = preset} class="h-7 w-7 rounded-md border border-border" style={`background: ${preset};`}></button>
+      {/each}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet rowSizeControl()}
+  <select bind:value={formData.queueRowSize} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    {#each queueRowSizes as option}
+      <option value={option.value}>{option.label}</option>
+    {/each}
+  </select>
+{/snippet}
+
+{#snippet notificationsControl()}
+  {@render ToggleSwitch('notificationsEnabled', formData.notificationsEnabled, (checked) => formData.notificationsEnabled = checked)}
+{/snippet}
+
+{#snippet showDetailsControl()}
+  {@render ToggleSwitch('showDetailsOnClick', formData.showDetailsOnClick, (checked) => formData.showDetailsOnClick = checked)}
+{/snippet}
+
+{#snippet extensionEnabledControl()}
+  {@render ToggleSwitch('extensionEnabled', formData.extensionIntegration.enabled, (checked) => updateExtensionIntegration({ enabled: checked }))}
+{/snippet}
+
+{#snippet handoffModeControl()}
+  <select bind:value={formData.extensionIntegration.downloadHandoffMode} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="ask">Ask</option>
+    <option value="auto">Auto</option>
+    <option value="off">Off</option>
+  </select>
+{/snippet}
+
+{#snippet listenPortControl()}
+  <input type="number" min="1" max="65535" bind:value={formData.extensionIntegration.listenPort} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet contextMenuControl()}
+  {@render ToggleSwitch('contextMenuEnabled', formData.extensionIntegration.contextMenuEnabled, (checked) => updateExtensionIntegration({ contextMenuEnabled: checked }), !formData.extensionIntegration.enabled)}
+{/snippet}
+
+{#snippet progressAfterHandoffControl()}
+  {@render ToggleSwitch('showProgressAfterHandoff', formData.extensionIntegration.showProgressAfterHandoff, (checked) => updateExtensionIntegration({ showProgressAfterHandoff: checked }), !formData.extensionIntegration.enabled)}
+{/snippet}
+
+{#snippet badgeStatusControl()}
+  {@render ToggleSwitch('showBadgeStatus', formData.extensionIntegration.showBadgeStatus, (checked) => updateExtensionIntegration({ showBadgeStatus: checked }), !formData.extensionIntegration.enabled)}
+{/snippet}
+
+{#snippet authenticatedHandoffControl()}
+  {@render ToggleSwitch('authenticatedHandoffEnabled', formData.extensionIntegration.authenticatedHandoffEnabled, (checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked }), !formData.extensionIntegration.enabled)}
+{/snippet}
+
+{#snippet SettingsPanel(title: string, icon: IconComponent, content: Snippet)}
+  {@const Icon = icon}
+  <div class="rounded-md border border-border bg-card">
+    <header class="flex min-h-11 items-center justify-between gap-3 border-b border-border bg-header px-4 py-2">
+      <div class="flex items-center gap-2 font-semibold text-foreground">
+        <span class="text-primary"><Icon size={20} /></span>
+        {title}
+      </div>
+    </header>
+    <div class="space-y-3 p-4">
+      {@render content()}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet FieldRow(label: string, description: string, control: Snippet, tooltip = description)}
+  <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4">
+    <div>
+      <div class="text-sm font-semibold text-foreground">{label}</div>
+      <p class="mt-0.5 text-xs leading-4 text-muted-foreground" title={tooltip}>{description}</p>
+    </div>
+    <div class="min-w-0">
+      {@render control()}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet ToggleSwitch(id: string, checked: boolean, onChange: (checked: boolean) => void, disabled = false)}
+  <label for={id} class={`relative inline-flex items-center ${disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+    <input type="checkbox" {id} {checked} {disabled} class="peer sr-only" onchange={(event) => onChange(event.currentTarget.checked)} />
+    <span class="h-6 w-11 rounded-full bg-muted transition peer-checked:bg-primary"></span>
+    <span class="absolute left-0.5 top-0.5 h-5 w-5 rounded-full border border-border bg-white transition peer-checked:translate-x-5"></span>
+  </label>
+{/snippet}
+
+{#snippet CompactSetting(icon: IconComponent, title: string, description: string, control: Snippet)}
+  {@const Icon = icon}
+  <div class="flex min-h-16 items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+    <div class="flex min-w-0 items-start gap-3">
+      <span class="mt-0.5 text-primary"><Icon size={18} /></span>
+      <div class="min-w-0">
+        <div class="text-sm font-semibold text-foreground">{title}</div>
+        <div class="mt-0.5 text-xs leading-4 text-muted-foreground" title={description}>{description}</div>
+      </div>
+    </div>
+    <div class="shrink-0">
+      {@render control()}
+    </div>
+  </div>
+{/snippet}
+
+{#snippet UtilityButton(icon: IconComponent, label: string, onClick: () => void, primary = false, disabled = false)}
+  {@const Icon = icon}
+  <button type="button" onclick={onClick} {disabled} class={`flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition ${primary ? 'bg-primary text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50' : 'border border-input bg-background text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50'}`}>
+    <Icon size={16} />
+    {label}
+  </button>
+{/snippet}
+
+{#snippet VersionIndicator(label: string, value: string, tone: AppUpdateVersionTone = 'current')}
+  <div class="min-w-0 border-l border-border pl-3">
+    <div class="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{label}</div>
+    <div class={`mt-1 truncate text-sm font-semibold tabular-nums ${versionIndicatorToneClass(tone)}`} title={value}>{value}</div>
+  </div>
+{/snippet}
+
+{#snippet StatCard(label: string, value: string)}
+  <div class="rounded-md border border-border bg-surface px-3 py-2">
+    <div class="text-xs text-muted-foreground">{label}</div>
+    <div class="mt-1 text-lg font-semibold tabular-nums text-foreground">{value}</div>
+  </div>
+{/snippet}
+
+{#snippet DiagnosticRow(label: string, value: string, muted = false)}
+  <div class="grid grid-cols-[110px_minmax(0,1fr)] gap-3 py-1 text-sm">
+    <span class="text-muted-foreground">{label}</span>
+    <span class={`break-all font-mono text-xs ${muted ? 'text-muted-foreground' : 'text-foreground'}`}>{value}</span>
+  </div>
+{/snippet}
+
+{#snippet ExcludedSitesDialog()}
+  <div class="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 px-4">
+    <div role="dialog" aria-modal="true" aria-labelledby="excluded-sites-title" class="w-full max-w-2xl rounded-md border border-border bg-card shadow-2xl">
+      <header class="flex items-center justify-between border-b border-border bg-header px-5 py-3">
+        <div>
+          <h2 id="excluded-sites-title" class="text-base font-semibold text-foreground">Excluded Sites</h2>
+          <p class="mt-0.5 text-xs text-muted-foreground">Prevent matching hosts from being handed off by the browser extension.</p>
+        </div>
+        <button type="button" onclick={() => isExcludedSitesDialogOpen = false} aria-label="Close excluded sites" class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground">
+          <X size={18} />
+        </button>
+      </header>
+
+      <div class="space-y-4 px-5 py-4">
+        <div class="grid gap-3 md:grid-cols-[1fr_auto]">
+          <input bind:value={excludedHostInput} placeholder="example.com or *.example.com" class="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+          <button type="button" onclick={addExcludedHost} disabled={!normalizeHostInput(excludedHostInput)} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+            <Plus size={14} />
+            Add
+          </button>
+        </div>
+
+        <div class="grid gap-3 md:grid-cols-[1fr_auto]">
+          <textarea bind:value={excludedBulkInput} rows="3" placeholder="Paste hosts, URLs, or wildcard hosts separated by commas or new lines." class="resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"></textarea>
+          <button type="button" onclick={addExcludedBulkHosts} disabled={parseExcludedHostInput(excludedBulkInput).length === 0} class="flex h-9 items-center gap-2 self-end rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+            <Plus size={14} />
+            Add Bulk
+          </button>
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-sm font-semibold text-foreground" for="excludedSitesSearch">Current Sites</label>
+          <div class="relative">
+            <Search size={15} class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input id="excludedSitesSearch" type="text" bind:value={excludedSearchQuery} placeholder="Search hosts" class="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+          </div>
+          <div class="max-h-56 overflow-auto rounded-md border border-border bg-surface">
+            {#if filteredExcludedHosts.length > 0}
+              {#each filteredExcludedHosts as host}
+                <div class="flex h-10 items-center justify-between gap-3 border-b border-border/70 px-3 last:border-b-0">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <Ban size={14} class="shrink-0 text-muted-foreground" />
+                    <span class="truncate text-sm font-medium text-foreground">{host}</span>
+                  </div>
+                  <button type="button" onclick={() => removeExcludedSite(host)} disabled={!formData.extensionIntegration.enabled} class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50" title={`Remove ${host}`} aria-label={`Remove ${host}`}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              {/each}
+            {:else}
+              <div class="px-3 py-6 text-center text-sm text-muted-foreground">No excluded sites match.</div>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <footer class="flex justify-end border-t border-border px-5 py-3">
+        <button type="button" onclick={() => isExcludedSitesDialogOpen = false} class="h-9 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90">Done</button>
+      </footer>
+    </div>
+  </div>
+{/snippet}

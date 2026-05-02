@@ -12,6 +12,7 @@
 </script>
 
 <script lang="ts">
+  import type { Component } from 'svelte';
   import { Archive, Link2, ListPlus, Magnet, PackagePlus, X } from '@lucide/svelte';
   import { addJob, addJobs, browseTorrentFile, type AddJobResult, type AddJobsResult } from './backend';
   import { getErrorMessage } from './errors';
@@ -19,8 +20,16 @@
     progressPopupIntentForSubmission,
     type DownloadMode,
   } from './batchProgress';
-  import { downloadSubmitLabel, ensureTrailingEditableLine, parseDownloadUrlLines } from './downloadInput';
+  import {
+    batchUrlTextAreaClassName,
+    batchUrlTextAreaWrap,
+    downloadSubmitLabel,
+    ensureTrailingEditableLine,
+    parseDownloadUrlLines,
+  } from './downloadInput';
   import { validateOptionalSha256 } from './downloadIntegrity';
+
+  type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
   interface Props {
     onClose: () => void;
@@ -40,14 +49,19 @@
   let isSubmitting = $state(false);
   let isImportingTorrent = $state(false);
   let errorMessage = $state('');
+  let inputElement = $state<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
   const activeUrls = $derived(urlsForMode(mode));
   const canSubmit = $derived(activeUrls.length > 0 && !isSubmitting && !(mode === 'bulk' && combineBulk && !archiveName.trim()));
   const submitLabel = $derived(downloadSubmitLabel(mode, activeUrls.length, combineBulk));
+  const readyLabel = $derived(mode === 'torrent'
+    ? `${activeUrls.length} ${activeUrls.length === 1 ? 'torrent' : 'torrents'} ready`
+    : `${activeUrls.length} ${activeUrls.length === 1 ? 'link' : 'links'} ready`);
 
   $effect(() => {
     mode;
     errorMessage = '';
+    requestAnimationFrame(() => inputElement?.focus());
   });
 
   $effect(() => {
@@ -109,9 +123,12 @@
     errorMessage = '';
     try {
       const selected = await browseTorrentFile();
-      if (selected) torrentUrl = selected;
+      if (selected) {
+        mode = 'torrent';
+        torrentUrl = selected;
+      }
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : 'Could not import torrent file.';
+      errorMessage = getErrorMessage(error, 'Failed to import torrent file.');
     } finally {
       isImportingTorrent = false;
     }
@@ -152,78 +169,124 @@
     }
   }
 
-  const modes: Array<{ id: DownloadMode; label: string; hint: string; icon: typeof Link2 }> = [
-    { id: 'single', label: 'Single', hint: 'One URL with optional SHA-256 verification.', icon: Link2 },
-    { id: 'torrent', label: 'Torrent', hint: 'Magnet link, .torrent URL, or local .torrent file.', icon: Magnet },
-    { id: 'multi', label: 'Multi', hint: 'One URL per line, kept as separate downloads.', icon: ListPlus },
-    { id: 'bulk', label: 'Bulk', hint: 'Queue many URLs and optionally combine them into one archive.', icon: Archive },
+  const modes: Array<{ id: DownloadMode; label: string; icon: IconComponent }> = [
+    { id: 'single', label: 'File', icon: Link2 },
+    { id: 'torrent', label: 'Torrent', icon: Magnet },
+    { id: 'multi', label: 'Multi', icon: ListPlus },
+    { id: 'bulk', label: 'Bulk', icon: PackagePlus },
   ];
 </script>
 
-<div class="fixed inset-0 z-40 flex items-center justify-center bg-black/35 px-4" role="presentation" onmousedown={(event) => event.target === event.currentTarget && onClose()}>
-  <div class="flex w-[640px] max-w-full flex-col overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="add-download-title">
-    <header class="flex items-center justify-between border-b border-border bg-header px-4 py-3">
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-[1px]" role="presentation" onmousedown={(event) => event.target === event.currentTarget && onClose()}>
+  <div class="w-full max-w-xl overflow-hidden rounded-md border border-border bg-card shadow-2xl animate-in fade-in zoom-in-95 duration-200" role="dialog" aria-modal="true" aria-labelledby="add-download-title">
+    <header class="flex items-center justify-between border-b border-border bg-header px-5 py-3">
       <div>
-        <h2 id="add-download-title" class="text-sm font-semibold">New download</h2>
-        <p class="mt-0.5 text-xs text-muted-foreground">Add regular downloads, torrents, or batch jobs.</p>
+        <h2 id="add-download-title" class="text-base font-semibold text-foreground">New Download</h2>
+        <p class="mt-0.5 text-xs text-muted-foreground">Add a file, torrent, link list, or bulk archive.</p>
       </div>
-      <button class="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" title="Close" onclick={onClose}><X size={17} /></button>
+      <button class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" aria-label="Close new download" title="Close" onclick={onClose}><X size={18} /></button>
     </header>
 
-    <form class="flex min-h-0 flex-col" onsubmit={submitForm}>
-      <div class="grid grid-cols-4 gap-2 border-b border-border bg-surface p-3">
-        {#each modes as item (item.id)}
-          {@const Icon = item.icon}
-          <button
-            type="button"
-            class={`min-w-0 rounded border px-3 py-2 text-left transition ${mode === item.id ? 'border-primary bg-primary-soft text-accent-foreground' : 'border-border bg-background hover:bg-muted'}`}
-            onclick={() => mode = item.id}
-          >
-            <div class="flex items-center gap-2 text-xs font-semibold"><Icon size={15} /> {item.label}</div>
-            <div class="mt-1 line-clamp-2 text-[10px] leading-3 text-muted-foreground">{item.hint}</div>
-          </button>
-        {/each}
+    <form onsubmit={submitForm}>
+      <div class="border-b border-border px-5 py-3">
+        <div class="grid grid-cols-4 rounded-md border border-border bg-background p-1">
+          {#each modes as item (item.id)}
+            {@const Icon = item.icon}
+            <button
+              type="button"
+              class={`flex h-8 items-center justify-center gap-1.5 rounded-[4px] text-xs font-semibold transition ${mode === item.id ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              onclick={() => mode = item.id}
+            >
+              <Icon size={15} />
+              <span class="truncate">{item.label}</span>
+            </button>
+          {/each}
+        </div>
       </div>
 
-      <div class="min-h-[280px] p-4">
+      <div class="space-y-3 px-5 py-4">
         {#if mode === 'single'}
-          <label class="block text-xs font-semibold text-foreground" for="single-download-url">Download URL</label>
-          <input id="single-download-url" type="url" required class="mt-1 w-full rounded border border-input bg-background px-3 py-2 text-sm" bind:value={singleUrl} placeholder="https://example.com/file.zip" />
-          <label class="mt-4 block text-xs font-semibold text-foreground" for="single-download-sha256">Expected SHA-256</label>
-          <input id="single-download-sha256" class="mt-1 w-full rounded border border-input bg-background px-3 py-2 text-sm font-mono" bind:value={singleSha256} placeholder="Optional integrity hash" />
-        {:else if mode === 'torrent'}
-          <label class="block text-xs font-semibold text-foreground" for="torrent-download-source">Torrent source</label>
-          <div class="mt-1 flex gap-2">
-            <input id="torrent-download-source" required class="min-w-0 flex-1 rounded border border-input bg-background px-3 py-2 text-sm" bind:value={torrentUrl} placeholder="magnet:?xt=... or https://example.com/file.torrent" />
-            <button type="button" class="inline-flex items-center gap-2 rounded border border-border px-3 text-xs font-semibold hover:bg-muted" onclick={() => void importTorrentFile()} disabled={isImportingTorrent}>
-              <PackagePlus size={15} /> Import
-            </button>
+          <div>
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label class="text-xs font-semibold text-foreground" for="single-download-url">File URL</label>
+              <span class="text-xs text-muted-foreground">HTTP(S) direct download.</span>
+            </div>
+            <input bind:this={inputElement} id="single-download-url" type="url" required class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" bind:value={singleUrl} placeholder="https://example.com/file.zip" />
           </div>
+          <div>
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label class="text-xs font-semibold text-foreground" for="single-download-sha256">SHA-256 Checksum</label>
+              <span class="text-xs text-muted-foreground">Optional integrity check after download.</span>
+            </div>
+            <input id="single-download-sha256" class="h-9 w-full rounded-md border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" bind:value={singleSha256} placeholder="64-character hex digest" spellcheck="false" />
+          </div>
+        {:else if mode === 'torrent'}
+          <section class="space-y-3">
+            <div class="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <Magnet size={16} class="text-primary" />
+              <span>Add Torrent</span>
+            </div>
+            <div>
+              <div class="mb-2 flex items-end justify-between gap-3">
+                <label class="text-xs font-semibold text-foreground" for="torrent-download-source">Torrent URL</label>
+                <span class="text-xs text-muted-foreground">Magnet or HTTP(S) .torrent link.</span>
+              </div>
+              <input bind:this={inputElement} id="torrent-download-source" required class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" bind:value={torrentUrl} placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent" />
+            </div>
+          </section>
         {:else if mode === 'multi'}
-          <label class="block text-xs font-semibold text-foreground" for="multi-download-urls">Download URLs</label>
-          <textarea id="multi-download-urls" class="mt-1 h-44 w-full resize-none rounded border border-input bg-background px-3 py-2 text-sm" value={multiUrls} oninput={(event) => multiUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/file-1.zip&#10;https://example.com/file-2.zip"></textarea>
+          <div>
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label class="text-xs font-semibold text-foreground" for="multi-download-urls">Download URLs</label>
+              <span class="text-xs text-muted-foreground">Paste one HTTP(S) file link per line.</span>
+            </div>
+            <textarea bind:this={inputElement} id="multi-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={multiUrls} oninput={(event) => multiUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/file-01.zip&#10;https://example.com/file-02.zip"></textarea>
+          </div>
         {:else}
-          <label class="block text-xs font-semibold text-foreground" for="bulk-download-urls">Bulk URLs</label>
-          <textarea id="bulk-download-urls" class="mt-1 h-36 w-full resize-none rounded border border-input bg-background px-3 py-2 text-sm" value={bulkUrls} oninput={(event) => bulkUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/asset-1.png&#10;https://example.com/asset-2.png"></textarea>
-          <label class="mt-3 flex items-center gap-2 text-xs font-semibold">
-            <input type="checkbox" bind:checked={combineBulk} />
-            Combine completed files into archive
-          </label>
-          {#if combineBulk}
-            <input class="mt-2 w-full rounded border border-input bg-background px-3 py-2 text-sm" value={archiveName} oninput={(event) => archiveName = normalizeArchiveName(event.currentTarget.value)} placeholder="bulk-download.zip" />
-          {/if}
+          <div>
+            <div class="mb-2 flex items-end justify-between gap-3">
+              <label class="text-xs font-semibold text-foreground" for="bulk-download-urls">Bulk Links</label>
+              <span class="text-xs text-muted-foreground">Paste one HTTP(S) file link per line.</span>
+            </div>
+            <textarea bind:this={inputElement} id="bulk-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={bulkUrls} oninput={(event) => bulkUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/assets/model.fbx&#10;https://example.com/assets/textures.zip&#10;https://example.com/assets/readme.pdf"></textarea>
+          </div>
+          <div class="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_220px]">
+            <label class="flex items-start gap-3 text-sm">
+              <input type="checkbox" bind:checked={combineBulk} class="mt-1 h-4 w-4 accent-primary" />
+              <span>
+                <span class="flex items-center gap-2 font-medium text-foreground">
+                  <Archive size={16} />
+                  Combine into one archive
+                </span>
+                <span class="mt-1 block text-xs leading-5 text-muted-foreground">Links are queued together with an archive name so the batch can be collected as one compressed output.</span>
+              </span>
+            </label>
+            <input class="h-9 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => archiveName = normalizeArchiveName(event.currentTarget.value)} disabled={!combineBulk} aria-label="Archive file name" />
+          </div>
         {/if}
+
+        <div class="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+          <span>{readyLabel}</span>
+          <span>{mode === 'torrent' ? 'Torrent' : mode === 'bulk' && combineBulk ? archiveName : 'Queue only'}</span>
+        </div>
 
         {#if errorMessage}
-          <div class="mt-3 rounded border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{errorMessage}</div>
+          <p class="rounded-md border border-destructive/35 bg-destructive/10 px-3 py-2 text-sm text-destructive">{errorMessage}</p>
         {/if}
       </div>
 
-      <footer class="flex items-center justify-between border-t border-border bg-surface px-4 py-3">
-        <div class="text-xs text-muted-foreground">{activeUrls.length} item{activeUrls.length === 1 ? '' : 's'} ready</div>
-        <div class="flex gap-2">
-          <button type="button" class="rounded border border-border px-3 py-1.5 text-xs font-semibold hover:bg-muted" onclick={onClose}>Cancel</button>
-          <button type="submit" class="rounded border border-primary/60 bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45" disabled={!canSubmit}>
+      <footer class="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
+        <div>
+          {#if mode === 'torrent'}
+            <button type="button" class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-semibold text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" title="Import magnet or torrent file" onclick={() => void importTorrentFile()} disabled={isImportingTorrent}>
+              {@render TorrentFileIcon()}
+              <span>{isImportingTorrent ? 'Importing...' : 'Import'}</span>
+            </button>
+          {/if}
+        </div>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="h-9 rounded-md px-4 text-sm font-semibold text-foreground transition-colors hover:bg-muted" onclick={onClose}>Cancel</button>
+          <button type="submit" class="h-9 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50" disabled={!canSubmit}>
             {isSubmitting ? 'Adding...' : submitLabel}
           </button>
         </div>
@@ -231,3 +294,12 @@
     </form>
   </div>
 </div>
+
+{#snippet TorrentFileIcon()}
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" class="shrink-0">
+    <path d="M4 1.75h5.25L12 4.5v9.75H4V1.75Z" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
+    <path d="M9.25 1.75V4.5H12" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" />
+    <path d="M6.15 7.1v2.05a1.85 1.85 0 0 0 3.7 0V7.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+    <path d="M6.15 7.1h1.2M8.65 7.1h1.2" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+  </svg>
+{/snippet}

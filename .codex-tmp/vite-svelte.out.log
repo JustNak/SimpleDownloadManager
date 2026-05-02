@@ -11,3 +11,76 @@
 [2m6:59:43 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/SettingsPage.svelte, /src/app.css, /src/App.svelte[22m
 [2m7:05:16 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/BatchProgressWindow.svelte, /src/app.css[22m
 [2m7:06:21 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/BatchProgressWindow.svelte, /src/app.css[22m
+[2m8:03:24 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/addDownloadModalUi.test.ts[22m
+[2m8:03:24 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/settingsPageLayout.test.ts[22m
+[2m8:03:24 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/appSidebarSource.test.ts[22m
+[2m8:03:24 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/queueHeaderLayout.test.ts[22m
+[2m8:05:26 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/AddDownloadModal.svelte, /src/app.css[22m
+[2m8:07:28 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.svelte, /src/app.css[22m
+[2m8:07:37 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/appSidebarSource.test.ts[22m
+[2m8:12:47 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/SettingsPage.svelte, /src/app.css, /src/App.svelte[22m
+8:12:47 pm [vite-plugin-svelte] src/SettingsPage.svelte:135:48 This reference only captures the initial value of `settings`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+8:12:47 pm [vite-plugin-svelte] src/SettingsPage.svelte:136:56 This reference only captures the initial value of `settings`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+8:12:47 pm [vite-plugin-svelte] src/SettingsPage.svelte:141:53 This reference only captures the initial value of `settings`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+8:12:47 pm [vite-plugin-svelte] src/SettingsPage.svelte:822:6 A form label must be associated with a control
+https://svelte.dev/e/a11y_label_has_associated_control
+8:12:47 pm [vite-plugin-svelte] src/SettingsPage.svelte:886:4 Non-interactive element `<section>` cannot have interactive role 'dialog'
+https://svelte.dev/e/a11y_no_noninteractive_element_to_interactive_role
+[2m8:16:42 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+8:16:42 pm [vite-plugin-svelte] src/QueueView.svelte:648:18 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:16:42 pm [vite-plugin-svelte] src/QueueView.svelte:648:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+8:16:42 pm [vite-plugin-svelte] src/QueueView.svelte:696:4 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:16:42 pm [vite-plugin-svelte] src/QueueView.svelte:696:4 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+[2m8:16:51 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.svelte, /src/app.css[22m
+[2m8:17:11 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+8:17:11 pm [vite-plugin-svelte] src/QueueView.svelte:649:18 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:17:11 pm [vite-plugin-svelte] src/QueueView.svelte:649:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+8:17:11 pm [vite-plugin-svelte] src/QueueView.svelte:697:4 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:17:11 pm [vite-plugin-svelte] src/QueueView.svelte:697:4 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+[2m8:17:26 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/queueHeaderLayout.test.ts[22m
+[2m8:17:44 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/queueHeaderLayout.test.ts[22m
+[2m8:18:01 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/settingsPageLayout.test.ts[22m
+[2m8:19:03 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:19:14 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/SettingsPage.svelte, /src/app.css, /src/App.svelte[22m
+[2m8:20:22 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/ToastArea.svelte, /src/app.css[22m
+[2m8:21:06 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/toastLifecycle.test.mjs[22m
+[2m8:30:55 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/FileBadge.svelte, /src/app.css[22m
+[2m8:31:31 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:32:10 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:35:00 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+8:35:00 pm [vite-plugin-svelte] src/QueueView.svelte:761:14 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:35:00 pm [vite-plugin-svelte] src/QueueView.svelte:761:14 `<div>` with a click or dblclick handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+8:35:00 pm [vite-plugin-svelte] src/QueueView.svelte:789:18 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:35:00 pm [vite-plugin-svelte] src/QueueView.svelte:789:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+[2m8:35:10 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+8:35:10 pm [vite-plugin-svelte] src/QueueView.svelte:761:14 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:35:10 pm [vite-plugin-svelte] src/QueueView.svelte:761:14 `<div>` with a click or dblclick handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+8:35:10 pm [vite-plugin-svelte] src/QueueView.svelte:789:18 Visible, non-interactive elements with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+8:35:10 pm [vite-plugin-svelte] src/QueueView.svelte:789:18 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+[2m8:35:35 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:36:16 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:36:23 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:42:30 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/SettingsPage.svelte, /src/app.css, /src/App.svelte[22m
+[2m8:44:54 pm[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/QueueView.svelte, /src/app.css[22m
+[2m8:45:41 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/queueHeaderLayout.test.ts[22m
+[2m8:46:14 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/settingsDraftSync.test.ts[22m
+[2m8:46:45 pm[22m [36m[1m[vite][22m[39m [32mpage reload [39m[2mtests/torrentExternalUse.test.ts[22m
