@@ -197,20 +197,23 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
 }
 
 pub fn focus_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+    if let Err(error) = crate::lifecycle::show_main_window(app) {
+        eprintln!("failed to focus main window: {error}");
     }
 }
 
 pub fn focus_job_in_main_window(app: &AppHandle, job_id: &str) {
-    focus_main_window(app);
-    let _ = app.emit_to("main", SELECT_JOB_EVENT, job_id);
+    let main_window_exists = app.get_webview_window("main").is_some();
+    if let Err(error) = crate::lifecycle::show_main_window_with_selected_job(app, job_id) {
+        eprintln!("failed to focus main window for job: {error}");
+        return;
+    }
+    if main_window_exists {
+        let _ = app.emit_to("main", SELECT_JOB_EVENT, job_id);
+    }
 }
 
-fn progress_window_label(job_id: &str) -> String {
+pub fn progress_window_label(job_id: &str) -> String {
     let safe_job_id: String = job_id
         .chars()
         .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '/'))
@@ -218,7 +221,7 @@ fn progress_window_label(job_id: &str) -> String {
     format!("{PROGRESS_WINDOW_PREFIX}{safe_job_id}")
 }
 
-fn batch_progress_window_label(batch_id: &str) -> String {
+pub fn batch_progress_window_label(batch_id: &str) -> String {
     let safe_batch_id: String = batch_id
         .chars()
         .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_'))
@@ -226,7 +229,7 @@ fn batch_progress_window_label(batch_id: &str) -> String {
     format!("{BATCH_PROGRESS_WINDOW_PREFIX}{safe_batch_id}")
 }
 
-fn torrent_progress_window_label(job_id: &str) -> String {
+pub fn torrent_progress_window_label(job_id: &str) -> String {
     let safe_job_id: String = job_id
         .chars()
         .filter(|value| value.is_ascii_alphanumeric() || matches!(value, '-' | '_' | ':' | '/'))

@@ -24,7 +24,7 @@ import {
 } from './downloadViews';
 import {
   calculateDownloadProgressMetricsByJobId,
-  recordProgressSample,
+  recordProgressSamples,
   type ProgressSample,
 } from './downloadProgressMetrics';
 import { getErrorMessage } from './errors';
@@ -92,6 +92,7 @@ import type { DiagnosticsSnapshot } from './types';
 import type { DesktopSnapshot } from './backend';
 import { canRetryFailedDownloads } from './queueCommands';
 import {
+  shouldRefreshDiagnostics,
   shouldNotifyDiagnosticsRefreshFailure,
   type DiagnosticsRefreshOptions,
 } from './diagnosticsRefresh';
@@ -113,6 +114,11 @@ import {
 
 const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
+
+export function initialSelectedJobIdFromSearch(search: string): string | null {
+  const selectedJobId = new URLSearchParams(search).get('selectJob')?.trim();
+  return selectedJobId ? selectedJobId : null;
+}
 
 function externalUseAutoReseedMessage(target: 'file' | 'folder', retrySeconds: number): string {
   if (retrySeconds === 60) {
@@ -168,7 +174,7 @@ export default function App() {
   const [sortMode, setSortMode] = useState<SortMode>('date:asc');
   const [isDownloadSectionExpanded, setIsDownloadSectionExpanded] = useState(true);
   const [isTorrentSectionExpanded, setIsTorrentSectionExpanded] = useState(true);
-  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(() => initialSelectedJobIdFromSearch(window.location.search));
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSnapshot | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<Settings | null>(null);
@@ -180,6 +186,8 @@ export default function App() {
   const [isUpdatePromptOpen, setIsUpdatePromptOpen] = useState(false);
   const progressSamplesRef = useRef<ProgressSample[]>([]);
   const startupUpdateCheckStartedRef = useRef(false);
+  const pendingVisibleSnapshotRef = useRef<DesktopSnapshot | null>(null);
+  const lastDiagnosticsRefreshAtRef = useRef(0);
   const appearanceSettings = settingsDraft ?? settings;
   const mainWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
 
@@ -198,6 +206,7 @@ export default function App() {
 
         applyDesktopSnapshot(initialData.snapshot);
         if (initialData.diagnostics) {
+          lastDiagnosticsRefreshAtRef.current = Date.now();
           setDiagnostics(initialData.diagnostics);
         } else if (initialData.diagnosticsError) {
           addToast({
@@ -208,8 +217,9 @@ export default function App() {
         }
 
         dispose = await subscribeToStateChanged((nextSnapshot) => {
-          applyDesktopSnapshot(nextSnapshot);
-          void refreshDiagnostics({ silent: true });
+          if (applyDesktopSnapshotWhenVisible(nextSnapshot)) {
+            void refreshDiagnostics({ silent: true });
+          }
         });
 
         if (shouldRunStartupUpdateCheck(startupUpdateCheckStartedRef.current)) {
@@ -269,19 +279,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const refresh = () => {
-      void refreshSnapshotFromBackend();
+    const refresh = (allowBackendRefresh: boolean) => {
+      const flushedPendingSnapshot = flushPendingVisibleSnapshot();
+      if (!flushedPendingSnapshot && allowBackendRefresh) {
+        void refreshSnapshotFromBackend();
+      }
+      void refreshDiagnostics({ silent: true });
     };
+    const refreshOnFocus = () => refresh(true);
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') {
-        refresh();
+        refresh(false);
       }
     };
 
-    window.addEventListener('focus', refresh);
+    window.addEventListener('focus', refreshOnFocus);
     document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
-      window.removeEventListener('focus', refresh);
+      window.removeEventListener('focus', refreshOnFocus);
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, []);
@@ -335,13 +350,29 @@ export default function App() {
   }
 
   function applyDesktopSnapshot(snapshot: DesktopSnapshot) {
-    progressSamplesRef.current = snapshot.jobs.reduce(
-      (samples, job) => recordProgressSample(samples, job),
-      progressSamplesRef.current,
-    );
+    progressSamplesRef.current = recordProgressSamples(progressSamplesRef.current, snapshot.jobs);
     setConnectionState(snapshot.connectionState);
     setJobs(snapshot.jobs);
     setSettings(snapshot.settings);
+  }
+
+  function applyDesktopSnapshotWhenVisible(snapshot: DesktopSnapshot): boolean {
+    if (document.visibilityState !== 'visible') {
+      pendingVisibleSnapshotRef.current = snapshot;
+      return false;
+    }
+
+    applyDesktopSnapshot(snapshot);
+    return true;
+  }
+
+  function flushPendingVisibleSnapshot(): boolean {
+    const pendingSnapshot = pendingVisibleSnapshotRef.current;
+    if (!pendingSnapshot) return false;
+
+    pendingVisibleSnapshotRef.current = null;
+    applyDesktopSnapshot(pendingSnapshot);
+    return true;
   }
 
   async function refreshSnapshotFromBackend() {
@@ -366,8 +397,15 @@ export default function App() {
   }, []);
 
   async function refreshDiagnostics(options: DiagnosticsRefreshOptions = {}) {
+    const now = Date.now();
+    if (!shouldRefreshDiagnostics(now, lastDiagnosticsRefreshAtRef.current, options)) {
+      return;
+    }
+
     try {
-      setDiagnostics(await getDiagnostics());
+      const nextDiagnostics = await getDiagnostics();
+      lastDiagnosticsRefreshAtRef.current = now;
+      setDiagnostics(nextDiagnostics);
     } catch (error) {
       if (shouldNotifyDiagnosticsRefreshFailure(options)) {
         addToast({ type: 'error', title: 'Diagnostics Failed', message: getErrorMessage(error) });
@@ -796,6 +834,7 @@ export default function App() {
 
   useEffect(() => {
     if (view === 'settings') return;
+    if (connectionState === ConnectionState.Checking) return;
     if (displayedJobs.length === 0) {
       setSelectedJobId(null);
       return;
@@ -803,7 +842,7 @@ export default function App() {
     if (selectedJobId && !displayedJobs.some((job) => job.id === selectedJobId)) {
       setSelectedJobId(null);
     }
-  }, [displayedJobs, selectedJobId, view]);
+  }, [connectionState, displayedJobs, selectedJobId, view]);
 
   const canPauseAny = jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state));
   const canResumeAny = jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));

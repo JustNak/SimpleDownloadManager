@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   isJobArtifactMissing,
   selectJobRange,
@@ -69,6 +69,7 @@ import {
 } from 'lucide-react';
 import { sortModeDirection, sortModeKey, type SortColumn, type SortMode } from './downloadSorting';
 import type { QueueRowSize } from './types';
+import { getVirtualQueueWindow } from './queueVirtualization';
 
 const DETAILS_MIN_HEIGHT = 104;
 const DETAILS_CLOSE_THRESHOLD = 84;
@@ -141,12 +142,14 @@ export function QueueView({
   const [isSelectingByDrag, setIsSelectingByDrag] = useState(false);
   const [recentlyCompletedJobIds, setRecentlyCompletedJobIds] = useState<Set<string>>(() => new Set());
   const queueRootRef = useRef<HTMLElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const resizeStart = useRef<{ y: number; height: number; containerHeight: number; proposedHeight: number } | null>(null);
   const selectedJobIdsRef = useRef(selectedJobIds);
   const visibleJobIdsRef = useRef<string[]>([]);
   const selectionDragRef = useRef<{ anchorId: string; selected: boolean; baseSelection: Set<string> } | null>(null);
   const previousJobStatesRef = useRef<Map<string, DownloadJob['state']>>(new Map());
   const completedBadgeTimersRef = useRef<Map<string, number>>(new Map());
+  const [scrollMetrics, setScrollMetrics] = useState({ scrollTop: 0, viewportHeight: 0 });
 
   const contextMenuJob = contextMenu ? jobs.find((job) => job.id === contextMenu.jobId) ?? null : null;
   const contextMenuSelectionJobs = contextMenuJob
@@ -160,6 +163,18 @@ export function QueueView({
   const hasVisibleSelection = jobs.some((job) => selectedJobIds.has(job.id));
   const tableColumns = queueTableColumnsForView(view);
   const isTorrentTable = tableColumns[2] === 'Seed';
+  const virtualQueue = useMemo(
+    () => getVirtualQueueWindow({
+      totalCount: jobs.length,
+      rowSize: queueRowSize,
+      scrollTop: scrollMetrics.scrollTop,
+      viewportHeight: scrollMetrics.viewportHeight,
+    }),
+    [jobs.length, queueRowSize, scrollMetrics.scrollTop, scrollMetrics.viewportHeight],
+  );
+  const renderedJobs = virtualQueue.enabled
+    ? jobs.slice(virtualQueue.startIndex, virtualQueue.endIndex)
+    : jobs;
 
   function selectSingleJob(jobId: string) {
     const next = new Set([jobId]);
@@ -406,6 +421,28 @@ export function QueueView({
   }, []);
 
   useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+
+    const updateViewportHeight = () => {
+      setScrollMetrics((current) => {
+        const next = {
+          scrollTop: scrollContainer.scrollTop,
+          viewportHeight: scrollContainer.clientHeight,
+        };
+        return current.scrollTop === next.scrollTop && current.viewportHeight === next.viewportHeight
+          ? current
+          : next;
+      });
+    };
+
+    updateViewportHeight();
+    const resizeObserver = new ResizeObserver(updateViewportHeight);
+    resizeObserver.observe(scrollContainer);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  useEffect(() => {
     if (!isResizingDetails) return;
 
     const resizeFromClientY = (clientY: number) => {
@@ -476,7 +513,22 @@ export function QueueView({
 
   return (
     <section ref={queueRootRef} className="flex min-h-0 flex-1 flex-col bg-surface">
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        ref={scrollContainerRef}
+        className="min-h-0 flex-1 overflow-auto"
+        onScroll={(event) => {
+          const target = event.currentTarget;
+          setScrollMetrics((current) => {
+            const next = {
+              scrollTop: target.scrollTop,
+              viewportHeight: target.clientHeight,
+            };
+            return current.scrollTop === next.scrollTop && current.viewportHeight === next.viewportHeight
+              ? current
+              : next;
+          });
+        }}
+      >
         <div className="download-table min-w-[980px] overflow-visible border-b border-t border-border bg-card">
           <div className="grid grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-3">
@@ -502,7 +554,10 @@ export function QueueView({
           </div>
 
           <div className="divide-y divide-border/70">
-            {jobs.map((job) => {
+            {virtualQueue.enabled && virtualQueue.topPadding > 0 ? (
+              <div style={{ height: virtualQueue.topPadding }} aria-hidden="true" />
+            ) : null}
+            {renderedJobs.map((job) => {
               const selected = job.id === selectedJob?.id;
               const multiSelected = selectedJobIds.has(job.id);
               const rowSelected = selected || multiSelected;
@@ -546,6 +601,7 @@ export function QueueView({
                   onPointerEnter={() => continueSelectionDrag(job.id)}
                   role="button"
                   tabIndex={0}
+                  style={virtualQueue.enabled ? { height: virtualQueue.rowHeight } : undefined}
                   className={`grid w-full grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px] items-center gap-0 px-3 text-left transition ${queueRowSizeClass(queueRowSize)} ${
                     rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'
                   } ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
@@ -610,6 +666,9 @@ export function QueueView({
                 </div>
               );
             })}
+            {virtualQueue.enabled && virtualQueue.bottomPadding > 0 ? (
+              <div style={{ height: virtualQueue.bottomPadding }} aria-hidden="true" />
+            ) : null}
           </div>
         </div>
       </div>

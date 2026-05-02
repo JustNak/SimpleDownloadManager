@@ -37,6 +37,39 @@ export function recordProgressSample(
   return [...retainedSamples, currentSample];
 }
 
+export function recordProgressSamples(
+  samples: ProgressSample[],
+  jobs: readonly DownloadJob[],
+  timestamp = Date.now(),
+): ProgressSample[] {
+  const activeJobs = new Map<string, DownloadJob>();
+  for (const job of jobs) {
+    if (job.state === 'downloading' && !isTorrentMetadataPendingForProgress(job)) {
+      activeJobs.set(job.id, job);
+    }
+  }
+
+  if (activeJobs.size === 0) return [];
+
+  const cutoff = timestamp - SAMPLE_WINDOW_MS;
+  const retainedSamples = samples.filter((sample) => (
+    activeJobs.has(sample.jobId)
+    && sample.timestamp >= cutoff
+    && sample.timestamp !== timestamp
+  ));
+
+  for (const job of jobs) {
+    if (!activeJobs.has(job.id)) continue;
+    retainedSamples.push({
+      jobId: job.id,
+      timestamp,
+      downloadedBytes: Math.max(0, job.downloadedBytes || 0),
+    });
+  }
+
+  return retainedSamples;
+}
+
 export function calculateDownloadProgressMetrics(
   job: DownloadJob,
   samples: ProgressSample[],

@@ -1,15 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Archive, CheckCircle2, Download, FolderOpen, Pause, Play, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { JobState, type DownloadJob } from './types';
+import { JobState, type DownloadJob, type Settings } from './types';
 import {
   cancelJob,
-  getAppSnapshot,
-  getProgressBatchContext,
+  getBatchProgressSnapshot,
   pauseJob,
   resumeJob,
   revealJobInFolder,
-  subscribeToStateChanged,
+  subscribeToBatchProgressSnapshot,
 } from './backend';
 import {
   calculateBatchProgress,
@@ -34,9 +33,9 @@ export function BatchProgressWindow() {
   useEffect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
     let disposed = false;
-    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
+    let latestSettings: Settings | null = null;
 
-    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getBatchProgressSnapshot>>) => {
       latestSettings = snapshot.settings;
       applyAppearance(snapshot.settings);
     };
@@ -48,18 +47,18 @@ export function BatchProgressWindow() {
     media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
-      const nextContext = batchId ? await getProgressBatchContext(batchId) : null;
+      const snapshot = batchId ? await getBatchProgressSnapshot(batchId) : null;
       if (disposed) return;
-      setContext(nextContext);
+      setContext(snapshot?.context ?? null);
+      if (snapshot) {
+        applySnapshotAppearance(snapshot);
+        setJobs(snapshot.jobs);
+      }
 
-      const snapshot = await getAppSnapshot();
-      if (disposed) return;
-      applySnapshotAppearance(snapshot);
-      setJobs(filterBatchJobs(snapshot.jobs, nextContext));
-
-      dispose = await subscribeToStateChanged((nextSnapshot) => {
+      dispose = await subscribeToBatchProgressSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
-        setJobs(filterBatchJobs(nextSnapshot.jobs, nextContext));
+        setContext(nextSnapshot.context);
+        setJobs(nextSnapshot.jobs);
       });
     }
 
@@ -310,12 +309,6 @@ async function runForJobs(jobs: DownloadJob[], action: (id: string) => Promise<v
   for (const job of jobs) {
     await action(job.id);
   }
-}
-
-function filterBatchJobs(jobs: DownloadJob[], context: ProgressBatchContext | null) {
-  if (!context) return [];
-  const ids = new Set(context.jobIds);
-  return jobs.filter((job) => ids.has(job.id));
 }
 
 function isPausable(job: DownloadJob) {

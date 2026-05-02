@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   calculateDownloadProgressMetricsByJobId,
   calculateDownloadProgressMetrics,
+  recordProgressSamples,
   recordProgressSample,
   shouldShowCompletedFileAction,
 } from '../src/downloadProgressMetrics.ts';
@@ -45,6 +46,28 @@ const averageSamples = recordProgressSample(
   initialSamples,
   { ...baseJob, downloadedBytes: 11_000, speed: 80_000 },
   11_000,
+);
+
+assert.deepEqual(
+  recordProgressSamples(
+    [
+      { jobId: 'job_1', timestamp: 1_000, downloadedBytes: 1_000 },
+      { jobId: 'job_2', timestamp: 1_000, downloadedBytes: 2_000 },
+      { jobId: 'job_done', timestamp: 1_000, downloadedBytes: 3_000 },
+    ],
+    [
+      { ...baseJob, id: 'job_1', downloadedBytes: 5_000 },
+      { ...baseJob, id: 'job_2', state: 'paused', downloadedBytes: 2_000 },
+      { ...baseJob, id: 'job_3', downloadedBytes: 7_000 },
+    ],
+    11_000,
+  ),
+  [
+    { jobId: 'job_1', timestamp: 1_000, downloadedBytes: 1_000 },
+    { jobId: 'job_1', timestamp: 11_000, downloadedBytes: 5_000 },
+    { jobId: 'job_3', timestamp: 11_000, downloadedBytes: 7_000 },
+  ],
+  'recordProgressSamples should update active jobs and clear inactive or missing job samples in one pass',
 );
 
 assert.deepEqual(

@@ -2,15 +2,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, Download, FolderOpen, Globe, HardDrive, MousePointerClick } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { DownloadPrompt } from './types';
+import type { Settings } from './types';
 import {
   browseDirectory,
   cancelDownloadPrompt,
   confirmDownloadPrompt,
-  getAppSnapshot,
   getCurrentDownloadPrompt,
+  getSettingsSnapshot,
   swapDownloadPrompt,
   subscribeToDownloadPromptChanged,
-  subscribeToStateChanged,
+  subscribeToSettingsSnapshot,
 } from './backend';
 import { PopupTitlebar } from './PopupTitlebar';
 import { FileBadge, formatBytes, getHost, joinDisplayPath } from './popupShared';
@@ -31,9 +32,9 @@ export function DownloadPromptWindow() {
   useEffect(() => {
     let promptDispose: (() => void | Promise<void>) | undefined;
     let stateDispose: (() => void | Promise<void>) | undefined;
-    let latestSettings: Awaited<ReturnType<typeof getAppSnapshot>>['settings'] | null = null;
+    let latestSettings: Settings | null = null;
 
-    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getAppSnapshot>>) => {
+    const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getSettingsSnapshot>>) => {
       latestSettings = snapshot.settings;
       applyAppearance(snapshot.settings);
     };
@@ -45,7 +46,7 @@ export function DownloadPromptWindow() {
     media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
-      applySnapshotAppearance(await getAppSnapshot());
+      applySnapshotAppearance(await getSettingsSnapshot());
       setPrompt(await getCurrentDownloadPrompt());
       promptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
         setDirectoryOverride(null);
@@ -56,7 +57,7 @@ export function DownloadPromptWindow() {
         setIsBusy(false);
         setPrompt(nextPrompt);
       });
-      stateDispose = await subscribeToStateChanged((nextSnapshot) => {
+      stateDispose = await subscribeToSettingsSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
       });
     }
