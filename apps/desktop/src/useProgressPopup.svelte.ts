@@ -1,4 +1,3 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { applyAppearance } from './appearance';
 import {
@@ -21,29 +20,30 @@ export type PopupActionRunner = (
 ) => Promise<void>;
 
 export interface ProgressPopupState {
-  job: DownloadJob | null;
-  progress: number;
-  progressMetrics: DownloadProgressMetrics;
-  isBusy: boolean;
-  isConfirmingCancel: boolean;
-  errorMessage: string;
+  readonly job: DownloadJob | null;
+  readonly progress: number;
+  readonly progressMetrics: DownloadProgressMetrics;
+  readonly isBusy: boolean;
+  readonly isConfirmingCancel: boolean;
+  readonly errorMessage: string;
   runAction: PopupActionRunner;
   onCancelClick: () => void;
   onClose: () => void;
 }
 
 export function useProgressPopup(): ProgressPopupState {
-  const [job, setJob] = useState<DownloadJob | null>(null);
-  const [isBusy, setIsBusy] = useState(false);
-  const [isConfirmingCancel, setIsConfirmingCancel] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
-  const progressSamplesRef = useRef<ProgressSample[]>([]);
-  const currentWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
-  const jobId = useMemo(() => new URLSearchParams(window.location.search).get('jobId') || '', []);
+  let job = $state<DownloadJob | null>(null);
+  let isBusy = $state(false);
+  let isConfirmingCancel = $state(false);
+  let errorMessage = $state('');
+  let progressSamples: ProgressSample[] = [];
+  const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
+  const jobId = new URLSearchParams(window.location.search).get('jobId') || '';
 
-  useEffect(() => {
+  $effect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
     let latestSettings: Settings | null = null;
+    let disposed = false;
 
     const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getProgressJobSnapshot>>) => {
       latestSettings = snapshot.settings;
@@ -52,9 +52,9 @@ export function useProgressPopup(): ProgressPopupState {
     const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getProgressJobSnapshot>>) => {
       const nextJob = snapshot.job;
       if (nextJob) {
-        progressSamplesRef.current = recordProgressSample(progressSamplesRef.current, nextJob);
+        progressSamples = recordProgressSample(progressSamples, nextJob);
       }
-      setJob(nextJob);
+      job = nextJob;
     };
 
     const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -65,6 +65,7 @@ export function useProgressPopup(): ProgressPopupState {
 
     async function initialize() {
       const snapshot = await getProgressJobSnapshot(jobId);
+      if (disposed) return;
       applySnapshotAppearance(snapshot);
       applySnapshotJob(snapshot);
       dispose = await subscribeToProgressJobSnapshot((nextSnapshot) => {
@@ -75,54 +76,53 @@ export function useProgressPopup(): ProgressPopupState {
 
     void initialize();
     return () => {
+      disposed = true;
       media?.removeEventListener('change', handleSystemThemeChange);
       void dispose?.();
     };
-  }, [jobId]);
+  });
 
-  useEffect(() => {
-    setIsConfirmingCancel(false);
-  }, [job?.id]);
+  $effect(() => {
+    job?.id;
+    isConfirmingCancel = false;
+  });
 
   async function runAction(
     action: () => Promise<void>,
     { closeOnSuccess = false }: { closeOnSuccess?: boolean } = {},
   ) {
-    setIsBusy(true);
-    setIsConfirmingCancel(false);
-    setErrorMessage('');
+    isBusy = true;
+    isConfirmingCancel = false;
+    errorMessage = '';
     const result = await runPopupAction({
       action,
       close: closeOnSuccess && currentWindow ? () => currentWindow.close() : undefined,
     });
     if (!result.ok) {
-      setErrorMessage(result.message);
+      errorMessage = result.message;
     }
-    setIsBusy(false);
+    isBusy = false;
   }
 
-  const progress = clampProgress(job?.progress ?? 0);
-  const progressMetrics = job
-    ? calculateDownloadProgressMetrics(job, progressSamplesRef.current)
-    : { averageSpeed: 0, timeRemaining: 0 };
-
   return {
-    job,
-    progress,
-    progressMetrics,
-    isBusy,
-    isConfirmingCancel,
-    errorMessage,
+    get job() { return job; },
+    get progress() { return clampProgress(job?.progress ?? 0); },
+    get progressMetrics() {
+      return job
+        ? calculateDownloadProgressMetrics(job, progressSamples)
+        : { averageSpeed: 0, timeRemaining: 0 };
+    },
+    get isBusy() { return isBusy; },
+    get isConfirmingCancel() { return isConfirmingCancel; },
+    get errorMessage() { return errorMessage; },
     runAction,
     onCancelClick: () => {
       const activeJobId = job?.id ?? jobId;
       if (!activeJobId) return;
-
       if (!isConfirmingCancel) {
-        setIsConfirmingCancel(true);
+        isConfirmingCancel = true;
         return;
       }
-
       void runAction(() => cancelJob(activeJobId));
     },
     onClose: () => {
