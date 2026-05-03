@@ -6,8 +6,8 @@ use crate::storage::{
     DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
     FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
     IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode,
-    TorrentSettings, TransferKind,
+    ProtectedDownloadAuthScope, QueueSummary, ResumeSupport, Settings, TorrentInfo,
+    TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -59,6 +59,7 @@ const EXTERNAL_USE_HANDLE_RELEASE_POLL: Duration = Duration::from_millis(50);
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
 const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
 const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
+const PROGRESS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -87,9 +88,11 @@ struct RuntimeState {
     main_window: Option<MainWindowState>,
     diagnostic_events: Vec<DiagnosticEvent>,
     next_job_number: u64,
+    job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
+    last_progress_persist_at: Option<Instant>,
 }
 
 #[derive(Clone)]

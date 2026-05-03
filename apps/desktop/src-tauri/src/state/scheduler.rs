@@ -12,9 +12,7 @@ impl SharedState {
                 .iter()
                 .filter(|id| {
                     state
-                        .jobs
-                        .iter()
-                        .find(|job| &job.id == *id)
+                        .job(id)
                         .map(|job| job.state != JobState::Seeding)
                         .unwrap_or(false)
                 })
@@ -42,7 +40,7 @@ impl SharedState {
 
             let mut tasks = Vec::new();
             for scheduled_id in scheduled_ids {
-                if let Some(job) = state.jobs.iter_mut().find(|job| job.id == scheduled_id) {
+                if let Some(job) = state.job_mut(&scheduled_id) {
                     job.state = JobState::Starting;
                     job.speed = 0;
                     job.eta = 0;
@@ -91,7 +89,7 @@ impl SharedState {
 
     pub async fn worker_control(&self, id: &str) -> WorkerControl {
         let state = self.inner.read().await;
-        let Some(job) = state.jobs.iter().find(|job| job.id == id) else {
+        let Some(job) = state.job(id) else {
             return WorkerControl::Missing;
         };
 

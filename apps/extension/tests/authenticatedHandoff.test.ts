@@ -28,7 +28,20 @@ const settings: ExtensionIntegrationSettings = {
   excludedHosts: [],
   ignoredFileExtensions: [],
   authenticatedHandoffEnabled: true,
+  protectedDownloadAuthScope: 'legacy_global',
   authenticatedHandoffHosts: [],
+};
+
+const allowlistSettings: ExtensionIntegrationSettings = {
+  ...settings,
+  protectedDownloadAuthScope: 'allowlist',
+  authenticatedHandoffHosts: ['chatgpt.com', '*.example.com'],
+};
+
+const disabledSettings: ExtensionIntegrationSettings = {
+  ...settings,
+  authenticatedHandoffEnabled: false,
+  protectedDownloadAuthScope: 'off',
 };
 
 assert.deepEqual(
@@ -52,27 +65,37 @@ assert.deepEqual(
   buildHandoffAuthForUrl(
     'https://chatgpt.com/backend-api/estuary/content?id=file_123',
     [{ name: 'Cookie', value: 'oai-did=1' }],
-    settings,
+    allowlistSettings,
   ),
   { headers: [{ name: 'Cookie', value: 'oai-did=1' }] },
-  'protected downloads should not require a host allowlist to receive captured browser auth',
+  'protected downloads should forward browser session headers for allowlisted hosts',
+);
+
+assert.equal(
+  buildHandoffAuthForUrl(
+    'https://download-cdn.other.test/file.pdf',
+    [{ name: 'Cookie', value: 'session=abc' }],
+    allowlistSettings,
+  ),
+  undefined,
+  'allowlist mode should not forward browser session headers for unlisted hosts',
 );
 
 assert.deepEqual(
   buildHandoffAuthForUrl(
-    'https://example.org/file.pdf',
+    'https://download-cdn.other.test/file.pdf',
     [{ name: 'Cookie', value: 'session=abc' }],
     settings,
   ),
   { headers: [{ name: 'Cookie', value: 'session=abc' }] },
-  'exact browser-download request auth should be controlled by the protected-download toggle, not by hosts',
+  'legacy global protected-download scope should preserve existing authenticated handoff behavior',
 );
 
 assert.equal(
   buildHandoffAuthForUrl(
     'https://chatgpt.com/backend-api/estuary/content?id=file_123',
     [{ name: 'Cookie', value: 'oai-did=1' }],
-    { ...settings, authenticatedHandoffEnabled: false },
+    disabledSettings,
   ),
   undefined,
   'disabled protected downloads must not attach browser auth',
@@ -81,33 +104,58 @@ assert.equal(
 captureHandoffAuthHeaders(
   {
     requestId: 'request-1',
-    url: 'https://download-cdn.example.com/file.zip',
+    url: 'https://download-cdn.other.test/file.zip',
     method: 'GET',
     incognito: false,
     requestHeaders: [{ name: 'Cookie', value: 'session=abc' }],
   },
+  allowlistSettings,
   1_000,
 );
 assert.equal(
   hasCapturedHandoffAuth(
     {
       requestId: 'request-1',
-      url: 'https://download-cdn.example.com/file.zip',
+      url: 'https://download-cdn.other.test/file.zip',
+      incognito: false,
+    },
+    1_200,
+  ),
+  false,
+  'capture should ignore browser session headers for hosts outside the allowlist',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'request-1',
+    url: 'https://chatgpt.com/file.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'session=abc' }],
+  },
+  allowlistSettings,
+  1_000,
+);
+assert.equal(
+  hasCapturedHandoffAuth(
+    {
+      requestId: 'request-1',
+      url: 'https://chatgpt.com/file.zip',
       incognito: false,
     },
     1_200,
   ),
   true,
-  'captured auth should be detectable without consuming it',
+  'allowlisted captured auth should be detectable without consuming it',
 );
 assert.equal(
   takeCapturedHandoffAuth(
     {
       requestId: 'request-1',
-      url: 'https://download-cdn.example.com/file.zip',
+      url: 'https://chatgpt.com/file.zip',
       incognito: false,
     },
-    { ...settings, authenticatedHandoffEnabled: false },
+    disabledSettings,
     1_225,
   ),
   undefined,
@@ -117,10 +165,10 @@ assert.equal(
   takeCapturedHandoffAuth(
     {
       requestId: 'request-1',
-      url: 'https://download-cdn.example.com/file.zip',
+      url: 'https://chatgpt.com/file.zip',
       incognito: false,
     },
-    settings,
+    allowlistSettings,
     1_250,
   ),
   undefined,
@@ -134,6 +182,7 @@ captureHandoffAuthHeaders(
     method: 'GET',
     requestHeaders: [{ name: 'Cookie', value: 'old=1' }],
   },
+  allowlistSettings,
   10_000,
 );
 assert.equal(
@@ -142,7 +191,7 @@ assert.equal(
       requestId: 'stale-request',
       url: 'https://chatgpt.com/backend-api/estuary/content?id=file_old',
     },
-    settings,
+    allowlistSettings,
     45_001,
   ),
   undefined,
@@ -156,6 +205,7 @@ captureHandoffAuthHeaders(
     method: 'GET',
     requestHeaders: [{ name: 'Cookie', value: 'oai-did=2' }],
   },
+  allowlistSettings,
   20_000,
 );
 assert.deepEqual(
@@ -163,7 +213,7 @@ assert.deepEqual(
     {
       url: 'https://chatgpt.com/backend-api/estuary/content?id=file_456',
     },
-    settings,
+    allowlistSettings,
     20_500,
   ),
   { headers: [{ name: 'Cookie', value: 'oai-did=2' }] },
@@ -178,6 +228,7 @@ captureHandoffAuthHeaders(
     incognito: false,
     requestHeaders: [{ name: 'Cookie', value: 'a=1' }],
   },
+  allowlistSettings,
   30_000,
 );
 captureHandoffAuthHeaders(
@@ -188,6 +239,7 @@ captureHandoffAuthHeaders(
     incognito: false,
     requestHeaders: [{ name: 'Cookie', value: 'b=1' }],
   },
+  allowlistSettings,
   30_100,
 );
 assert.equal(
@@ -196,7 +248,7 @@ assert.equal(
       url: 'https://download-cdn.example.com/ambiguous.zip',
       incognito: false,
     },
-    settings,
+    allowlistSettings,
     30_200,
   ),
   undefined,
@@ -209,7 +261,7 @@ assert.deepEqual(
       url: 'https://download-cdn.example.com/ambiguous.zip',
       incognito: false,
     },
-    settings,
+    allowlistSettings,
     30_250,
   ),
   { headers: [{ name: 'Cookie', value: 'b=1' }] },
@@ -224,6 +276,7 @@ for (let index = 0; index < 70; index += 1) {
       method: 'GET',
       requestHeaders: [{ name: 'Cookie', value: `session=${index}` }],
     },
+    allowlistSettings,
     40_000 + index,
   );
 }
@@ -233,7 +286,7 @@ assert.equal(
       requestId: 'eviction-0',
       url: 'https://download-cdn.example.com/eviction-0.zip',
     },
-    settings,
+    allowlistSettings,
     40_100,
   ),
   undefined,
@@ -245,7 +298,7 @@ assert.deepEqual(
       requestId: 'eviction-69',
       url: 'https://download-cdn.example.com/eviction-69.zip',
     },
-    settings,
+    allowlistSettings,
     40_100,
   ),
   { headers: [{ name: 'Cookie', value: 'session=69' }] },

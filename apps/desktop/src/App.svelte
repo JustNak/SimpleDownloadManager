@@ -453,7 +453,8 @@
         showBadgeStatus: true,
         excludedHosts: [],
         ignoredFileExtensions: [],
-        authenticatedHandoffEnabled: true,
+        authenticatedHandoffEnabled: false,
+        protectedDownloadAuthScope: 'off',
         authenticatedHandoffHosts: [],
       },
     };

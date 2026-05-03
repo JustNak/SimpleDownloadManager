@@ -125,6 +125,7 @@ export interface ExtensionIntegrationSettings {
   excludedHosts: string[];
   ignoredFileExtensions: string[];
   authenticatedHandoffEnabled: boolean;
+  protectedDownloadAuthScope: 'off' | 'allowlist' | 'legacy_global';
   authenticatedHandoffHosts: string[];
 }
 

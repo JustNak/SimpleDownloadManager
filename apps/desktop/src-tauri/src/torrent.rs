@@ -1052,8 +1052,10 @@ mod tests {
 
     #[test]
     fn runtime_download_speed_uses_live_estimator_not_progress_bytes() {
-        let mut live = librqbit::api::LiveStats::default();
-        live.download_speed = 1.5.into();
+        let live = librqbit::api::LiveStats {
+            download_speed: 1.5.into(),
+            ..Default::default()
+        };
         let stats = librqbit::TorrentStats {
             state: librqbit::TorrentStatsState::Live,
             file_progress: vec![10 * 1024 * 1024 * 1024],
@@ -1086,8 +1088,10 @@ mod tests {
 
     #[test]
     fn runtime_upload_speed_uses_live_estimator() {
-        let mut live = librqbit::api::LiveStats::default();
-        live.upload_speed = 0.75.into();
+        let live = librqbit::api::LiveStats {
+            upload_speed: 0.75.into(),
+            ..Default::default()
+        };
         let stats = librqbit::TorrentStats {
             state: librqbit::TorrentStatsState::Live,
             file_progress: vec![],

@@ -26,6 +26,7 @@ import {
 } from './browserDownloads';
 import {
   captureHandoffAuthHeaders,
+  clearCapturedHandoffAuth,
   hasCapturedHandoffAuth,
   takeCapturedHandoffAuth,
   type HandoffAuthRequestDetails,
@@ -367,6 +368,7 @@ async function handOffBrowserDownload(
     incognito: item.incognito,
   };
   if (!settings.authenticatedHandoffEnabled && hasCapturedHandoffAuth(handoffDetails)) {
+    clearCapturedHandoffAuth();
     return {
       ok: false,
       requestId: 'protected_downloads_disabled',
@@ -613,7 +615,9 @@ function registerHandoffAuthHeaderCapture(): void {
   }
 
   const listener = (details: HandoffAuthRequestDetails): void => {
-    captureHandoffAuthHeaders(details);
+    void getCachedExtensionSettings().then((settings) => {
+      captureHandoffAuthHeaders(details, settings);
+    });
   };
   const filter = {
     urls: ['http://*/*', 'https://*/*'],

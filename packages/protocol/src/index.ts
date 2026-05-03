@@ -153,6 +153,8 @@ export interface QueueSummary {
   failed: number;
 }
 
+export type ProtectedDownloadAuthScope = 'off' | 'allowlist' | 'legacy_global';
+
 export interface ExtensionIntegrationSettings {
   enabled: boolean;
   downloadHandoffMode: DownloadHandoffMode;
@@ -163,6 +165,7 @@ export interface ExtensionIntegrationSettings {
   excludedHosts: string[];
   ignoredFileExtensions: string[];
   authenticatedHandoffEnabled: boolean;
+  protectedDownloadAuthScope: ProtectedDownloadAuthScope;
   authenticatedHandoffHosts: string[];
 }
 
@@ -213,6 +216,19 @@ export function isUrlHostExcludedByPatterns(url: string, patterns: string[]): bo
   } catch {
     return false;
   }
+}
+
+export function isProtectedDownloadAuthAllowedForUrl(
+  url: string,
+  settings: Pick<
+    ExtensionIntegrationSettings,
+    'authenticatedHandoffEnabled' | 'protectedDownloadAuthScope' | 'authenticatedHandoffHosts'
+  >,
+): boolean {
+  if (!settings.authenticatedHandoffEnabled) return false;
+  if (settings.protectedDownloadAuthScope === 'legacy_global') return true;
+  if (settings.protectedDownloadAuthScope !== 'allowlist') return false;
+  return isUrlHostExcludedByPatterns(url, settings.authenticatedHandoffHosts);
 }
 
 function wildcardHostPatternRegex(pattern: string): RegExp {

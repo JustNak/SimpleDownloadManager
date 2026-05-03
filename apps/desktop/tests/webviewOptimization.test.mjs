@@ -8,6 +8,8 @@ const progressPopupSource = await readFile(new URL('../src/useProgressPopup.svel
 const batchPopupSource = await readFile(new URL('../src/BatchProgressWindow.svelte', import.meta.url), 'utf8');
 const promptSource = await readFile(new URL('../src/DownloadPromptWindow.svelte', import.meta.url), 'utf8');
 const commandsSource = await readFile(new URL('../src-tauri/src/commands/mod.rs', import.meta.url), 'utf8');
+const downloadSource = await readFile(new URL('../src-tauri/src/download/mod.rs', import.meta.url), 'utf8');
+const runtimeStateSource = await readFile(new URL('../src-tauri/src/state/runtime.rs', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(await readFile(new URL('../src-tauri/tauri.conf.json', import.meta.url), 'utf8'));
 
 for (const importPath of ['./App.svelte', './DownloadPromptWindow.svelte', './DownloadProgressWindow.svelte', './TorrentProgressWindow.svelte', './BatchProgressWindow.svelte']) {
@@ -53,3 +55,5 @@ for (const rustSymbol of ['ProgressJobSnapshot', 'BatchProgressSnapshot', 'Setti
 assert.match(commandsSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');
 assert.match(commandsSource, /DOWNLOADS_UPDATE_BATCH_EVENT/, 'commands should define a batched download update event');
 assert.match(commandsSource, /emit_popup_snapshots\(app,\s*snapshot\)/, 'snapshot emission should fan out targeted popup payloads');
+assert.doesNotMatch(downloadSource, /powershell\.exe|Compress-Archive/, 'bulk archive creation should not shell out to PowerShell');
+assert.doesNotMatch(runtimeStateSource, /\.map\(add_artifact_existence\)|Path::new\(&job\.target_path\)\.exists\(\)/, 'full snapshots should not probe completed artifacts on disk');

@@ -121,15 +121,17 @@ impl SharedState {
 
     pub(super) async fn validate_handoff_auth_for_url(
         &self,
-        _url: &str,
+        url: &str,
         auth: &HandoffAuth,
     ) -> Result<(), BackendError> {
         validate_handoff_auth_headers(auth)?;
         let settings = self.extension_integration_settings().await;
-        if !settings.authenticated_handoff_enabled {
+        if !protected_download_auth_allowed_for_url(url, &settings) {
             return Err(BackendError {
                 code: "PERMISSION_DENIED",
-                message: "Protected Downloads is disabled.".into(),
+                message:
+                    "Protected Downloads browser session headers are not allowed for this site."
+                        .into(),
             });
         }
 
@@ -259,7 +261,7 @@ impl RuntimeState {
                 None
             };
         let replaced_duplicate = duplicate_replacement_index.map(|index| {
-            let job = self.jobs.remove(index);
+            let job = self.remove_job_at_index(index);
             self.active_workers.remove(&job.id);
             self.external_reseed_jobs.remove(&job.id);
             if job.state != JobState::Completed {
@@ -289,7 +291,7 @@ impl RuntimeState {
             status: IntegrityStatus::Pending,
         });
 
-        self.jobs.push(DownloadJob {
+        self.push_job(DownloadJob {
             id: job_id.clone(),
             url: url.clone(),
             filename: filename.clone(),
@@ -467,6 +469,51 @@ impl RuntimeState {
 
         None
     }
+}
+
+pub(super) fn protected_download_auth_allowed_for_url(
+    url: &str,
+    settings: &ExtensionIntegrationSettings,
+) -> bool {
+    if !settings.authenticated_handoff_enabled {
+        return false;
+    }
+
+    match settings.protected_download_auth_scope {
+        ProtectedDownloadAuthScope::LegacyGlobal => true,
+        ProtectedDownloadAuthScope::Allowlist => {
+            url_host_matches_patterns(url, &settings.authenticated_handoff_hosts)
+        }
+        ProtectedDownloadAuthScope::Off => false,
+    }
+}
+
+fn url_host_matches_patterns(url: &str, patterns: &[String]) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    patterns
+        .iter()
+        .any(|pattern| host_matches_pattern(&host, pattern))
+}
+
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim().to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1);
+    }
+
+    host == pattern || host.ends_with(&format!(".{pattern}"))
 }
 
 fn path_matches(existing_path: &str, candidate: &Path) -> bool {

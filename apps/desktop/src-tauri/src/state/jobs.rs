@@ -270,9 +270,7 @@ impl SharedState {
     pub async fn clear_completed_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state
-                .jobs
-                .retain(|job| !matches!(job.state, JobState::Completed | JobState::Canceled));
+            state.retain_jobs(|job| !matches!(job.state, JobState::Completed | JobState::Canceled));
             (state.snapshot(), state.persisted())
         };
 
@@ -307,7 +305,7 @@ impl SharedState {
                 job.transfer_kind == TransferKind::Torrent && job.state == JobState::Canceled;
             let filename = job.filename.clone();
             state.active_workers.remove(id);
-            state.jobs.remove(job_index);
+            state.remove_job_at_index(job_index);
             if removed_canceled_torrent {
                 state.push_diagnostic_event(
                     DiagnosticLevel::Info,

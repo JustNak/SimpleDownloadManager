@@ -22,12 +22,7 @@ impl RuntimeState {
     pub(super) fn snapshot(&self) -> DesktopSnapshot {
         DesktopSnapshot {
             connection_state: self.connection_state,
-            jobs: self
-                .jobs
-                .iter()
-                .cloned()
-                .map(add_artifact_existence)
-                .collect(),
+            jobs: self.jobs.clone(),
             settings: self.settings.clone(),
         }
     }
@@ -160,6 +155,60 @@ impl RuntimeState {
             })
             .collect()
     }
+
+    pub(super) fn rebuild_job_indexes(&mut self) {
+        self.job_indexes = job_indexes_for(&self.jobs);
+    }
+
+    pub(super) fn job_index(&self, id: &str) -> Option<usize> {
+        self.job_indexes
+            .get(id)
+            .copied()
+            .filter(|index| self.jobs.get(*index).is_some_and(|job| job.id == id))
+    }
+
+    pub(super) fn job(&self, id: &str) -> Option<&DownloadJob> {
+        self.job_index(id).and_then(|index| self.jobs.get(index))
+    }
+
+    pub(super) fn job_mut(&mut self, id: &str) -> Option<&mut DownloadJob> {
+        let index = self.job_index(id)?;
+        self.jobs.get_mut(index)
+    }
+
+    pub(super) fn push_job(&mut self, job: DownloadJob) {
+        self.job_indexes.insert(job.id.clone(), self.jobs.len());
+        self.jobs.push(job);
+    }
+
+    pub(super) fn remove_job_at_index(&mut self, index: usize) -> DownloadJob {
+        let job = self.jobs.remove(index);
+        self.rebuild_job_indexes();
+        job
+    }
+
+    pub(super) fn retain_jobs(&mut self, mut keep: impl FnMut(&DownloadJob) -> bool) {
+        self.jobs.retain(|job| keep(job));
+        self.rebuild_job_indexes();
+    }
+
+    pub(super) fn should_persist_progress_at(&mut self, now: Instant) -> bool {
+        if self.last_progress_persist_at.is_some_and(|last| {
+            now.saturating_duration_since(last) < PROGRESS_PERSIST_COALESCE_WINDOW
+        }) {
+            return false;
+        }
+
+        self.last_progress_persist_at = Some(now);
+        true
+    }
+}
+
+pub(super) fn job_indexes_for(jobs: &[DownloadJob]) -> HashMap<String, usize> {
+    jobs.iter()
+        .enumerate()
+        .map(|(index, job)| (job.id.clone(), index))
+        .collect()
 }
 
 pub(super) fn job_needs_attention(job: &DownloadJob) -> bool {
@@ -209,15 +258,6 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
 
     job.artifact_exists = None;
 
-    job
-}
-
-pub(super) fn add_artifact_existence(mut job: DownloadJob) -> DownloadJob {
-    job.artifact_exists = if job.state == JobState::Completed {
-        Some(Path::new(&job.target_path).exists())
-    } else {
-        None
-    };
     job
 }
 

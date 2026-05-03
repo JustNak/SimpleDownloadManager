@@ -35,6 +35,7 @@ async function main() {
     excludedHosts: [],
     ignoredFileExtensions: [],
     authenticatedHandoffEnabled: false,
+    protectedDownloadAuthScope: 'off',
     authenticatedHandoffHosts: [],
   };
   assert.equal(

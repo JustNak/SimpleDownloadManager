@@ -15,6 +15,7 @@ const defaultSettings: ExtensionIntegrationSettings = {
   excludedHosts: [],
   ignoredFileExtensions: [],
   authenticatedHandoffEnabled: false,
+  protectedDownloadAuthScope: 'off',
   authenticatedHandoffHosts: [],
 };
 

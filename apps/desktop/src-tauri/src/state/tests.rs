@@ -5,33 +5,23 @@ use crate::storage::{
 
 #[test]
 fn queue_summary_counts_attention_jobs() {
-    let state = RuntimeState {
-        connection_state: ConnectionState::Connected,
-        jobs: vec![
-            download_job("job_1", JobState::Failed, ResumeSupport::Supported, 25),
-            download_job("job_2", JobState::Paused, ResumeSupport::Unsupported, 40),
-            download_job(
-                "job_3",
-                JobState::Downloading,
-                ResumeSupport::Unsupported,
-                0,
-            ),
-            download_job(
-                "job_4",
-                JobState::Completed,
-                ResumeSupport::Unsupported,
-                100,
-            ),
-            download_job("job_5", JobState::Queued, ResumeSupport::Unknown, 0),
-        ],
-        settings: Settings::default(),
-        main_window: None,
-        diagnostic_events: Vec::new(),
-        next_job_number: 6,
-        active_workers: HashSet::new(),
-        external_reseed_jobs: HashSet::new(),
-        last_host_contact: None,
-    };
+    let state = runtime_state_with_jobs(vec![
+        download_job("job_1", JobState::Failed, ResumeSupport::Supported, 25),
+        download_job("job_2", JobState::Paused, ResumeSupport::Unsupported, 40),
+        download_job(
+            "job_3",
+            JobState::Downloading,
+            ResumeSupport::Unsupported,
+            0,
+        ),
+        download_job(
+            "job_4",
+            JobState::Completed,
+            ResumeSupport::Unsupported,
+            100,
+        ),
+        download_job("job_5", JobState::Queued, ResumeSupport::Unknown, 0),
+    ]);
 
     let summary = state.queue_summary();
 
@@ -60,6 +50,24 @@ fn save_settings_sync_persists_startup_preferences() {
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn normalize_extension_settings_migrates_legacy_protected_downloads() {
+    let mut settings = ExtensionIntegrationSettings {
+        authenticated_handoff_enabled: true,
+        protected_download_auth_scope: ProtectedDownloadAuthScope::Off,
+        authenticated_handoff_hosts: vec![],
+        ..ExtensionIntegrationSettings::default()
+    };
+
+    normalize_extension_settings(&mut settings);
+
+    assert!(settings.authenticated_handoff_enabled);
+    assert_eq!(
+        settings.protected_download_auth_scope,
+        ProtectedDownloadAuthScope::LegacyGlobal
+    );
 }
 
 #[tokio::test]
@@ -111,23 +119,80 @@ async fn authenticated_handoff_auth_is_memory_only_and_claimed_with_task() {
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn authenticated_handoff_auth_requires_allowed_host() {
+    let download_dir = test_runtime_dir("auth-handoff-allowlist");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+    let mut settings = state.settings().await;
+    settings.download_directory = download_dir.display().to_string();
+    settings.extension_integration.authenticated_handoff_enabled = true;
+    settings.extension_integration.protected_download_auth_scope =
+        ProtectedDownloadAuthScope::Allowlist;
+    settings.extension_integration.authenticated_handoff_hosts = vec!["chatgpt.com".into()];
+    state.save_settings(settings).await.unwrap();
+
+    let auth = HandoffAuth {
+        headers: vec![HandoffAuthHeader {
+            name: "Cookie".into(),
+            value: "session=abc".into(),
+        }],
+    };
+
+    let error = state
+        .enqueue_download_with_options(
+            "https://example.com/file.zip".into(),
+            EnqueueOptions {
+                source: Some(DownloadSource {
+                    entry_point: "browser_download".into(),
+                    browser: "chrome".into(),
+                    extension_version: "0.3.41".into(),
+                    page_url: None,
+                    page_title: None,
+                    referrer: None,
+                    incognito: Some(false),
+                }),
+                handoff_auth: Some(auth.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unlisted hosts should not receive browser session headers");
+
+    assert_eq!(error.code, "PERMISSION_DENIED");
+
+    state
+        .enqueue_download_with_options(
+            "https://files.chatgpt.com/file.zip".into(),
+            EnqueueOptions {
+                source: Some(DownloadSource {
+                    entry_point: "browser_download".into(),
+                    browser: "chrome".into(),
+                    extension_version: "0.3.41".into(),
+                    page_url: None,
+                    page_title: None,
+                    referrer: None,
+                    incognito: Some(false),
+                }),
+                handoff_auth: Some(auth),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("allowlisted host should receive browser session headers");
+
+    let raw_state = std::fs::read_to_string(download_dir.join("state.json")).unwrap();
+    assert!(!raw_state.contains("session=abc"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn duplicate_enqueue_result_includes_existing_job_details() {
     let mut existing_job = download_job("job_9", JobState::Paused, ResumeSupport::Supported, 50);
     existing_job.url = "https://example.com/file.zip".into();
     existing_job.filename = "file.zip".into();
 
-    let state = RuntimeState {
-        connection_state: ConnectionState::Connected,
-        jobs: vec![existing_job],
-        settings: Settings::default(),
-        main_window: None,
-        diagnostic_events: Vec::new(),
-        next_job_number: 10,
-        active_workers: HashSet::new(),
-        external_reseed_jobs: HashSet::new(),
-        last_host_contact: None,
-    };
+    let state = runtime_state_with_jobs(vec![existing_job]);
 
     let result = state
         .duplicate_enqueue_result("https://example.com/file.zip")
@@ -1400,26 +1465,78 @@ async fn reveal_unfinished_job_without_artifact_returns_parent_directory() {
 }
 
 #[test]
-fn snapshot_marks_completed_artifact_existence() {
-    let download_dir = test_runtime_dir("snapshot-artifact-existence");
-    let existing_path = download_dir.join("exists.pdf");
-    std::fs::write(&existing_path, b"done").unwrap();
-    let missing_path = download_dir.join("missing.zip");
+fn snapshot_leaves_completed_artifact_existence_unprobed() {
+    let jobs = (0..1_000)
+        .map(|index| {
+            let mut job = download_job(
+                &format!("job_{index}"),
+                JobState::Completed,
+                ResumeSupport::Supported,
+                100,
+            );
+            job.target_path = format!("Z:/definitely-missing/snapshot-scan-{index}.zip");
+            job
+        })
+        .collect::<Vec<_>>();
 
-    let mut existing_job =
-        download_job("job_24", JobState::Completed, ResumeSupport::Supported, 100);
-    existing_job.target_path = existing_path.display().to_string();
-    let mut missing_job =
-        download_job("job_25", JobState::Completed, ResumeSupport::Supported, 100);
-    missing_job.target_path = missing_path.display().to_string();
-
-    let state = runtime_state_with_jobs(vec![existing_job, missing_job]);
+    let state = runtime_state_with_jobs(jobs);
     let snapshot = state.snapshot();
 
-    assert_eq!(snapshot.jobs[0].artifact_exists, Some(true));
-    assert_eq!(snapshot.jobs[1].artifact_exists, Some(false));
+    assert!(
+        snapshot
+            .jobs
+            .iter()
+            .all(|job| job.artifact_exists.is_none()),
+        "full snapshots should not issue filesystem existence probes for completed artifacts"
+    );
+}
+
+#[tokio::test]
+async fn update_job_progress_coalesces_persistence() {
+    let download_dir = test_runtime_dir("progress-persist-coalesce");
+    let storage_path = download_dir.join("state.json");
+    let mut first = download_job("job_1", JobState::Downloading, ResumeSupport::Supported, 0);
+    first.total_bytes = 100;
+    let mut second = download_job("job_2", JobState::Downloading, ResumeSupport::Supported, 0);
+    second.total_bytes = 100;
+    let state = shared_state_with_jobs(storage_path.clone(), vec![first, second]);
+
+    state
+        .update_job_progress("job_1", 10, Some(100), 1, true)
+        .await
+        .expect("first progress update should persist");
+    state
+        .update_job_progress("job_2", 25, Some(100), 1, true)
+        .await
+        .expect("second progress update should update memory");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.jobs[1].downloaded_bytes, 25);
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    assert_eq!(persisted.jobs[0].downloaded_bytes, 10);
+    assert_eq!(
+        persisted.jobs[1].downloaded_bytes, 0,
+        "nearby active progress updates should be coalesced instead of writing full state each time"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn runtime_state_tracks_job_indexes_after_insert_and_remove() {
+    let mut state = runtime_state_with_jobs(vec![
+        download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0),
+        download_job("job_2", JobState::Queued, ResumeSupport::Unknown, 0),
+    ]);
+
+    assert_eq!(state.job_index("job_1"), Some(0));
+    assert_eq!(state.job_index("job_2"), Some(1));
+
+    let removed = state.remove_job_at_index(0);
+    assert_eq!(removed.id, "job_1");
+    assert_eq!(state.job_index("job_1"), None);
+    assert_eq!(state.job_index("job_2"), Some(0));
 }
 
 #[test]
@@ -2623,6 +2740,7 @@ fn torrent_runtime_update(
 }
 
 fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
+    let job_indexes = job_indexes_for(&jobs);
     RuntimeState {
         connection_state: ConnectionState::Connected,
         jobs,
@@ -2630,9 +2748,11 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         main_window: None,
         diagnostic_events: Vec::new(),
         next_job_number: 99,
+        job_indexes,
         active_workers: HashSet::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
+        last_progress_persist_at: None,
     }
 }
 

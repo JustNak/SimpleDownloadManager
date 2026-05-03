@@ -1,4 +1,8 @@
-import { normalizeExcludedHostPattern, type ExtensionIntegrationSettings } from '@myapp/protocol';
+import {
+  normalizeExcludedHostPattern,
+  type ExtensionIntegrationSettings,
+  type ProtectedDownloadAuthScope,
+} from '@myapp/protocol';
 
 export const DEFAULT_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
@@ -11,7 +15,8 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
-  authenticatedHandoffEnabled: true,
+  authenticatedHandoffEnabled: false,
+  protectedDownloadAuthScope: 'off',
   authenticatedHandoffHosts: [],
 };
 
@@ -28,9 +33,12 @@ export function normalizeExtensionSettings(
   settings?: Partial<ExtensionIntegrationSettings>,
 ): ExtensionIntegrationSettings {
   const defaults = createDefaultExtensionSettings();
+  const protectedDownloadAuthScope = normalizeProtectedDownloadAuthScope(settings);
   return {
     ...defaults,
     ...settings,
+    authenticatedHandoffEnabled: protectedDownloadAuthScope !== 'off',
+    protectedDownloadAuthScope,
     listenPort: normalizeListenPort(settings?.listenPort),
     excludedHosts: Array.from(
       new Set(
@@ -50,6 +58,28 @@ export function normalizeExtensionSettings(
       settings?.ignoredFileExtensions ?? defaults.ignoredFileExtensions,
     ),
   };
+}
+
+function normalizeProtectedDownloadAuthScope(
+  settings?: Partial<ExtensionIntegrationSettings>,
+): ProtectedDownloadAuthScope {
+  if (settings?.authenticatedHandoffEnabled === false) {
+    return 'off';
+  }
+
+  if (settings?.protectedDownloadAuthScope === 'off') {
+    return 'off';
+  }
+
+  if (settings?.protectedDownloadAuthScope === 'allowlist') {
+    return 'allowlist';
+  }
+
+  if (settings?.protectedDownloadAuthScope === 'legacy_global') {
+    return 'legacy_global';
+  }
+
+  return settings?.authenticatedHandoffEnabled ? 'legacy_global' : 'off';
 }
 
 function normalizeListenPort(value: unknown): number {

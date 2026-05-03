@@ -17,13 +17,11 @@ use crate::windows::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use url::Url;
-
-#[cfg(windows)]
-use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
@@ -115,6 +113,23 @@ struct PromptDownloadPayload {
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SideEffectClientTrust {
+    TrustedNativeHost {
+        process_id: u32,
+        image_path: PathBuf,
+    },
+    TrustedDesktop {
+        process_id: u32,
+        image_path: PathBuf,
+    },
+    Untrusted {
+        process_id: u32,
+        image_path: Option<PathBuf>,
+    },
+    IdentityUnavailable(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +312,7 @@ async fn accept_single_connection(
         .connect()
         .await
         .map_err(|error| format!("Could not accept named pipe connection: {error}"))?;
+    let client_trust = side_effect_client_trust_for_pipe(&server);
 
     tauri::async_runtime::spawn(async move {
         let result: Result<(), String> = async {
@@ -314,7 +330,8 @@ async fn accept_single_connection(
             let request = serde_json::from_str::<HostRequest>(&request_line)
                 .map_err(|error| format!("Could not parse host request: {error}"))?;
 
-            let response = handle_request(app, state.clone(), prompts, request).await;
+            let response =
+                handle_request(app, state.clone(), prompts, request, &client_trust).await;
             if !response.ok {
                 let _ = state
                     .record_diagnostic_event(
@@ -407,6 +424,7 @@ async fn handle_request(
     state: SharedState,
     prompts: PromptRegistry,
     request: HostRequest,
+    client_trust: &SideEffectClientTrust,
 ) -> HostResponse {
     if let Err(response) = validate_host_request(&request) {
         return *response;
@@ -419,6 +437,10 @@ async fn handle_request(
             "RATE_LIMITED",
             "Too many extension bridge requests. Try again shortly.".into(),
         );
+    }
+
+    if let Err(message) = authorize_side_effect_client(&request.message_type, client_trust) {
+        return HostResponse::error(request.request_id, "rejected", "PERMISSION_DENIED", message);
     }
 
     if should_register_host_contact_before_response(&request.message_type) {
@@ -954,6 +976,162 @@ fn is_side_effect_request_type(message_type: &str) -> bool {
             | "enqueue_download"
             | "prompt_download"
     )
+}
+
+fn authorize_side_effect_client(
+    message_type: &str,
+    trust: &SideEffectClientTrust,
+) -> Result<(), String> {
+    if !is_side_effect_request_type(message_type) {
+        return Ok(());
+    }
+
+    match trust {
+        SideEffectClientTrust::TrustedNativeHost { .. }
+        | SideEffectClientTrust::TrustedDesktop { .. } => Ok(()),
+        SideEffectClientTrust::Untrusted {
+            process_id,
+            image_path,
+        } => Err(format!(
+            "Rejected side-effecting native host request from untrusted local client {process_id}{}.",
+            image_path
+                .as_ref()
+                .map(|path| format!(" ({})", path.display()))
+                .unwrap_or_default()
+        )),
+        SideEffectClientTrust::IdentityUnavailable(message) => Err(format!(
+            "Rejected side-effecting native host request because client identity could not be verified: {message}."
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn side_effect_client_trust_for_pipe(
+    server: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> SideEffectClientTrust {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
+    let mut process_id = 0_u32;
+    let ok = unsafe {
+        GetNamedPipeClientProcessId(server.as_raw_handle() as _, &mut process_id as *mut u32)
+    };
+    if ok == 0 || process_id == 0 {
+        return SideEffectClientTrust::IdentityUnavailable(
+            "GetNamedPipeClientProcessId failed".into(),
+        );
+    }
+
+    match query_process_image_path(process_id) {
+        Ok(image_path) => classify_side_effect_client_process(process_id, Some(image_path)),
+        Err(error) => SideEffectClientTrust::IdentityUnavailable(error),
+    }
+}
+
+#[cfg(windows)]
+fn query_process_image_path(process_id: u32) -> Result<PathBuf, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return Err(format!("OpenProcess failed with {}", unsafe {
+            GetLastError()
+        }));
+    }
+
+    let mut buffer = vec![0_u16; 32_768];
+    let mut len = buffer.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len)
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if ok == 0 {
+        return Err(format!(
+            "QueryFullProcessImageNameW failed with {}",
+            unsafe { GetLastError() }
+        ));
+    }
+
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..len as usize])))
+}
+
+#[cfg(windows)]
+fn classify_side_effect_client_process(
+    process_id: u32,
+    image_path: Option<PathBuf>,
+) -> SideEffectClientTrust {
+    let Some(image_path) = image_path else {
+        return SideEffectClientTrust::Untrusted {
+            process_id,
+            image_path: None,
+        };
+    };
+
+    if is_current_desktop_process(&image_path) {
+        return SideEffectClientTrust::TrustedDesktop {
+            process_id,
+            image_path,
+        };
+    }
+
+    if is_bundled_native_host_process(&image_path) {
+        return SideEffectClientTrust::TrustedNativeHost {
+            process_id,
+            image_path,
+        };
+    }
+
+    SideEffectClientTrust::Untrusted {
+        process_id,
+        image_path: Some(image_path),
+    }
+}
+
+#[cfg(windows)]
+fn is_current_desktop_process(image_path: &Path) -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|current| same_path(&current, image_path))
+}
+
+#[cfg(windows)]
+fn is_bundled_native_host_process(image_path: &Path) -> bool {
+    let Some(file_name) = image_path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if !matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "simple-download-manager-native-host.exe"
+            | "simple-download-manager-native-host-x86_64-pc-windows-msvc.exe"
+    ) {
+        return false;
+    }
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        return true;
+    };
+    let Some(install_root) = current_exe.parent() else {
+        return true;
+    };
+
+    image_path.starts_with(install_root)
+        || install_root
+            .parent()
+            .is_some_and(|parent| image_path.starts_with(parent))
+}
+
+#[cfg(windows)]
+fn same_path(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
 fn side_effect_request_times() -> &'static Mutex<VecDeque<Instant>> {
@@ -1511,6 +1689,42 @@ mod tests {
             "enqueue_download",
             now + SIDE_EFFECT_RATE_LIMIT_WINDOW + Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn side_effect_client_trust_rejects_untrusted_local_clients() {
+        let trust = SideEffectClientTrust::Untrusted {
+            process_id: 4242,
+            image_path: Some(PathBuf::from(r"C:\Temp\unknown-client.exe")),
+        };
+
+        let error = authorize_side_effect_client("enqueue_download", &trust)
+            .expect_err("unknown local clients should not be allowed to enqueue downloads");
+
+        assert!(error.contains("unknown-client.exe"));
+    }
+
+    #[test]
+    fn side_effect_client_trust_preserves_read_only_requests() {
+        let trust = SideEffectClientTrust::Untrusted {
+            process_id: 4242,
+            image_path: Some(PathBuf::from(r"C:\Temp\unknown-client.exe")),
+        };
+
+        assert!(authorize_side_effect_client("ping", &trust).is_ok());
+        assert!(authorize_side_effect_client("get_status", &trust).is_ok());
+    }
+
+    #[test]
+    fn side_effect_client_trust_allows_bundled_native_host() {
+        let trust = SideEffectClientTrust::TrustedNativeHost {
+            process_id: 4242,
+            image_path: PathBuf::from(
+                r"C:\Program Files\Simple Download Manager\simple-download-manager-native-host.exe",
+            ),
+        };
+
+        assert!(authorize_side_effect_client("prompt_download", &trust).is_ok());
     }
 
     #[test]

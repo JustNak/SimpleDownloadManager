@@ -437,7 +437,7 @@
     </div>
 
     <div class="grid gap-3 border-y border-border/40 py-3 md:grid-cols-2">
-      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.5.0-beta', 'current')}
+      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.5.1-beta', 'current')}
       {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
     </div>
 
@@ -515,7 +515,7 @@
     {@render SwitchFieldRow(Globe, 'Context menu', 'Show Send to Simple Download Manager in the browser.', contextMenuControl)}
     {@render SwitchFieldRow(Download, 'Progress after handoff', 'Open a progress window after accepting a browser download.', progressAfterHandoffControl)}
     {@render SwitchFieldRow(CheckCircle2, 'Badge status', 'Show extension status in the browser toolbar.', badgeStatusControl)}
-    {@render SwitchFieldRow(ShieldCheck, 'Authenticated handoff', 'Require signed browser handoff requests.', authenticatedHandoffControl)}
+    {@render SwitchFieldRow(ShieldCheck, 'Protected Downloads', 'Forward memory-only browser session headers for configured sites.', authenticatedHandoffControl)}
     <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
       <div>
         <div class="flex min-w-0 items-start gap-3">
@@ -846,7 +846,7 @@
 {/snippet}
 
 {#snippet authenticatedHandoffControl()}
-  {@render ToggleSwitch('authenticatedHandoffEnabled', formData.extensionIntegration.authenticatedHandoffEnabled, (checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked }), !formData.extensionIntegration.enabled)}
+  {@render ToggleSwitch('authenticatedHandoffEnabled', formData.extensionIntegration.authenticatedHandoffEnabled, (checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked, protectedDownloadAuthScope: checked ? 'allowlist' : 'off' }), !formData.extensionIntegration.enabled)}
 {/snippet}
 
 {#snippet CategorySettingsCard(title: string, icon: IconComponent, content: Snippet)}

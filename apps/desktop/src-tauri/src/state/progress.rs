@@ -8,7 +8,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -36,7 +36,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -72,7 +72,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -92,7 +92,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             let event_message = {
-                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                let Some(job) = state.job_mut(id) else {
                     return Err("Job not found.".into());
                 };
 
@@ -124,7 +124,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -149,10 +149,14 @@ impl SharedState {
                 job.eta = 0;
             }
 
-            (state.snapshot(), state.persisted())
+            let persisted = persist
+                .then(|| state.should_persist_progress_at(Instant::now()))
+                .filter(|should_persist| *should_persist)
+                .map(|_| state.persisted());
+            (state.snapshot(), persisted)
         };
 
-        if persist {
+        if let Some(persisted) = persisted {
             persist_state(&self.storage_path, &persisted)?;
         }
         Ok(snapshot)
@@ -161,9 +165,7 @@ impl SharedState {
     pub async fn job_requires_sha256(&self, id: &str) -> bool {
         let state = self.inner.read().await;
         state
-            .jobs
-            .iter()
-            .find(|job| job.id == id)
+            .job(id)
             .and_then(|job| job.integrity_check.as_ref())
             .is_some_and(|check| {
                 check.algorithm == IntegrityAlgorithm::Sha256
@@ -190,7 +192,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -273,7 +275,7 @@ impl SharedState {
         id: &str,
     ) -> Result<Option<BulkArchiveReady>, String> {
         let state = self.inner.read().await;
-        let Some(job) = state.jobs.iter().find(|job| job.id == id) else {
+        let Some(job) = state.job(id) else {
             return Ok(None);
         };
         let Some(archive) = &job.bulk_archive else {
@@ -342,7 +344,7 @@ impl SharedState {
             state.active_workers.remove(id);
             state.external_reseed_jobs.remove(id);
             let event_message = {
-                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                let Some(job) = state.job_mut(id) else {
                     return Err("Job not found.".into());
                 };
 
@@ -370,7 +372,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.active_workers.remove(id);
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+            let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
 
@@ -393,14 +395,10 @@ impl SharedState {
     pub async fn resolve_openable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
         let (path, transfer_kind, job_state) = {
             let state = self.inner.read().await;
-            let job = state
-                .jobs
-                .iter()
-                .find(|job| job.id == id)
-                .ok_or_else(|| BackendError {
-                    code: "INTERNAL_ERROR",
-                    message: "Job not found.".into(),
-                })?;
+            let job = state.job(id).ok_or_else(|| BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Job not found.".into(),
+            })?;
 
             (
                 PathBuf::from(&job.target_path),
@@ -429,14 +427,10 @@ impl SharedState {
     pub async fn resolve_revealable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
         let (job_state, target_path, temp_path) = {
             let state = self.inner.read().await;
-            let job = state
-                .jobs
-                .iter()
-                .find(|job| job.id == id)
-                .ok_or_else(|| BackendError {
-                    code: "INTERNAL_ERROR",
-                    message: "Job not found.".into(),
-                })?;
+            let job = state.job(id).ok_or_else(|| BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Job not found.".into(),
+            })?;
 
             (
                 job.state,

@@ -22,6 +22,9 @@ pub(super) fn normalize_extension_settings(settings: &mut ExtensionIntegrationSe
     settings.excluded_hosts = normalize_host_patterns(&settings.excluded_hosts);
     settings.authenticated_handoff_hosts =
         normalize_host_patterns(&settings.authenticated_handoff_hosts);
+    settings.protected_download_auth_scope = normalize_protected_download_auth_scope(settings);
+    settings.authenticated_handoff_enabled =
+        settings.protected_download_auth_scope != ProtectedDownloadAuthScope::Off;
 
     let mut normalized_extensions = Vec::new();
     let mut seen_extensions = HashSet::new();
@@ -40,6 +43,19 @@ pub(super) fn normalize_extension_settings(settings: &mut ExtensionIntegrationSe
     }
 
     settings.ignored_file_extensions = normalized_extensions;
+}
+
+fn normalize_protected_download_auth_scope(
+    settings: &ExtensionIntegrationSettings,
+) -> ProtectedDownloadAuthScope {
+    if !settings.authenticated_handoff_enabled {
+        return ProtectedDownloadAuthScope::Off;
+    }
+
+    match settings.protected_download_auth_scope {
+        ProtectedDownloadAuthScope::Off => ProtectedDownloadAuthScope::LegacyGlobal,
+        scope => scope,
+    }
 }
 
 pub(super) fn normalize_host_patterns(hosts: &[String]) -> Vec<String> {

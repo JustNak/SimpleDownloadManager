@@ -46,6 +46,7 @@ impl SharedState {
             .collect::<Vec<_>>();
         let diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
         let next_job_number = next_job_number(&jobs);
+        let job_indexes = job_indexes_for(&jobs);
 
         let state = Self {
             inner: Arc::new(RwLock::new(RuntimeState {
@@ -55,9 +56,11 @@ impl SharedState {
                 main_window: persisted.main_window,
                 diagnostic_events,
                 next_job_number,
+                job_indexes,
                 active_workers: HashSet::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
+                last_progress_persist_at: None,
             })),
             storage_path: Arc::new(storage_path),
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
@@ -69,6 +72,7 @@ impl SharedState {
 
     #[cfg(test)]
     pub(crate) fn for_tests(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Self {
+        let job_indexes = job_indexes_for(&jobs);
         Self {
             inner: Arc::new(RwLock::new(RuntimeState {
                 connection_state: ConnectionState::Connected,
@@ -77,9 +81,11 @@ impl SharedState {
                 main_window: None,
                 diagnostic_events: Vec::new(),
                 next_job_number: 99,
+                job_indexes,
                 active_workers: HashSet::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
+                last_progress_persist_at: None,
             })),
             storage_path: Arc::new(storage_path),
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),

@@ -224,7 +224,10 @@ badgeToggle?.addEventListener('change', () => {
 });
 
 authHandoffToggle?.addEventListener('change', () => {
-  void updateSettings({ authenticatedHandoffEnabled: authHandoffToggle.checked });
+  void updateSettings({
+    authenticatedHandoffEnabled: authHandoffToggle.checked,
+    protectedDownloadAuthScope: authHandoffToggle.checked ? 'allowlist' : 'off',
+  });
 });
 
 addExtensionButton?.addEventListener('click', () => {

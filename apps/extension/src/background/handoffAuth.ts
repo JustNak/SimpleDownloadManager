@@ -1,4 +1,5 @@
 import {
+  isProtectedDownloadAuthAllowedForUrl,
   sanitizeHandoffAuth,
   type ExtensionIntegrationSettings,
   type HandoffAuth,
@@ -46,7 +47,7 @@ export function buildHandoffAuthForUrl(
   headers: HandoffAuthRequestHeader[] | undefined,
   settings: ExtensionIntegrationSettings,
 ): HandoffAuth | undefined {
-  if (!settings.authenticatedHandoffEnabled || !isHttpUrl(url)) {
+  if (!isHttpUrl(url) || !isProtectedDownloadAuthAllowedForUrl(url, settings)) {
     return undefined;
   }
 
@@ -56,13 +57,14 @@ export function buildHandoffAuthForUrl(
 
 export function captureHandoffAuthHeaders(
   details: HandoffAuthRequestDetails,
+  settings: ExtensionIntegrationSettings,
   now = Date.now(),
 ): void {
   if (details.method && details.method.toUpperCase() !== 'GET') {
     return;
   }
 
-  if (!isHttpUrl(details.url)) {
+  if (!isHttpUrl(details.url) || !isProtectedDownloadAuthAllowedForUrl(details.url, settings)) {
     return;
   }
 
@@ -104,6 +106,10 @@ export function takeCapturedHandoffAuth(
 ): HandoffAuth | undefined {
   if (!settings.authenticatedHandoffEnabled) {
     clearCapturedHandoffAuth();
+    return undefined;
+  }
+
+  if (!isProtectedDownloadAuthAllowedForUrl(details.url, settings)) {
     return undefined;
   }
 
