@@ -96,7 +96,7 @@
           <span class="truncate text-[11px] tabular-nums text-muted-foreground" title={downloadedText(job)}>{downloadedText(job)}</span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-progress-track">
-          <div class={`h-1.5 rounded-full transition-all duration-300 ${progressColor(job)}`} style={`width: ${progress}%`}></div>
+          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${progressColor(job)}`} style={`width: ${progress}%`}></div>
         </div>
       </section>
 

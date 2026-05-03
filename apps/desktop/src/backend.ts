@@ -5,11 +5,17 @@ import type { ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
 import { canSwapFailedDownloadToBrowser } from './queueCommands';
+export { applyDownloadUpdateBatch } from './downloadUpdateBatch';
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
   jobs: DownloadJob[];
   settings: Settings;
+}
+
+export interface DownloadUpdateBatch {
+  jobs: DownloadJob[];
+  removedJobIds: string[];
 }
 
 export interface ProgressJobSnapshot {
@@ -47,6 +53,7 @@ export interface ExternalUseResult {
 }
 
 const STATE_CHANGED_EVENT = 'app://state-changed';
+const DOWNLOADS_UPDATE_BATCH_EVENT = 'app://downloads-update-batch';
 const PROGRESS_JOB_SNAPSHOT_EVENT = 'app://progress-job-snapshot';
 const BATCH_PROGRESS_SNAPSHOT_EVENT = 'app://batch-progress-snapshot';
 const SETTINGS_SNAPSHOT_EVENT = 'app://settings-snapshot';
@@ -948,6 +955,13 @@ export async function subscribeToStateChanged(
     return async () => mockListeners.delete(listener);
   }
   return listen<DesktopSnapshot>(STATE_CHANGED_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToDownloadUpdateBatch(
+  listener: (batch: DownloadUpdateBatch) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<DownloadUpdateBatch>(DOWNLOADS_UPDATE_BATCH_EVENT, (event) => listener(event.payload));
 }
 
 export async function subscribeToProgressJobSnapshot(

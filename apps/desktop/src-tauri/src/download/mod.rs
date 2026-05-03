@@ -1,4 +1,4 @@
-use crate::commands::emit_snapshot;
+use crate::commands::{emit_download_update, emit_snapshot};
 use crate::state::{
     should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
     TorrentRuntimeSnapshot, WorkerControl,
@@ -1550,7 +1550,7 @@ async fn run_torrent_download_attempt(
             .update_torrent_progress(&task.id, update.clone(), should_persist)
             .await
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-        emit_snapshot(app, &snapshot);
+        emit_download_update(app, &snapshot, &task.id);
         let next_snapshot_job_state = snapshot
             .jobs
             .iter()
@@ -1650,7 +1650,7 @@ async fn persist_final_torrent_snapshot_before_pause(
         .update_torrent_progress(job_id, update, true)
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-    emit_snapshot(app, &snapshot);
+    emit_download_update(app, &snapshot, job_id);
     Ok(())
 }
 
@@ -2465,7 +2465,7 @@ async fn run_http_download_attempt(
                     should_persist,
                 )
                 .await?;
-            emit_snapshot(app, &snapshot);
+            emit_download_update(app, &snapshot, &task.id);
             last_emitted_bytes = downloaded_bytes;
             if should_persist {
                 last_persisted_at = Instant::now();
@@ -2500,7 +2500,7 @@ async fn run_http_download_attempt(
         let snapshot = state
             .update_job_progress(&task.id, downloaded_bytes, total_bytes, 0, should_persist)
             .await?;
-        emit_snapshot(app, &snapshot);
+        emit_download_update(app, &snapshot, &task.id);
     }
 
     let final_path = move_to_final_path(&task.temp_path, &target_path)
@@ -2880,7 +2880,7 @@ async fn run_segmented_download_attempt(
     let snapshot = state
         .update_job_progress(&task.id, plan.total_bytes, Some(plan.total_bytes), 0, true)
         .await?;
-    emit_snapshot(app, &snapshot);
+    emit_download_update(app, &snapshot, &task.id);
 
     let final_path = move_to_final_path(&task.temp_path, &task.target_path)
         .await
@@ -3163,7 +3163,7 @@ async fn report_segmented_progress(
                     .await?
             }
         };
-        emit_snapshot(&app, &snapshot);
+        emit_download_update(&app, &snapshot, &job_id);
 
         if stopping {
             break;
@@ -5527,9 +5527,7 @@ mod tests {
 
         prepare_direct_segment_file(&temp_path, 12).await.unwrap();
         let mut file = open_direct_segment_file(&temp_path).await.unwrap();
-        write_segment_chunk_to(&mut file, 4, b"rust")
-            .await
-            .unwrap();
+        write_segment_chunk_to(&mut file, 4, b"rust").await.unwrap();
 
         let bytes = tokio::fs::read(&temp_path).await.unwrap();
         assert_eq!(&bytes[4..8], b"rust");

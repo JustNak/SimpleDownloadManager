@@ -1,17 +1,22 @@
 import assert from 'node:assert/strict';
 
-let publishUpdaterAlpha;
+let publishUpdaterBeta;
+let publishUpdaterAlphaBridge;
 try {
-  publishUpdaterAlpha = await import('../../../scripts/publish-updater-alpha.mjs');
+  publishUpdaterBeta = await import('../../../scripts/publish-updater-beta.mjs');
+  publishUpdaterAlphaBridge = await import('../../../scripts/publish-updater-alpha-bridge.mjs');
 } catch (error) {
-  assert.fail(`Updater publish helper should be importable without running gh: ${error instanceof Error ? error.message : error}`);
+  assert.fail(`Updater publish helpers should be importable without running gh: ${error instanceof Error ? error.message : error}`);
 }
 
 const {
   assertGitHubCliAvailable,
   isMissingGitHubCliError,
   missingGitHubCliMessage,
-} = publishUpdaterAlpha;
+} = publishUpdaterBeta;
+
+assert.equal(typeof publishUpdaterBeta.publishUpdaterBeta, 'function');
+assert.equal(typeof publishUpdaterAlphaBridge.publishUpdaterAlphaBridge, 'function');
 
 assert.equal(
   isMissingGitHubCliError({ code: 'ENOENT', path: 'gh', syscall: 'spawn gh' }),

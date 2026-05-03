@@ -35,10 +35,8 @@
   import { ConnectionState, JobState } from './types';
   import type { DownloadJob, QueueRowSize, Settings, ToastMessage } from './types';
   import QueueView from './QueueView.svelte';
-  import SettingsPage, { SETTINGS_SECTIONS, type SettingsSectionId } from './SettingsPage.svelte';
+  import { SETTINGS_SECTIONS, type SettingsSectionId } from './settingsSections';
   import ToastArea from './ToastArea.svelte';
-  import AddDownloadModal from './AddDownloadModal.svelte';
-  import type { AddDownloadOutcome } from './AddDownloadModal.svelte';
   import Titlebar from './Titlebar.svelte';
   import { compareDownloadsForSort, readStoredSortMode, writeStoredSortMode, type SortMode } from './downloadSorting';
   import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
@@ -85,6 +83,7 @@
     retryJob,
     runHostRegistrationFix,
     saveSettings,
+    subscribeToDownloadUpdateBatch,
     subscribeToSelectedJobRequested,
     subscribeToStateChanged,
     subscribeToUpdateInstallProgress,
@@ -92,6 +91,7 @@
     testExtensionHandoff,
   } from './backend';
   import type { AddJobsResult, DesktopSnapshot } from './backend';
+  import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
   import {
     shouldNotifyDiagnosticsRefreshFailure,
@@ -115,6 +115,7 @@
   } from './appUpdates';
   import type { DiagnosticsSnapshot } from './types';
   import { formatBytes } from './popupShared';
+  type AddDownloadOutcome = import('./AddDownloadModal.svelte').AddDownloadOutcome;
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
@@ -144,11 +145,15 @@
   let commandMenuOpen = $state(false);
   let commandMenuRoot: HTMLDivElement | null = $state(null);
   let settingsScrollRoot: HTMLDivElement | null = $state(null);
+  let SettingsPageComponent = $state<Component<any> | null>(null);
+  let AddDownloadModalComponent = $state<Component<any> | null>(null);
 
   let progressSamples: ProgressSample[] = [];
   let startupUpdateCheckStarted = false;
   let pendingVisibleSnapshot: DesktopSnapshot | null = null;
   let lastDiagnosticsRefreshAt = 0;
+  let settingsPageLoad: Promise<void> | null = null;
+  let addDownloadModalLoad: Promise<void> | null = null;
 
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
@@ -175,7 +180,7 @@
 
   $effect(() => {
     let isMounted = true;
-    let dispose: (() => void | Promise<void>) | undefined;
+    const disposers: Array<() => void | Promise<void>> = [];
 
     async function initialize() {
       try {
@@ -198,11 +203,15 @@
           });
         }
 
-        dispose = await subscribeToStateChanged((nextSnapshot) => {
+        disposers.push(await subscribeToStateChanged((nextSnapshot) => {
           if (applyDesktopSnapshotWhenVisible(nextSnapshot)) {
             void refreshDiagnostics({ silent: true });
           }
-        });
+        }));
+
+        disposers.push(await subscribeToDownloadUpdateBatch((batch) => {
+          applyDownloadUpdateBatchWhenVisible(batch);
+        }));
 
         if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted)) {
           startupUpdateCheckStarted = true;
@@ -225,7 +234,9 @@
 
     return () => {
       isMounted = false;
-      void dispose?.();
+      for (const dispose of disposers) {
+        void dispose();
+      }
     };
   });
 
@@ -324,8 +335,11 @@
       return;
     }
 
+    void loadSettingsPageComponent();
+
     const scrollRoot = settingsScrollRoot;
     if (!scrollRoot) return;
+    if (!SettingsPageComponent) return;
 
     const updateActiveSectionFromScroll = () => {
       if (scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 2) {
@@ -385,6 +399,12 @@
       document.removeEventListener('pointerdown', closeOnPointerDown);
       document.removeEventListener('keydown', closeOnEscape);
     };
+  });
+
+  $effect(() => {
+    if (isAddModalOpen) {
+      void loadAddDownloadModalComponent();
+    }
   });
 
   $effect(() => {
@@ -454,6 +474,9 @@
     }
 
     view = nextView;
+    if (nextView === 'settings') {
+      void loadSettingsPageComponent();
+    }
   }
 
   function handleSettingsSectionClick(sectionId: SettingsSectionId) {
@@ -482,6 +505,12 @@
     settings = snapshot.settings;
   }
 
+  function applyDownloadBatch(batch: DownloadUpdateBatch) {
+    const nextJobs = applyDownloadUpdateBatch(jobs, batch);
+    progressSamples = recordProgressSamples(progressSamples, nextJobs);
+    jobs = nextJobs;
+  }
+
   function applyDesktopSnapshotWhenVisible(snapshot: DesktopSnapshot): boolean {
     if (document.visibilityState !== 'visible') {
       pendingVisibleSnapshot = snapshot;
@@ -489,6 +518,20 @@
     }
 
     applyDesktopSnapshot(snapshot);
+    return true;
+  }
+
+  function applyDownloadUpdateBatchWhenVisible(batch: DownloadUpdateBatch): boolean {
+    if (document.visibilityState !== 'visible') {
+      const baseSnapshot = pendingVisibleSnapshot ?? { connectionState, jobs, settings };
+      pendingVisibleSnapshot = {
+        ...baseSnapshot,
+        jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, batch),
+      };
+      return false;
+    }
+
+    applyDownloadBatch(batch);
     return true;
   }
 
@@ -511,6 +554,27 @@
         message: getErrorMessage(error, 'Failed to refresh desktop state.'),
       });
     }
+  }
+
+  async function loadSettingsPageComponent() {
+    if (SettingsPageComponent) return;
+    settingsPageLoad ??= import('./SettingsPage.svelte').then((module) => {
+      SettingsPageComponent = module.default;
+    });
+    await settingsPageLoad;
+  }
+
+  async function loadAddDownloadModalComponent() {
+    if (AddDownloadModalComponent) return;
+    addDownloadModalLoad ??= import('./AddDownloadModal.svelte').then((module) => {
+      AddDownloadModalComponent = module.default;
+    });
+    await addDownloadModalLoad;
+  }
+
+  function openAddDownloadModal() {
+    isAddModalOpen = true;
+    void loadAddDownloadModalComponent();
   }
 
   function addToast(toast: Omit<ToastMessage, 'id'>) {
@@ -555,7 +619,7 @@
       }
 
       if (mode === 'manual') {
-        addToast({ type: 'success', title: 'No Update Available', message: 'You are running the latest alpha build.' });
+        addToast({ type: 'success', title: 'No Update Available', message: 'You are running the latest beta build.' });
       }
     } catch (error) {
       const message = getErrorMessage(error, 'Could not check for updates.');
@@ -1037,7 +1101,7 @@
     {#if view !== 'settings'}
       <div class="command-bar flex h-full min-w-0 flex-1 items-center justify-between gap-3">
         <div class="flex min-w-0 shrink-0 items-center gap-1.5">
-          {@render ToolbarButton(FilePlus, 'New Download', () => isAddModalOpen = true, false, true)}
+          {@render ToolbarButton(FilePlus, 'New Download', openAddDownloadModal, false, true)}
           <div class="mx-1.5 h-5 w-px bg-border"></div>
           <div class="relative" bind:this={commandMenuRoot}>
             {@render ToolbarButton(MoreHorizontal, 'More', () => commandMenuOpen = !commandMenuOpen, false, false, 'Queue actions and row size')}
@@ -1165,26 +1229,28 @@
     <main class="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
       {#if view === 'settings'}
         <div class="min-h-0 flex-1 overflow-y-auto bg-surface" bind:this={settingsScrollRoot}>
-          <SettingsPage
-            {settings}
-            {diagnostics}
-            hasActiveTorrentJobs={hasActiveTorrentJobs}
-            isSaving={isSavingSettings}
-            onSave={(newSettings) => void handleSaveSettings(newSettings, 'all')}
-            onCancel={() => requestViewChange('all')}
-            onDirtyChange={setSettingsDirtyState}
-            onBrowseDirectory={handleBrowseDirectory}
-            onClearTorrentSessionCache={() => void handleClearTorrentSessionCache()}
-            onRefreshDiagnostics={() => void refreshDiagnostics({ silent: false, force: true })}
-            onOpenInstallDocs={() => void handleOpenInstallDocs()}
-            onRunHostRegistrationFix={() => void handleRunHostRegistrationFix()}
-            onTestExtensionHandoff={() => void handleTestExtensionHandoff()}
-            onCopyDiagnostics={() => void handleCopyDiagnostics()}
-            onExportDiagnostics={() => void handleExportDiagnostics()}
-            {updateState}
-            onCheckForUpdates={() => void handleCheckForUpdates('manual')}
-            onInstallUpdate={() => void handleInstallUpdate()}
-          />
+          {#if SettingsPageComponent}
+            <SettingsPageComponent
+              {settings}
+              {diagnostics}
+              hasActiveTorrentJobs={hasActiveTorrentJobs}
+              isSaving={isSavingSettings}
+              onSave={(newSettings: Settings) => void handleSaveSettings(newSettings, 'all')}
+              onCancel={() => requestViewChange('all')}
+              onDirtyChange={setSettingsDirtyState}
+              onBrowseDirectory={handleBrowseDirectory}
+              onClearTorrentSessionCache={() => void handleClearTorrentSessionCache()}
+              onRefreshDiagnostics={() => void refreshDiagnostics({ silent: false, force: true })}
+              onOpenInstallDocs={() => void handleOpenInstallDocs()}
+              onRunHostRegistrationFix={() => void handleRunHostRegistrationFix()}
+              onTestExtensionHandoff={() => void handleTestExtensionHandoff()}
+              onCopyDiagnostics={() => void handleCopyDiagnostics()}
+              onExportDiagnostics={() => void handleExportDiagnostics()}
+              {updateState}
+              onCheckForUpdates={() => void handleCheckForUpdates('manual')}
+              onInstallUpdate={() => void handleInstallUpdate()}
+            />
+          {/if}
         </div>
       {:else}
         <QueueView
@@ -1226,10 +1292,12 @@
   <ToastArea {toasts} onRemove={removeToast} />
 
   {#if isAddModalOpen}
-    <AddDownloadModal
-      onClose={() => isAddModalOpen = false}
-      onAdded={handleAddDownloadResult}
-    />
+    {#if AddDownloadModalComponent}
+      <AddDownloadModalComponent
+        onClose={() => isAddModalOpen = false}
+        onAdded={handleAddDownloadResult}
+      />
+    {/if}
   {/if}
 
   {#if isUnsavedSettingsPromptOpen}

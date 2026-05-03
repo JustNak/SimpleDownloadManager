@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
+const sectionsSource = readFileSync(new URL('../src/settingsSections.ts', import.meta.url), 'utf8');
 
 assert.match(source, /settings-surface mx-auto w-full max-w-6xl p-4/, 'settings content should keep the React centered max-width form layout');
-assert.match(source, /export const SETTINGS_SECTIONS = \[/, 'settings should export its section list for the app shell');
+assert.match(sectionsSource, /export const SETTINGS_SECTIONS = \[/, 'settings section list should live in the lightweight app-shell metadata module');
 
 for (const [sectionId, label] of [
   ['settings-general', 'General'],
@@ -14,7 +15,7 @@ for (const [sectionId, label] of [
   ['settings-extension', 'Web Extension'],
   ['settings-native-host', 'Native Host'],
 ]) {
-  assert.match(source, new RegExp(`id: '${sectionId}'[\\s\\S]*label: '${label}'`), `settings section metadata for ${sectionId} should exist`);
+  assert.match(sectionsSource, new RegExp(`id: '${sectionId}'[\\s\\S]*label: '${label}'`), `settings section metadata for ${sectionId} should exist`);
   assert.match(source, new RegExp(`<section id="${sectionId}" class="scroll-mt-4"`), `settings section ${sectionId} should render as a scroll anchor`);
 }
 
@@ -22,7 +23,7 @@ assert.match(source, /sticky top-0 z-30[\s\S]*bg-surface\/95[\s\S]*backdrop-blur
 assert.match(source, /Configure downloads, appearance, notifications, and native host diagnostics\./, 'settings subtitle should match React');
 assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep React cancel and save actions');
 assert.match(source, /CategorySettingsCard\('General'/, 'general settings should render through the category card helper');
-assert.match(source, /Alpha channel updates/, 'app update card should be present');
+assert.match(source, /Beta channel updates/, 'app update card should be present');
 assert.match(source, /CategorySettingsCard\('Torrenting'/, 'torrent settings should render the torrenting category card');
 assert.match(source, /CategorySettingsCard\('Appearance'/, 'appearance settings should render the appearance category card');
 assert.match(source, /CategorySettingsCard\('Web Extension'/, 'extension settings should render the web extension category card');

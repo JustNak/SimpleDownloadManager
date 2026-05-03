@@ -13,7 +13,8 @@ assert.match(source, /download-sidebar flex w-\[220px\] shrink-0 flex-col overfl
 assert.match(source, /<nav class="min-h-0 flex-1 overflow-y-auto overscroll-contain/, 'the sidebar navigation should scroll independently on short windows');
 assert.match(source, /Gauge, 'Active'[\s\S]*CheckCircle2, 'Completed'[\s\S]*Torrents/, 'Completed downloads should remain visible with Active above the torrent section');
 assert.match(source, /class="shrink-0 space-y-2"/, 'the Settings footer should stay fixed below the scrollable sidebar navigation');
-assert.match(source, /import SettingsPage, \{ SETTINGS_SECTIONS, type SettingsSectionId \}/, 'the app shell should consume the shared settings section list');
+assert.match(source, /import \{ SETTINGS_SECTIONS, type SettingsSectionId \} from '\.\/settingsSections'/, 'the app shell should consume the shared settings section list');
+assert.doesNotMatch(source, /^import\s+.*\.\/SettingsPage\.svelte/m, 'the app shell should lazy-load the heavy settings page component');
 assert.match(source, /let activeSettingsSectionId = \$state<SettingsSectionId>\(SETTINGS_SECTIONS\[0\]\.id\)/, 'settings view should track the active settings section');
 assert.match(source, /SettingsSidebar\(activeSettingsSectionId/, 'settings view should restore the React settings sidebar outside the settings form');
 assert.match(source, /Back to downloads/, 'settings sidebar should expose the React back action');

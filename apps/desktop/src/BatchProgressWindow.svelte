@@ -306,7 +306,7 @@
           </span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-progress-track">
-          <div class={`h-1.5 rounded-full transition-all duration-300 ${summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${progress}%`}></div>
+          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${progress}%`}></div>
         </div>
       </section>
 
@@ -369,7 +369,7 @@
       <div class="truncate text-sm font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</div>
       <div class="truncate text-xs text-muted-foreground" title={job.url}>{job.transferKind === 'torrent' ? 'Torrent' : getHost(job.url)}</div>
       <div class="mt-1 h-1 overflow-hidden rounded-full bg-progress-track">
-        <div class={`h-1 rounded-full transition-all duration-300 ${progressColor(job.state)}`} style={`width: ${rowProgress}%`}></div>
+        <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${progressColor(job.state)}`} style={`width: ${rowProgress}%`}></div>
       </div>
     </div>
     <div class="min-w-0 text-right text-xs">

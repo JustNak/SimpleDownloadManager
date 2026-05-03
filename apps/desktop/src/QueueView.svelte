@@ -756,7 +756,7 @@
             {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
             {@const statusPresentation = queueStatusPresentation(job)}
             <div
-              class={`grid w-full ${QUEUE_TABLE_GRID_CLASS} items-center gap-0 px-3 text-left transition ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
+              class={`grid w-full ${QUEUE_TABLE_GRID_CLASS} items-center gap-0 px-3 text-left transition-colors ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
               role="button"
               tabindex="0"
               style={virtualQueue.enabled ? `height: ${virtualQueue.rowHeight}px;` : undefined}
@@ -825,18 +825,18 @@
                 onkeydown={(event) => event.stopPropagation()}
               >
                 {#if job.state === JobState.Paused}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground" title="Resume" aria-label="Resume" onclick={() => onResume(job.id)}><Play size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Resume" aria-label="Resume" onclick={() => onResume(job.id)}><Play size={17} /></button>
                 {:else if isActive(job)}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground" title="Pause" aria-label="Pause" onclick={() => onPause(job.id)}><Pause size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Pause" aria-label="Pause" onclick={() => onPause(job.id)}><Pause size={17} /></button>
                 {/if}
                 {#if [JobState.Failed, JobState.Canceled].includes(job.state)}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground" title="Retry" aria-label="Retry" onclick={() => onRetry(job.id)}><RotateCw size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Retry" aria-label="Retry" onclick={() => onRetry(job.id)}><RotateCw size={17} /></button>
                 {/if}
                 {#if canSwapFailedDownloadToBrowser(job)}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground" title="Swap" aria-label="Swap" onclick={() => onSwapFailedToBrowser(job.id)}><ExternalLink size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Swap" aria-label="Swap" onclick={() => onSwapFailedToBrowser(job.id)}><ExternalLink size={17} /></button>
                 {/if}
                 <button
-                  class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition hover:border-border hover:bg-muted hover:text-foreground"
+                  class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
                   title="More actions"
                   aria-label="More actions"
                   onclick={(event) => {
@@ -947,7 +947,7 @@
   <div class={`relative -ml-2 min-w-0 flex-1 overflow-hidden rounded-sm ${density.container}`}>
     {#if showProgress}
       <div
-        class={`pointer-events-none absolute ${density.progressInset} left-0 z-0 rounded-[inherit] blur-md ${nameProgressClass(presentation.tone)}`}
+        class={`pointer-events-none absolute ${density.progressInset} left-0 z-0 rounded-[inherit] opacity-25 ${nameProgressClass(presentation.tone)}`}
         style={`width: ${progress}%;`}
         aria-hidden="true"
       ></div>
@@ -1027,7 +1027,7 @@
 
 {#snippet MenuItem(icon: IconComponent, label: string, onClick: () => void, destructive = false)}
   {@const Icon = icon}
-  <button class={`flex h-9 w-full items-center gap-2 px-3 text-left text-sm transition hover:bg-muted ${destructive ? 'text-destructive' : 'text-foreground'}`} onclick={() => { onClick(); closeMenus(); }}>
+  <button class={`flex h-9 w-full items-center gap-2 px-3 text-left text-sm transition-colors hover:bg-muted ${destructive ? 'text-destructive' : 'text-foreground'}`} onclick={() => { onClick(); closeMenus(); }}>
     <span class={destructive ? 'text-destructive' : 'text-muted-foreground'}><Icon size={16} /></span>
     <span class="min-w-0 flex-1 truncate">{label}</span>
   </button>

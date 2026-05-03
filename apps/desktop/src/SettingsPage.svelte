@@ -1,52 +1,3 @@
-<script module lang="ts">
-  export const SETTINGS_SECTIONS = [
-    {
-      id: 'settings-general',
-      href: '#settings-general',
-      label: 'General',
-      description: 'Folders and limits.',
-      iconName: 'general',
-    },
-    {
-      id: 'settings-updates',
-      href: '#settings-updates',
-      label: 'App Updates',
-      description: 'Version controls.',
-      iconName: 'updates',
-    },
-    {
-      id: 'settings-torrenting',
-      href: '#settings-torrenting',
-      label: 'Torrenting',
-      description: 'Seeding and peers.',
-      iconName: 'torrenting',
-    },
-    {
-      id: 'settings-appearance',
-      href: '#settings-appearance',
-      label: 'Appearance',
-      description: 'Theme and rows.',
-      iconName: 'appearance',
-    },
-    {
-      id: 'settings-extension',
-      href: '#settings-extension',
-      label: 'Web Extension',
-      description: 'Browser handoff.',
-      iconName: 'extension',
-    },
-    {
-      id: 'settings-native-host',
-      href: '#settings-native-host',
-      label: 'Native Host',
-      description: 'Diagnostics tools.',
-      iconName: 'native-host',
-    },
-  ] as const;
-
-  export type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id'];
-</script>
-
 <script lang="ts">
   import { untrack, type Component, type Snippet } from 'svelte';
   import {
@@ -300,13 +251,13 @@
   }
 
   function renderUpdateStatus(state: AppUpdateState): string {
-    if (state.status === 'checking') return 'Checking GitHub Releases for a newer alpha build.';
+    if (state.status === 'checking') return 'Checking GitHub Releases for a newer beta build.';
     if (state.status === 'available' && state.availableUpdate) return `Version ${state.availableUpdate.version} is available.`;
-    if (state.status === 'not_available') return 'You are running the latest alpha build.';
+    if (state.status === 'not_available') return 'You are running the latest beta build.';
     if (state.status === 'downloading') return 'Downloading the signed update package.';
     if (state.status === 'installing') return 'Installing the update. The app may close automatically.';
     if (state.status === 'error') return 'The last update action failed.';
-    return 'Checks the signed alpha feed hosted on GitHub Releases.';
+    return 'Checks the signed beta feed hosted on GitHub Releases.';
   }
 
   function versionIndicatorToneClass(tone: AppUpdateVersionTone): string {
@@ -476,7 +427,7 @@
   <div class="space-y-4">
     <div class="flex items-start justify-between gap-3">
       <div class="min-w-0">
-        <div class="font-semibold text-foreground">Alpha channel updates</div>
+        <div class="font-semibold text-foreground">Beta channel updates</div>
         <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderUpdateStatus(updateState)}</div>
       </div>
       <button type="button" onclick={onCheckForUpdates} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
@@ -486,7 +437,7 @@
     </div>
 
     <div class="grid gap-3 border-y border-border/40 py-3 md:grid-cols-2">
-      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.3.55-alpha', 'current')}
+      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.5.0-beta', 'current')}
       {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
     </div>
 

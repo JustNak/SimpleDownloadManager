@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const repoRoot = path.resolve();
-const expectedVersion = '0.3.55-alpha';
+const expectedVersion = '0.5.0-beta';
 const expectedProtocolVersion = '0.3.48-alpha';
 const expectedNativeHostVersion = '0.3.48-alpha';
 const expectedExtensionVersion = '0.3.48-beta';
@@ -32,6 +32,11 @@ assert.equal(
 
 const tauriConfig = JSON.parse(await readFile(path.join(repoRoot, 'apps', 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'));
 assert.equal(tauriConfig.version, expectedVersion, 'Tauri config should be bumped to the release version');
+assert.deepEqual(
+  tauriConfig.plugins.updater.endpoints,
+  ['https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/latest-beta.json'],
+  'desktop updater endpoint should track the beta feed',
+);
 
 const desktopCargoManifest = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
 assert.match(

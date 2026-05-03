@@ -16,14 +16,15 @@ use crate::storage::{
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, progress_window_label,
-    show_batch_progress_window, show_download_prompt_window, show_progress_window_for_transfer_kind,
-    torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
+    show_batch_progress_window, show_download_prompt_window,
+    show_progress_window_for_transfer_kind, torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, OnceLock, RwLock};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(windows)]
@@ -45,9 +46,11 @@ use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 pub const STATE_CHANGED_EVENT: &str = "app://state-changed";
+const DOWNLOADS_UPDATE_BATCH_EVENT: &str = "app://downloads-update-batch";
 const PROGRESS_JOB_SNAPSHOT_EVENT: &str = "app://progress-job-snapshot";
 const BATCH_PROGRESS_SNAPSHOT_EVENT: &str = "app://batch-progress-snapshot";
 const SETTINGS_SNAPSHOT_EVENT: &str = "app://settings-snapshot";
+const DOWNLOAD_UPDATE_BATCH_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const INSTALL_RESOURCE_DIR: &str = "resources\\install";
 const NATIVE_HOST_NAME: &str = "com.myapp.download_manager";
 const DEFAULT_CHROMIUM_EXTENSION_ID: &str = "pkaojpfpjieklhinoibjibmjldohlmbb";
@@ -111,6 +114,13 @@ pub struct AddJobsResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DownloadUpdateBatch {
+    pub jobs: Vec<DownloadJob>,
+    pub removed_job_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressJobSnapshot {
     pub job: Option<DownloadJob>,
     pub settings: Settings,
@@ -129,6 +139,15 @@ pub struct BatchProgressSnapshot {
 pub struct SettingsSnapshot {
     pub settings: Settings,
 }
+
+#[derive(Debug, Default)]
+struct PendingDownloadUpdateBatch {
+    jobs: HashMap<String, DownloadJob>,
+    removed_job_ids: HashSet<String>,
+    scheduled: bool,
+}
+
+static DOWNLOAD_UPDATE_BATCH: OnceLock<Mutex<PendingDownloadUpdateBatch>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +200,66 @@ pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
         eprintln!("failed to emit state snapshot: {error}");
     }
     emit_popup_snapshots(app, snapshot);
+}
+
+pub fn emit_download_update(app: &AppHandle, snapshot: &DesktopSnapshot, job_id: &str) {
+    let job = snapshot.jobs.iter().find(|job| job.id == job_id).cloned();
+    let should_schedule = {
+        let mut pending = pending_download_update_batch()
+            .lock()
+            .expect("download update batch lock poisoned");
+
+        if let Some(job) = job {
+            pending.removed_job_ids.remove(&job.id);
+            pending.jobs.insert(job.id.clone(), job);
+        } else {
+            pending.jobs.remove(job_id);
+            pending.removed_job_ids.insert(job_id.to_string());
+        }
+
+        if pending.scheduled {
+            false
+        } else {
+            pending.scheduled = true;
+            true
+        }
+    };
+
+    emit_popup_snapshots(app, snapshot);
+
+    if should_schedule {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(DOWNLOAD_UPDATE_BATCH_FLUSH_INTERVAL).await;
+            flush_download_update_batch(&app);
+        });
+    }
+}
+
+fn pending_download_update_batch() -> &'static Mutex<PendingDownloadUpdateBatch> {
+    DOWNLOAD_UPDATE_BATCH.get_or_init(|| Mutex::new(PendingDownloadUpdateBatch::default()))
+}
+
+fn flush_download_update_batch(app: &AppHandle) {
+    let payload = {
+        let mut pending = pending_download_update_batch()
+            .lock()
+            .expect("download update batch lock poisoned");
+        pending.scheduled = false;
+
+        if pending.jobs.is_empty() && pending.removed_job_ids.is_empty() {
+            return;
+        }
+
+        DownloadUpdateBatch {
+            jobs: pending.jobs.drain().map(|(_, job)| job).collect(),
+            removed_job_ids: pending.removed_job_ids.drain().collect(),
+        }
+    };
+
+    if let Err(error) = app.emit_to("main", DOWNLOADS_UPDATE_BATCH_EVENT, payload) {
+        eprintln!("failed to emit download update batch: {error}");
+    }
 }
 
 fn emit_popup_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
@@ -262,7 +341,10 @@ fn filter_batch_jobs(
     let Some(context) = context else {
         return Vec::new();
     };
-    let selected_ids = context.job_ids.iter().collect::<std::collections::HashSet<_>>();
+    let selected_ids = context
+        .job_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
     snapshot
         .jobs
         .iter()

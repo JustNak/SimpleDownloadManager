@@ -83,3 +83,19 @@ That command will:
 - bundle installer resources and native-host manifest templates
 - build the Tauri NSIS installer
 - zip the extension outputs into the top-level `release/` directory
+- write `release/latest-beta.json` for the beta updater feed
+- write `release/latest-alpha.json` as a one-time alpha-to-beta migration bridge
+
+Publish the beta updater feed after a successful release build:
+
+```powershell
+npm run publish:updater-beta
+```
+
+For the first beta rollout, also publish the alpha bridge feed so installed alpha clients can discover the beta installer:
+
+```powershell
+npm run publish:updater-alpha-bridge
+```
+
+The bridge uploads only `latest-alpha.json` to the existing `updater-alpha` release. That metadata points at the beta installer asset under `updater-beta`, so alpha users upgrade in place and then follow `latest-beta.json` on future checks.
