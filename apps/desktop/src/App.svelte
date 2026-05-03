@@ -1072,7 +1072,7 @@
         </div>
 
         <div class="flex w-[310px] max-w-[42vw] shrink-0 items-center justify-end gap-2">
-          <label class="relative w-full min-w-0">
+          <label class="relative w-full min-w-0" data-no-window-drag>
             <Search size={16} class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <input
               value={searchQuery}

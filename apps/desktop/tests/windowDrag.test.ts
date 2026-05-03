@@ -30,6 +30,12 @@ const outsideToolbar = makeTarget(false);
 assert.equal(shouldStartWindowDrag({ button: 0, target: outsideToolbar, currentTarget: makeBoundary(toolbarGap) }), false, 'targets outside the titlebar boundary should not start a window drag');
 
 const popupTitlebarSource = readFileSync(new URL('../src/PopupTitlebar.svelte', import.meta.url), 'utf8');
+const mainTitlebarSource = readFileSync(new URL('../src/Titlebar.svelte', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
+
+assert.doesNotMatch(mainTitlebarSource, /<div class="min-w-0 flex-1" data-no-window-drag>/, 'main titlebar should not blanket-disable dragging for the entire slotted command bar');
+assert.match(mainTitlebarSource, /<div class="min-w-0 flex-1 cursor-grab active:cursor-grabbing">\{@render children\(\)\}<\/div>/, 'empty slotted titlebar gaps should remain draggable and advertise grab states');
+assert.match(appSource, /<label class="relative w-full min-w-0" data-no-window-drag>/, 'the search field composite should opt out of titlebar dragging without blocking adjacent empty titlebar gaps');
 
 assert.match(popupTitlebarSource, /function startDrag\(event: PointerEvent\)/, 'popup titlebars should start dragging from the pointer-down event');
 assert.match(popupTitlebarSource, /class="flex h-11 shrink-0 select-none items-center justify-between border-b border-border bg-background/, 'popup titlebars should use the same 44px drag band height as the main window titlebar');

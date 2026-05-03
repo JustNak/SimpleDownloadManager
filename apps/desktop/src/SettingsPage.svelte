@@ -143,11 +143,10 @@
   let accentColorInput = $state(initialAccentColor());
   let isClearingTorrentSessionCache = $state(false);
 
-  const isDirty = $derived(!settingsEqual(formData, settings) || normalizeAccentColor(accentColorInput) !== normalizeAccentColor(settings.accentColor));
+  const isDirty = $derived(!settingsEqual(completeSettingsDraft(), settings));
   const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
-  const normalizedAccentColor = $derived(normalizeAccentColor(accentColorInput));
 
   $effect(() => {
     const nextSettings = settings;
@@ -170,7 +169,7 @@
 
   $effect(() => {
     const dirty = isDirty;
-    const draft = dirty ? cloneSettings(formData) : null;
+    const draft = dirty ? completeSettingsDraft() : null;
     const draftKey = draft ? JSON.stringify(draft) : '';
     if (dirty === lastReportedDirty && draftKey === lastReportedDraftKey) {
       return;
@@ -193,15 +192,22 @@
     return normalizeAccentColor(settings.accentColor);
   }
 
-  function submit(event: SubmitEvent) {
-    event.preventDefault();
-    onSave({
+  function completeSettingsDraft(): Settings {
+    return {
       ...cloneSettings(formData),
       accentColor: normalizeAccentColor(accentColorInput),
-      torrent: normalizeTorrentSettings(formData.torrent, formData.downloadDirectory),
+    };
+  }
+
+  function submit(event: SubmitEvent) {
+    event.preventDefault();
+    const draft = completeSettingsDraft();
+    onSave({
+      ...draft,
+      torrent: normalizeTorrentSettings(draft.torrent, draft.downloadDirectory),
       extensionIntegration: {
-        ...formData.extensionIntegration,
-        listenPort: normalizeListenPort(String(formData.extensionIntegration.listenPort)),
+        ...draft.extensionIntegration,
+        listenPort: normalizeListenPort(String(draft.extensionIntegration.listenPort)),
       },
     });
   }
@@ -480,7 +486,7 @@
     </div>
 
     <div class="grid gap-3 border-y border-border/40 py-3 md:grid-cols-2">
-      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.3.54-alpha', 'current')}
+      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.3.55-alpha', 'current')}
       {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
     </div>
 

@@ -68,7 +68,7 @@
 
   <div class="flex h-full min-w-0 flex-1 items-center px-4" data-tauri-drag-region role="presentation" onpointerdown={startDrag} ondblclick={toggleMaximize}>
     {#if children}
-      <div class="min-w-0 flex-1" data-no-window-drag>{@render children()}</div>
+      <div class="min-w-0 flex-1 cursor-grab active:cursor-grabbing">{@render children()}</div>
     {:else}
       <div class="h-full flex-1 cursor-grab active:cursor-grabbing"></div>
     {/if}
