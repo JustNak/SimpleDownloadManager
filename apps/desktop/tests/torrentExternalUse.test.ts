@@ -5,6 +5,8 @@ const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'u
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
 const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const queueViewSource = readFileSync(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
+const torrentWorkerSource = readFileSync(new URL('../src-tauri/src/download/torrent.rs', import.meta.url), 'utf8');
+const commandsSource = readFileSync(new URL('../src-tauri/src/commands/mod.rs', import.meta.url), 'utf8');
 
 assert.match(backendSource, /export interface ExternalUseResult[\s\S]*pausedTorrent: boolean[\s\S]*autoReseedRetrySeconds\?: number/, 'open and reveal commands should expose whether a torrent was paused plus automatic reseed timing');
 assert.match(backendSource, /invokeCommand<ExternalUseResult>\('open_job_file'/, 'openJobFile should return the backend external-use result');
@@ -15,3 +17,5 @@ assert.match(appSource, /Windows can use the \$\{target\}[\s\S]*reseed every 60s
 assert.match(backendPreviewSource, /return \{ pausedTorrent: true, autoReseedRetrySeconds: 60 \}/, 'mock external use should mirror the backend auto-reseed retry timing');
 assert.match(queueViewSource, /Open File'[\s\S]*onOpen\(job\.id\)/, 'the context menu should keep routing Open File through the open handler');
 assert.match(queueViewSource, /Open Folder'[\s\S]*onReveal\(job\.id\)/, 'the context menu should keep routing Open Folder through the reveal handler');
+assert.match(torrentWorkerSource, /torrent_pause_should_release_engine_session[\s\S]*engine\.forget\(engine_id\)/, 'finished torrent pause should release the engine session before auto-reseed');
+assert.match(commandsSource, /torrent_pause_requires_worker_release[\s\S]*wait_for_torrent_removal_release/, 'pause command should wait for seeding torrent handle release before resolving');

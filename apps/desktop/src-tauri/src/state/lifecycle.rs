@@ -165,6 +165,14 @@ impl SharedState {
         state.settings.extension_integration.clone()
     }
 
+    pub async fn appearance_settings(&self) -> crate::storage::AppearanceSettings {
+        let state = self.inner.read().await;
+        crate::storage::AppearanceSettings {
+            theme: state.settings.theme.clone(),
+            accent_color: state.settings.accent_color.clone(),
+        }
+    }
+
     pub async fn show_progress_after_handoff(&self) -> bool {
         let state = self.inner.read().await;
         state

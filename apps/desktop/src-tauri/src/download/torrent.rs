@@ -1,5 +1,22 @@
 use super::*;
 
+pub(super) fn torrent_pause_should_release_engine_session(update: &TorrentRuntimeSnapshot) -> bool {
+    update.finished
+}
+
+pub(super) fn prepare_torrent_source_for_task(
+    task: &crate::state::DownloadTask,
+    app_data_dir: &Path,
+) -> PreparedTorrentSource {
+    let cached_source = cached_torrent_metadata_source(
+        app_data_dir,
+        task.torrent
+            .as_ref()
+            .and_then(|torrent| torrent.info_hash.as_deref()),
+    );
+    prepare_torrent_source(cached_source.as_deref().unwrap_or(&task.url))
+}
+
 pub(super) async fn run_torrent_download_attempt(
     app: &AppHandle,
     state: &SharedState,
@@ -27,6 +44,7 @@ pub(super) async fn run_torrent_download_attempt(
             )
             .await;
     }
+    let app_data_dir = state.app_data_dir();
 
     let mut output_folder = task.target_path.clone();
     let existing_torrent = task.torrent.as_ref();
@@ -144,7 +162,7 @@ pub(super) async fn run_torrent_download_attempt(
                     )
                     .await;
             }
-            let prepared_source = prepare_torrent_source(&task.url);
+            let prepared_source = prepare_torrent_source_for_task(task, &app_data_dir);
             let pending_cleanup_info_hash = pending_torrent_cleanup_info_hash(&prepared_source);
             prepared_source_for_recheck = Some(prepared_source.clone());
             if prepared_source.fallback_trackers_added > 0 {
@@ -277,7 +295,7 @@ pub(super) async fn run_torrent_download_attempt(
     loop {
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
-                persist_final_torrent_snapshot_before_pause(
+                let final_update = persist_final_torrent_snapshot_before_pause(
                     app,
                     state,
                     engine.as_ref(),
@@ -285,6 +303,32 @@ pub(super) async fn run_torrent_download_attempt(
                     &task.id,
                 )
                 .await?;
+                if final_update
+                    .as_ref()
+                    .is_some_and(torrent_pause_should_release_engine_session)
+                {
+                    if let Err(message) = engine.cache_metadata(engine_id, &app_data_dir).await {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Warning,
+                                "torrent",
+                                format!("Could not cache torrent metadata before pause: {message}"),
+                                Some(task.id.clone()),
+                            )
+                            .await;
+                    }
+                    engine.forget(engine_id).await.map_err(|message| {
+                        download_error(FailureCategory::Torrent, message, false)
+                    })?;
+                    let snapshot = state
+                        .mark_torrent_engine_session_released(&task.id)
+                        .await
+                        .map_err(|message| {
+                            download_error(FailureCategory::Torrent, message, false)
+                        })?;
+                    emit_snapshot(app, &snapshot);
+                    return Ok(DownloadOutcome::Paused);
+                }
                 engine
                     .pause(engine_id)
                     .await
@@ -430,7 +474,7 @@ pub(super) async fn run_torrent_download_attempt(
                             })?;
                         emit_snapshot(app, &snapshot);
 
-                        let prepared_source = prepare_torrent_source(&task.url);
+                        let prepared_source = prepare_torrent_source_for_task(task, &app_data_dir);
                         if prepared_source.fallback_trackers_added > 0 {
                             record_fallback_tracker_usage(
                                 state,
@@ -564,7 +608,7 @@ pub(super) async fn run_torrent_download_attempt(
                     )
                     .await
                     .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-                    let prepared_source = prepare_torrent_source(&task.url);
+                    let prepared_source = prepare_torrent_source_for_task(task, &app_data_dir);
                     if prepared_source.fallback_trackers_added > 0 {
                         record_fallback_tracker_usage(
                             state,
@@ -687,7 +731,7 @@ pub(super) async fn persist_final_torrent_snapshot_before_pause(
     engine: &TorrentEngine,
     engine_id: usize,
     job_id: &str,
-) -> Result<(), DownloadError> {
+) -> Result<Option<TorrentRuntimeSnapshot>, DownloadError> {
     let update = match engine.snapshot(engine_id).await {
         Ok(update) => update,
         Err(message) => {
@@ -699,7 +743,7 @@ pub(super) async fn persist_final_torrent_snapshot_before_pause(
                     Some(job_id.to_string()),
                 )
                 .await;
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -715,11 +759,11 @@ pub(super) async fn persist_final_torrent_snapshot_before_pause(
     }
 
     let snapshot = state
-        .update_torrent_progress(job_id, update, true)
+        .update_torrent_progress(job_id, update.clone(), true)
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
     emit_download_update(app, &snapshot, job_id);
-    Ok(())
+    Ok(Some(update))
 }
 
 pub(super) fn torrent_progress_should_persist(

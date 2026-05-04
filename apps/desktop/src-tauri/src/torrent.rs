@@ -24,6 +24,7 @@ pub const TORRENT_DEFER_WRITES_MB: usize = 16;
 pub const TORRENT_CONCURRENT_INIT_LIMIT: usize = 2;
 pub const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
 pub const TORRENT_TRACKER_FIRST_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
+pub const TORRENT_METADATA_CACHE_DIR: &str = "torrent-metadata";
 const BYTES_PER_MEBIBYTE: f64 = 1024.0 * 1024.0;
 pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
     "udp://tracker.opentrackr.org:1337/announce",
@@ -350,6 +351,31 @@ impl TorrentEngine {
             .map_err(|error| format!("Could not forget torrent: {error:#}"))
     }
 
+    pub async fn cache_metadata(
+        &self,
+        id: usize,
+        app_data_dir: &Path,
+    ) -> Result<Option<PathBuf>, String> {
+        let handle = self.handle(id).await?;
+        let info_hash = handle.info_hash().as_string();
+        let Some(path) = torrent_metadata_cache_path(app_data_dir, &info_hash) else {
+            return Ok(None);
+        };
+        let torrent_bytes = handle
+            .with_metadata(|metadata| metadata.torrent_bytes.clone())
+            .map_err(|error| format!("Could not extract torrent metadata: {error:#}"))?;
+
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| format!("Could not create torrent metadata cache: {error}"))?;
+        }
+        tokio::fs::write(&path, torrent_bytes)
+            .await
+            .map_err(|error| format!("Could not cache torrent metadata: {error}"))?;
+        Ok(Some(path))
+    }
+
     pub async fn forget_existing(
         &self,
         engine_id: Option<usize>,
@@ -433,6 +459,32 @@ pub fn prepare_torrent_source(source: &str) -> PreparedTorrentSource {
         fallback_trackers_added: fallback_trackers.len(),
         fallback_trackers_for_options: fallback_trackers,
         tracker_first_metadata: false,
+    }
+}
+
+pub(crate) fn cached_torrent_metadata_source(
+    app_data_dir: &Path,
+    info_hash: Option<&str>,
+) -> Option<String> {
+    let path = torrent_metadata_cache_path(app_data_dir, info_hash?)?;
+    path.is_file().then(|| path.display().to_string())
+}
+
+pub(crate) fn torrent_metadata_cache_path(app_data_dir: &Path, info_hash: &str) -> Option<PathBuf> {
+    let info_hash = normalized_torrent_metadata_cache_info_hash(info_hash)?;
+    Some(
+        app_data_dir
+            .join(TORRENT_METADATA_CACHE_DIR)
+            .join(format!("{info_hash}.torrent")),
+    )
+}
+
+fn normalized_torrent_metadata_cache_info_hash(info_hash: &str) -> Option<String> {
+    let info_hash = info_hash.trim();
+    if info_hash.len() == 40 && info_hash.chars().all(|char| char.is_ascii_hexdigit()) {
+        Some(info_hash.to_ascii_lowercase())
+    } else {
+        None
     }
 }
 

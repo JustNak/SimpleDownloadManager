@@ -4,536 +4,156 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Simple Download Manager Extension</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        --bg: #090d12;
-        --surface: #0d1218;
-        --panel: #111820;
-        --panel-strong: #151d26;
-        --row: #0f151c;
-        --text: #f4f7fb;
-        --muted: #9aa8bb;
-        --border: #26313f;
-        --input: #334155;
-        --primary: #3b82f6;
-        --primary-strong: #2563eb;
-        --primary-soft: #122747;
-        --success: #36d27f;
-        --success-soft: #123322;
-        --warning: #facc15;
-        --warning-soft: #342b12;
-        --danger: #ff6b75;
-        --danger-soft: #35191d;
-        font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      html,
-      body {
-        margin: 0;
-        min-height: 100%;
-        background: var(--bg);
-        color: var(--text);
-        letter-spacing: 0;
-      }
-
-      body {
-        overflow-x: hidden;
-      }
-
-      button,
-      input,
-      select {
-        font: inherit;
-        letter-spacing: 0;
-      }
-
-      button {
-        border: 0;
-      }
-
-      .app-shell {
-        min-height: 100vh;
-        background: var(--surface);
-      }
-
-      .page {
-        min-width: 0;
-        min-height: 100vh;
-        background: var(--surface);
-      }
-
-      .topbar {
-        position: sticky;
-        top: 0;
-        z-index: 2;
-        display: flex;
-        min-height: 78px;
-        align-items: center;
-        justify-content: space-between;
-        gap: 18px;
-        border-bottom: 1px solid var(--border);
-        background: color-mix(in srgb, var(--surface) 92%, transparent);
-        padding: 0 32px;
-        backdrop-filter: blur(14px);
-      }
-
-      h1,
-      h2,
-      p {
-        margin: 0;
-      }
-
-      h1 {
-        font-size: 22px;
-        font-weight: 760;
-      }
-
-      .subtitle {
-        margin-top: 5px;
-        color: var(--muted);
-        font-size: 13px;
-      }
-
-      .title-block {
-        min-width: 0;
-      }
-
-      .header-actions {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 10px;
-      }
-
-      .status {
-        border-radius: 999px;
-        background: var(--warning-soft);
-        color: var(--warning);
-        padding: 7px 10px;
-        font-size: 11px;
-        font-weight: 800;
-        text-transform: uppercase;
-        white-space: nowrap;
-      }
-
-      .status.connected {
-        background: var(--success-soft);
-        color: var(--success);
-      }
-
-      .status.error,
-      .status.host_missing,
-      .status.app_missing,
-      .status.app_unreachable {
-        background: var(--danger-soft);
-        color: var(--danger);
-      }
-
-      .content {
-        width: min(1040px, calc(100vw - 32px));
-        margin: 0 auto;
-        padding: 26px 0 42px;
-      }
-
-      .sections {
-        display: grid;
-        gap: 16px;
-      }
-
-      .panel {
-        scroll-margin-top: 86px;
-        overflow: hidden;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--panel);
-      }
-
-      .panel-header {
-        display: flex;
-        min-height: 50px;
-        align-items: center;
-        justify-content: space-between;
-        gap: 16px;
-        border-bottom: 1px solid var(--border);
-        background: var(--panel-strong);
-        padding: 0 18px;
-      }
-
-      h2 {
-        font-size: 15px;
-        font-weight: 760;
-      }
-
-      .panel-note {
-        color: var(--muted);
-        font-size: 12px;
-      }
-
-      .setting-row {
-        display: grid;
-        grid-template-columns: minmax(210px, 300px) minmax(0, 1fr);
-        align-items: center;
-        gap: 20px;
-        min-height: 78px;
-        border-bottom: 1px solid var(--border);
-        background: var(--row);
-        padding: 14px 18px;
-      }
-
-      .setting-row:last-child {
-        border-bottom: 0;
-      }
-
-      .label {
-        font-size: 14px;
-        font-weight: 740;
-      }
-
-      .description {
-        margin-top: 4px;
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 18px;
-      }
-
-      select,
-      input[type="text"],
-      input[type="number"] {
-        width: 100%;
-        height: 38px;
-        border: 1px solid var(--input);
-        border-radius: 6px;
-        background: #090f15;
-        color: var(--text);
-        outline: none;
-        padding: 0 10px;
-        font-size: 13px;
-      }
-
-      select:focus,
-      input[type="text"]:focus,
-      input[type="number"]:focus {
-        border-color: var(--primary);
-        box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
-      }
-
-      .switch {
-        position: relative;
-        display: inline-flex;
-        width: 48px;
-        height: 28px;
-        cursor: pointer;
-      }
-
-      .switch input {
-        position: absolute;
-        opacity: 0;
-      }
-
-      .track {
-        width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        background: #1f2937;
-        transition: background 140ms ease, border-color 140ms ease;
-      }
-
-      .thumb {
-        position: absolute;
-        top: 4px;
-        left: 4px;
-        width: 20px;
-        height: 20px;
-        border-radius: 999px;
-        background: var(--muted);
-        transition: transform 140ms ease, background 140ms ease;
-      }
-
-      .switch input:checked ~ .track {
-        border-color: var(--primary);
-        background: color-mix(in srgb, var(--primary) 35%, #111827);
-      }
-
-      .switch input:checked ~ .thumb {
-        transform: translateX(20px);
-        background: #dbeafe;
-      }
-
-      .switch input:disabled ~ .track,
-      .switch input:disabled ~ .thumb {
-        opacity: 0.5;
-      }
-
-      .input-action {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 8px;
-      }
-
-      .button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        height: 38px;
-        border: 1px solid var(--input);
-        border-radius: 6px;
-        background: #101720;
-        color: var(--text);
-        cursor: pointer;
-        padding: 0 13px;
-        font-size: 13px;
-        font-weight: 760;
-        transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
-      }
-
-      .button.primary {
-        border-color: transparent;
-        background: var(--primary-strong);
-        color: #ffffff;
-      }
-
-      .button:hover {
-        background: #182231;
-      }
-
-      .button.primary:hover {
-        background: var(--primary);
-      }
-
-      .button:disabled,
-      input:disabled,
-      select:disabled {
-        cursor: not-allowed;
-        opacity: 0.55;
-      }
-
-      .chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 10px;
-      }
-
-      .chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        min-height: 30px;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: #111923;
-        color: var(--text);
-        padding: 0 8px;
-        font-size: 13px;
-        font-weight: 650;
-      }
-
-      .chip button {
-        display: grid;
-        width: 20px;
-        height: 20px;
-        place-items: center;
-        border-radius: 5px;
-        background: transparent;
-        color: var(--muted);
-        cursor: pointer;
-        line-height: 1;
-      }
-
-      .chip button:hover {
-        background: var(--danger-soft);
-        color: var(--danger);
-      }
-
-      .empty {
-        border: 1px dashed var(--border);
-        border-radius: 6px;
-        background: #0c1219;
-        color: var(--muted);
-        padding: 10px;
-        font-size: 13px;
-      }
-
-      .save-state {
-        min-height: 18px;
-        color: var(--muted);
-        font-size: 12px;
-        line-height: 18px;
-      }
-
-      @media (max-width: 840px) {
-        .content {
-          width: min(100% - 24px, 760px);
-        }
-
-        .topbar {
-          position: static;
-          align-items: flex-start;
-          flex-direction: column;
-          padding: 18px;
-        }
-
-        .setting-row {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="./theme.css" />
   </head>
-  <body>
-    <div class="app-shell">
-      <main class="page">
-        <header class="topbar">
-          <div class="title-block">
-            <h1>Web Extension Settings</h1>
-            <p class="subtitle">Control how browser downloads are captured and handed to the desktop app.</p>
-            <div id="save-state" class="save-state">Loading settings...</div>
-          </div>
-          <div class="header-actions">
-            <span id="connection-status" class="status checking">Checking</span>
-            <button id="refresh-button" type="button" class="button">Refresh</button>
-          </div>
-        </header>
-
-        <div class="content">
-          <div class="sections">
-            <section id="capture" class="panel">
-              <div class="panel-header">
-                <h2>Capture</h2>
-                <span class="panel-note">Automatic browser downloads</span>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Extension Enabled</div>
-                  <div class="description">Allow this browser to hand downloads to Simple Download Manager.</div>
-                </div>
-                <label class="switch" for="enabled-toggle" aria-label="Extension Enabled">
-                  <input id="enabled-toggle" type="checkbox" />
-                  <span class="track"></span>
-                  <span class="thumb"></span>
-                </label>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Capture Mode</div>
-                  <div class="description">Choose whether website downloads stay in the browser, ask first, or send silently.</div>
-                </div>
-                <select id="handoff-mode">
-                  <option value="off">Off</option>
-                  <option value="ask">Ask before sending</option>
-                  <option value="auto">Silent download</option>
-                </select>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Listen Port</div>
-                  <div class="description">Local desktop listener port used by extension-side configuration.</div>
-                </div>
-                <input id="listen-port-input" type="number" min="1" max="65535" step="1" inputmode="numeric" aria-label="Extension listen port" />
-              </div>
-            </section>
-
-            <section id="filters" class="panel">
-              <div class="panel-header">
-                <h2>Filters</h2>
-                <span class="panel-note">Rules for automatic capture</span>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Ignored File Extensions</div>
-                  <div class="description">Automatic captures matching these extensions stay in the browser.</div>
-                </div>
-                <div>
-                  <div class="input-action">
-                    <input id="ignored-extension-input" type="text" placeholder="exe zip txt pdf" />
-                    <button id="add-extension-button" type="button" class="button">Add</button>
-                  </div>
-                  <div id="ignored-extensions" class="chips"></div>
-                </div>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Excluded Sites</div>
-                  <div class="description">Downloads from these hostnames and wildcard host patterns stay in the browser.</div>
-                </div>
-                <div>
-                  <div class="input-action">
-                    <input id="excluded-host-input" type="text" placeholder="*.example.com" />
-                    <button id="add-host-button" type="button" class="button">Add</button>
-                  </div>
-                  <div id="excluded-hosts" class="chips"></div>
-                </div>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Protected Downloads</div>
-                  <div class="description">Forward memory-only browser session headers for configured sites when the desktop app needs them.</div>
-                </div>
-                <label class="switch" for="auth-handoff-toggle" aria-label="Protected Downloads">
-                  <input id="auth-handoff-toggle" type="checkbox" />
-                  <span class="track"></span>
-                  <span class="thumb"></span>
-                </label>
-              </div>
-            </section>
-
-            <section id="behavior" class="panel">
-              <div class="panel-header">
-                <h2>Behavior</h2>
-                <span class="panel-note">Extension controls</span>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Right-click Menu</div>
-                  <div class="description">Show Download with Simple Download Manager on browser links.</div>
-                </div>
-                <label class="switch" for="context-menu-toggle" aria-label="Right-click Menu">
-                  <input id="context-menu-toggle" type="checkbox" />
-                  <span class="track"></span>
-                  <span class="thumb"></span>
-                </label>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Progress Window</div>
-                  <div class="description">Open the small progress window after a browser handoff.</div>
-                </div>
-                <label class="switch" for="progress-toggle" aria-label="Progress Window">
-                  <input id="progress-toggle" type="checkbox" />
-                  <span class="track"></span>
-                  <span class="thumb"></span>
-                </label>
-              </div>
-
-              <div class="setting-row">
-                <div>
-                  <div class="label">Badge Status</div>
-                  <div class="description">Show active or attention counts on the extension icon.</div>
-                </div>
-                <label class="switch" for="badge-toggle" aria-label="Badge Status">
-                  <input id="badge-toggle" type="checkbox" />
-                  <span class="track"></span>
-                  <span class="thumb"></span>
-                </label>
-              </div>
-            </section>
-          </div>
+  <body class="options-page">
+    <main class="options-shell">
+      <header class="options-topbar">
+        <div class="title-block">
+          <div class="eyebrow">Advanced</div>
+          <h1>Web Extension Settings</h1>
+          <p class="subtitle">Control how browser downloads are captured and handed to the desktop app.</p>
+          <div id="save-state" class="save-state">Loading settings...</div>
         </div>
-      </main>
-    </div>
+        <div class="header-actions">
+          <span id="connection-status" class="status checking">Checking</span>
+          <button id="refresh-button" type="button" class="button">Refresh</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <div class="sections">
+          <section id="capture" class="panel">
+            <div class="panel-header">
+              <h2>Capture</h2>
+              <span class="panel-note">Automatic browser downloads</span>
+            </div>
+
+            <div class="setting-row switch-row">
+              <div>
+                <div class="label">Extension Enabled</div>
+                <div class="description">Allow this browser to hand downloads to Simple Download Manager.</div>
+              </div>
+              <label class="switch" for="enabled-toggle" aria-label="Extension Enabled">
+                <input id="enabled-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="label">Capture Mode</div>
+                <div class="description">Choose whether website downloads stay in the browser, ask first, or send silently.</div>
+              </div>
+              <select id="handoff-mode">
+                <option value="off">Off</option>
+                <option value="ask">Ask before sending</option>
+                <option value="auto">Silent download</option>
+              </select>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="label">Listen Port</div>
+                <div class="description">Local desktop listener port used by extension-side configuration.</div>
+              </div>
+              <input id="listen-port-input" type="number" min="1" max="65535" step="1" inputmode="numeric" aria-label="Extension listen port" />
+            </div>
+          </section>
+
+          <section id="filters" class="panel">
+            <div class="panel-header">
+              <h2>Filters</h2>
+              <span class="panel-note">Rules for automatic capture</span>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="label">Ignored File Extensions</div>
+                <div class="description">Automatic captures matching these extensions stay in the browser.</div>
+              </div>
+              <div>
+                <div class="input-action">
+                  <input id="ignored-extension-input" type="text" placeholder="exe zip txt pdf" />
+                  <button id="add-extension-button" type="button" class="button primary">Add</button>
+                </div>
+                <div id="ignored-extensions" class="chips"></div>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="label">Excluded Sites</div>
+                <div class="description">Downloads from these hostnames and wildcard host patterns stay in the browser.</div>
+              </div>
+              <div>
+                <div class="input-action">
+                  <input id="excluded-host-input" type="text" placeholder="*.example.com" />
+                  <button id="add-host-button" type="button" class="button primary">Add</button>
+                </div>
+                <div id="excluded-hosts" class="chips"></div>
+              </div>
+            </div>
+
+            <div class="setting-row switch-row">
+              <div>
+                <div class="label">Protected Downloads</div>
+                <div class="description">Forward memory-only browser session headers for configured sites when the desktop app needs them.</div>
+              </div>
+              <label class="switch" for="auth-handoff-toggle" aria-label="Protected Downloads">
+                <input id="auth-handoff-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+          </section>
+
+          <section id="behavior" class="panel">
+            <div class="panel-header">
+              <h2>Behavior</h2>
+              <span class="panel-note">Extension controls</span>
+            </div>
+
+            <div class="setting-row switch-row">
+              <div>
+                <div class="label">Right-click Menu</div>
+                <div class="description">Show Download with Simple Download Manager on browser links.</div>
+              </div>
+              <label class="switch" for="context-menu-toggle" aria-label="Right-click Menu">
+                <input id="context-menu-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="setting-row switch-row">
+              <div>
+                <div class="label">Progress Window</div>
+                <div class="description">Open the small progress window after a browser handoff.</div>
+              </div>
+              <label class="switch" for="progress-toggle" aria-label="Progress Window">
+                <input id="progress-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+
+            <div class="setting-row switch-row">
+              <div>
+                <div class="label">Badge Status</div>
+                <div class="description">Show active or attention counts on the extension icon.</div>
+              </div>
+              <label class="switch" for="badge-toggle" aria-label="Badge Status">
+                <input id="badge-toggle" type="checkbox" />
+                <span class="track"></span>
+                <span class="thumb"></span>
+              </label>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
 
     <script type="module" src="./options.js"></script>
   </body>

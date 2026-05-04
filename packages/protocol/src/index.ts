@@ -44,6 +44,7 @@ export type AppResponseType =
 
 export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
+export type AppearanceTheme = 'light' | 'dark' | 'oled_dark' | 'system';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -154,6 +155,11 @@ export interface QueueSummary {
   failed: number;
 }
 
+export interface AppearanceSettings {
+  theme: AppearanceTheme;
+  accentColor: string;
+}
+
 export type ProtectedDownloadAuthScope = 'off' | 'allowlist' | 'legacy_global';
 
 export interface ExtensionIntegrationSettings {
@@ -250,6 +256,7 @@ export interface PongPayload {
   connectionState?: DesktopConnectionState;
   queueSummary?: QueueSummary;
   extensionSettings?: ExtensionIntegrationSettings;
+  appearanceSettings?: AppearanceSettings;
 }
 
 export interface AppRequestEnvelope<TType extends AppRequestType, TPayload> {
@@ -303,6 +310,7 @@ export type AppResponse =
         connectionState?: DesktopConnectionState;
         queueSummary?: QueueSummary;
         extensionSettings?: ExtensionIntegrationSettings;
+        appearanceSettings?: AppearanceSettings;
       }
     >
   | AppSuccessResponse<'queued', { jobId: string; filename?: string; status: 'queued' }>

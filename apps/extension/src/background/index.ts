@@ -34,6 +34,7 @@ import {
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
+import { normalizeAccentColor } from '../shared/appearance';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
@@ -562,7 +563,9 @@ async function updateBrowserBadge(state: PopupStateResponse) {
   const active = state.queueSummary?.active ?? 0;
   const text = attention > 0 ? String(attention) : active > 0 ? String(active) : '';
   await badgeApi.setBadgeText({ text });
-  await badgeApi.setBadgeBackgroundColor({ color: attention > 0 ? '#d97706' : '#3b82f6' });
+  await badgeApi.setBadgeBackgroundColor({
+    color: attention > 0 ? '#d97706' : normalizeAccentColor(state.appearanceSettings?.accentColor),
+  });
 }
 
 function getBadgeApi() {

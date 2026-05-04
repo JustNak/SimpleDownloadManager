@@ -300,6 +300,13 @@ pub enum Theme {
     System,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettings {
+    pub theme: Theme,
+    pub accent_color: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadHandoffMode {

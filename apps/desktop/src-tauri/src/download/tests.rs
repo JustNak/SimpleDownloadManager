@@ -1215,6 +1215,89 @@ async fn fallback_tracker_usage_records_diagnostic_event() {
 }
 
 #[test]
+fn finished_torrent_pause_releases_engine_session() {
+    let mut update = torrent_runtime_update(0, 1024, 0);
+    update.finished = true;
+
+    assert!(torrent_pause_should_release_engine_session(&update));
+}
+
+#[test]
+fn unfinished_torrent_pause_keeps_engine_session() {
+    let update = torrent_runtime_update(0, 512, 0);
+
+    assert!(!torrent_pause_should_release_engine_session(&update));
+}
+
+#[test]
+fn cached_torrent_metadata_source_is_preferred_for_resume() {
+    let storage_path = test_storage_path("torrent-cached-source-preferred");
+    let app_data_dir = storage_path.parent().unwrap();
+    let info_hash = "420f3778a160fbe6eb0a67c8470256be13b0ecc8";
+    let metadata_path = app_data_dir
+        .join("torrent-metadata")
+        .join(format!("{info_hash}.torrent"));
+    std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &metadata_path,
+        b"d8:announce13:http://tracker4:info4:name4:teste",
+    )
+    .unwrap();
+    let mut job = torrent_job("job_1", JobState::Paused);
+    job.url = format!("magnet:?xt=urn:btih:{info_hash}");
+    let task = crate::state::DownloadTask {
+        id: job.id,
+        url: job.url,
+        filename: job.filename,
+        transfer_kind: job.transfer_kind,
+        torrent: Some(TorrentInfo {
+            info_hash: Some(info_hash.into()),
+            ..TorrentInfo::default()
+        }),
+        handoff_auth: None,
+        target_path: PathBuf::from(job.target_path),
+        temp_path: PathBuf::from(job.temp_path),
+    };
+
+    let prepared = prepare_torrent_source_for_task(&task, app_data_dir);
+
+    assert_eq!(prepared.source_kind, TorrentSourceKind::TorrentFile);
+    assert_eq!(prepared.source, metadata_path.display().to_string());
+
+    let _ = std::fs::remove_dir_all(app_data_dir);
+}
+
+#[test]
+fn cached_torrent_metadata_source_falls_back_to_original_source_when_absent() {
+    let storage_path = test_storage_path("torrent-cached-source-absent");
+    let app_data_dir = storage_path.parent().unwrap();
+    let info_hash = "420f3778a160fbe6eb0a67c8470256be13b0ecc8";
+    let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
+    let mut job = torrent_job("job_1", JobState::Paused);
+    job.url = magnet.clone();
+    let task = crate::state::DownloadTask {
+        id: job.id,
+        url: job.url,
+        filename: job.filename,
+        transfer_kind: job.transfer_kind,
+        torrent: Some(TorrentInfo {
+            info_hash: Some(info_hash.into()),
+            ..TorrentInfo::default()
+        }),
+        handoff_auth: None,
+        target_path: PathBuf::from(job.target_path),
+        temp_path: PathBuf::from(job.temp_path),
+    };
+
+    let prepared = prepare_torrent_source_for_task(&task, app_data_dir);
+
+    assert_eq!(prepared.source_kind, TorrentSourceKind::Magnet);
+    assert!(prepared.source.starts_with(&magnet));
+
+    let _ = std::fs::remove_dir_all(app_data_dir);
+}
+
+#[test]
 fn resume_support_uses_partial_content_before_header_hints() {
     assert_eq!(
         derive_resume_support_from_parts(StatusCode::PARTIAL_CONTENT, 10, None),

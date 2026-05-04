@@ -9,8 +9,9 @@ use crate::storage::{
     ResumeSupport, TorrentInfo, TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
 };
 use crate::torrent::{
-    pending_torrent_cleanup_info_hash, prepare_torrent_source, PreparedTorrentSource,
-    TorrentAddSessionOutcome, TorrentEngine, TorrentSourceKind, TrackerFirstMetadataOutcome,
+    cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
+    PreparedTorrentSource, TorrentAddSessionOutcome, TorrentEngine, TorrentSourceKind,
+    TrackerFirstMetadataOutcome,
 };
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;

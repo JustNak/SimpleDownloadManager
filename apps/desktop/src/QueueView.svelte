@@ -349,20 +349,24 @@
     applySelectionRange(selectionDrag.anchorId, jobId, selectionDrag.selected, selectionDrag.baseSelection);
   }
 
-  function selectedIdsFor(job: DownloadJob): string[] {
+  function selectedIdsFor(job: QueueDisplayJob): string[] {
     if (selectedJobIds.has(job.id) && selectedJobIds.size > 1) return [...selectedJobIds];
     return [job.id];
   }
 
-  function selectedJobsFor(job: DownloadJob): DownloadJob[] {
+  function selectedJobsFor(job: QueueDisplayJob): QueueDisplayJob[] {
     const ids = new Set(selectedIdsFor(job));
     return jobs.filter((candidate) => ids.has(candidate.id));
   }
 
-  function openDeletePrompt(job: DownloadJob) {
-    deletePromptJobs = selectedJobsFor(job);
+  function openDeletePromptForJobs(jobs: QueueDisplayJob[]) {
+    deletePromptJobs = jobs;
     deleteFromDisk = defaultDeleteFromDiskForJobs(deletePromptJobs);
     closeMenus();
+  }
+
+  function openDeletePrompt(job: DownloadJob) {
+    openDeletePromptForJobs(selectedJobsFor(job));
   }
 
   function openDeleteFromDiskPrompt(job: QueueDisplayJob) {
@@ -626,8 +630,16 @@
     return isBulkAggregateJob(job) && job.state === JobState.Completed && Boolean(job.bulkArchiveOutputPath);
   }
 
+  function isCanceledBulkAggregate(job: DownloadJob): boolean {
+    return isBulkAggregateJob(job) && job.state === JobState.Canceled;
+  }
+
   function isFailedBulkAggregate(job: DownloadJob): boolean {
     return isBulkAggregateJob(job) && job.bulkArchive?.archiveStatus === 'failed';
+  }
+
+  function canOpenSelectedDeletePrompt(job: QueueDisplayJob): boolean {
+    return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
   }
 
   function bulkOpenLabel(job: DownloadJob): string {
@@ -698,8 +710,8 @@
           <div class="flex h-9 items-center justify-between border-b border-border bg-primary-soft px-3 text-xs text-primary">
             <span>{selectedJobIds.size} downloads selected</span>
             <div class="flex items-center gap-2">
-              {#if selectedJobs.every((job) => !isBulkAggregateJob(job))}
-                <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={() => deletePromptJobs = selectedJobs}>Delete All</button>
+              {#if selectedJobs.every((job) => canOpenSelectedDeletePrompt(job))}
+                <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={() => openDeletePromptForJobs(selectedJobs)}>Delete All</button>
               {/if}
               <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={clearJobSelection}>Clear</button>
             </div>
@@ -985,6 +997,9 @@
     {:else if isFailedBulkAggregate(job)}
       {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
       {@render MenuItem(RotateCcw, 'Retry archive', () => onRetry(job.id))}
+      {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
+      {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
+    {:else if isCanceledBulkAggregate(job)}
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else}

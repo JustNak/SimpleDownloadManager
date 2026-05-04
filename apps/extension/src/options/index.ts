@@ -7,6 +7,7 @@ import {
 import browser from 'webextension-polyfill';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
+import { applyExtensionAppearance } from '../shared/appearance';
 
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
 const enabledToggle = document.querySelector<HTMLInputElement>('#enabled-toggle');
@@ -35,6 +36,7 @@ async function sendMessage<T>(message: PopupRequest): Promise<T> {
 function renderState(state: PopupStateResponse) {
   currentState = state;
   const settings = state.extensionSettings;
+  applyExtensionAppearance(state.appearanceSettings);
   updateConnectionStatus(state.connection);
 
   if (!settings) return;

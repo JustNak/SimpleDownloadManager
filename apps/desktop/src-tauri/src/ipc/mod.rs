@@ -7,8 +7,9 @@ use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
 use crate::storage::{
-    ConnectionState, DiagnosticLevel, DownloadSource, ExtensionIntegrationSettings, HandoffAuth,
-    HostRegistrationDiagnostics, HostRegistrationEntry, HostRegistrationStatus, QueueSummary,
+    AppearanceSettings, ConnectionState, DiagnosticLevel, DownloadSource,
+    ExtensionIntegrationSettings, HandoffAuth, HostRegistrationDiagnostics, HostRegistrationEntry,
+    HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
     focus_job_in_main_window, focus_main_window, show_download_prompt_window,
@@ -163,6 +164,7 @@ impl HostResponse {
         connection_state: ConnectionState,
         queue_summary: QueueSummary,
         extension_settings: ExtensionIntegrationSettings,
+        appearance_settings: AppearanceSettings,
     ) -> Self {
         Self {
             ok: true,
@@ -173,6 +175,7 @@ impl HostResponse {
                 "connectionState": connection_state,
                 "queueSummary": queue_summary,
                 "extensionSettings": extension_settings,
+                "appearanceSettings": appearance_settings,
             })),
             code: None,
             message: None,
@@ -452,12 +455,14 @@ async fn handle_request(
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
             let extension_settings = state.extension_integration_settings().await;
+            let appearance_settings = state.appearance_settings().await;
             HostResponse::ready(
                 request.request_id,
                 "running",
                 connection_state,
                 queue_summary,
                 extension_settings,
+                appearance_settings,
             )
         }
         "open_app" | "show_window" => {
@@ -465,12 +470,14 @@ async fn handle_request(
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
             let extension_settings = state.extension_integration_settings().await;
+            let appearance_settings = state.appearance_settings().await;
             HostResponse::ready(
                 request.request_id,
                 "launched",
                 connection_state,
                 queue_summary,
                 extension_settings,
+                appearance_settings,
             )
         }
         "save_extension_settings" => {
@@ -496,12 +503,14 @@ async fn handle_request(
                     let connection_state = register_host_contact(&app, &state).await;
                     let queue_summary = state.queue_summary().await;
                     let extension_settings = state.extension_integration_settings().await;
+                    let appearance_settings = state.appearance_settings().await;
                     HostResponse::ready(
                         request.request_id,
                         "running",
                         connection_state,
                         queue_summary,
                         extension_settings,
+                        appearance_settings,
                     )
                 }
                 Err(message) => HostResponse::error(
@@ -1607,6 +1616,46 @@ mod tests {
         assert!(!super::should_register_host_contact_before_response(
             "enqueue_download"
         ));
+    }
+
+    #[test]
+    fn ready_response_includes_appearance_settings() {
+        let response = HostResponse::ready(
+            "request-1".into(),
+            "running",
+            ConnectionState::Connected,
+            QueueSummary {
+                total: 0,
+                active: 0,
+                attention: 0,
+                queued: 0,
+                downloading: 0,
+                completed: 0,
+                failed: 0,
+            },
+            ExtensionIntegrationSettings::default(),
+            crate::storage::AppearanceSettings {
+                theme: crate::storage::Theme::OledDark,
+                accent_color: "#06b6d4".into(),
+            },
+        );
+
+        let appearance = response
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("appearanceSettings"))
+            .expect("ready response should include appearance settings");
+
+        assert_eq!(
+            appearance.get("theme").and_then(|value| value.as_str()),
+            Some("oled_dark")
+        );
+        assert_eq!(
+            appearance
+                .get("accentColor")
+                .and_then(|value| value.as_str()),
+            Some("#06b6d4")
+        );
     }
 
     #[test]

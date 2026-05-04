@@ -56,6 +56,25 @@ pub(super) fn is_external_reseed_file_access_error(message: &str) -> bool {
 }
 
 impl SharedState {
+    pub async fn torrent_pause_requires_worker_release(
+        &self,
+        id: &str,
+    ) -> Result<bool, BackendError> {
+        let state = self.inner.read().await;
+        let job = state
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .ok_or_else(|| BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Job not found.".into(),
+            })?;
+
+        Ok(job.transfer_kind == TransferKind::Torrent
+            && job.state == JobState::Seeding
+            && state.active_workers.contains(id))
+    }
+
     pub async fn prepare_torrent_session_cache_clear(
         &self,
     ) -> Result<TorrentSessionCacheClearState, BackendError> {
@@ -106,6 +125,50 @@ impl SharedState {
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
         Ok(TorrentSessionCacheClearState { snapshot, torrents })
+    }
+
+    pub async fn mark_torrent_engine_session_released(
+        &self,
+        id: &str,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let filename = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
+                };
+
+                if job.transfer_kind != TransferKind::Torrent {
+                    return Err("Job is not a torrent.".into());
+                }
+
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+
+                let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+                torrent.engine_id = None;
+                torrent.peers = None;
+                torrent.seeds = None;
+                torrent.last_runtime_uploaded_bytes = None;
+                torrent.last_runtime_fetched_bytes = None;
+                torrent.diagnostics = None;
+
+                job.filename.clone()
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "torrent".into(),
+                format!(
+                    "Released torrent engine session for {filename}; file handles are available for external use"
+                ),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
     }
 
     pub async fn begin_external_reseed(&self, id: &str) {

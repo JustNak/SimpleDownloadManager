@@ -1,4 +1,5 @@
 import type {
+  AppearanceSettings,
   ErrorCode,
   ExtensionIntegrationSettings,
   HostToExtensionResponse,
@@ -11,6 +12,10 @@ import {
   defaultExtensionSettings,
   normalizeExtensionSettings,
 } from '../shared/defaultExtensionSettings';
+import {
+  DEFAULT_APPEARANCE_SETTINGS,
+  normalizeAppearanceSettings,
+} from '../shared/appearance';
 
 const STATE_KEY = 'popup-state';
 const EXTENSION_SETTINGS_KEY = 'extension-settings';
@@ -19,17 +24,23 @@ const defaultState: PopupStateResponse = {
   connection: 'checking',
   isSubmitting: false,
   extensionSettings: createDefaultExtensionSettings(),
+  appearanceSettings: DEFAULT_APPEARANCE_SETTINGS,
 };
 
 type PartialState = Partial<PopupStateResponse>;
 
 export async function getPopupState(): Promise<PopupStateResponse> {
   const stored = await browser.storage.local.get(STATE_KEY);
-  return { ...defaultState, ...(stored[STATE_KEY] as PartialState | undefined) };
+  const state = { ...defaultState, ...(stored[STATE_KEY] as PartialState | undefined) };
+  return {
+    ...state,
+    appearanceSettings: normalizePopupAppearanceSettings(state.appearanceSettings),
+  };
 }
 
 export async function updatePopupState(update: PartialState): Promise<PopupStateResponse> {
   const nextState = { ...(await getPopupState()), ...update };
+  nextState.appearanceSettings = normalizePopupAppearanceSettings(nextState.appearanceSettings);
   await browser.storage.local.set({ [STATE_KEY]: nextState });
   return nextState;
 }
@@ -63,15 +74,23 @@ export async function setLastResult(connection: PopupStateResponse['connection']
   const extensionSettings = payload?.extensionSettings
     ? await setExtensionSettings(payload.extensionSettings)
     : await getExtensionSettings();
+  const appearanceSettings = normalizePopupAppearanceSettings(
+    payload?.appearanceSettings ?? currentState.appearanceSettings,
+  );
 
   return updatePopupState({
     connection: payload?.connectionState ?? connection,
     isSubmitting: false,
     queueSummary: payload?.queueSummary ?? currentState.queueSummary,
     extensionSettings,
+    appearanceSettings,
     lastResult: response,
     lastError: response.ok ? undefined : { code: response.code, message: response.message },
   });
 }
 
 export { defaultExtensionSettings };
+
+function normalizePopupAppearanceSettings(settings?: Partial<AppearanceSettings>): AppearanceSettings {
+  return normalizeAppearanceSettings(settings);
+}

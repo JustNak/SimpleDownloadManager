@@ -548,9 +548,19 @@ pub async fn pause_job(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
+    let wait_for_torrent_release = state
+        .torrent_pause_requires_worker_release(&id)
+        .await
+        .map_err(|error| error.message)?;
     let snapshot = state.pause_job(&id).await.map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
-    schedule_downloads(app, state.inner().clone());
+    schedule_downloads(app.clone(), state.inner().clone());
+    if wait_for_torrent_release {
+        state
+            .wait_for_torrent_removal_release(&id)
+            .await
+            .map_err(|error| error.message)?;
+    }
     Ok(())
 }
 

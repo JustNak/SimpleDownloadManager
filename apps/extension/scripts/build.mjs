@@ -108,6 +108,7 @@ async function buildTarget(target) {
 
   await cp(path.join(appRoot, 'src', 'popup', 'index.html'), path.join(outdir, 'popup.html'));
   await cp(path.join(appRoot, 'src', 'options', 'index.html'), path.join(outdir, 'options.html'));
+  await cp(path.join(appRoot, 'src', 'shared', 'theme.css'), path.join(outdir, 'theme.css'));
   await cp(path.join(appRoot, 'src', 'icons'), path.join(outdir, 'icons'), { recursive: true });
   await writeFile(path.join(outdir, 'manifest.json'), JSON.stringify(target.manifest, null, 2));
 }

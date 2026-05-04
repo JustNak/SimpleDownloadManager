@@ -24,10 +24,10 @@ assert.equal(releaseChannels.alphaBridge.metadataReleaseTag, 'updater-alpha');
 assert.equal(releaseChannels.alphaBridge.assetReleaseTag, 'updater-beta');
 assert.equal(releaseChannels.alphaBridge.metadataFilename, 'latest-alpha.json');
 
-const installerName = 'Simple Download Manager_0.5.1-beta_x64-setup.exe';
+const installerName = 'Simple Download Manager_0.5.12-beta_x64-setup.exe';
 assert.equal(
   githubReleaseAssetName(installerName),
-  'Simple.Download.Manager_0.5.1-beta_x64-setup.exe',
+  'Simple.Download.Manager_0.5.12-beta_x64-setup.exe',
 );
 assert.equal(
   updaterAssetUrl(
@@ -35,11 +35,11 @@ assert.equal(
     releaseChannels.beta.assetReleaseTag,
     githubReleaseAssetName(installerName),
   ),
-  'https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/Simple.Download.Manager_0.5.1-beta_x64-setup.exe',
+  'https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/Simple.Download.Manager_0.5.12-beta_x64-setup.exe',
 );
 
 const latest = createUpdaterMetadata({
-  version: '0.5.1-beta',
+  version: '0.5.12-beta',
   notes: 'Beta update',
   pubDate: '2026-04-27T00:00:00.000Z',
   url: updaterAssetUrl(
@@ -50,27 +50,27 @@ const latest = createUpdaterMetadata({
   signature: 'signed-content',
 });
 
-assert.equal(latest.version, '0.5.1-beta');
+assert.equal(latest.version, '0.5.12-beta');
 assert.equal(latest.notes, 'Beta update');
 assert.equal(latest.pub_date, '2026-04-27T00:00:00.000Z');
 assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64']);
 assert.equal(latest.platforms['windows-x86_64'].signature, 'signed-content');
-assert.match(latest.platforms['windows-x86_64'].url, /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.1-beta_x64-setup\.exe$/);
+assert.match(latest.platforms['windows-x86_64'].url, /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_x64-setup\.exe$/);
 
 const alphaBridge = await writeReleaseUpdaterMetadata({
   root: 'virtual-root',
   channel: releaseChannels.alphaBridge,
-  version: '0.5.1-beta',
+  version: '0.5.12-beta',
   signature: 'signed-content',
   writeFile: async () => undefined,
-  readFile: async () => '{"version":"0.5.1-beta"}',
+  readFile: async () => '{"version":"0.5.12-beta"}',
   pubDate: '2026-04-27T00:00:00.000Z',
 });
 
 assert.match(alphaBridge.paths.metadataPath, /latest-alpha\.json$/, 'alpha bridge metadata should keep the alpha feed filename');
 assert.match(
   alphaBridge.metadata.platforms['windows-x86_64'].url,
-  /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.1-beta_x64-setup\.exe$/,
+  /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_x64-setup\.exe$/,
   'alpha bridge should point alpha clients at the beta installer asset',
 );
 assert.equal(alphaBridge.metadata.notes, 'Beta migration update');

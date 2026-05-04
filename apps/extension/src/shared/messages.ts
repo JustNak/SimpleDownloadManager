@@ -1,4 +1,10 @@
-import type { ErrorCode, ExtensionIntegrationSettings, HostToExtensionResponse, QueueSummary } from '@myapp/protocol';
+import type {
+  AppearanceSettings,
+  ErrorCode,
+  ExtensionIntegrationSettings,
+  HostToExtensionResponse,
+  QueueSummary,
+} from '@myapp/protocol';
 
 export type PopupRequest =
   | { type: 'popup_ping' }
@@ -14,6 +20,7 @@ export interface PopupStateResponse {
   isSubmitting: boolean;
   queueSummary?: QueueSummary;
   extensionSettings?: ExtensionIntegrationSettings;
+  appearanceSettings?: AppearanceSettings;
   lastResult?: HostToExtensionResponse;
   lastError?: { code: ErrorCode; message: string };
 }

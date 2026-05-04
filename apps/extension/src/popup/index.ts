@@ -1,10 +1,14 @@
-import type { ExtensionIntegrationSettings } from '@myapp/protocol';
+import type { DownloadHandoffMode, ExtensionIntegrationSettings } from '@myapp/protocol';
 import browser from 'webextension-polyfill';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
+import { applyExtensionAppearance } from '../shared/appearance';
 
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
+const activeCount = document.querySelector<HTMLSpanElement>('#active-count');
+const attentionCount = document.querySelector<HTMLSpanElement>('#attention-count');
 const silentDownloadToggle = document.querySelector<HTMLInputElement>('#silent-download-toggle');
+const captureModeLabel = document.querySelector<HTMLDivElement>('#capture-mode-label');
 const silentDownloadHint = document.querySelector<HTMLDivElement>('#silent-download-hint');
 const extensionToggleButton = document.querySelector<HTMLButtonElement>('#extension-toggle-button');
 const advancedButton = document.querySelector<HTMLButtonElement>('#advanced-button');
@@ -20,7 +24,9 @@ function renderState(state: PopupStateResponse) {
   currentState = state;
   const settings = state.extensionSettings;
 
+  applyExtensionAppearance(state.appearanceSettings);
   updateConnectionStatus(state.connection);
+  updateQueueSummary(state);
 
   if (silentDownloadToggle) {
     silentDownloadToggle.checked = settings?.downloadHandoffMode === 'auto';
@@ -28,15 +34,17 @@ function renderState(state: PopupStateResponse) {
   }
 
   if (silentDownloadHint) {
-    silentDownloadHint.textContent = settings?.downloadHandoffMode === 'auto'
-      ? 'Send downloads without a prompt.'
-      : 'Ask before sending downloads.';
+    silentDownloadHint.textContent = captureModeDescription(settings?.downloadHandoffMode);
+  }
+
+  if (captureModeLabel) {
+    captureModeLabel.textContent = captureModeLabelText(settings?.downloadHandoffMode);
   }
 
   if (extensionToggleButton) {
     const isEnabled = settings?.enabled !== false;
     extensionToggleButton.textContent = isEnabled ? 'Disable Extension' : 'Enable Extension';
-    extensionToggleButton.className = isEnabled ? 'danger' : 'primary';
+    extensionToggleButton.className = isEnabled ? 'button danger' : 'button primary';
     extensionToggleButton.disabled = isUpdating;
   }
 
@@ -94,6 +102,16 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
   }
 }
 
+function updateQueueSummary(state: PopupStateResponse) {
+  if (activeCount) {
+    activeCount.textContent = String(state.queueSummary?.active ?? 0);
+  }
+
+  if (attentionCount) {
+    attentionCount.textContent = String(state.queueSummary?.attention ?? state.queueSummary?.failed ?? 0);
+  }
+}
+
 silentDownloadToggle?.addEventListener('change', () => {
   void updateSettings({
     downloadHandoffMode: silentDownloadToggle.checked ? 'auto' : 'ask',
@@ -134,6 +152,28 @@ function renderTransientError(error: unknown, fallback: string) {
       message,
     },
   };
+}
+
+function captureModeLabelText(mode: DownloadHandoffMode | undefined): string {
+  switch (mode) {
+    case 'auto':
+      return 'Silent Download';
+    case 'off':
+      return 'Browser Only';
+    default:
+      return 'Ask Before Sending';
+  }
+}
+
+function captureModeDescription(mode: DownloadHandoffMode | undefined): string {
+  switch (mode) {
+    case 'auto':
+      return 'Send downloads without a prompt.';
+    case 'off':
+      return 'Leave browser downloads in the browser.';
+    default:
+      return 'Ask before sending downloads.';
+  }
 }
 
 function fallbackErrorState(message: string): PopupStateResponse {

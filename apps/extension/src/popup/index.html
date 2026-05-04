@@ -4,237 +4,39 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Simple Download Manager</title>
-    <style>
-      :root {
-        color-scheme: light dark;
-        --bg: #f8fafc;
-        --panel: #ffffff;
-        --panel-strong: #f1f5f9;
-        --text: #172033;
-        --muted: #64748b;
-        --border: #d8e1ee;
-        --primary: #2563eb;
-        --primary-hover: #1d4ed8;
-        --danger: #b91c1c;
-        --danger-soft: #fee2e2;
-        --success: #15803d;
-        --success-soft: #dcfce7;
-        --warning: #a16207;
-        --warning-soft: #fef3c7;
-        font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #090d12;
-          --panel: #11161d;
-          --panel-strong: #171d25;
-          --text: #f4f7fb;
-          --muted: #9aa8bb;
-          --border: #26313f;
-          --primary: #60a5fa;
-          --primary-hover: #3b82f6;
-          --danger: #f87171;
-          --danger-soft: #35191d;
-          --success: #6ee7a5;
-          --success-soft: #123322;
-          --warning: #facc15;
-          --warning-soft: #342b12;
-        }
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        width: 320px;
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        letter-spacing: 0;
-      }
-
-      button,
-      input {
-        font: inherit;
-        letter-spacing: 0;
-      }
-
-      .shell {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        padding: 14px;
-      }
-
-      header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 12px;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: 15px;
-        font-weight: 750;
-      }
-
-      .status {
-        border-radius: 999px;
-        padding: 4px 8px;
-        background: var(--warning-soft);
-        color: var(--warning);
-        font-size: 10px;
-        font-weight: 800;
-        text-transform: uppercase;
-      }
-
-      .status.connected {
-        background: var(--success-soft);
-        color: var(--success);
-      }
-
-      .status.error,
-      .status.host_missing,
-      .status.app_missing,
-      .status.app_unreachable {
-        background: var(--danger-soft);
-        color: var(--danger);
-      }
-
-      .control {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 14px;
-        min-height: 58px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        background: var(--panel);
-        padding: 12px;
-      }
-
-      .label {
-        font-size: 14px;
-        font-weight: 750;
-      }
-
-      .hint {
-        margin-top: 3px;
-        color: var(--muted);
-        font-size: 11px;
-        line-height: 15px;
-      }
-
-      .switch {
-        position: relative;
-        display: inline-flex;
-        width: 48px;
-        height: 28px;
-        flex: 0 0 auto;
-        cursor: pointer;
-      }
-
-      .switch input {
-        position: absolute;
-        opacity: 0;
-      }
-
-      .track {
-        width: 100%;
-        border-radius: 999px;
-        background: var(--panel-strong);
-        border: 1px solid var(--border);
-        transition: background 140ms ease, border-color 140ms ease;
-      }
-
-      .thumb {
-        position: absolute;
-        top: 4px;
-        left: 4px;
-        width: 20px;
-        height: 20px;
-        border-radius: 999px;
-        background: var(--muted);
-        transition: transform 140ms ease, background 140ms ease;
-      }
-
-      .switch input:checked ~ .track {
-        background: color-mix(in srgb, var(--primary) 28%, var(--panel));
-        border-color: var(--primary);
-      }
-
-      .switch input:checked ~ .thumb {
-        transform: translateX(20px);
-        background: var(--primary);
-      }
-
-      .switch input:disabled ~ .track,
-      .switch input:disabled ~ .thumb {
-        opacity: 0.45;
-      }
-
-      .actions {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 8px;
-      }
-
-      button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        height: 38px;
-        border: 1px solid var(--border);
-        border-radius: 7px;
-        background: var(--panel-strong);
-        color: var(--text);
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 800;
-      }
-
-      button.primary {
-        border-color: transparent;
-        background: var(--primary);
-        color: #ffffff;
-      }
-
-      button.danger {
-        border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
-        background: var(--danger-soft);
-        color: var(--danger);
-      }
-
-      button:hover {
-        background: color-mix(in srgb, var(--panel-strong) 82%, var(--text));
-      }
-
-      button.primary:hover {
-        background: var(--primary-hover);
-      }
-
-      button:disabled {
-        cursor: not-allowed;
-        opacity: 0.55;
-      }
-    </style>
+    <link rel="stylesheet" href="./theme.css" />
   </head>
-  <body>
-    <main class="shell">
-      <header>
-        <h1>Simple Download Manager</h1>
+  <body class="popup-page">
+    <main class="popup-shell" aria-label="Simple Download Manager quick actions">
+      <header class="popup-header">
+        <div class="brand-lockup">
+          <img class="brand-icon" src="./icons/icon-32.png" alt="" />
+          <div class="brand-text">
+            <h1>Simple Download Manager</h1>
+            <p>Browser handoff</p>
+          </div>
+        </div>
         <span id="connection-status" class="status checking">Checking</span>
       </header>
 
-      <section class="control">
+      <section class="popup-summary" aria-label="Download queue summary">
+        <div class="summary-metric">
+          <span class="metric-label">Active</span>
+          <span id="active-count" class="metric-value">0</span>
+        </div>
+        <div class="summary-divider"></div>
+        <div class="summary-metric">
+          <span class="metric-label">Attention</span>
+          <span id="attention-count" class="metric-value warning-value">0</span>
+        </div>
+      </section>
+
+      <section class="control compact-control">
         <div>
-          <div class="label">Silent Download</div>
+          <div id="capture-mode-label" class="label">Ask Before Sending</div>
           <div id="silent-download-hint" class="hint">Ask before sending downloads.</div>
         </div>
-        <label class="switch" for="silent-download-toggle" aria-label="Silent Download">
+        <label class="switch" for="silent-download-toggle" aria-label="Toggle silent downloads">
           <input id="silent-download-toggle" type="checkbox" />
           <span class="track"></span>
           <span class="thumb"></span>
@@ -242,8 +44,8 @@
       </section>
 
       <div class="actions">
-        <button id="extension-toggle-button" type="button" class="danger">Disable Extension</button>
-        <button id="advanced-button" type="button" class="primary">Advanced</button>
+        <button id="extension-toggle-button" type="button" class="button danger">Disable Extension</button>
+        <button id="advanced-button" type="button" class="button primary">Advanced</button>
       </div>
     </main>
 

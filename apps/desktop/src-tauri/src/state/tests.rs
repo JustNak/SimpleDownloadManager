@@ -1036,6 +1036,100 @@ async fn torrent_session_cache_clear_resets_runtime_identity_and_reseed_state() 
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn released_seeding_pause_clears_engine_identity_and_preserves_seed_state() {
+    let download_dir = test_runtime_dir("torrent-release-seeding-pause");
+    let storage_path = download_dir.join("state.json");
+    let mut paused_job = download_job("job_1", JobState::Paused, ResumeSupport::Unsupported, 100);
+    paused_job.transfer_kind = TransferKind::Torrent;
+    paused_job.downloaded_bytes = 4096;
+    paused_job.total_bytes = 4096;
+    paused_job.torrent = Some(TorrentInfo {
+        engine_id: Some(7),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        uploaded_bytes: 2048,
+        last_runtime_uploaded_bytes: Some(1024),
+        fetched_bytes: 512,
+        last_runtime_fetched_bytes: Some(256),
+        ratio: 0.5,
+        seeding_started_at: Some(1234),
+        diagnostics: Some(TorrentRuntimeDiagnostics::default()),
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(storage_path.clone(), vec![paused_job]);
+
+    let snapshot = state
+        .mark_torrent_engine_session_released("job_1")
+        .await
+        .expect("released seeding pause should update torrent identity");
+
+    let job = &snapshot.jobs[0];
+    assert_eq!(job.state, JobState::Paused);
+    assert_eq!(job.downloaded_bytes, 4096);
+    let torrent = job.torrent.as_ref().expect("torrent metadata");
+    assert_eq!(torrent.engine_id, None);
+    assert_eq!(
+        torrent.info_hash.as_deref(),
+        Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8")
+    );
+    assert_eq!(torrent.uploaded_bytes, 2048);
+    assert_eq!(torrent.fetched_bytes, 512);
+    assert_eq!(torrent.ratio, 0.5);
+    assert_eq!(torrent.seeding_started_at, Some(1234));
+    assert_eq!(torrent.last_runtime_uploaded_bytes, None);
+    assert_eq!(torrent.last_runtime_fetched_bytes, None);
+    assert_eq!(torrent.diagnostics, None);
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    let persisted_torrent = persisted.jobs[0]
+        .torrent
+        .as_ref()
+        .expect("persisted torrent metadata");
+    assert_eq!(persisted_torrent.engine_id, None);
+    assert_eq!(persisted_torrent.uploaded_bytes, 2048);
+    assert_eq!(persisted_torrent.seeding_started_at, Some(1234));
+
+    let runtime = state.inner.read().await;
+    assert!(runtime.diagnostic_events.iter().any(|event| {
+        event.level == DiagnosticLevel::Info
+            && event.category == "torrent"
+            && event.message.contains("Released torrent engine session")
+    }));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn torrent_pause_requires_release_wait_only_for_active_seeding_torrent() {
+    let download_dir = test_runtime_dir("torrent-pause-release-required");
+    let mut seeding_job = download_job("job_1", JobState::Seeding, ResumeSupport::Unsupported, 100);
+    seeding_job.transfer_kind = TransferKind::Torrent;
+    seeding_job.torrent = Some(TorrentInfo::default());
+    let mut paused_job = download_job("job_2", JobState::Paused, ResumeSupport::Unsupported, 100);
+    paused_job.transfer_kind = TransferKind::Torrent;
+    paused_job.torrent = Some(TorrentInfo::default());
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![seeding_job, paused_job],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+        runtime.active_workers.insert("job_2".into());
+    }
+
+    assert!(state
+        .torrent_pause_requires_worker_release("job_1")
+        .await
+        .expect("seeding torrent should be inspected"));
+    assert!(!state
+        .torrent_pause_requires_worker_release("job_2")
+        .await
+        .expect("paused torrent should be inspected"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn torrent_session_cache_directory_clear_removes_session_without_payload() {
     let download_dir = test_runtime_dir("torrent-cache-directory-clear");
