@@ -129,6 +129,26 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  queueStatusPresentation({
+    ...baseJob,
+    state: 'downloading',
+    bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip', archiveStatus: 'compressing' },
+  }),
+  { label: 'Compressing', tone: 'warning' },
+  'bulk aggregate rows should expose archive compression instead of a file download label',
+);
+
+assert.deepEqual(
+  queueStatusPresentation({
+    ...baseJob,
+    state: 'failed',
+    bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip', archiveStatus: 'failed', error: 'zip failed' },
+  }),
+  { label: 'Archive failed', tone: 'destructive' },
+  'bulk aggregate rows should expose archive creation failures distinctly',
+);
+
+assert.deepEqual(
   queueStatusPresentation({ ...baseJob, state: 'completed' }),
   { label: 'Done', tone: 'success' },
 );

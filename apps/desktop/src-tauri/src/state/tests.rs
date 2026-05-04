@@ -1464,6 +1464,138 @@ async fn reveal_unfinished_job_without_artifact_returns_parent_directory() {
     let _ = std::fs::remove_dir_all(resolved);
 }
 
+#[tokio::test]
+async fn resolve_completed_bulk_archive_path_returns_output_file() {
+    let download_dir = test_runtime_dir("resolve-completed-bulk-archive");
+    let archive_path = download_dir.join("bulk-download.zip");
+    std::fs::write(&archive_path, b"archive").unwrap();
+    let archive = BulkArchiveInfo {
+        id: "bulk_1".into(),
+        name: "bulk-download.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Completed,
+        output_path: Some(archive_path.display().to_string()),
+        error: None,
+        warning: None,
+    };
+    let mut job = download_job("job_24", JobState::Completed, ResumeSupport::Supported, 100);
+    job.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let openable = state
+        .resolve_bulk_archive_openable_path("bulk_1")
+        .await
+        .unwrap();
+    let revealable = state
+        .resolve_bulk_archive_revealable_path("bulk_1")
+        .await
+        .unwrap();
+
+    assert_eq!(openable, archive_path);
+    assert_eq!(revealable, archive_path);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn resolve_completed_bulk_folder_path_returns_output_directory() {
+    let download_dir = test_runtime_dir("resolve-completed-bulk-folder");
+    let folder_path = download_dir.join("Game");
+    std::fs::create_dir_all(&folder_path).unwrap();
+    let archive = BulkArchiveInfo {
+        id: "bulk_folder".into(),
+        name: "Game".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Completed,
+        output_path: Some(folder_path.display().to_string()),
+        error: None,
+        warning: None,
+    };
+    let mut job = download_job("job_31", JobState::Completed, ResumeSupport::Supported, 100);
+    job.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let openable = state
+        .resolve_bulk_archive_openable_path("bulk_folder")
+        .await
+        .unwrap();
+    let revealable = state
+        .resolve_bulk_archive_revealable_path("bulk_folder")
+        .await
+        .unwrap();
+
+    assert_eq!(openable, folder_path);
+    assert_eq!(revealable, folder_path);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown_archives() {
+    let download_dir = test_runtime_dir("resolve-invalid-bulk-archive");
+    let completed_missing_path = download_dir.join("missing.zip");
+    let mut pending_job =
+        download_job("job_25", JobState::Completed, ResumeSupport::Supported, 100);
+    pending_job.bulk_archive = Some(BulkArchiveInfo {
+        id: "bulk_pending".into(),
+        name: "pending.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Pending,
+        output_path: None,
+        error: None,
+        warning: None,
+    });
+    let mut failed_job = download_job("job_26", JobState::Completed, ResumeSupport::Supported, 100);
+    failed_job.bulk_archive = Some(BulkArchiveInfo {
+        id: "bulk_failed".into(),
+        name: "failed.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Failed,
+        output_path: Some(download_dir.join("failed.zip").display().to_string()),
+        error: Some("zip failed".into()),
+        warning: None,
+    });
+    let mut missing_job =
+        download_job("job_30", JobState::Completed, ResumeSupport::Supported, 100);
+    missing_job.bulk_archive = Some(BulkArchiveInfo {
+        id: "bulk_missing".into(),
+        name: "missing.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Completed,
+        output_path: Some(completed_missing_path.display().to_string()),
+        error: None,
+        warning: None,
+    });
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![pending_job, failed_job, missing_job],
+    );
+
+    let pending = state
+        .resolve_bulk_archive_openable_path("bulk_pending")
+        .await
+        .unwrap_err();
+    let failed = state
+        .resolve_bulk_archive_revealable_path("bulk_failed")
+        .await
+        .unwrap_err();
+    let missing = state
+        .resolve_bulk_archive_openable_path("bulk_missing")
+        .await
+        .unwrap_err();
+    let unknown = state
+        .resolve_bulk_archive_revealable_path("bulk_unknown")
+        .await
+        .unwrap_err();
+
+    assert!(pending.message.contains("is not ready yet"));
+    assert!(failed.message.contains("failed"));
+    assert!(missing.message.contains("not available on disk"));
+    assert!(unknown.message.contains("Bulk archive not found"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn snapshot_leaves_completed_artifact_existence_unprobed() {
     let jobs = (0..1_000)
@@ -1744,6 +1876,129 @@ async fn enqueue_downloads_keeps_batch_modes_http_only() {
         .unwrap_err();
 
     assert_eq!(error.code, "INVALID_TRANSFER_KIND");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn enqueue_download_entries_uses_filename_hints_for_resolved_hoster_links() {
+    let download_dir = test_runtime_dir("enqueue-batch-filename-hint");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let results = state
+        .enqueue_download_entries(
+            vec![BatchDownloadEntry {
+                url: "https://dl.fuckingfast.co/dl/direct-token_123".into(),
+                filename_hint: Some("archive.part01.rar".into()),
+            }],
+            None,
+            None,
+        )
+        .await
+        .expect("resolved hoster link should enqueue");
+
+    assert_eq!(results[0].filename, "archive.part01.rar");
+    assert_eq!(
+        results[0].snapshot.jobs[0].url,
+        "https://dl.fuckingfast.co/dl/direct-token_123"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn enqueue_download_entries_can_start_bulk_batches_paused() {
+    let download_dir = test_runtime_dir("enqueue-batch-start-paused");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_options(
+            vec![
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part01.rar".into(),
+                    filename_hint: None,
+                },
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part02.rar".into(),
+                    filename_hint: None,
+                },
+            ],
+            None,
+            Some("Game.zip".into()),
+            true,
+        )
+        .await
+        .expect("bulk batch should enqueue paused");
+
+    assert_eq!(results.len(), 2);
+    assert!(results
+        .last()
+        .unwrap()
+        .snapshot
+        .jobs
+        .iter()
+        .all(|job| job.state == JobState::Paused));
+    assert!(results.last().unwrap().snapshot.jobs.iter().all(|job| job
+        .bulk_archive
+        .as_ref()
+        .map(|archive| archive.name.as_str())
+        == Some("Game.zip")));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn enqueue_download_entries_stores_folder_bulk_output_kind() {
+    let download_dir = test_runtime_dir("enqueue-batch-folder-output-kind");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_bulk_options(
+            vec![
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part01.rar".into(),
+                    filename_hint: None,
+                },
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part02.rar".into(),
+                    filename_hint: None,
+                },
+            ],
+            None,
+            Some("Game".into()),
+            true,
+            BulkArchiveOutputKind::Folder,
+        )
+        .await
+        .expect("folder bulk batch should enqueue");
+
+    let snapshot = &results.last().unwrap().snapshot;
+    assert!(snapshot.jobs.iter().all(|job| {
+        job.bulk_archive.as_ref().is_some_and(|archive| {
+            archive.output_kind == BulkArchiveOutputKind::Folder && archive.name == "Game"
+        })
+    }));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -2089,9 +2344,11 @@ fn bulk_archive_status_updates_all_archive_members() {
     let archive = BulkArchiveInfo {
         id: "bulk_1".into(),
         name: "bundle.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Pending,
         output_path: None,
         error: None,
+        warning: None,
     };
     let mut first = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     let mut second = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
@@ -2107,6 +2364,7 @@ fn bulk_archive_status_updates_all_archive_members() {
         "bulk_1",
         BulkArchiveStatus::Compressing,
         Some("C:/Downloads/bundle.zip".into()),
+        None,
         None,
     );
 
@@ -2128,6 +2386,7 @@ fn bulk_archive_status_updates_all_archive_members() {
         BulkArchiveStatus::Failed,
         Some("C:/Downloads/bundle.zip".into()),
         Some("zip failed".into()),
+        None,
     );
     archive_members = state
         .jobs
@@ -2146,6 +2405,7 @@ fn bulk_archive_status_updates_all_archive_members() {
         BulkArchiveStatus::Completed,
         Some("C:/Downloads/bundle.zip".into()),
         None,
+        Some("cleanup warning".into()),
     );
     archive_members = state
         .jobs
@@ -2158,6 +2418,9 @@ fn bulk_archive_status_updates_all_archive_members() {
     assert!(archive_members
         .iter()
         .all(|archive| archive.error.is_none()));
+    assert!(archive_members
+        .iter()
+        .all(|archive| archive.warning.as_deref() == Some("cleanup warning")));
 }
 
 #[tokio::test]
@@ -2259,6 +2522,271 @@ async fn delete_canceled_torrent_job_with_files_clears_stale_worker_slot() {
     drop(runtime);
     assert!(!target_path.exists());
     assert!(!temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_completed_bulk_member_from_disk_removes_archive_output() {
+    let download_dir = test_runtime_dir("delete-bulk-archive-output");
+    let archive_path = download_dir.join("bulk-download.zip");
+    let part_path = download_dir.join("Game.part01.rar");
+    std::fs::write(&archive_path, b"archive").unwrap();
+    std::fs::write(&part_path, b"part").unwrap();
+    let mut job = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job.target_path = part_path.display().to_string();
+    job.temp_path = part_path.with_extension("rar.part").display().to_string();
+    job.bulk_archive = Some(BulkArchiveInfo {
+        id: "bulk_1".into(),
+        name: "bulk-download.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Completed,
+        output_path: Some(archive_path.display().to_string()),
+        error: None,
+        warning: None,
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let snapshot = state
+        .delete_job("job_1", true)
+        .await
+        .expect("bulk member disk deletion should remove the completed archive output");
+
+    assert!(snapshot.jobs.is_empty());
+    assert!(!archive_path.exists());
+    assert!(!part_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
+    let download_dir = test_runtime_dir("retry-failed-bulk-archive-ready");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+    std::fs::write(&part_2, b"second").unwrap();
+
+    let bulk_archive = BulkArchiveInfo {
+        id: "bulk_retry".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Failed,
+        output_path: Some(download_dir.join("Game.zip").display().to_string()),
+        error: Some("locked".into()),
+        warning: None,
+    };
+    let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job_1.filename = "Game.part01.rar".into();
+    job_1.target_path = part_1.display().to_string();
+    job_1.temp_path = part_1.with_extension("rar.part").display().to_string();
+    job_1.bulk_archive = Some(bulk_archive.clone());
+    let mut job_2 = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    job_2.filename = "Game.part02.rar".into();
+    job_2.target_path = part_2.display().to_string();
+    job_2.temp_path = part_2.with_extension("rar.part").display().to_string();
+    job_2.bulk_archive = Some(bulk_archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job_1, job_2]);
+
+    let ready = state
+        .bulk_archive_ready_for_retry("bulk_retry")
+        .await
+        .expect("failed archive should be retryable");
+
+    assert_eq!(ready.archive_id, "bulk_retry");
+    assert_eq!(ready.output_path, download_dir.join("Game.zip"));
+    assert_eq!(ready.entries.len(), 2);
+    assert_eq!(ready.entries[0].source_path, part_1);
+    assert_eq!(ready.entries[1].source_path, part_2);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_for_retry_rejects_missing_parts() {
+    let download_dir = test_runtime_dir("retry-failed-bulk-archive-missing-part");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+
+    let bulk_archive = BulkArchiveInfo {
+        id: "bulk_retry_missing".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Failed,
+        output_path: Some(download_dir.join("Game.zip").display().to_string()),
+        error: Some("locked".into()),
+        warning: None,
+    };
+    let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job_1.filename = "Game.part01.rar".into();
+    job_1.target_path = part_1.display().to_string();
+    job_1.temp_path = part_1.with_extension("rar.part").display().to_string();
+    job_1.bulk_archive = Some(bulk_archive.clone());
+    let mut job_2 = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    job_2.filename = "Game.part02.rar".into();
+    job_2.target_path = part_2.display().to_string();
+    job_2.temp_path = part_2.with_extension("rar.part").display().to_string();
+    job_2.bulk_archive = Some(bulk_archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job_1, job_2]);
+
+    let error = state
+        .bulk_archive_ready_for_retry("bulk_retry_missing")
+        .await
+        .expect_err("missing downloaded part should block archive retry");
+
+    assert!(error.contains("Game.part02.rar"));
+    assert!(error.contains("missing"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_for_retry_rejects_unknown_incomplete_running_and_completed_archives() {
+    let download_dir = test_runtime_dir("retry-failed-bulk-archive-invalid-states");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+    std::fs::write(&part_2, b"second").unwrap();
+
+    let archive = |id: &str, status: BulkArchiveStatus| BulkArchiveInfo {
+        id: id.into(),
+        name: format!("{id}.zip"),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: status,
+        output_path: Some(download_dir.join(format!("{id}.zip")).display().to_string()),
+        error: if status == BulkArchiveStatus::Failed {
+            Some("locked".into())
+        } else {
+            None
+        },
+        warning: None,
+    };
+
+    let mut pending_job = download_job(
+        "job_pending",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    pending_job.target_path = part_1.display().to_string();
+    pending_job.bulk_archive = Some(archive("bulk_pending", BulkArchiveStatus::Pending));
+
+    let mut running_job = download_job(
+        "job_running",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    running_job.target_path = part_1.display().to_string();
+    running_job.bulk_archive = Some(archive("bulk_running", BulkArchiveStatus::Extracting));
+
+    let mut completed_job = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    completed_job.target_path = part_1.display().to_string();
+    completed_job.bulk_archive = Some(archive("bulk_completed", BulkArchiveStatus::Completed));
+
+    let failed_archive = archive("bulk_incomplete", BulkArchiveStatus::Failed);
+    let mut incomplete_job_1 = download_job(
+        "job_incomplete_1",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    incomplete_job_1.target_path = part_1.display().to_string();
+    incomplete_job_1.bulk_archive = Some(failed_archive.clone());
+    let mut incomplete_job_2 = download_job(
+        "job_incomplete_2",
+        JobState::Paused,
+        ResumeSupport::Supported,
+        0,
+    );
+    incomplete_job_2.target_path = part_2.display().to_string();
+    incomplete_job_2.bulk_archive = Some(failed_archive);
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![
+            pending_job,
+            running_job,
+            completed_job,
+            incomplete_job_1,
+            incomplete_job_2,
+        ],
+    );
+
+    assert!(state
+        .bulk_archive_ready_for_retry("bulk_unknown")
+        .await
+        .unwrap_err()
+        .contains("not found"));
+    assert!(state
+        .bulk_archive_ready_for_retry("bulk_pending")
+        .await
+        .unwrap_err()
+        .contains("not ready"));
+    assert!(state
+        .bulk_archive_ready_for_retry("bulk_running")
+        .await
+        .unwrap_err()
+        .contains("already running"));
+    assert!(state
+        .bulk_archive_ready_for_retry("bulk_completed")
+        .await
+        .unwrap_err()
+        .contains("already completed"));
+    assert!(state
+        .bulk_archive_ready_for_retry("bulk_incomplete")
+        .await
+        .unwrap_err()
+        .contains("every member"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_failed_bulk_members_from_disk_removes_downloaded_parts() {
+    let download_dir = test_runtime_dir("delete-failed-bulk-parts");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+    std::fs::write(&part_2, b"second").unwrap();
+
+    let bulk_archive = BulkArchiveInfo {
+        id: "bulk_failed_delete".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Failed,
+        output_path: Some(download_dir.join("Game.zip").display().to_string()),
+        error: Some("locked".into()),
+        warning: None,
+    };
+    let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job_1.target_path = part_1.display().to_string();
+    job_1.temp_path = part_1.with_extension("rar.part").display().to_string();
+    job_1.bulk_archive = Some(bulk_archive.clone());
+    let mut job_2 = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    job_2.target_path = part_2.display().to_string();
+    job_2.temp_path = part_2.with_extension("rar.part").display().to_string();
+    job_2.bulk_archive = Some(bulk_archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job_1, job_2]);
+
+    state
+        .delete_job("job_1", true)
+        .await
+        .expect("first failed bulk member should delete from disk");
+    let snapshot = state
+        .delete_job("job_2", true)
+        .await
+        .expect("second failed bulk member should delete from disk");
+
+    assert!(snapshot.jobs.is_empty());
+    assert!(!part_1.exists());
+    assert!(!part_2.exists());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }

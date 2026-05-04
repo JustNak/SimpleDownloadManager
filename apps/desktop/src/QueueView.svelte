@@ -9,6 +9,7 @@
     Clock3,
     Download,
     ExternalLink,
+    FileArchive,
     FileText,
     FolderOpen,
     Globe,
@@ -61,6 +62,7 @@
   import { formatBytes, formatTime, getHost } from './popupShared';
   import type { DownloadJob, QueueRowSize } from './types';
   import { JobState } from './types';
+  import { isBulkAggregateJob, type QueueDisplayJob } from './bulkQueueRows';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
   type DetailsLevel = 'compact' | 'standard' | 'expanded';
@@ -75,7 +77,7 @@
   const QUEUE_TABLE_GRID_CLASS = 'grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px]';
 
   interface Props {
-    jobs: DownloadJob[];
+    jobs: QueueDisplayJob[];
     view: string;
     selectedJobId: string | null;
     showDetailsOnClick: boolean;
@@ -125,9 +127,9 @@
   let selectedJobIds = new SvelteSet<string>();
   let openMenuJobId = $state<string | null>(null);
   let contextMenu = $state<{ jobId: string; x: number; y: number } | null>(null);
-  let renamePromptJob = $state<DownloadJob | null>(null);
+  let renamePromptJob = $state<QueueDisplayJob | null>(null);
   let renameValue = $state('');
-  let deletePromptJobs = $state<DownloadJob[]>([]);
+  let deletePromptJobs = $state<QueueDisplayJob[]>([]);
   let deleteFromDisk = $state(false);
   let detailsHeight = $state(DETAILS_DEFAULT_HEIGHT);
   let isResizingDetails = $state(false);
@@ -354,8 +356,18 @@
     closeMenus();
   }
 
+  function openDeleteFromDiskPrompt(job: QueueDisplayJob) {
+    deletePromptJobs = selectedJobsFor(job);
+    deleteFromDisk = true;
+    closeMenus();
+  }
+
+  function deleteJobIdsForPrompt(promptJobs: QueueDisplayJob[]): string[] {
+    return promptJobs.flatMap((job) => isBulkAggregateJob(job) ? job.bulkMemberIds : [job.id]);
+  }
+
   function confirmDelete() {
-    onDelete(deletePromptJobs.map((job) => job.id), deleteFromDisk);
+    onDelete(deleteJobIdsForPrompt(deletePromptJobs), deleteFromDisk);
     deletePromptJobs = [];
   }
 
@@ -669,6 +681,18 @@
   function isActive(job: DownloadJob): boolean {
     return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   }
+
+  function isCompletedBulkAggregate(job: DownloadJob): boolean {
+    return isBulkAggregateJob(job) && job.state === JobState.Completed && Boolean(job.bulkArchiveOutputPath);
+  }
+
+  function isFailedBulkAggregate(job: DownloadJob): boolean {
+    return isBulkAggregateJob(job) && job.bulkArchive?.archiveStatus === 'failed';
+  }
+
+  function bulkOpenLabel(job: DownloadJob): string {
+    return job.bulkArchive?.outputKind === 'folder' ? 'Open Folder' : 'Open File';
+  }
 </script>
 
 {#if jobs.length === 0}
@@ -734,7 +758,9 @@
           <div class="flex h-9 items-center justify-between border-b border-border bg-primary-soft px-3 text-xs text-primary">
             <span>{selectedJobIds.size} downloads selected</span>
             <div class="flex items-center gap-2">
-              <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={() => deletePromptJobs = selectedJobs}>Delete All</button>
+              {#if selectedJobs.every((job) => !isBulkAggregateJob(job))}
+                <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={() => deletePromptJobs = selectedJobs}>Delete All</button>
+              {/if}
               <button type="button" class="rounded px-2 py-1 font-semibold hover:bg-primary/10" onclick={clearJobSelection}>Clear</button>
             </div>
           </div>
@@ -824,32 +850,37 @@
                 ondblclick={(event) => event.stopPropagation()}
                 onkeydown={(event) => event.stopPropagation()}
               >
-                {#if job.state === JobState.Paused}
+                {#if isCompletedBulkAggregate(job)}
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Show" aria-label="Show" onclick={() => onReveal(job.id)}><FolderOpen size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title={bulkOpenLabel(job)} aria-label={bulkOpenLabel(job)} onclick={() => onOpen(job.id)}><FileArchive size={17} /></button>
+                {:else if job.state === JobState.Paused}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Resume" aria-label="Resume" onclick={() => onResume(job.id)}><Play size={17} /></button>
                 {:else if isActive(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Pause" aria-label="Pause" onclick={() => onPause(job.id)}><Pause size={17} /></button>
                 {/if}
-                {#if [JobState.Failed, JobState.Canceled].includes(job.state)}
+                {#if !isBulkAggregateJob(job) && [JobState.Failed, JobState.Canceled].includes(job.state)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Retry" aria-label="Retry" onclick={() => onRetry(job.id)}><RotateCw size={17} /></button>
                 {/if}
-                {#if canSwapFailedDownloadToBrowser(job)}
+                {#if !isBulkAggregateJob(job) && canSwapFailedDownloadToBrowser(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Swap" aria-label="Swap" onclick={() => onSwapFailedToBrowser(job.id)}><ExternalLink size={17} /></button>
                 {/if}
-                <button
-                  class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
-                  title="More actions"
-                  aria-label="More actions"
-                  onclick={(event) => {
-                    event.stopPropagation();
-                    openMenuJobId = openMenuJobId === job.id ? null : job.id;
-                  }}
-                >
-                  <MoreHorizontal size={18} />
-                </button>
-                {#if openMenuJobId === job.id}
-                  <div class="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl" role="menu" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
-                    {@render RowMenu(job, 'actions')}
-                  </div>
+                {#if !isCompletedBulkAggregate(job)}
+                  <button
+                    class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
+                    title="More actions"
+                    aria-label="More actions"
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      openMenuJobId = openMenuJobId === job.id ? null : job.id;
+                    }}
+                  >
+                    <MoreHorizontal size={18} />
+                  </button>
+                  {#if openMenuJobId === job.id}
+                    <div class="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl" role="menu" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
+                      {@render RowMenu(job, 'actions')}
+                    </div>
+                  {/if}
                 {/if}
               </div>
             </div>
@@ -962,7 +993,9 @@
       {@render QueueStatusBadge(presentation, size)}
     </div>
     <div class={`relative z-10 min-w-0 text-muted-foreground ${density.metaText} ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}>
-      {#if job.transferKind === 'torrent'}
+      {#if isBulkAggregateJob(job)}
+        <div class="truncate" title={job.bulkArchiveMemberSearchText}>{job.bulkMemberIds.length} files</div>
+      {:else if job.transferKind === 'torrent'}
         {@render TorrentDetailLine(job)}
       {:else}
         <div class="truncate" title={job.url}>{getHost(job.url)}</div>
@@ -999,12 +1032,28 @@
   </span>
 {/snippet}
 
-{#snippet RowMenu(job: DownloadJob, mode: 'actions' | 'context')}
+{#snippet RowMenu(job: QueueDisplayJob, mode: 'actions' | 'context')}
   {@const menuJobs = selectedJobsFor(job)}
-  {@const removableJobs = menuJobs.filter(canRemoveDownloadImmediately)}
+  {@const removableJobs = menuJobs.filter((candidate) => !isBulkAggregateJob(candidate) && canRemoveDownloadImmediately(candidate))}
   {@const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state)}
   {@const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state)}
-  {#if mode === 'context'}
+  {#if isBulkAggregateJob(job)}
+    {#if isCompletedBulkAggregate(job)}
+      {@render MenuItem(FolderOpen, 'Show', () => onReveal(job.id))}
+      {@render MenuItem(FileArchive, bulkOpenLabel(job), () => onOpen(job.id))}
+      {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
+    {:else if isFailedBulkAggregate(job)}
+      {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
+      {@render MenuItem(RotateCcw, 'Retry archive', () => onRetry(job.id))}
+      {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
+      {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
+    {:else}
+      {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
+      {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id))}{/if}
+      {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
+      {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
+    {/if}
+  {:else if mode === 'context'}
     {@render MenuItem(FileText, 'Open File', () => onOpen(job.id))}
     {@render MenuItem(FolderOpen, 'Open Folder', () => onReveal(job.id))}
     {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}

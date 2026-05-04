@@ -259,6 +259,7 @@ pub(super) async fn run_http_download_attempt(
         .sync_all()
         .await
         .map_err(|error| disk_error(format!("Could not sync download file: {error}")))?;
+    drop(file);
 
     if let Some(total_bytes) = total_bytes {
         if downloaded_bytes < total_bytes {
@@ -335,53 +336,192 @@ pub(super) async fn handle_bulk_archive_after_completion(
     job_id: &str,
 ) -> Result<(), String> {
     if let Some(archive) = state.bulk_archive_ready_for_job(job_id).await? {
-        let archive_id = archive.archive_id.clone();
-        let archive_output_path = archive.output_path.display().to_string();
-        let snapshot = state
-            .mark_bulk_archive_status(
-                &archive_id,
-                BulkArchiveStatus::Compressing,
-                Some(archive_output_path.clone()),
-                None,
-            )
-            .await?;
-        emit_snapshot(app, &snapshot);
+        let _ = create_bulk_archive_from_ready(app, state, archive, Some(job_id.into())).await;
+    }
 
-        match create_bulk_archive(archive).await {
-            Ok(path) => {
-                let snapshot = state
-                    .mark_bulk_archive_status(
-                        &archive_id,
-                        BulkArchiveStatus::Completed,
-                        Some(path.display().to_string()),
-                        None,
-                    )
-                    .await?;
-                emit_snapshot(app, &snapshot);
-                notify_bulk_archive_completed(app, state, &path).await;
-            }
+    Ok(())
+}
+
+pub(super) async fn retry_bulk_archive_creation(
+    app: &AppHandle,
+    state: &SharedState,
+    archive_id: &str,
+) -> Result<(), String> {
+    let archive = state.bulk_archive_ready_for_retry(archive_id).await?;
+    create_bulk_archive_from_ready(app, state, archive, None).await
+}
+
+async fn create_bulk_archive_from_ready(
+    app: &AppHandle,
+    state: &SharedState,
+    archive: BulkArchiveReady,
+    diagnostic_job_id: Option<String>,
+) -> Result<(), String> {
+    let archive_id = archive.archive_id.clone();
+    let archive_output_path = archive.output_path.display().to_string();
+    let requires_extraction = match build_bulk_archive_source_plan(&archive.entries) {
+        Ok(plan) => !plan.archive_sets.is_empty(),
+        Err(error) => {
+            let snapshot = state
+                .mark_bulk_archive_status(
+                    &archive_id,
+                    BulkArchiveStatus::Failed,
+                    Some(archive_output_path.clone()),
+                    Some(error.clone()),
+                    None,
+                )
+                .await?;
+            emit_snapshot(app, &snapshot);
+            return Err(error);
+        }
+    };
+    let seven_zip_path = if requires_extraction {
+        match crate::sidecars::resolve_seven_zip_binary_path() {
+            Ok(path) => Some(path),
             Err(error) => {
-                let _ = state
-                    .record_diagnostic_event(
-                        DiagnosticLevel::Error,
-                        "bulk_archive",
-                        format!("Bulk archive failed: {error}"),
-                        Some(job_id.into()),
-                    )
-                    .await;
                 let snapshot = state
                     .mark_bulk_archive_status(
                         &archive_id,
                         BulkArchiveStatus::Failed,
-                        Some(archive_output_path),
+                        Some(archive_output_path.clone()),
                         Some(error.clone()),
+                        None,
                     )
                     .await?;
                 emit_snapshot(app, &snapshot);
-                eprintln!("failed to create bulk archive: {error}");
+                return Err(error);
             }
         }
+    } else {
+        None
+    };
+    let finalizing_status = if archive.output_kind == BulkArchiveOutputKind::Folder {
+        BulkArchiveStatus::CreatingFolder
+    } else {
+        BulkArchiveStatus::Compressing
+    };
+    let initial_status = if requires_extraction {
+        BulkArchiveStatus::Extracting
+    } else {
+        finalizing_status
+    };
+    let snapshot = state
+        .mark_bulk_archive_status(
+            &archive_id,
+            initial_status,
+            Some(archive_output_path.clone()),
+            None,
+            None,
+        )
+        .await?;
+    emit_snapshot(app, &snapshot);
+
+    let prepared = match prepare_bulk_archive_sources(archive, seven_zip_path).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            mark_bulk_archive_create_failed(
+                app,
+                state,
+                &archive_id,
+                archive_output_path,
+                error.clone(),
+                diagnostic_job_id,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+
+    if requires_extraction {
+        let snapshot = state
+            .mark_bulk_archive_status(
+                &archive_id,
+                finalizing_status,
+                Some(archive_output_path.clone()),
+                None,
+                None,
+            )
+            .await?;
+        emit_snapshot(app, &snapshot);
     }
 
+    match finish_prepared_bulk_archive(prepared).await {
+        Ok(outcome) => {
+            let cleanup_warning = cleanup_warning_message(&outcome.cleanup_warnings);
+            if let Some(warning) = &cleanup_warning {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "bulk_archive",
+                        warning.clone(),
+                        diagnostic_job_id.clone(),
+                    )
+                    .await;
+            }
+            let snapshot = state
+                .mark_bulk_archive_status(
+                    &archive_id,
+                    BulkArchiveStatus::Completed,
+                    Some(outcome.output_path.display().to_string()),
+                    None,
+                    cleanup_warning,
+                )
+                .await?;
+            emit_snapshot(app, &snapshot);
+            notify_bulk_archive_completed(app, state, &outcome.output_path).await;
+            Ok(())
+        }
+        Err(error) => {
+            mark_bulk_archive_create_failed(
+                app,
+                state,
+                &archive_id,
+                archive_output_path,
+                error.clone(),
+                diagnostic_job_id,
+            )
+            .await?;
+            Err(error)
+        }
+    }
+}
+
+async fn mark_bulk_archive_create_failed(
+    app: &AppHandle,
+    state: &SharedState,
+    archive_id: &str,
+    archive_output_path: String,
+    error: String,
+    diagnostic_job_id: Option<String>,
+) -> Result<(), String> {
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Error,
+            "bulk_archive",
+            format!("Bulk archive failed: {error}"),
+            diagnostic_job_id,
+        )
+        .await;
+    let snapshot = state
+        .mark_bulk_archive_status(
+            archive_id,
+            BulkArchiveStatus::Failed,
+            Some(archive_output_path),
+            Some(error.clone()),
+            None,
+        )
+        .await?;
+    emit_snapshot(app, &snapshot);
+    eprintln!("failed to create bulk archive: {error}");
     Ok(())
+}
+
+fn cleanup_warning_message(warnings: &[String]) -> Option<String> {
+    match warnings.len() {
+        0 => None,
+        1 => warnings.first().cloned(),
+        count => Some(format!(
+            "Bulk archive was created, but {count} downloaded archive parts could not be deleted."
+        )),
+    }
 }

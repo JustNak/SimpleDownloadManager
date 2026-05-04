@@ -20,4 +20,11 @@ assert.match(source, /document\.addEventListener\('keydown', closeOnEscape\)/, '
 assert.match(source, /document\.removeEventListener\('keydown', closeOnEscape\)/, 'the modal should remove its Escape listener on unmount');
 assert.match(source, /progressPopupIntentForSubmission/, 'added downloads should still return the popup intent used by the app shell');
 assert.match(source, /mode === 'torrent'[\s\S]*transferKind: 'torrent'/, 'torrent submissions should keep the torrent transfer kind');
+assert.match(source, /mode === 'multi'\)[\s\S]*addJobs\(urls\)/, 'multi submissions should keep plain batch queueing');
+assert.match(source, /defaultBulkArchiveNameForUrls/, 'bulk archive names should be suggested from pasted multipart links');
+assert.match(source, /bulkOutputKind/, 'bulk modal should track whether combine output is an archive or folder');
+assert.match(source, /Archive[\s\S]*Folder/, 'bulk modal should offer Archive and Folder output choices');
+assert.match(source, /setBulkOutputKind/, 'bulk modal should normalize the output name when switching Archive and Folder');
+assert.match(source, /archiveNameTouched/, 'manual bulk archive names should not be overwritten by later pasted links');
+assert.match(source, /addJobs\(urls, trimmedArchiveName, \{ resolveHosterLinks: true, startPaused: true, bulkOutputKind \}\)/, 'bulk submissions should resolve hoster links, pass output kind, and wait for explicit popup Start');
 assert.match(source, /readyLabel/, 'footer should use the React ready-label wording instead of generic item copy');

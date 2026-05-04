@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildAddJobCommandArgs } from '../src/backendCommandArgs.ts';
+import { buildAddJobCommandArgs, buildAddJobsCommandArgs } from '../src/backendCommandArgs.ts';
 
 assert.deepEqual(
   buildAddJobCommandArgs('https://example.com/file.zip'),
@@ -57,4 +57,50 @@ assert.deepEqual(
     transferKind: 'torrent',
   },
   'addJob should pass explicit local torrent file intent through command args',
+);
+
+assert.deepEqual(
+  buildAddJobsCommandArgs([
+    ' https://example.com/file-01.zip ',
+    '',
+    'https://example.com/file-02.zip',
+  ]),
+  {
+    urls: ['https://example.com/file-01.zip', 'https://example.com/file-02.zip'],
+    bulkArchiveName: undefined,
+    resolveHosterLinks: undefined,
+  },
+  'multi-download command args should not request hoster resolution',
+);
+
+assert.deepEqual(
+  buildAddJobsCommandArgs(
+    ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
+    ' bulk-download.zip ',
+    { resolveHosterLinks: true, startPaused: true, bulkOutputKind: 'archive' },
+  ),
+  {
+    urls: ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
+    bulkArchiveName: 'bulk-download.zip',
+    resolveHosterLinks: true,
+    startPaused: true,
+    bulkOutputKind: 'archive',
+  },
+  'bulk command args should request hoster resolution and paused review when enabled',
+);
+
+assert.deepEqual(
+  buildAddJobsCommandArgs(
+    ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
+    ' Game ',
+    { resolveHosterLinks: true, startPaused: true, bulkOutputKind: 'folder' },
+  ),
+  {
+    urls: ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
+    bulkArchiveName: 'Game',
+    resolveHosterLinks: true,
+    startPaused: true,
+    bulkOutputKind: 'folder',
+  },
+  'folder bulk command args should pass the selected output kind',
 );

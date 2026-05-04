@@ -186,5 +186,9 @@ function categoryForFilename(filename: string): DownloadCategory {
 
 function matchesSearchQuery(job: DownloadJob, normalizedQuery: string): boolean {
   if (!normalizedQuery) return true;
-  return `${job.filename} ${job.url} ${job.targetPath ?? ''}`.toLowerCase().includes(normalizedQuery);
+  const bulkSearchText = 'bulkArchiveMemberSearchText' in job
+    && typeof job.bulkArchiveMemberSearchText === 'string'
+    ? job.bulkArchiveMemberSearchText
+    : '';
+  return `${job.filename} ${job.url} ${job.targetPath ?? ''} ${bulkSearchText}`.toLowerCase().includes(normalizedQuery);
 }

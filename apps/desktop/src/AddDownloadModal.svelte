@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { Archive, Link2, ListPlus, Magnet, PackagePlus, X } from '@lucide/svelte';
+  import { Archive, FolderOpen, Link2, ListPlus, Magnet, PackagePlus, X } from '@lucide/svelte';
   import { addJob, addJobs, browseTorrentFile, type AddJobResult, type AddJobsResult } from './backend';
   import { getErrorMessage } from './errors';
   import {
@@ -28,6 +28,13 @@
     parseDownloadUrlLines,
   } from './downloadInput';
   import { validateOptionalSha256 } from './downloadIntegrity';
+  import {
+    defaultBulkArchiveNameForUrls,
+    defaultBulkOutputNameForUrls,
+    normalizeBulkOutputName,
+    stripZipExtension,
+    type BulkOutputKind,
+  } from './bulkArchiveNaming';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
@@ -45,6 +52,8 @@
   let multiUrls = $state('');
   let bulkUrls = $state('');
   let archiveName = $state('bulk-download.zip');
+  let archiveNameTouched = $state(false);
+  let bulkOutputKind = $state<BulkOutputKind>('archive');
   let combineBulk = $state(true);
   let isSubmitting = $state(false);
   let isImportingTorrent = $state(false);
@@ -52,6 +61,10 @@
   let inputElement = $state<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
   const activeUrls = $derived(urlsForMode(mode));
+  const suggestedBulkArchiveName = $derived(defaultBulkArchiveNameForUrls(parseDownloadUrlLines(bulkUrls)));
+  const suggestedBulkOutputName = $derived(bulkOutputKind === 'archive'
+    ? suggestedBulkArchiveName
+    : defaultBulkOutputNameForUrls(parseDownloadUrlLines(bulkUrls), 'folder'));
   const canSubmit = $derived(activeUrls.length > 0 && !isSubmitting && !(mode === 'bulk' && combineBulk && !archiveName.trim()));
   const submitLabel = $derived(downloadSubmitLabel(mode, activeUrls.length, combineBulk));
   const readyLabel = $derived(mode === 'torrent'
@@ -62,6 +75,12 @@
     mode;
     errorMessage = '';
     requestAnimationFrame(() => inputElement?.focus());
+  });
+
+  $effect(() => {
+    if (mode === 'bulk' && combineBulk && !archiveNameTouched && archiveName !== suggestedBulkOutputName) {
+      archiveName = suggestedBulkOutputName;
+    }
   });
 
   $effect(() => {
@@ -112,10 +131,17 @@
     return activeMode === 'torrent' ? 'Enter a valid magnet link or torrent URL.' : 'Enter a valid URL.';
   }
 
-  function normalizeArchiveName(value: string) {
-    const sanitized = value.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '').trimStart();
-    if (!sanitized) return '';
-    return sanitized.toLowerCase().endsWith('.zip') ? sanitized : `${sanitized}.zip`;
+  function setBulkOutputKind(nextKind: BulkOutputKind) {
+    if (bulkOutputKind === nextKind) return;
+    const wasTouched = archiveNameTouched;
+    bulkOutputKind = nextKind;
+    if (wasTouched) {
+      archiveName = nextKind === 'folder'
+        ? normalizeBulkOutputName(stripZipExtension(archiveName), 'folder')
+        : normalizeBulkOutputName(archiveName, 'archive');
+    } else {
+      archiveName = defaultBulkOutputNameForUrls(parseDownloadUrlLines(bulkUrls), nextKind);
+    }
   }
 
   async function importTorrentFile() {
@@ -157,8 +183,8 @@
         const result = await addJobs(urls);
         emitAdded(mode, result);
       } else {
-        const trimmedArchiveName = combineBulk ? normalizeArchiveName(archiveName) : undefined;
-        const result = await addJobs(urls, trimmedArchiveName);
+        const trimmedArchiveName = combineBulk ? normalizeBulkOutputName(archiveName, bulkOutputKind) : undefined;
+        const result = await addJobs(urls, trimmedArchiveName, { resolveHosterLinks: true, startPaused: true, bulkOutputKind });
         emitAdded(mode, result, trimmedArchiveName);
       }
       onClose();
@@ -256,12 +282,24 @@
               <span>
                 <span class="flex items-center gap-2 font-medium text-foreground">
                   <Archive size={16} />
-                  Combine into one archive
+                  Combine downloads
                 </span>
-                <span class="mt-1 block text-xs leading-5 text-muted-foreground">Links are queued together with an archive name so the batch can be collected as one compressed output.</span>
+                <span class="mt-1 block text-xs leading-5 text-muted-foreground">Links are queued together with an output name so the batch can be collected as one archive or folder.</span>
               </span>
             </label>
-            <input class="h-9 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => archiveName = normalizeArchiveName(event.currentTarget.value)} disabled={!combineBulk} aria-label="Archive file name" />
+            <div class="flex min-w-0 flex-col gap-2">
+              <div class="grid grid-cols-2 rounded-md border border-border bg-card p-1">
+                <button type="button" class={`flex h-8 items-center justify-center gap-1.5 rounded-[4px] text-xs font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
+                  <Archive size={14} />
+                  <span>Archive</span>
+                </button>
+                <button type="button" class={`flex h-8 items-center justify-center gap-1.5 rounded-[4px] text-xs font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
+                  <FolderOpen size={14} />
+                  <span>Folder</span>
+                </button>
+              </div>
+              <input class="h-9 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
+            </div>
           </div>
         {/if}
 

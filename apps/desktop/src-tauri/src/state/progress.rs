@@ -254,6 +254,7 @@ impl SharedState {
         archive_status: BulkArchiveStatus,
         output_path: Option<String>,
         error: Option<String>,
+        warning: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -262,6 +263,7 @@ impl SharedState {
                 archive_status,
                 output_path,
                 error,
+                warning,
             );
             (state.snapshot(), state.persisted())
         };
@@ -306,9 +308,6 @@ impl SharedState {
 
         let output_dir = PathBuf::from(&state.settings.download_directory);
         let output_path = output_dir.join(&archive.name);
-        if output_path.exists() {
-            return Ok(None);
-        }
 
         let mut used_names = HashSet::new();
         let mut entries = Vec::with_capacity(members.len());
@@ -327,9 +326,93 @@ impl SharedState {
 
         Ok(Some(BulkArchiveReady {
             archive_id: archive.id.clone(),
+            output_kind: archive.output_kind,
             output_path,
             entries,
         }))
+    }
+
+    pub async fn bulk_archive_ready_for_retry(
+        &self,
+        archive_id: &str,
+    ) -> Result<BulkArchiveReady, String> {
+        let state = self.inner.read().await;
+        let archive = state
+            .jobs
+            .iter()
+            .filter_map(|job| job.bulk_archive.as_ref())
+            .find(|archive| archive.id == archive_id)
+            .cloned()
+            .ok_or_else(|| "Bulk archive was not found.".to_string())?;
+
+        if archive.archive_status != BulkArchiveStatus::Failed {
+            return Err(match archive.archive_status {
+                BulkArchiveStatus::Completed => "Bulk archive is already completed.".into(),
+                BulkArchiveStatus::Pending => "Bulk archive is not ready to retry yet.".into(),
+                BulkArchiveStatus::Extracting
+                | BulkArchiveStatus::CreatingFolder
+                | BulkArchiveStatus::Compressing => {
+                    "Bulk archive creation is already running.".into()
+                }
+                BulkArchiveStatus::Failed => unreachable!(),
+            });
+        }
+
+        let members = state
+            .jobs
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .bulk_archive
+                    .as_ref()
+                    .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
+            })
+            .collect::<Vec<_>>();
+
+        if members.len() < 2 {
+            return Err("Bulk archive retry needs at least two completed downloads.".into());
+        }
+        if members
+            .iter()
+            .any(|member| member.state != JobState::Completed)
+        {
+            return Err(
+                "Bulk archive retry can only run after every member download is completed.".into(),
+            );
+        }
+
+        let output_path = archive
+            .output_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(&state.settings.download_directory).join(&archive.name)
+            });
+        let mut used_names = HashSet::new();
+        let mut entries = Vec::with_capacity(members.len());
+        for member in members {
+            let source_path = PathBuf::from(&member.target_path);
+            if !source_path.is_file() {
+                return Err(format!(
+                    "Downloaded file is missing for {}: {}",
+                    member.filename,
+                    source_path.display()
+                ));
+            }
+
+            let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
+            entries.push(BulkArchiveEntry {
+                source_path,
+                archive_name,
+            });
+        }
+
+        Ok(BulkArchiveReady {
+            archive_id: archive.id,
+            output_kind: archive.output_kind,
+            output_path,
+            entries,
+        })
     }
 
     pub async fn fail_job(
@@ -471,6 +554,73 @@ impl SharedState {
             ),
         })
     }
+
+    pub async fn resolve_bulk_archive_openable_path(
+        &self,
+        archive_id: &str,
+    ) -> Result<PathBuf, BackendError> {
+        self.resolve_completed_bulk_archive_path(archive_id).await
+    }
+
+    pub async fn resolve_bulk_archive_revealable_path(
+        &self,
+        archive_id: &str,
+    ) -> Result<PathBuf, BackendError> {
+        self.resolve_completed_bulk_archive_path(archive_id).await
+    }
+
+    async fn resolve_completed_bulk_archive_path(
+        &self,
+        archive_id: &str,
+    ) -> Result<PathBuf, BackendError> {
+        let archive = {
+            let state = self.inner.read().await;
+            state
+                .jobs
+                .iter()
+                .filter_map(|job| job.bulk_archive.as_ref())
+                .find(|archive| archive.id == archive_id)
+                .cloned()
+        }
+        .ok_or_else(|| BackendError {
+            code: "INTERNAL_ERROR",
+            message: "Bulk archive not found.".into(),
+        })?;
+
+        if archive.archive_status == BulkArchiveStatus::Failed {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: archive
+                    .error
+                    .map(|error| format!("Bulk archive failed: {error}"))
+                    .unwrap_or_else(|| "Bulk archive failed.".into()),
+            });
+        }
+
+        if archive.archive_status != BulkArchiveStatus::Completed {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Bulk archive is not ready yet.".into(),
+            });
+        }
+
+        let Some(output_path) = archive.output_path.filter(|path| !path.trim().is_empty()) else {
+            return Err(BackendError {
+                code: "INTERNAL_ERROR",
+                message: "Bulk archive is not ready yet.".into(),
+            });
+        };
+
+        let path = PathBuf::from(output_path);
+        if path.is_file() || path.is_dir() {
+            return Ok(path);
+        }
+
+        Err(BackendError {
+            code: "INTERNAL_ERROR",
+            message: format!("Bulk archive is not available on disk: {}", path.display()),
+        })
+    }
 }
 
 impl RuntimeState {
@@ -480,6 +630,7 @@ impl RuntimeState {
         archive_status: BulkArchiveStatus,
         output_path: Option<String>,
         error: Option<String>,
+        warning: Option<String>,
     ) {
         for job in &mut self.jobs {
             let Some(archive) = &mut job.bulk_archive else {
@@ -492,6 +643,7 @@ impl RuntimeState {
             archive.archive_status = archive_status;
             archive.output_path = output_path.clone();
             archive.error = error.clone();
+            archive.warning = warning.clone();
         }
     }
 }

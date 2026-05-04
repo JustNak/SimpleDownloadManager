@@ -69,16 +69,19 @@
     getAppSnapshot,
     installUpdate,
     openBatchProgressWindow,
+    openBulkArchive,
     openInstallDocs,
     openJobFile,
     openProgressWindow,
     pauseAllJobs,
     pauseJob,
+    revealBulkArchive,
     revealJobInFolder,
     renameJob,
     resumeAllJobs,
     resumeJob,
     restartJob,
+    retryBulkArchive,
     retryFailedJobs,
     retryJob,
     runHostRegistrationFix,
@@ -93,6 +96,11 @@
   import type { AddJobsResult, DesktopSnapshot } from './backend';
   import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
+  import {
+    groupBulkQueueRows,
+    isBulkAggregateJob,
+    type QueueDisplayJob,
+  } from './bulkQueueRows';
   import {
     shouldNotifyDiagnosticsRefreshFailure,
     shouldRefreshDiagnostics,
@@ -158,10 +166,11 @@
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
   const activeSettingsSection = $derived(SETTINGS_SECTIONS.find((section) => section.id === activeSettingsSectionId) ?? SETTINGS_SECTIONS[0]);
-  const counts = $derived(getQueueCounts(jobs));
+  const queueRows = $derived(groupBulkQueueRows(jobs));
+  const counts = $derived(getQueueCounts(queueRows));
   const torrentFooterStats = $derived(getTorrentFooterStats(jobs));
   const displayedJobs = $derived.by(() => {
-    const filtered = filterJobsForView(jobs, view, searchQuery);
+    const filtered = filterJobsForView(queueRows, view, searchQuery);
     return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   });
   const progressMetricsByJobId = $derived(calculateDownloadProgressMetricsByJobId(jobs, progressSamples));
@@ -644,7 +653,7 @@
 
   async function handlePause(id: string) {
     try {
-      await pauseJob(id);
+      await runJobOrBulkAction(id, pauseJob, (job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state));
     } catch (error) {
       addToast({ type: 'error', title: 'Pause Failed', message: getErrorMessage(error) });
     }
@@ -652,7 +661,7 @@
 
   async function handleResume(id: string) {
     try {
-      await resumeJob(id);
+      await runJobOrBulkAction(id, resumeJob, (job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
     } catch (error) {
       addToast({ type: 'error', title: 'Resume Failed', message: getErrorMessage(error) });
     }
@@ -678,7 +687,7 @@
 
   async function handleCancel(id: string) {
     try {
-      await cancelJob(id);
+      await runJobOrBulkAction(id, cancelJob, (job) => ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state));
     } catch (error) {
       addToast({ type: 'error', title: 'Cancel Failed', message: getErrorMessage(error) });
     }
@@ -686,6 +695,12 @@
 
   async function handleRetry(id: string) {
     try {
+      const row = queueRowById(id);
+      if (row && isBulkAggregateJob(row)) {
+        await retryBulkArchive(row.bulkArchiveId);
+        addToast({ type: 'info', title: 'Retrying Archive', message: 'Bulk archive creation was started again.' });
+        return;
+      }
       await retryJob(id);
       addToast({ type: 'info', title: 'Retrying Download', message: 'The download was added back to the queue.' });
     } catch (error) {
@@ -768,6 +783,11 @@
 
   async function handleOpenFile(id: string) {
     try {
+      const row = queueRowById(id);
+      if (row && isBulkAggregateJob(row)) {
+        await openBulkArchive(row.bulkArchiveId);
+        return;
+      }
       const result = await openJobFile(id);
       if (result.pausedTorrent) {
         addToast({
@@ -783,6 +803,11 @@
 
   async function handleReveal(id: string) {
     try {
+      const row = queueRowById(id);
+      if (row && isBulkAggregateJob(row)) {
+        await revealBulkArchive(row.bulkArchiveId);
+        return;
+      }
       const result = await revealJobInFolder(id);
       if (result.pausedTorrent) {
         addToast({
@@ -798,6 +823,16 @@
 
   async function handleShowPopup(id: string) {
     try {
+      const row = queueRowById(id);
+      if (row && isBulkAggregateJob(row)) {
+        await openBatchProgressWindow({
+          kind: 'bulk',
+          jobIds: row.bulkMemberIds,
+          title: 'Bulk download progress',
+          archiveName: row.filename,
+        });
+        return;
+      }
       await openProgressWindow(id);
     } catch (error) {
       addToast({
@@ -806,6 +841,28 @@
         message: getErrorMessage(error, 'The progress popup could not be opened.'),
       });
     }
+  }
+
+  function queueRowById(id: string): QueueDisplayJob | undefined {
+    return queueRows.find((row) => row.id === id);
+  }
+
+  async function runJobOrBulkAction(
+    id: string,
+    action: (jobId: string) => Promise<unknown>,
+    includeMember: (job: DownloadJob) => boolean,
+  ) {
+    const row = queueRowById(id);
+    if (!row || !isBulkAggregateJob(row)) {
+      await action(id);
+      return;
+    }
+
+    const memberIds = new Set(row.bulkMemberIds);
+    const actionableIds = jobs
+      .filter((job) => memberIds.has(job.id) && includeMember(job))
+      .map((job) => job.id);
+    await Promise.all(actionableIds.map((jobId) => action(jobId)));
   }
 
   async function handleOpenInstallDocs() {

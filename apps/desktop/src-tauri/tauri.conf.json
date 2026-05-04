@@ -26,7 +26,10 @@
       "resources/install/chromium.template.json",
       "resources/install/edge.template.json",
       "resources/install/firefox.template.json",
-      "resources/install/release.json"
+      "resources/install/release.json",
+      "resources/bin/7z.exe",
+      "resources/bin/7z.dll",
+      "resources/bin/7zip-LICENSE.txt"
     ],
     "windows": {
       "nsis": {

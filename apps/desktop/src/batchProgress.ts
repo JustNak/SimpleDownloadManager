@@ -3,7 +3,7 @@ import type { DownloadJob } from './types';
 
 export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
-export type BulkPhase = 'downloading' | 'compressing' | 'ready' | 'failed';
+export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'creating_folder' | 'compressing' | 'ready' | 'failed';
 
 export interface ProgressBatchContext {
   batchId?: string;
@@ -62,11 +62,25 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'failed' || job.state === 'failed')) {
     return 'failed';
   }
+  if (
+    archiveJobs.length > 0
+    && archiveJobs.length === jobs.length
+    && jobs.every((job) => job.state === 'paused' && job.downloadedBytes === 0 && job.progress === 0)
+    && archiveJobs.every((job) => job.bulkArchive?.archiveStatus === 'pending')
+  ) {
+    return 'review';
+  }
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'completed')) {
     return 'ready';
   }
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'compressing')) {
     return 'compressing';
+  }
+  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'creating_folder')) {
+    return 'creating_folder';
+  }
+  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'extracting')) {
+    return 'extracting';
   }
   if (jobs.length > 0 && archiveJobs.length === 0 && jobs.every((job) => job.state === 'completed')) {
     return 'ready';

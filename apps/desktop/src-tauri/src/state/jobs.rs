@@ -334,7 +334,7 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, BackendError> {
         if delete_from_disk {
             self.wait_for_paused_torrent_delete_release(id).await?;
-            let (target_path, temp_path) = {
+            let (target_path, temp_path, bulk_archive_output_path) = {
                 let state = self.inner.read().await;
                 let job =
                     state
@@ -358,12 +358,24 @@ impl SharedState {
                 (
                     PathBuf::from(&job.target_path),
                     PathBuf::from(&job.temp_path),
+                    job.bulk_archive.as_ref().and_then(|archive| {
+                        if archive.archive_status == BulkArchiveStatus::Completed {
+                            archive.output_path.as_ref().map(PathBuf::from)
+                        } else {
+                            None
+                        }
+                    }),
                 )
             };
 
             remove_path_if_exists(&target_path).map_err(internal_error)?;
             if temp_path != target_path {
                 remove_path_if_exists(&temp_path).map_err(internal_error)?;
+            }
+            if let Some(archive_path) = bulk_archive_output_path {
+                if archive_path != target_path && archive_path != temp_path {
+                    remove_path_if_exists(&archive_path).map_err(internal_error)?;
+                }
             }
         }
 

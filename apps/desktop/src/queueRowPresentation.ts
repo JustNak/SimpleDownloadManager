@@ -28,7 +28,7 @@ export function isTorrentQueueView(view: string): boolean {
 }
 
 type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
-  Partial<Pick<DownloadJob, 'downloadedBytes' | 'filename' | 'progress' | 'torrent' | 'transferKind' | 'totalBytes'>>;
+  Partial<Pick<DownloadJob, 'bulkArchive' | 'downloadedBytes' | 'filename' | 'progress' | 'torrent' | 'transferKind' | 'totalBytes'>>;
 
 export function shouldShowNameProgress(job: TorrentMetadataPendingJob): boolean {
   if (isTorrentCheckingFiles(job) || isTorrentSeedingRestore(job)) return false;
@@ -92,6 +92,22 @@ export function torrentDisplayName(job: TorrentMetadataPendingJob): string {
 }
 
 export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueStatusPresentation {
+  if (job.bulkArchive?.archiveStatus === 'failed') {
+    return { label: 'Archive failed', tone: 'destructive' };
+  }
+
+  if (job.bulkArchive?.archiveStatus === 'compressing') {
+    return { label: 'Compressing', tone: 'warning' };
+  }
+
+  if (job.bulkArchive?.archiveStatus === 'creating_folder') {
+    return { label: 'Creating folder', tone: 'warning' };
+  }
+
+  if (job.bulkArchive?.archiveStatus === 'extracting') {
+    return { label: 'Extracting', tone: 'warning' };
+  }
+
   if (isTorrentSeedingRestore(job)) {
     return { label: 'Restoring seeding', tone: 'warning' };
   }

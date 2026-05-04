@@ -1,5 +1,7 @@
 use super::*;
-use crate::storage::{DownloadJob, HandoffAuth, HandoffAuthHeader, JobState, TorrentInfo};
+use crate::storage::{
+    BulkArchiveOutputKind, DownloadJob, HandoffAuth, HandoffAuthHeader, JobState, TorrentInfo,
+};
 use std::future::pending;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -61,6 +63,7 @@ fn create_bulk_archive_sync_writes_zip_with_distinct_entry_names() {
 
     let archive = BulkArchiveReady {
         archive_id: "bulk_1".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
         output_path: output_path.clone(),
         entries: vec![
             crate::state::BulkArchiveEntry {
@@ -79,7 +82,10 @@ fn create_bulk_archive_sync_writes_zip_with_distinct_entry_names() {
     assert_eq!(result, output_path);
     assert_eq!(
         zip_central_directory_names(&result),
-        vec!["file.txt".to_string(), "file (1).txt".to_string()]
+        vec![
+            "downloads/file.txt".to_string(),
+            "downloads/file (1).txt".to_string()
+        ]
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -91,6 +97,7 @@ fn create_bulk_archive_sync_rejects_missing_source() {
     let output_path = root.join("downloads.zip");
     let archive = BulkArchiveReady {
         archive_id: "bulk_2".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
         output_path: output_path.clone(),
         entries: vec![crate::state::BulkArchiveEntry {
             source_path: root.join("missing.txt"),
@@ -104,6 +111,420 @@ fn create_bulk_archive_sync_rejects_missing_source() {
     assert!(!output_path.exists());
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_archive_source_plan_detects_multipart_rar_set() {
+    let root = test_download_runtime_dir("bulk-archive-detect-rar-set");
+    let entries = vec![
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("Game.part01.rar"),
+            archive_name: "Game.part01.rar".into(),
+        },
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("Game.part02.rar"),
+            archive_name: "Game.part02.rar".into(),
+        },
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("Game.part03.rar"),
+            archive_name: "Game.part03.rar".into(),
+        },
+    ];
+
+    let plan = build_bulk_archive_source_plan(&entries).expect("rar parts should be planned");
+
+    assert!(bulk_archive_needs_extraction(&entries));
+    assert!(plan.raw_entries.is_empty());
+    assert_eq!(plan.archive_sets.len(), 1);
+    assert_eq!(
+        plan.archive_sets[0].first_part.archive_name,
+        "Game.part01.rar"
+    );
+    assert_eq!(
+        plan.archive_sets[0]
+            .members
+            .iter()
+            .map(|entry| entry.archive_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Game.part01.rar", "Game.part02.rar", "Game.part03.rar"]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_archive_source_plan_detects_dot_001_set_and_missing_number() {
+    let root = test_download_runtime_dir("bulk-archive-detect-001-set");
+    let entries = vec![
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("payload.001"),
+            archive_name: "payload.001".into(),
+        },
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("payload.003"),
+            archive_name: "payload.003".into(),
+        },
+    ];
+
+    let error = build_bulk_archive_source_plan(&entries)
+        .expect_err("missing payload.002 should fail the archive plan");
+
+    assert!(error.contains("payload.002"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_archive_source_plan_keeps_non_archive_files_raw() {
+    let root = test_download_runtime_dir("bulk-archive-detect-raw-files");
+    let entries = vec![
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("readme.txt"),
+            archive_name: "readme.txt".into(),
+        },
+        crate::state::BulkArchiveEntry {
+            source_path: root.join("cover.jpg"),
+            archive_name: "cover.jpg".into(),
+        },
+    ];
+
+    let plan = build_bulk_archive_source_plan(&entries).expect("raw files should be accepted");
+
+    assert!(!bulk_archive_needs_extraction(&entries));
+    assert!(plan.archive_sets.is_empty());
+    assert_eq!(plan.raw_entries.len(), 2);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn prepare_bulk_archive_sources_extracts_multiple_sets_into_staging() {
+    let root = test_download_runtime_dir("bulk-archive-prepare-extract");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_extract".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("bulk-download.zip"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+            archive_test_entry(&root, "Patch.001", b"patch-one"),
+            archive_test_entry(&root, "Patch.002", b"patch-two"),
+        ],
+    };
+    let extractor = RecordingArchiveExtractor::default();
+
+    let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect("archive sets should be extracted into staging");
+
+    assert_eq!(
+        extractor.calls.borrow().clone(),
+        vec![root.join("Game.part01.rar"), root.join("Patch.001")]
+    );
+    assert_eq!(
+        prepared
+            .entries
+            .iter()
+            .map(|entry| entry.archive_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "bulk-download/Game/content.bin",
+            "bulk-download/Patch/content.bin"
+        ]
+    );
+    assert_eq!(prepared.cleanup_paths.len(), 4);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn finish_bulk_archive_sources_zips_extracted_files_and_deletes_original_parts() {
+    let root = test_download_runtime_dir("bulk-archive-finish-extracted");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_finish".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("bulk-download.zip"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+        ],
+    };
+    let source_part_1 = archive.entries[0].source_path.clone();
+    let source_part_2 = archive.entries[1].source_path.clone();
+    let extractor = RecordingArchiveExtractor::default();
+    let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect("archive set should be staged");
+
+    let outcome = finish_prepared_bulk_archive_sync(prepared).expect("zip should be finalized");
+
+    assert_eq!(
+        zip_central_directory_names(&outcome.output_path),
+        vec!["bulk-download/Game/content.bin"]
+    );
+    assert!(!source_part_1.exists());
+    assert!(!source_part_2.exists());
+    assert!(outcome.cleanup_warnings.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn finish_bulk_folder_sources_writes_extracted_files_and_deletes_original_parts() {
+    let root = test_download_runtime_dir("bulk-folder-finish-extracted");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_folder_finish".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Game"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+        ],
+    };
+    let source_part_1 = archive.entries[0].source_path.clone();
+    let source_part_2 = archive.entries[1].source_path.clone();
+    let extractor = RecordingArchiveExtractor::default();
+    let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect("archive set should be staged for folder output");
+
+    let outcome =
+        finish_prepared_bulk_archive_sync(prepared).expect("folder output should be finalized");
+
+    assert!(outcome.output_path.is_dir());
+    assert_eq!(
+        std::fs::read(outcome.output_path.join("Game").join("content.bin")).unwrap(),
+        b"Game"
+    );
+    assert!(!source_part_1.exists());
+    assert!(!source_part_2.exists());
+    assert!(outcome.cleanup_warnings.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
+    let root = test_download_runtime_dir("bulk-folder-finish-raw");
+    let readme = root.join("readme.txt");
+    let cover = root.join("cover.jpg");
+    std::fs::write(&readme, b"readme").unwrap();
+    std::fs::write(&cover, b"cover").unwrap();
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_folder_raw".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Bundle"),
+        entries: vec![
+            crate::state::BulkArchiveEntry {
+                source_path: readme.clone(),
+                archive_name: "readme.txt".into(),
+            },
+            crate::state::BulkArchiveEntry {
+                source_path: cover.clone(),
+                archive_name: "cover.jpg".into(),
+            },
+        ],
+    };
+    let prepared = prepare_bulk_archive_sources_without_extraction(archive)
+        .expect("raw files should be prepared for folder output");
+
+    let outcome =
+        finish_prepared_bulk_archive_sync(prepared).expect("folder output should copy raw files");
+
+    assert_eq!(
+        std::fs::read(outcome.output_path.join("readme.txt")).unwrap(),
+        b"readme"
+    );
+    assert_eq!(
+        std::fs::read(outcome.output_path.join("cover.jpg")).unwrap(),
+        b"cover"
+    );
+    assert!(!readme.exists());
+    assert!(!cover.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn cleanup_failures_warn_without_failing_completed_zip() {
+    let root = test_download_runtime_dir("bulk-archive-cleanup-warning");
+    let source = root.join("source.txt");
+    std::fs::write(&source, b"payload").unwrap();
+    let prepared = PreparedBulkArchive {
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("bulk-download.zip"),
+        entries: vec![crate::state::BulkArchiveEntry {
+            source_path: source,
+            archive_name: "source.txt".into(),
+        }],
+        cleanup_paths: vec![root.join("missing.part01.rar")],
+        staging_root: None,
+    };
+
+    let outcome = finish_prepared_bulk_archive_sync(prepared)
+        .expect("cleanup warnings should not fail a completed zip");
+
+    assert_eq!(
+        zip_central_directory_names(&outcome.output_path),
+        vec!["source.txt"]
+    );
+    assert_eq!(outcome.cleanup_warnings.len(), 1);
+    assert!(outcome.cleanup_warnings[0].contains("missing.part01.rar"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn single_stream_http_drops_writer_before_finalizing_download() {
+    let source = include_str!("http.rs");
+    let drop_index = source
+        .find("drop(file);")
+        .expect("single-stream HTTP path should explicitly drop the completed writer");
+    let finalize_index = source
+        .find("move_to_final_path(&task.temp_path, &target_path)")
+        .expect("single-stream HTTP path should finalize the downloaded file");
+
+    assert!(
+        drop_index < finalize_index,
+        "download file handle should be released before finalizing and triggering bulk extraction"
+    );
+}
+
+#[test]
+fn seven_zip_failure_messages_are_user_readable() {
+    let source = Path::new("Game.part01.rar");
+
+    assert_eq!(
+        seven_zip_failure_message(source, Some(2), "ERROR: Wrong password"),
+        "Archive extraction failed for Game.part01.rar: password is required or incorrect."
+    );
+    assert_eq!(
+        seven_zip_failure_message(source, Some(2), "ERROR: CRC Failed"),
+        "Archive extraction failed for Game.part01.rar: archive data failed CRC validation."
+    );
+    assert_eq!(
+        seven_zip_failure_message(source, Some(2), "ERROR: Missing volume"),
+        "Archive extraction failed for Game.part01.rar: one or more archive parts are missing."
+    );
+    assert_eq!(
+        seven_zip_failure_message(
+            source,
+            Some(2),
+            "ERROR: The process cannot access the file because it is being used by another process."
+        ),
+        "Archive extraction failed for Game.part01.rar: downloaded archive part is still locked by another process. Retry archive creation in a moment."
+    );
+    assert!(
+        seven_zip_failure_message(source, Some(7), "unexpected failure")
+            .contains("7-Zip exited with code 7")
+    );
+}
+
+#[test]
+fn archive_extraction_retries_transient_file_locks() {
+    let root = test_download_runtime_dir("bulk-archive-lock-retry");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_lock_retry".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("bulk-download.zip"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+        ],
+    };
+    let extractor = LockOnceArchiveExtractor::default();
+
+    let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect("transient lock should be retried before failing extraction");
+
+    assert_eq!(*extractor.calls.borrow(), 2);
+    assert_eq!(prepared.entries.len(), 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn zip_central_directory_entry_uses_zip64_extra_for_large_sizes_and_offsets() {
+    let entry = ZipCentralDirectoryEntry {
+        name: "large.bin".into(),
+        crc32: 0x1234_5678,
+        compressed_size: u64::from(u32::MAX) + 1,
+        uncompressed_size: u64::from(u32::MAX) + 1,
+        local_header_offset: u64::from(u32::MAX) + 24,
+    };
+    let mut zip = Vec::new();
+
+    write_zip_central_directory_entry(&mut zip, &entry).unwrap();
+
+    assert_eq!(&zip[0..4], &[0x50, 0x4b, 0x01, 0x02]);
+    assert_eq!(u16::from_le_bytes(zip[6..8].try_into().unwrap()), 45);
+    assert_eq!(
+        u32::from_le_bytes(zip[20..24].try_into().unwrap()),
+        u32::MAX
+    );
+    assert_eq!(
+        u32::from_le_bytes(zip[24..28].try_into().unwrap()),
+        u32::MAX
+    );
+    assert_eq!(
+        u32::from_le_bytes(zip[42..46].try_into().unwrap()),
+        u32::MAX
+    );
+
+    let name_len = u16::from_le_bytes(zip[28..30].try_into().unwrap()) as usize;
+    let extra_len = u16::from_le_bytes(zip[30..32].try_into().unwrap()) as usize;
+    let extra_start = 46 + name_len;
+    let extra = &zip[extra_start..extra_start + extra_len];
+    assert_eq!(u16::from_le_bytes(extra[0..2].try_into().unwrap()), 0x0001);
+    assert_eq!(u16::from_le_bytes(extra[2..4].try_into().unwrap()), 24);
+    assert_eq!(
+        u64::from_le_bytes(extra[4..12].try_into().unwrap()),
+        u64::from(u32::MAX) + 1
+    );
+    assert_eq!(
+        u64::from_le_bytes(extra[12..20].try_into().unwrap()),
+        u64::from(u32::MAX) + 1
+    );
+    assert_eq!(
+        u64::from_le_bytes(extra[20..28].try_into().unwrap()),
+        u64::from(u32::MAX) + 24
+    );
+}
+
+#[test]
+fn zip_end_of_central_directory_emits_zip64_locator_when_zip32_limits_are_exceeded() {
+    let mut zip = std::io::Cursor::new(Vec::new());
+
+    write_zip_end_of_central_directory(
+        &mut zip,
+        usize::from(u16::MAX) + 1,
+        u64::from(u32::MAX) + 128,
+        u64::from(u32::MAX) + 256,
+    )
+    .unwrap();
+
+    let bytes = zip.into_inner();
+    assert!(
+        bytes
+            .windows(4)
+            .any(|window| window == [0x50, 0x4b, 0x06, 0x06]),
+        "ZIP64 end of central directory record should be present"
+    );
+    assert!(
+        bytes
+            .windows(4)
+            .any(|window| window == [0x50, 0x4b, 0x06, 0x07]),
+        "ZIP64 end of central directory locator should be present"
+    );
+    let eocd_index = bytes
+        .windows(4)
+        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+        .unwrap();
+    assert_eq!(
+        u16::from_le_bytes(bytes[eocd_index + 10..eocd_index + 12].try_into().unwrap()),
+        u16::MAX
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[eocd_index + 12..eocd_index + 16].try_into().unwrap()),
+        u32::MAX
+    );
 }
 
 #[tokio::test]
@@ -1470,6 +1891,59 @@ fn test_download_runtime_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     root
+}
+
+fn archive_test_entry(root: &Path, name: &str, contents: &[u8]) -> crate::state::BulkArchiveEntry {
+    let source_path = root.join(name);
+    std::fs::write(&source_path, contents).unwrap();
+    crate::state::BulkArchiveEntry {
+        source_path,
+        archive_name: name.into(),
+    }
+}
+
+#[derive(Default)]
+struct RecordingArchiveExtractor {
+    calls: std::cell::RefCell<Vec<PathBuf>>,
+}
+
+impl ArchiveExtractor for RecordingArchiveExtractor {
+    fn extract(&self, first_part: &Path, output_dir: &Path) -> Result<(), String> {
+        self.calls.borrow_mut().push(first_part.to_path_buf());
+        let stem = first_part
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|name| name.split('.').next())
+            .unwrap_or("Archive");
+        let output_path = output_dir.join(stem).join("content.bin");
+        std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        std::fs::write(output_path, stem.as_bytes()).unwrap();
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct LockOnceArchiveExtractor {
+    calls: std::cell::RefCell<usize>,
+}
+
+impl ArchiveExtractor for LockOnceArchiveExtractor {
+    fn extract(&self, first_part: &Path, output_dir: &Path) -> Result<(), String> {
+        let mut calls = self.calls.borrow_mut();
+        *calls += 1;
+        if *calls == 1 {
+            return Err(seven_zip_failure_message(
+                first_part,
+                Some(2),
+                "ERROR: The process cannot access the file because it is being used by another process.",
+            ));
+        }
+
+        let output_path = output_dir.join("Game").join("content.bin");
+        std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        std::fs::write(output_path, b"Game").unwrap();
+        Ok(())
+    }
 }
 
 fn zip_central_directory_names(path: &Path) -> Vec<String> {

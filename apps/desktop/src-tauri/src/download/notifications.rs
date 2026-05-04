@@ -38,8 +38,25 @@ pub(super) async fn notify_bulk_archive_completed(
     .await;
 }
 
-pub(super) async fn create_bulk_archive(archive: BulkArchiveReady) -> Result<PathBuf, String> {
-    tauri::async_runtime::spawn_blocking(move || create_bulk_archive_sync(archive))
+pub(super) async fn prepare_bulk_archive_sources(
+    archive: BulkArchiveReady,
+    seven_zip_path: Option<PathBuf>,
+) -> Result<PreparedBulkArchive, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(seven_zip_path) = seven_zip_path {
+            prepare_bulk_archive_sources_with_7zip(archive, seven_zip_path)
+        } else {
+            prepare_bulk_archive_sources_without_extraction(archive)
+        }
+    })
+    .await
+    .map_err(|error| format!("Could not prepare bulk archive task: {error}"))?
+}
+
+pub(super) async fn finish_prepared_bulk_archive(
+    prepared: PreparedBulkArchive,
+) -> Result<BulkArchiveCreateOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || finish_prepared_bulk_archive_sync(prepared))
         .await
         .map_err(|error| format!("Could not create bulk archive task: {error}"))?
 }

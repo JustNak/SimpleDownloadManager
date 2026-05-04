@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings, type TorrentSessionCacheClearResult } from './types';
 import type { ProgressBatchContext } from './batchProgress';
-import { buildAddJobCommandArgs, type AddJobOptions } from './backendCommandArgs';
+import { buildAddJobCommandArgs, buildAddJobsCommandArgs, type AddJobOptions, type AddJobsOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
 import { canSwapFailedDownloadToBrowser } from './queueCommands';
 export { applyDownloadUpdateBatch } from './downloadUpdateBatch';
@@ -724,8 +724,9 @@ export async function addJob(url: string, options?: AddJobOptions): Promise<AddJ
   return invokeCommand<AddJobResult>('add_job', args);
 }
 
-export async function addJobs(urls: string[], bulkArchiveName?: string): Promise<AddJobsResult> {
-  const normalizedUrls = urls.map((url) => url.trim()).filter(Boolean);
+export async function addJobs(urls: string[], bulkArchiveName?: string, options: AddJobsOptions = {}): Promise<AddJobsResult> {
+  const args = buildAddJobsCommandArgs(urls, bulkArchiveName, options);
+  const normalizedUrls = args.urls;
   if (normalizedUrls.length === 0) {
     throw new Error('Add at least one download URL.');
   }
@@ -733,7 +734,12 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
   if (!isTauriRuntime()) {
     const results: AddJobResult[] = [];
     const bulkArchive = bulkArchiveName && normalizedUrls.length > 1
-      ? { id: crypto.randomUUID(), name: bulkArchiveName, archiveStatus: 'pending' as const }
+      ? {
+          id: crypto.randomUUID(),
+          name: bulkArchiveName,
+          outputKind: args.bulkOutputKind ?? 'archive',
+          archiveStatus: 'pending' as const,
+        }
       : undefined;
     for (const url of normalizedUrls) {
       const duplicateJob = mockState.jobs.find((job) => job.url === url);
@@ -753,7 +759,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
         url,
         filename,
         transferKind: 'http',
-        state: JobState.Queued,
+        state: args.startPaused ? JobState.Paused : JobState.Queued,
         createdAt: Date.now(),
         progress: 0,
         totalBytes: 0,
@@ -774,10 +780,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string): Promise
     };
   }
 
-  return invokeCommand<AddJobsResult>('add_jobs', {
-    urls: normalizedUrls,
-    bulkArchiveName: bulkArchiveName?.trim() || undefined,
-  });
+  return invokeCommand<AddJobsResult>('add_jobs', args);
 }
 
 export async function saveSettings(settings: Settings): Promise<Settings> {
@@ -915,6 +918,21 @@ export async function openJobFile(id: string): Promise<ExternalUseResult> {
 export async function revealJobInFolder(id: string): Promise<ExternalUseResult> {
   if (!isTauriRuntime()) return prepareMockExternalUse(id);
   return invokeCommand<ExternalUseResult>('reveal_job_in_folder', { id });
+}
+
+export async function openBulkArchive(archiveId: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('open_bulk_archive', { archiveId });
+}
+
+export async function revealBulkArchive(archiveId: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('reveal_bulk_archive', { archiveId });
+}
+
+export async function retryBulkArchive(archiveId: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('retry_bulk_archive', { archiveId });
 }
 
 export async function openInstallDocs(): Promise<void> {

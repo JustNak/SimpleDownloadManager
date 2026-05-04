@@ -4,9 +4,9 @@ use crate::state::{
     TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
-    default_torrent_download_directory_for, BulkArchiveStatus, DiagnosticLevel,
-    DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState, ResumeSupport, TorrentInfo,
-    TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
+    default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,
+    DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState,
+    ResumeSupport, TorrentInfo, TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
 };
 use crate::torrent::{
     pending_torrent_cleanup_info_hash, prepare_torrent_source, PreparedTorrentSource,
@@ -154,6 +154,14 @@ pub async fn forget_known_torrent_sessions(torrents: &[TorrentInfo]) -> Result<(
     }
 
     Ok(())
+}
+
+pub async fn retry_bulk_archive(
+    app: &AppHandle,
+    state: &SharedState,
+    archive_id: &str,
+) -> Result<(), String> {
+    retry_bulk_archive_creation(app, state, archive_id).await
 }
 
 pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: String) {

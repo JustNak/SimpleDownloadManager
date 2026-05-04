@@ -1,14 +1,16 @@
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { Archive, CheckCircle2, Download, FolderOpen, Pause, Play, X } from '@lucide/svelte';
+  import { Archive, CheckCircle2, Download, FileArchive, FolderOpen, Pause, Play, X } from '@lucide/svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { JobState, type DownloadJob, type Settings } from './types';
   import {
     cancelJob,
+    deleteJobs,
     getBatchProgressSnapshot,
+    openBulkArchive,
     pauseJob,
+    revealBulkArchive,
     resumeJob,
-    revealJobInFolder,
     subscribeToBatchProgressSnapshot,
     type BatchProgressSnapshot,
   } from './backend';
@@ -37,7 +39,11 @@
   const summary = $derived(calculateBatchProgress(jobs));
   const progress = $derived(summary.progress);
   const bulkPhase = $derived(context?.kind === 'bulk' ? deriveBulkPhase(jobs) : null);
-  const completedJob = $derived(jobs.find((job) => job.state === JobState.Completed && job.targetPath));
+  const isBulkReviewPhase = $derived(bulkPhase === 'review');
+  const completedArchive = $derived(jobs.find((job) => (
+    job.bulkArchive?.archiveStatus === 'completed'
+    && Boolean(job.bulkArchive.outputPath)
+  ))?.bulkArchive ?? null);
   const canPause = $derived(jobs.some(isPausable));
   const canResume = $derived(jobs.some(isResumable));
   const canCancel = $derived(jobs.some(isCancelable));
@@ -102,7 +108,7 @@
         speed: 7340032,
         eta: 28,
         targetPath: 'C:\\Users\\You\\Downloads\\model.fbx',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
       {
         id: 'preview-2',
@@ -117,7 +123,7 @@
         speed: 5242880,
         eta: 86,
         targetPath: 'C:\\Users\\You\\Downloads\\textures.zip',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
       {
         id: 'preview-3',
@@ -132,7 +138,7 @@
         speed: 0,
         eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\readme.pdf',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
     ];
     return {
@@ -259,8 +265,12 @@
   function phaseClass(phase: BulkPhase) {
     if (phase === 'failed') return 'text-destructive';
     if (phase === 'ready') return 'text-success';
-    if (phase === 'compressing') return 'text-warning';
+    if (phase === 'extracting' || phase === 'creating_folder' || phase === 'compressing') return 'text-warning';
     return 'text-primary';
+  }
+
+  function bulkOpenLabel(archive: NonNullable<DownloadJob['bulkArchive']>) {
+    return archive.outputKind === 'folder' ? 'Open Folder' : 'Open File';
   }
 
   function isTauriRuntime(): boolean {
@@ -299,7 +309,7 @@
 
       <section class="mt-3">
         <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
-          <span>{summary.activeCount} active</span>
+          <span>{isBulkReviewPhase ? 'Ready to start' : `${summary.activeCount} active`}</span>
           <span>
             {summary.knownTotal
               ? `${formatBytes(summary.downloadedBytes)} / ${formatBytes(summary.totalBytes)}`
@@ -324,21 +334,17 @@
       {/if}
 
       <div class="mt-3 flex flex-wrap justify-end gap-2 border-t border-border pt-3">
-        {@render ActionButton('Pause all', Pause, () => void runAction(() => runForJobs(jobs.filter(isPausable), pauseJob)), isBusy || !canPause)}
-        {@render ActionButton('Resume all', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, canResume)}
-        {@render ActionButton('Cancel active', X, () => void runAction(() => runForJobs(jobs.filter(isCancelable), cancelJob)), isBusy || !canCancel, false, canCancel)}
-        {@render ActionButton(
-          'Reveal completed',
-          FolderOpen,
-          () => {
-            if (!completedJob) return;
-            void runAction(async () => {
-              await revealJobInFolder(completedJob.id);
-            }, { closeOnSuccess: true });
-          },
-          isBusy || !completedJob,
-        )}
-        {#if summary.activeCount === 0}
+        {#if completedArchive}
+          {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy)}
+          {@render ActionButton(bulkOpenLabel(completedArchive), FileArchive, () => void runAction(() => openBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy)}
+        {:else if isBulkReviewPhase}
+          {@render ActionButton('Cancel', X, () => void runAction(() => deleteJobs(jobs.map((job) => job.id), false), { closeOnSuccess: true }), isBusy, false, true)}
+          {@render ActionButton('Start', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, true)}
+        {:else if summary.activeCount > 0 || canPause || canResume || canCancel}
+          {@render ActionButton('Pause all', Pause, () => void runAction(() => runForJobs(jobs.filter(isPausable), pauseJob)), isBusy || !canPause)}
+          {@render ActionButton('Resume all', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, canResume)}
+          {@render ActionButton('Cancel active', X, () => void runAction(() => runForJobs(jobs.filter(isCancelable), cancelJob)), isBusy || !canCancel, false, canCancel)}
+        {:else}
           {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
         {/if}
       </div>
@@ -387,14 +393,20 @@
 
 {#snippet BulkPhaseStrip(phase: BulkPhase, jobs: DownloadJob[])}
   {@const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive}
+  {@const finalizingPhase = archive?.outputKind === 'folder'
+    ? { id: 'creating_folder' as BulkPhase, label: 'Creating folder' }
+    : { id: 'compressing' as BulkPhase, label: 'Compressing archive' }}
   {@const phases = [
+    { id: 'review' as BulkPhase, label: 'Review links' },
     { id: 'downloading' as BulkPhase, label: 'Downloading files' },
-    { id: 'compressing' as BulkPhase, label: 'Compressing archive' },
+    { id: 'extracting' as BulkPhase, label: 'Extracting archive' },
+    finalizingPhase,
     { id: 'ready' as BulkPhase, label: 'Ready' },
   ]}
-  {@const activeIndex = phase === 'failed' ? phases.findIndex((item) => item.id === 'compressing') : phases.findIndex((item) => item.id === phase)}
+  {@const failedPhase = archive?.error?.toLowerCase().includes('extract') || archive?.error?.toLowerCase().includes('7-zip') || archive?.error?.toLowerCase().includes('password') ? 'extracting' : finalizingPhase.id}
+  {@const activeIndex = phase === 'failed' ? phases.findIndex((item) => item.id === failedPhase) : phases.findIndex((item) => item.id === phase)}
   <section class="mt-3 rounded border border-border bg-background px-3 py-2">
-    <div class="grid grid-cols-3 gap-2">
+    <div class="grid grid-cols-5 gap-2">
       {#each phases as item, index (item.id)}
         {@const isDone = phase !== 'failed' && index < activeIndex}
         {@const isActive = index === activeIndex}
@@ -408,6 +420,9 @@
     </div>
     {#if phase === 'failed' && archive?.error}
       <div class="mt-2 truncate text-xs text-destructive" title={archive.error}>{archive.error}</div>
+    {/if}
+    {#if phase === 'ready' && archive?.warning}
+      <div class="mt-2 truncate text-xs text-warning" title={archive.warning}>{archive.warning}</div>
     {/if}
   </section>
 {/snippet}

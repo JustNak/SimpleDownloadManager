@@ -228,12 +228,24 @@ pub struct DownloadJob {
 pub struct BulkArchiveInfo {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_bulk_output_archive")]
+    pub output_kind: BulkArchiveOutputKind,
     #[serde(default, skip_serializing_if = "is_bulk_archive_pending")]
     pub archive_status: BulkArchiveStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkArchiveOutputKind {
+    #[default]
+    Archive,
+    Folder,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,9 +253,15 @@ pub struct BulkArchiveInfo {
 pub enum BulkArchiveStatus {
     #[default]
     Pending,
+    Extracting,
+    CreatingFolder,
     Compressing,
     Completed,
     Failed,
+}
+
+fn is_bulk_output_archive(kind: &BulkArchiveOutputKind) -> bool {
+    *kind == BulkArchiveOutputKind::Archive
 }
 
 fn is_bulk_archive_pending(status: &BulkArchiveStatus) -> bool {
@@ -836,6 +854,45 @@ mod tests {
         assert_eq!(state.jobs[0].transfer_kind, TransferKind::Http);
         assert_eq!(state.jobs[0].integrity_check, None);
         assert!(state.diagnostic_events.is_empty());
+    }
+
+    #[test]
+    fn persisted_bulk_archives_default_to_archive_output_kind() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_1",
+                "url": "https://example.com/file.zip",
+                "filename": "file.zip",
+                "state": "completed",
+                "progress": 100.0,
+                "totalBytes": 100,
+                "downloadedBytes": 100,
+                "speed": 0,
+                "eta": 0,
+                "targetPath": "C:/Downloads/file.zip",
+                "tempPath": "C:/Downloads/file.zip.part",
+                "bulkArchive": {
+                  "id": "bulk_1",
+                  "name": "bulk-download.zip",
+                  "archiveStatus": "completed",
+                  "outputPath": "C:/Downloads/bulk-download.zip"
+                }
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("old persisted bulk archive metadata should still parse");
+
+        assert_eq!(
+            state.jobs[0].bulk_archive.as_ref().unwrap().output_kind,
+            BulkArchiveOutputKind::Archive
+        );
     }
 
     #[test]

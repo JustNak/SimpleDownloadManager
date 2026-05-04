@@ -7,12 +7,12 @@ use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{
-    clear_torrent_session_cache_directory, validate_settings, DuplicatePolicy, EnqueueResult,
-    EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
+    clear_torrent_session_cache_directory, validate_settings, BatchDownloadEntry, DuplicatePolicy,
+    EnqueueResult, EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
 };
 use crate::storage::{
-    DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPrompt,
-    DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
+    BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
+    DownloadPrompt, DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, progress_window_label,
@@ -479,11 +479,43 @@ pub async fn add_jobs(
     state: State<'_, SharedState>,
     urls: Vec<String>,
     bulk_archive_name: Option<String>,
+    resolve_hoster_links: Option<bool>,
+    start_paused: Option<bool>,
+    bulk_output_kind: Option<BulkArchiveOutputKind>,
 ) -> Result<AddJobsResult, String> {
-    let results = state
-        .enqueue_downloads(urls, None, bulk_archive_name)
-        .await
-        .map_err(|error| error.message)?;
+    let start_paused = start_paused.unwrap_or(false);
+    let bulk_output_kind = bulk_output_kind.unwrap_or_default();
+    let results = if resolve_hoster_links.unwrap_or(false) {
+        let entries = crate::hosters::resolve_hoster_links(urls)
+            .await
+            .map_err(|error| error.message)?
+            .into_iter()
+            .map(|link| BatchDownloadEntry {
+                url: link.url,
+                filename_hint: link.filename_hint,
+            })
+            .collect();
+        state
+            .enqueue_download_entries_with_bulk_options(
+                entries,
+                None,
+                bulk_archive_name,
+                start_paused,
+                bulk_output_kind,
+            )
+            .await
+    } else {
+        state
+            .enqueue_downloads_with_bulk_options(
+                urls,
+                None,
+                bulk_archive_name,
+                start_paused,
+                bulk_output_kind,
+            )
+            .await
+    }
+    .map_err(|error| error.message)?;
 
     if let Some(result) = results.last() {
         emit_snapshot(&app, &result.snapshot);
@@ -492,6 +524,7 @@ pub async fn add_jobs(
     if results
         .iter()
         .any(|result| result.status == EnqueueStatus::Queued)
+        && !start_paused
     {
         schedule_downloads(app, state.inner().clone());
     }
@@ -994,6 +1027,45 @@ pub async fn reveal_job_in_folder(
         paused_torrent: preparation.paused_torrent,
         auto_reseed_retry_seconds,
     })
+}
+
+#[tauri::command]
+pub async fn open_bulk_archive(
+    state: State<'_, SharedState>,
+    archive_id: String,
+) -> Result<(), String> {
+    let path = state
+        .resolve_bulk_archive_openable_path(&archive_id)
+        .await
+        .map_err(|error| error.message)?;
+
+    tauri::async_runtime::spawn_blocking(move || open_path(&path))
+        .await
+        .map_err(|error| format!("Could not open archive: {error}"))?
+}
+
+#[tauri::command]
+pub async fn reveal_bulk_archive(
+    state: State<'_, SharedState>,
+    archive_id: String,
+) -> Result<(), String> {
+    let path = state
+        .resolve_bulk_archive_revealable_path(&archive_id)
+        .await
+        .map_err(|error| error.message)?;
+
+    tauri::async_runtime::spawn_blocking(move || reveal_path(&path))
+        .await
+        .map_err(|error| format!("Could not reveal archive: {error}"))?
+}
+
+#[tauri::command]
+pub async fn retry_bulk_archive(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    archive_id: String,
+) -> Result<(), String> {
+    crate::download::retry_bulk_archive(&app, state.inner(), &archive_id).await
 }
 
 #[tauri::command]
@@ -1652,6 +1724,100 @@ mod tests {
             artifact_exists: None,
             bulk_archive: None,
         }
+    }
+
+    #[test]
+    fn fuckingfast_resolver_extracts_direct_link_and_fragment_filename() {
+        let html = r#"
+            <html>
+              <head><title>Ignored title</title></head>
+              <body>
+                <script>
+                  function download() {
+                    window.open("https://dl.fuckingfast.co/dl/direct-token_123")
+                  }
+                </script>
+              </body>
+            </html>
+        "#;
+
+        let resolved = crate::hosters::resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar",
+            html,
+        )
+        .expect("fuckingfast page should resolve");
+
+        assert_eq!(
+            resolved.url,
+            "https://dl.fuckingfast.co/dl/direct-token_123"
+        );
+        assert_eq!(
+            resolved.filename_hint.as_deref(),
+            Some("archive.part01.rar")
+        );
+    }
+
+    #[test]
+    fn fuckingfast_resolver_uses_page_title_when_fragment_is_missing() {
+        let html = r#"
+            <html>
+              <head>
+                <meta name="title" content="I_Am_Jesus_Christ.part02.rar">
+              </head>
+              <body>
+                <script>window.open("https://dl.fuckingfast.co/dl/direct-token_456")</script>
+              </body>
+            </html>
+        "#;
+
+        let resolved = crate::hosters::resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf",
+            html,
+        )
+        .expect("fuckingfast page should resolve");
+
+        assert_eq!(
+            resolved.url,
+            "https://dl.fuckingfast.co/dl/direct-token_456"
+        );
+        assert_eq!(
+            resolved.filename_hint.as_deref(),
+            Some("I_Am_Jesus_Christ.part02.rar")
+        );
+    }
+
+    #[test]
+    fn hoster_resolver_leaves_unsupported_hosts_unchanged() {
+        let resolved = crate::hosters::resolve_hoster_link_from_html(
+            "https://example.com/file.zip",
+            "<html></html>",
+        )
+        .expect("unsupported hosts should pass through");
+
+        assert_eq!(resolved.url, "https://example.com/file.zip");
+        assert_eq!(resolved.filename_hint, None);
+    }
+
+    #[test]
+    fn fuckingfast_resolver_rejects_pages_without_direct_download_link() {
+        let error = crate::hosters::resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf",
+            "<html><button>DOWNLOAD</button></html>",
+        )
+        .expect_err("missing direct link should fail");
+
+        assert_eq!(error.code, "HOSTER_RESOLUTION_FAILED");
+    }
+
+    #[test]
+    fn fuckingfast_resolver_rejects_direct_links_on_unexpected_hosts() {
+        let error = crate::hosters::resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf",
+            r#"<script>window.open("https://evil.example/dl/direct-token_123")</script>"#,
+        )
+        .expect_err("unexpected direct host should fail");
+
+        assert_eq!(error.code, "HOSTER_RESOLUTION_FAILED");
     }
 
     fn test_runtime_dir(name: &str) -> std::path::PathBuf {

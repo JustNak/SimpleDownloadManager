@@ -30,43 +30,147 @@ impl SharedState {
         source: Option<DownloadSource>,
         bulk_archive_name: Option<String>,
     ) -> Result<Vec<EnqueueResult>, BackendError> {
-        if urls.is_empty() {
+        self.enqueue_downloads_with_options(urls, source, bulk_archive_name, false)
+            .await
+    }
+
+    pub async fn enqueue_downloads_with_options(
+        &self,
+        urls: Vec<String>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+        start_paused: bool,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        self.enqueue_downloads_with_bulk_options(
+            urls,
+            source,
+            bulk_archive_name,
+            start_paused,
+            BulkArchiveOutputKind::Archive,
+        )
+        .await
+    }
+
+    pub async fn enqueue_downloads_with_bulk_options(
+        &self,
+        urls: Vec<String>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+        start_paused: bool,
+        bulk_output_kind: BulkArchiveOutputKind,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        let entries = urls
+            .into_iter()
+            .map(|url| BatchDownloadEntry {
+                url,
+                filename_hint: None,
+            })
+            .collect();
+        self.enqueue_download_entries_with_bulk_options(
+            entries,
+            source,
+            bulk_archive_name,
+            start_paused,
+            bulk_output_kind,
+        )
+        .await
+    }
+
+    pub async fn enqueue_download_entries(
+        &self,
+        entries: Vec<BatchDownloadEntry>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        self.enqueue_download_entries_with_options(entries, source, bulk_archive_name, false)
+            .await
+    }
+
+    pub async fn enqueue_download_entries_with_options(
+        &self,
+        entries: Vec<BatchDownloadEntry>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+        start_paused: bool,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        self.enqueue_download_entries_with_bulk_options(
+            entries,
+            source,
+            bulk_archive_name,
+            start_paused,
+            BulkArchiveOutputKind::Archive,
+        )
+        .await
+    }
+
+    pub async fn enqueue_download_entries_with_bulk_options(
+        &self,
+        entries: Vec<BatchDownloadEntry>,
+        source: Option<DownloadSource>,
+        bulk_archive_name: Option<String>,
+        start_paused: bool,
+        bulk_output_kind: BulkArchiveOutputKind,
+    ) -> Result<Vec<EnqueueResult>, BackendError> {
+        if entries.is_empty() {
             return Err(BackendError {
                 code: "INVALID_URL",
                 message: "Add at least one download URL.".into(),
             });
         }
 
-        let normalized_urls = urls
-            .iter()
-            .map(|url| normalize_download_url(url))
+        let normalized_entries = entries
+            .into_iter()
+            .map(|entry| {
+                normalize_download_url(&entry.url).map(|url| BatchDownloadEntry {
+                    url,
+                    filename_hint: entry.filename_hint,
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let bulk_archive = bulk_archive_name
-            .filter(|_| normalized_urls.len() > 1)
-            .map(|name| BulkArchiveInfo {
-                id: format!(
-                    "bulk_{}_{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|duration| duration.as_millis())
-                        .unwrap_or_default(),
-                    normalized_urls.len()
-                ),
-                name: normalize_archive_filename(&name),
-                archive_status: BulkArchiveStatus::Pending,
-                output_path: None,
-                error: None,
-            });
+        let bulk_archive =
+            if let Some(name) = bulk_archive_name.filter(|_| normalized_entries.len() > 1) {
+                let name = normalize_bulk_output_name(&name, bulk_output_kind);
+                let output_path = {
+                    let state = self.inner.read().await;
+                    PathBuf::from(&state.settings.download_directory).join(&name)
+                };
+                if output_path.exists() {
+                    return Err(BackendError {
+                        code: "DESTINATION_EXISTS",
+                        message: format!("Bulk output already exists: {}", output_path.display()),
+                    });
+                }
+                Some(BulkArchiveInfo {
+                    id: format!(
+                        "bulk_{}_{}",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|duration| duration.as_millis())
+                            .unwrap_or_default(),
+                        normalized_entries.len()
+                    ),
+                    name,
+                    output_kind: bulk_output_kind,
+                    archive_status: BulkArchiveStatus::Pending,
+                    output_path: None,
+                    error: None,
+                    warning: None,
+                })
+            } else {
+                None
+            };
 
-        let mut results = Vec::with_capacity(normalized_urls.len());
-        for url in normalized_urls {
+        let mut results = Vec::with_capacity(normalized_entries.len());
+        for entry in normalized_entries {
             results.push(
                 self.enqueue_download_with_options(
-                    url,
+                    entry.url,
                     EnqueueOptions {
                         source: source.clone(),
+                        filename_hint: entry.filename_hint,
                         transfer_kind: Some(TransferKind::Http),
                         bulk_archive: bulk_archive.clone(),
+                        start_paused,
                         ..Default::default()
                     },
                 )
@@ -291,6 +395,12 @@ impl RuntimeState {
             status: IntegrityStatus::Pending,
         });
 
+        let initial_state = if options.start_paused {
+            JobState::Paused
+        } else {
+            JobState::Queued
+        };
+
         self.push_job(DownloadJob {
             id: job_id.clone(),
             url: url.clone(),
@@ -299,7 +409,7 @@ impl RuntimeState {
             transfer_kind,
             integrity_check,
             torrent: (transfer_kind == TransferKind::Torrent).then(TorrentInfo::default),
-            state: JobState::Queued,
+            state: initial_state,
             created_at: current_unix_timestamp_millis(),
             progress: 0.0,
             total_bytes: 0,

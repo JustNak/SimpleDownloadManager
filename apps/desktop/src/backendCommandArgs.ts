@@ -1,4 +1,5 @@
 import type { TransferKind } from './types';
+import type { BulkOutputKind } from './bulkArchiveNaming';
 
 export type AddJobOptions =
   | string
@@ -8,6 +9,12 @@ export type AddJobOptions =
       expectedSha256?: string | null;
       transferKind?: TransferKind;
     };
+
+export interface AddJobsOptions {
+  resolveHosterLinks?: boolean;
+  startPaused?: boolean;
+  bulkOutputKind?: BulkOutputKind;
+}
 
 export function buildAddJobCommandArgs(url: string, options?: AddJobOptions) {
   const expectedSha256 = typeof options === 'string' || options === null ? options : options?.expectedSha256;
@@ -41,4 +48,18 @@ export function inferTransferKindForUrl(url: string): TransferKind {
   }
 
   return 'http';
+}
+
+export function buildAddJobsCommandArgs(
+  urls: string[],
+  bulkArchiveName?: string,
+  options: AddJobsOptions = {},
+) {
+  return {
+    urls: urls.map((url) => url.trim()).filter(Boolean),
+    bulkArchiveName: bulkArchiveName?.trim() || undefined,
+    resolveHosterLinks: options.resolveHosterLinks ? true : undefined,
+    ...(options.startPaused ? { startPaused: true } : {}),
+    ...(options.bulkOutputKind ? { bulkOutputKind: options.bulkOutputKind } : {}),
+  };
 }

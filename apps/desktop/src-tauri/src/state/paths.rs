@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::BulkArchiveOutputKind;
 
 pub(super) fn validate_handoff_auth_headers(auth: &HandoffAuth) -> Result<(), BackendError> {
     if auth.headers.is_empty() || auth.headers.len() > MAX_HANDOFF_AUTH_HEADERS {
@@ -431,6 +432,16 @@ pub(super) fn normalize_archive_filename(input: &str) -> String {
         filename.push_str(".zip");
     }
     filename
+}
+
+pub(super) fn normalize_bulk_output_name(
+    input: &str,
+    output_kind: BulkArchiveOutputKind,
+) -> String {
+    match output_kind {
+        BulkArchiveOutputKind::Archive => normalize_archive_filename(input),
+        BulkArchiveOutputKind::Folder => sanitize_filename(input),
+    }
 }
 
 pub(super) fn unique_archive_entry_name(

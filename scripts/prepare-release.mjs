@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,11 +27,20 @@ const sidecarTarget = path.join(
 );
 
 const installerResourceDir = path.join(root, 'apps', 'desktop', 'src-tauri', 'resources', 'install');
+const sevenZipResourceDir = path.join(root, 'apps', 'desktop', 'src-tauri', 'resources', 'bin');
+const sevenZipRequiredFiles = ['7z.exe', '7z.dll', '7zip-LICENSE.txt'];
 
 await rm(sidecarDir, { recursive: true, force: true });
 await rm(installerResourceDir, { recursive: true, force: true });
 await mkdir(sidecarDir, { recursive: true });
 await mkdir(installerResourceDir, { recursive: true });
+
+for (const file of sevenZipRequiredFiles) {
+  const filePath = path.join(sevenZipResourceDir, file);
+  await access(filePath).catch(() => {
+    throw new Error(`Missing bundled 7-Zip resource: ${filePath}`);
+  });
+}
 
 await copyFile(hostBinarySource, sidecarTarget);
 
@@ -66,6 +75,7 @@ console.log(
       hostTuple,
       sidecarTarget,
       installerResourceDir,
+      sevenZipResourceDir,
       chromiumExtensionId: config.chromiumExtensionId,
       firefoxExtensionId: config.firefoxExtensionId,
     },
