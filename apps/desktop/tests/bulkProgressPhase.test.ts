@@ -70,6 +70,39 @@ assert.equal(
   deriveBulkPhase([
     {
       ...baseJob,
+      id: 'job_1',
+      state: 'paused',
+      progress: 0,
+      totalBytes: 0,
+      downloadedBytes: 0,
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'NFS-demo.zip',
+        archiveStatus: 'pending',
+      },
+    },
+    {
+      ...baseJob,
+      id: 'job_2',
+      state: 'queued',
+      progress: 0,
+      totalBytes: 0,
+      downloadedBytes: 0,
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'NFS-demo.zip',
+        archiveStatus: 'pending',
+      },
+    },
+  ]),
+  'review',
+  'queued or paused zero-progress pending bulk members should still show Start and selection before the user starts the popup',
+);
+
+assert.equal(
+  deriveBulkPhase([
+    {
+      ...baseJob,
       bulkArchive: {
         id: 'bulk_1',
         name: 'bulk-download.zip',

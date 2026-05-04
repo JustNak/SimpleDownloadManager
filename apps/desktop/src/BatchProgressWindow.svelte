@@ -20,6 +20,7 @@
     calculateBatchProgress,
     deriveBulkPhase,
     deriveBulkUiState,
+    isUntouchedBulkReviewGate,
     type BulkFinalizingStepId,
     type BulkPhase,
     type BulkUiState,
@@ -48,13 +49,20 @@
   let selectedBulkJobIds = $state<Set<string>>(new Set());
   let reviewSelectionSignature = $state('');
   let lastBulkUiState = $state<BulkUiState | null>(null);
+  let bulkHasStarted = $state(false);
+  let lastBatchId = $state('');
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const batchId = new URLSearchParams(window.location.search).get('batchId') || '';
 
   const summary = $derived(calculateBatchProgress(jobs));
   const progress = $derived(summary.progress);
   const bulkPhase = $derived(context?.kind === 'bulk' ? deriveBulkPhase(jobs) : null);
-  const bulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
+  const rawBulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
+  const bulkUiState = $derived(context?.kind === 'bulk'
+    ? bulkHasStarted && rawBulkUiState === 'review'
+      ? 'downloading'
+      : rawBulkUiState
+    : null);
   const isBulkReviewPhase = $derived(bulkUiState === 'review');
   const selectedBulkCount = $derived(jobs.filter((job) => selectedBulkJobIds.has(job.id)).length);
   const completedArchive = $derived(jobs.find((job) => (
@@ -106,6 +114,14 @@
       media?.removeEventListener('change', handleSystemThemeChange);
       void dispose?.();
     };
+  });
+
+  $effect(() => {
+    const nextBatchId = context?.batchId ?? batchId;
+    if (nextBatchId !== lastBatchId) {
+      bulkHasStarted = false;
+      lastBatchId = nextBatchId;
+    }
   });
 
   $effect(() => {
@@ -267,6 +283,7 @@
       return;
     }
 
+    bulkHasStarted = true;
     void runAction(async () => {
       if (selection.excludedJobs.length > 0) {
         await deleteJobs(selection.excludedJobs.map((job) => job.id), false);
@@ -437,7 +454,7 @@
         {@render BulkStateStrip(bulkUiState, jobs)}
       {/if}
 
-      {#if context.kind === 'bulk' && bulkUiState === 'review'}
+      {#if context.kind === 'bulk' && bulkUiState === 'review' && isUntouchedBulkReviewGate(jobs)}
         {@render BulkReviewList(jobs)}
       {:else}
         {@render BatchJobList(jobs)}

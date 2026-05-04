@@ -25,8 +25,12 @@ assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Cancel active/, 
 assert.match(batchSource, /archive\?\.warning/, 'bulk progress popup should surface cleanup warnings after a completed archive');
 assert.doesNotMatch(batchSource, /summary\.activeCount === 0[\s\S]{0,240}Pause all/, 'inactive batch popup footer should not keep disabled pause controls visible');
 assert.match(batchSource, /selectedBulkJobIds/, 'bulk review rows should track local checked include state');
+assert.match(batchSource, /type="checkbox"/, 'bulk review rows should expose per-file include checkboxes');
+assert.match(batchSource, /bulkHasStarted/, 'bulk popup should keep local started state after the user clicks Start');
+assert.match(batchSource, /isUntouchedBulkReviewGate/, 'bulk popup should derive the first review gate from untouched pending jobs');
 assert.match(batchSource, /bulkReviewStartSelection/, 'bulk Start should partition included and excluded review rows');
 assert.match(batchSource, /deleteJobs\(selection\.excludedJobs\.map\(\(job\) => job\.id\), false\)/, 'bulk Start should remove unchecked review rows without deleting files from disk');
+assert.doesNotMatch(batchSource, /bulkUiState === 'review'[\s\S]{0,280}Resume/, 'bulk review footer should say Start, not Resume');
 assert.match(batchSource, /isConfirmingCancel/, 'bulk Cancel should use the same two-step confirmation transition as other progress popups');
 assert.match(batchSource, /bulkUiState === 'finalizing'[\s\S]*BulkFinalizingStrip/, 'bulk finalizing state should render the adaptive no-action phase strip');
 assert.doesNotMatch(batchSource, /bulkUiState === 'finalizing'[\s\S]{0,360}ActionButton/, 'bulk finalizing state should not render footer actions');

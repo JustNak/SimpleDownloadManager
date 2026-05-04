@@ -4,6 +4,11 @@ use crate::storage::BulkArchiveOutputKind;
 use std::collections::{BTreeSet, HashMap};
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
 const ARCHIVE_EXTRACT_LOCK_RETRY_ATTEMPTS: usize = 8;
 
 #[cfg(test)]
@@ -254,6 +259,9 @@ impl ArchiveExtractor for SevenZipArchiveExtractor {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
 
         if let Some(parent) = self.executable.parent() {
             command.current_dir(parent);

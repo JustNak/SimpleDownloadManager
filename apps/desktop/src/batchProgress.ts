@@ -75,12 +75,7 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'failed' || job.state === 'failed')) {
     return 'failed';
   }
-  if (
-    archiveJobs.length > 0
-    && archiveJobs.length === jobs.length
-    && jobs.every((job) => job.state === 'paused' && job.downloadedBytes === 0 && job.progress === 0)
-    && archiveJobs.every((job) => job.bulkArchive?.archiveStatus === 'pending')
-  ) {
+  if (isUntouchedBulkReviewGate(jobs)) {
     return 'review';
   }
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'completed')) {
@@ -106,6 +101,20 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
     return outputKind === 'folder' ? 'combining' : 'compressing';
   }
   return 'downloading';
+}
+
+export function isUntouchedBulkReviewGate(jobs: DownloadJob[]): boolean {
+  const archiveJobs = jobs.filter((job) => job.bulkArchive);
+  return (
+    archiveJobs.length > 0
+    && archiveJobs.length === jobs.length
+    && jobs.every((job) => (
+      (job.state === 'paused' || job.state === 'queued')
+      && job.downloadedBytes === 0
+      && job.progress === 0
+    ))
+    && archiveJobs.every((job) => job.bulkArchive?.archiveStatus === 'pending')
+  );
 }
 
 export function deriveBulkUiState(jobs: DownloadJob[]): BulkUiState {

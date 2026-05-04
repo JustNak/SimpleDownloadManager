@@ -6,6 +6,7 @@ import {
   calculateBatchProgress,
   deriveBulkPhase,
   deriveBulkUiState,
+  isUntouchedBulkReviewGate,
   progressPopupIntentForSubmission,
 } from '../src/batchProgress.ts';
 import type { AddJobResult, AddJobsResult } from '../src/backend.ts';
@@ -119,6 +120,48 @@ assert.equal(
   ]),
   'review',
   'bulk UI should enter review while every pending member is paused at zero progress',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({
+      id: 'job_1',
+      state: 'paused',
+      progress: 0,
+      downloadedBytes: 0,
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+    job({
+      id: 'job_2',
+      state: 'queued',
+      progress: 0,
+      downloadedBytes: 0,
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+  ]),
+  'review',
+  'bulk UI should keep the initial Start/checklist gate while pending members are paused or queued at zero progress',
+);
+
+assert.equal(
+  isUntouchedBulkReviewGate([
+    job({
+      id: 'job_1',
+      state: 'paused',
+      progress: 0,
+      downloadedBytes: 0,
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+    job({
+      id: 'job_2',
+      state: 'queued',
+      progress: 0,
+      downloadedBytes: 0,
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+  ]),
+  true,
+  'untouched pending bulk batches should be recognized as the selectable review gate',
 );
 
 assert.equal(
