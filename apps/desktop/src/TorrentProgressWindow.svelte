@@ -50,6 +50,7 @@
 
   type IconComponent = typeof X;
   type MetricTone = 'default' | 'primary' | 'warning' | 'success';
+  type TorrentActionVariant = 'default' | 'primary' | 'cancel' | 'confirm';
 
   const popup = useProgressPopup();
   const segmentCount = 42;
@@ -161,11 +162,21 @@
     return job.state === JobState.Failed;
   }
 
-  function actionClass(primary: boolean, danger: boolean, destructive: boolean) {
-    if (destructive) return 'border border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90';
-    if (danger) return 'border border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground';
-    if (primary) return 'border border-primary bg-background text-primary hover:bg-primary-soft';
-    return 'border border-input bg-background text-foreground hover:bg-muted';
+  function cancelActionVariant(isConfirming: boolean): TorrentActionVariant {
+    return isConfirming ? 'confirm' : 'cancel';
+  }
+
+  function actionClass(variant: TorrentActionVariant) {
+    switch (variant) {
+      case 'primary':
+        return 'border border-primary bg-background text-primary hover:bg-primary-soft cursor-pointer';
+      case 'cancel':
+        return 'border border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90 cursor-pointer';
+      case 'confirm':
+        return 'border border-border bg-white text-black hover:bg-white/90 cursor-pointer';
+      default:
+        return 'border border-input bg-background text-foreground hover:bg-muted cursor-pointer';
+    }
   }
 </script>
 
@@ -258,16 +269,16 @@
           {@render Action('Show', FolderOpen, () => void popup.runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
         {/if}
         {#if isActive(job)}
-          {@render Action('Pause', Pause, () => void popup.runAction(() => pauseJob(job.id)), true)}
+          {@render Action('Pause', Pause, () => void popup.runAction(() => pauseJob(job.id)), 'primary')}
         {/if}
         {#if isPaused(job)}
-          {@render Action('Resume', Play, () => void popup.runAction(() => resumeJob(job.id)), true)}
+          {@render Action('Resume', Play, () => void popup.runAction(() => resumeJob(job.id)), 'primary')}
         {/if}
         {#if isCompleted(job)}
-          {@render Action('Open', ExternalLink, () => void popup.runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), true)}
+          {@render Action('Open', ExternalLink, () => void popup.runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), 'primary')}
         {/if}
         {#if isFailed(job)}
-          {@render Action('Retry', RotateCw, () => void popup.runAction(() => retryJob(job.id)), true)}
+          {@render Action('Retry', RotateCw, () => void popup.runAction(() => retryJob(job.id)), 'primary')}
         {/if}
         {#if isFailed(job) && canSwapFailedDownloadToBrowser(job)}
           {@render Action('Swap', ExternalLink, () => void popup.runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}
@@ -276,7 +287,7 @@
           {@render Action('Show', FolderOpen, () => void popup.runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
         {/if}
         {#if isActive(job) || isPaused(job)}
-          {@render Action(popup.isConfirmingCancel ? 'Confirm' : 'Cancel', X, popup.onCancelClick, false, !popup.isConfirmingCancel, popup.isConfirmingCancel)}
+          {@render Action(popup.isConfirmingCancel ? 'Confirm' : 'Cancel', X, popup.onCancelClick, cancelActionVariant(popup.isConfirmingCancel))}
         {/if}
         {#if isCompleted(job) || isFailed(job)}
           {@render Action('Close', X, popup.onClose)}
@@ -348,12 +359,12 @@
   </div>
 {/snippet}
 
-{#snippet Action(label: string, icon: IconComponent, onClick: () => void, primary = false, danger = false, destructive = false)}
+{#snippet Action(label: string, icon: IconComponent, onClick: () => void, variant: TorrentActionVariant = 'default')}
   {@const Icon = icon}
   <button
     onclick={onClick}
     disabled={popup.isBusy}
-    class={`flex h-8 min-w-[128px] items-center justify-center gap-2.5 rounded-md px-5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${actionClass(primary, danger, destructive)}`}
+    class={`flex h-8 min-w-[128px] items-center justify-center gap-2.5 rounded-md px-5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${actionClass(variant)}`}
   >
     <Icon size={18} />
     {label}

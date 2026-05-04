@@ -9,6 +9,8 @@
   import { useProgressPopup, type PopupActionRunner } from './useProgressPopup.svelte';
   import type { DownloadProgressMetrics } from './downloadProgressMetrics';
 
+  type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm';
+
   const popup = useProgressPopup();
 
   interface ProgressViewProps {
@@ -41,6 +43,19 @@
     return job.totalBytes > 0
       ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}`
       : formatBytes(job.downloadedBytes);
+  }
+
+  function actionClass(variant: ActionVariant) {
+    switch (variant) {
+      case 'primary':
+        return 'border-primary bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer';
+      case 'cancel':
+        return 'border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90 cursor-pointer';
+      case 'confirm':
+        return 'border-border bg-white text-black hover:bg-white/90 cursor-pointer';
+      default:
+        return 'border-border text-foreground hover:bg-muted cursor-pointer';
+    }
   }
 </script>
 
@@ -118,13 +133,13 @@
       {/if}
 
       <div class="mt-auto flex justify-end gap-2 border-t border-border pt-2">
-        {#if job.state === JobState.Paused}{@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), true)}{/if}
+        {#if job.state === JobState.Paused}{@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}{/if}
         {#if job.state === JobState.Downloading || job.state === JobState.Queued || job.state === JobState.Starting}{@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}{/if}
-        {#if job.state === JobState.Failed}{@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), true)}{/if}
+        {#if job.state === JobState.Failed}{@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}{/if}
         {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Open in browser', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
-        {@render Action('Reveal', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }))}
-        {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }))}
-        {@render Action(isConfirmingCancel ? 'Confirm cancel' : 'Cancel', X, isBusy, onCancelClick, false, true)}
+        {@render Action('Reveal', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, job.state === JobState.Completed ? { closeOnSuccess: true } : undefined))}
+        {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, job.state === JobState.Completed ? { closeOnSuccess: true } : undefined))}
+        {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
         {@render Action('Close', X, isBusy, onClose)}
       </div>
     </main>
@@ -138,10 +153,10 @@
   </div>
 {/snippet}
 
-{#snippet Action(label: string, icon: typeof X, disabled: boolean, onClick: () => void, primary = false, danger = false)}
+{#snippet Action(label: string, icon: typeof X, disabled: boolean, onClick: () => void, variant: ActionVariant = 'default')}
   {@const Icon = icon}
   <button
-    class={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] font-semibold disabled:opacity-45 ${primary ? 'border-primary bg-primary text-primary-foreground' : danger ? 'border-destructive/50 text-destructive hover:bg-destructive/10' : 'border-border hover:bg-muted'}`}
+    class={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] font-semibold disabled:cursor-not-allowed disabled:opacity-45 ${actionClass(variant)}`}
     {disabled}
     onclick={onClick}
   >

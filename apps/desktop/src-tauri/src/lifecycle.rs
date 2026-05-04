@@ -12,9 +12,11 @@ use tauri::{
 #[cfg(windows)]
 use std::ffi::OsStr;
 #[cfg(windows)]
-use std::io::Write;
+use std::io::{Error as IoError, ErrorKind, Write};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::time::Duration;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
 #[cfg(windows)]
@@ -39,10 +41,25 @@ const TRAY_MENU_OPEN: &str = "open";
 const TRAY_MENU_EXIT: &str = "exit";
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\SimpleDownloadManager.SingleInstance";
 const SINGLE_INSTANCE_REQUEST_ID: &str = "desktop-single-instance";
+#[cfg(windows)]
+const EXISTING_INSTANCE_WAKE_RETRY_ATTEMPTS: usize = 8;
+#[cfg(windows)]
+const EXISTING_INSTANCE_WAKE_RETRY_DELAY: Duration = Duration::from_millis(125);
+#[cfg(windows)]
+const ERROR_FILE_NOT_FOUND_CODE: i32 = 2;
+#[cfg(windows)]
+const ERROR_PIPE_BUSY_CODE: i32 = 231;
 
 #[cfg(windows)]
 pub struct SingleInstanceGuard {
     handle: HANDLE,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExistingInstanceWakeRetryPolicy {
+    attempts: usize,
+    delay: Duration,
 }
 
 #[cfg(windows)]
@@ -112,18 +129,63 @@ pub fn acquire_single_instance_or_notify() -> Result<Option<SingleInstanceGuard>
 
 #[cfg(windows)]
 fn notify_existing_instance_show_window() -> Result<(), String> {
+    let policy = existing_instance_wake_retry_policy();
+    let mut last_error = None;
+
+    for attempt in 0..policy.attempts {
+        match send_existing_instance_show_window_request() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let should_retry = attempt + 1 < policy.attempts
+                    && is_retryable_existing_instance_wake_error(&error);
+                if should_retry {
+                    last_error = Some(error);
+                    std::thread::sleep(policy.delay);
+                    continue;
+                }
+
+                return Err(format_existing_instance_wake_error(error));
+            }
+        }
+    }
+
+    Err(last_error
+        .map(format_existing_instance_wake_error)
+        .unwrap_or_else(|| "Could not notify existing app instance.".into()))
+}
+
+#[cfg(windows)]
+fn existing_instance_wake_retry_policy() -> ExistingInstanceWakeRetryPolicy {
+    ExistingInstanceWakeRetryPolicy {
+        attempts: EXISTING_INSTANCE_WAKE_RETRY_ATTEMPTS,
+        delay: EXISTING_INSTANCE_WAKE_RETRY_DELAY,
+    }
+}
+
+#[cfg(windows)]
+fn send_existing_instance_show_window_request() -> Result<(), IoError> {
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(PIPE_NAME)
-        .map_err(|error| format!("Could not connect to existing app instance: {error}"))?;
+        .open(PIPE_NAME)?;
 
-    pipe.write_all(single_instance_show_window_request().as_bytes())
-        .map_err(|error| format!("Could not write existing-instance wake request: {error}"))?;
-    pipe.write_all(b"\n")
-        .map_err(|error| format!("Could not terminate existing-instance wake request: {error}"))?;
+    pipe.write_all(single_instance_show_window_request().as_bytes())?;
+    pipe.write_all(b"\n")?;
     pipe.flush()
-        .map_err(|error| format!("Could not flush existing-instance wake request: {error}"))
+}
+
+#[cfg(windows)]
+fn is_retryable_existing_instance_wake_error(error: &IoError) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::WouldBlock)
+        || matches!(
+            error.raw_os_error(),
+            Some(ERROR_FILE_NOT_FOUND_CODE) | Some(ERROR_PIPE_BUSY_CODE)
+        )
+}
+
+#[cfg(windows)]
+fn format_existing_instance_wake_error(error: IoError) -> String {
+    format!("Could not notify existing app instance: {error}")
 }
 
 pub fn single_instance_show_window_request() -> String {
@@ -794,5 +856,26 @@ mod tests {
         assert_eq!(value["requestId"], super::SINGLE_INSTANCE_REQUEST_ID);
         assert_eq!(value["type"], "show_window");
         assert_eq!(value["payload"]["reason"], "user_request");
+    }
+
+    #[test]
+    fn duplicate_instance_wake_policy_retries_transient_pipe_startup_errors() {
+        let policy = super::existing_instance_wake_retry_policy();
+
+        assert!(policy.attempts > 1);
+        assert!(policy.delay.as_millis() >= 25);
+    }
+
+    #[test]
+    fn duplicate_instance_wake_retries_missing_or_busy_pipe_errors() {
+        assert!(super::is_retryable_existing_instance_wake_error(
+            &std::io::Error::from_raw_os_error(2),
+        ));
+        assert!(super::is_retryable_existing_instance_wake_error(
+            &std::io::Error::from_raw_os_error(231),
+        ));
+        assert!(!super::is_retryable_existing_instance_wake_error(
+            &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        ));
     }
 }

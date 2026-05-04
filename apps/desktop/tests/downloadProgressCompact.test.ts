@@ -12,5 +12,12 @@ assert.match(progressSource, /PopupTitlebar title="Download progress"/, 'normal 
 assert.match(progressSource, /Metric\('Speed'[\s\S]*Metric\('ETA'[\s\S]*Metric\('Size'/, 'compact download view should keep speed, ETA, and size metrics visible in a flat metric rail');
 assert.doesNotMatch(progressSource, /function MetricGrid|rounded border border-border bg-background/, 'progress popup metrics should be flat instead of boxed cards');
 assert.match(progressSource, /grid grid-cols-3 gap-2 border-t border-border\/35 bg-background\/30/, 'progress popup metric rail should use softer boxed-in shading and a muted top separator');
+assert.match(progressSource, /Action\('Reveal'[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download Reveal should close the popup after a successful action');
+assert.match(progressSource, /Action\('Open'[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download Open should close the popup after a successful action');
+assert.match(progressSource, /type ActionVariant = 'default' \| 'primary' \| 'cancel' \| 'confirm'/, 'download progress actions should use explicit variants for cancel confirmation states');
+assert.match(progressSource, /isConfirmingCancel \? 'confirm' : 'cancel'/, 'download progress cancel button should switch to a confirm variant on the second click');
+assert.match(progressSource, /case 'cancel':[\s\S]*border-destructive bg-destructive text-destructive-foreground[\s\S]*cursor-pointer/, 'download progress Cancel should be a red button with white text and an action cursor');
+assert.match(progressSource, /case 'confirm':[\s\S]*border-border bg-white text-black[\s\S]*cursor-pointer/, 'download progress Confirm should be a white button with black text and an action cursor');
+assert.match(progressSource, /disabled:cursor-not-allowed/, 'download progress action buttons should show a disabled cursor while busy');
 assert.match(windowsSource, /width:\s*460\.0,[\s\S]*height:\s*280\.0,/, 'download progress popup geometry should stay compact for normal downloads');
 assert.match(backendSource, /width=460,height=280/, 'browser fallback download progress popup should keep the compact 460x280 geometry');
