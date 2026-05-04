@@ -51,6 +51,13 @@
   const label = $derived(transferKind === 'torrent' ? 'P2P' : extension ? extension.slice(0, 4).toUpperCase() : 'FILE');
   const Icon = $derived(iconForFilename(filename, transferKind));
   const selectable = $derived(!large && Boolean(onSelectionChange));
+  let selectionHandledByPointer = $state(false);
+
+  function consumePointerHandledSelection() {
+    if (!selectionHandledByPointer) return false;
+    selectionHandledByPointer = false;
+    return true;
+  }
 
   function iconForFilename(name: string, kind: TransferKind) {
     if (kind === 'torrent') return Magnet;
@@ -93,10 +100,14 @@
       title={selectionTitle ?? 'Select download'}
       aria-label={selectionTitle ?? 'Select download'}
       class="absolute -right-1 -top-1 z-20 h-3.5 w-3.5 shrink-0 cursor-pointer rounded-[2px] accent-primary"
-      onclick={(event) => event.stopPropagation()}
+      onclick={(event) => {
+        event.stopPropagation();
+        if (consumePointerHandledSelection()) event.preventDefault();
+      }}
       ondblclick={(event) => event.stopPropagation()}
       onpointerdown={(event) => {
         if (onSelectionPointerDown) {
+          selectionHandledByPointer = true;
           onSelectionPointerDown(event);
           return;
         }
@@ -104,6 +115,7 @@
       }}
       oninput={(event) => {
         event.stopPropagation();
+        if (consumePointerHandledSelection()) return;
         onSelectionChange?.(event.currentTarget.checked);
       }}
     />

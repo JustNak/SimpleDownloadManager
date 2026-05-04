@@ -21,6 +21,11 @@ assert.match(source, /GripHorizontal/, 'details pane should keep the React resiz
 assert.match(source, /ondblclick=\{\(event\) => \{[\s\S]*shouldOpenJobFileOnDoubleClick\(job, event\.button\)[\s\S]*onOpen\(job\.id\)/, 'queue row double-click should open the file instead of revealing the folder');
 assert.match(source, /function toggleSingleJobSelection\(jobId: string\)/, 'queue row click should keep the React toggle selection helper');
 assert.match(source, /function applySelectionRange/, 'queue should keep React drag/range selection behavior');
+assert.match(source, /onSelectionPointerDown=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*startSelectionDrag\(job\.id, !selectedJobIds\.has\(job\.id\)\)/, 'queue row checkbox pointerdown should keep starting drag selection without bubbling to the row');
+assert.match(fileBadgeSource, /let selectionHandledByPointer = \$state\(false\)/, 'file badge checkbox should remember when pointerdown already handled selection');
+assert.match(fileBadgeSource, /function consumePointerHandledSelection\(\)[\s\S]*selectionHandledByPointer = false[\s\S]*return true/, 'file badge checkbox should consume pointer-handled selection once');
+assert.match(fileBadgeSource, /onclick=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*if \(consumePointerHandledSelection\(\)\) event\.preventDefault\(\);[\s\S]*\}\}/, 'file badge checkbox click should prevent the native click toggle after pointer selection');
+assert.match(fileBadgeSource, /oninput=\{\(event\) => \{[\s\S]*event\.stopPropagation\(\);[\s\S]*if \(consumePointerHandledSelection\(\)\) return;[\s\S]*onSelectionChange\?\.\(event\.currentTarget\.checked\);[\s\S]*\}\}/, 'file badge checkbox input should ignore pointer-handled input but keep keyboard input behavior');
 assert.match(source, /Open Folder[\s\S]*onReveal\(job\.id\)/, 'the context menu Open Folder action should still reveal the file location');
 assert.match(source, /DetailsCompactLine\(selectedJob\)/, 'compact details should use a dense single-line inspector layout');
 assert.match(source, /DetailsGrid\(selectedJob, detailsLevel\)/, 'standard and expanded details should use the adaptive inspector grid');
