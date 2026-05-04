@@ -1,13 +1,12 @@
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { Archive, CheckCircle2, Download, FileArchive, FolderOpen, Pause, Play, X } from '@lucide/svelte';
+  import { Archive, CheckCircle2, Download, FolderOpen, Pause, Play, X } from '@lucide/svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { JobState, type DownloadJob, type Settings } from './types';
   import {
     cancelJob,
     deleteJobs,
     getBatchProgressSnapshot,
-    openBulkArchive,
     pauseJob,
     revealBulkArchive,
     resumeJob,
@@ -15,9 +14,15 @@
     type BatchProgressSnapshot,
   } from './backend';
   import {
+    activeBulkFinalizingStepId,
+    bulkFinalizingSteps,
+    bulkReviewStartSelection,
     calculateBatchProgress,
     deriveBulkPhase,
+    deriveBulkUiState,
+    type BulkFinalizingStepId,
     type BulkPhase,
+    type BulkUiState,
     type ProgressBatchContext,
   } from './batchProgress';
   import PopupTitlebar from './PopupTitlebar.svelte';
@@ -28,18 +33,30 @@
   import { runPopupAction } from './popupActions';
 
   type IconComponent = Component<{ size?: number; class?: string }>;
+  type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm' | 'show';
+  const bulkFinalizingStepLabels: Record<BulkFinalizingStepId, string> = {
+    uncompressing: 'Uncompressing',
+    combining: 'Combining',
+    compressing: 'Compressing',
+  };
 
   let context = $state<ProgressBatchContext | null>(null);
   let jobs = $state<DownloadJob[]>([]);
   let isBusy = $state(false);
+  let isConfirmingCancel = $state(false);
   let errorMessage = $state('');
+  let selectedBulkJobIds = $state<Set<string>>(new Set());
+  let reviewSelectionSignature = $state('');
+  let lastBulkUiState = $state<BulkUiState | null>(null);
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const batchId = new URLSearchParams(window.location.search).get('batchId') || '';
 
   const summary = $derived(calculateBatchProgress(jobs));
   const progress = $derived(summary.progress);
   const bulkPhase = $derived(context?.kind === 'bulk' ? deriveBulkPhase(jobs) : null);
-  const isBulkReviewPhase = $derived(bulkPhase === 'review');
+  const bulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
+  const isBulkReviewPhase = $derived(bulkUiState === 'review');
+  const selectedBulkCount = $derived(jobs.filter((job) => selectedBulkJobIds.has(job.id)).length);
   const completedArchive = $derived(jobs.find((job) => (
     job.bulkArchive?.archiveStatus === 'completed'
     && Boolean(job.bulkArchive.outputPath)
@@ -91,6 +108,26 @@
     };
   });
 
+  $effect(() => {
+    if (context?.kind !== 'bulk' || bulkUiState !== 'review') {
+      reviewSelectionSignature = '';
+      return;
+    }
+
+    const nextSignature = jobs.map((job) => job.id).join('|');
+    if (nextSignature !== reviewSelectionSignature) {
+      selectedBulkJobIds = new Set(jobs.map((job) => job.id));
+      reviewSelectionSignature = nextSignature;
+    }
+  });
+
+  $effect(() => {
+    if (bulkUiState !== lastBulkUiState) {
+      isConfirmingCancel = false;
+      lastBulkUiState = bulkUiState;
+    }
+  });
+
   function getPreviewBatchProgressSnapshot(): BatchProgressSnapshot | null {
     if (isTauriRuntime()) return null;
     const now = Date.now();
@@ -100,13 +137,13 @@
         url: 'https://example.com/assets/model.fbx',
         filename: 'model.fbx',
         transferKind: 'http',
-        state: JobState.Downloading,
+        state: JobState.Paused,
         createdAt: now - 1000 * 60 * 8,
-        progress: 62,
+        progress: 0,
         totalBytes: 524288000,
-        downloadedBytes: 325058560,
-        speed: 7340032,
-        eta: 28,
+        downloadedBytes: 0,
+        speed: 0,
+        eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\model.fbx',
         bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
@@ -115,13 +152,13 @@
         url: 'https://example.com/assets/textures.zip',
         filename: 'textures.zip',
         transferKind: 'http',
-        state: JobState.Downloading,
+        state: JobState.Paused,
         createdAt: now - 1000 * 60 * 7,
-        progress: 38,
+        progress: 0,
         totalBytes: 734003200,
-        downloadedBytes: 279969792,
-        speed: 5242880,
-        eta: 86,
+        downloadedBytes: 0,
+        speed: 0,
+        eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\textures.zip',
         bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
@@ -130,11 +167,11 @@
         url: 'https://example.com/assets/readme.pdf',
         filename: 'readme.pdf',
         transferKind: 'http',
-        state: JobState.Completed,
+        state: JobState.Paused,
         createdAt: now - 1000 * 60 * 6,
-        progress: 100,
+        progress: 0,
         totalBytes: 12582912,
-        downloadedBytes: 12582912,
+        downloadedBytes: 0,
         speed: 0,
         eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\readme.pdf',
@@ -195,6 +232,7 @@
     { closeOnSuccess = false }: { closeOnSuccess?: boolean } = {},
   ) {
     isBusy = true;
+    isConfirmingCancel = false;
     errorMessage = '';
     const result = await runPopupAction({
       action,
@@ -210,6 +248,52 @@
     for (const job of targetJobs) {
       await action(job.id);
     }
+  }
+
+  function toggleBulkJobSelection(id: string) {
+    const nextSelection = new Set(selectedBulkJobIds);
+    if (nextSelection.has(id)) {
+      nextSelection.delete(id);
+    } else {
+      nextSelection.add(id);
+    }
+    selectedBulkJobIds = nextSelection;
+  }
+
+  function startBulkDownload() {
+    const selection = bulkReviewStartSelection(jobs, selectedBulkJobIds);
+    if (selection.includedJobs.length === 0) {
+      errorMessage = 'Select at least one file to start.';
+      return;
+    }
+
+    void runAction(async () => {
+      if (selection.excludedJobs.length > 0) {
+        await deleteJobs(selection.excludedJobs.map((job) => job.id), false);
+      }
+      await runForJobs(selection.resumableJobs, resumeJob);
+    });
+  }
+
+  function onBulkPauseResumeClick() {
+    const targetJobs = canPause ? jobs.filter(isPausable) : jobs.filter(isResumable);
+    const action = canPause ? pauseJob : resumeJob;
+    void runAction(() => runForJobs(targetJobs, action));
+  }
+
+  function onBulkCancelClick() {
+    if (!isConfirmingCancel) {
+      isConfirmingCancel = true;
+      return;
+    }
+
+    const targetJobs = bulkUiState === 'review' ? jobs : jobs.filter(isCancelable);
+    void runAction(
+      () => bulkUiState === 'review'
+        ? deleteJobs(targetJobs.map((job) => job.id), false)
+        : runForJobs(targetJobs, cancelJob),
+      { closeOnSuccess: bulkUiState === 'review' },
+    );
   }
 
   function isPausable(job: DownloadJob) {
@@ -262,15 +346,27 @@
     return 'bg-primary';
   }
 
-  function phaseClass(phase: BulkPhase) {
+  function phaseClass(phase: BulkPhase | BulkUiState | BulkFinalizingStepId | null) {
     if (phase === 'failed') return 'text-destructive';
     if (phase === 'ready') return 'text-success';
-    if (phase === 'extracting' || phase === 'creating_folder' || phase === 'compressing') return 'text-warning';
+    if (phase === 'extracting' || phase === 'uncompressing' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing' || phase === 'finalizing') {
+      return 'text-warning';
+    }
     return 'text-primary';
   }
 
-  function bulkOpenLabel(archive: NonNullable<DownloadJob['bulkArchive']>) {
-    return archive.outputKind === 'folder' ? 'Open Folder' : 'Open File';
+  function actionClass(variant: ActionVariant) {
+    switch (variant) {
+      case 'primary':
+        return 'border border-primary bg-background text-primary hover:bg-primary-soft cursor-pointer';
+      case 'cancel':
+        return 'border border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90 cursor-pointer';
+      case 'confirm':
+      case 'show':
+        return 'border border-border bg-white text-black hover:bg-white/90 cursor-pointer';
+      default:
+        return 'border border-input bg-background text-foreground hover:bg-muted cursor-pointer';
+    }
   }
 
   function isTauriRuntime(): boolean {
@@ -289,27 +385,41 @@
   <div class="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
     <PopupTitlebar title={context.title} />
 
-    <main class="flex min-h-0 flex-1 flex-col bg-surface px-4 py-3">
+    <main class="flex min-h-0 flex-1 flex-col bg-surface px-5 py-3">
       <section class="flex items-start gap-3">
-        <div class="flex h-12 w-10 shrink-0 items-center justify-center rounded-sm border border-border bg-background text-primary">
-          {#if context.kind === 'bulk'}<Archive size={22} />{:else}<Download size={22} />{/if}
+        <div class="flex h-12 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-background text-primary">
+          {#if context.kind === 'bulk'}<Archive size={24} />{:else}<Download size={22} />{/if}
         </div>
         <div class="min-w-0 flex-1">
           <h1 class="truncate text-base font-semibold leading-5 text-foreground" title={context.archiveName ?? context.title}>
             {context.archiveName ?? context.title}
           </h1>
-          <div class="mt-0.5 text-xs text-muted-foreground">
-            {summary.completedCount} of {summary.totalCount} completed{summary.failedCount > 0 ? `, ${summary.failedCount} failed` : ''}
+          <div class="mt-1 text-xs text-muted-foreground">
+            {#if context.kind === 'bulk' && bulkUiState === 'review'}
+              {selectedBulkCount} of {summary.totalCount} selected
+            {:else if context.kind === 'bulk' && bulkUiState === 'finalizing'}
+              Preparing combined output
+            {:else}
+              {summary.completedCount} of {summary.totalCount} completed{summary.failedCount > 0 ? `, ${summary.failedCount} failed` : ''}
+            {/if}
           </div>
         </div>
         <div class="text-right text-2xl font-semibold tabular-nums text-foreground">
-          {progress.toFixed(0)}%
+          {isBulkReviewPhase ? selectedBulkCount : progress.toFixed(0)}{isBulkReviewPhase ? '' : '%'}
         </div>
       </section>
 
       <section class="mt-3">
         <div class="mb-1.5 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
-          <span>{isBulkReviewPhase ? 'Ready to start' : `${summary.activeCount} active`}</span>
+          <span>
+            {#if context.kind === 'bulk' && bulkUiState === 'review'}
+              Ready to start
+            {:else if context.kind === 'bulk' && bulkUiState === 'finalizing'}
+              Finalizing
+            {:else}
+              {summary.activeCount} active
+            {/if}
+          </span>
           <span>
             {summary.knownTotal
               ? `${formatBytes(summary.downloadedBytes)} / ${formatBytes(summary.totalBytes)}`
@@ -317,15 +427,21 @@
           </span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-progress-track">
-          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${progress}%`}></div>
+          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${isBulkReviewPhase ? 0 : progress}%`}></div>
         </div>
       </section>
 
-      {#if bulkPhase}
-        {@render BulkPhaseStrip(bulkPhase, jobs)}
+      {#if context.kind === 'bulk' && bulkUiState === 'finalizing'}
+        {@render BulkFinalizingStrip(bulkPhase, jobs)}
+      {:else if context.kind === 'bulk' && bulkUiState}
+        {@render BulkStateStrip(bulkUiState, jobs)}
       {/if}
 
-      {@render BatchJobList(jobs)}
+      {#if context.kind === 'bulk' && bulkUiState === 'review'}
+        {@render BulkReviewList(jobs)}
+      {:else}
+        {@render BatchJobList(jobs)}
+      {/if}
 
       {#if errorMessage}
         <div class="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
@@ -333,21 +449,13 @@
         </div>
       {/if}
 
-      <div class="mt-3 flex flex-wrap justify-end gap-2 border-t border-border pt-3">
-        {#if completedArchive}
-          {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy)}
-          {@render ActionButton(bulkOpenLabel(completedArchive), FileArchive, () => void runAction(() => openBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy)}
-        {:else if isBulkReviewPhase}
-          {@render ActionButton('Cancel', X, () => void runAction(() => deleteJobs(jobs.map((job) => job.id), false), { closeOnSuccess: true }), isBusy, false, true)}
-          {@render ActionButton('Start', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, true)}
-        {:else if summary.activeCount > 0 || canPause || canResume || canCancel}
-          {@render ActionButton('Pause all', Pause, () => void runAction(() => runForJobs(jobs.filter(isPausable), pauseJob)), isBusy || !canPause)}
-          {@render ActionButton('Resume all', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, canResume)}
-          {@render ActionButton('Cancel active', X, () => void runAction(() => runForJobs(jobs.filter(isCancelable), cancelJob)), isBusy || !canCancel, false, canCancel)}
-        {:else}
-          {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+      {#if context.kind === 'bulk'}
+        {#if bulkUiState !== 'finalizing'}
+          {@render BulkFooter()}
         {/if}
-      </div>
+      {:else}
+        {@render MultiFooter()}
+      {/if}
     </main>
   </div>
 {/if}
@@ -362,6 +470,43 @@
       <div class="divide-y divide-border/60">
         {#each jobs as job (job.id)}
           {@render BatchJobRow(job)}
+        {/each}
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
+{#snippet BulkReviewList(jobs: DownloadJob[])}
+  <section class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
+    {#if jobs.length === 0}
+      <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
+        Waiting for queued files to appear.
+      </div>
+    {:else}
+      <div class="divide-y divide-border/60">
+        {#each jobs as job (job.id)}
+          <label class="grid cursor-pointer grid-cols-[28px_40px_minmax(0,1fr)_82px] items-center gap-2 px-3 py-2 transition hover:bg-row-hover">
+            <input
+              type="checkbox"
+              checked={selectedBulkJobIds.has(job.id)}
+              onchange={() => toggleBulkJobSelection(job.id)}
+              class="h-4 w-4 accent-primary"
+              aria-label={`Include ${job.filename}`}
+            />
+            <FileBadge filename={job.filename} transferKind={job.transferKind} />
+            <div class="min-w-0">
+              <div class={`truncate text-sm font-semibold leading-5 ${selectedBulkJobIds.has(job.id) ? 'text-foreground' : 'text-muted-foreground'}`} title={job.filename}>{job.filename}</div>
+              <div class="truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
+            </div>
+            <div class="min-w-0 text-right text-xs">
+              <div class={selectedBulkJobIds.has(job.id) ? 'font-semibold text-primary' : 'font-semibold text-muted-foreground'}>
+                {selectedBulkJobIds.has(job.id) ? 'Included' : 'Excluded'}
+              </div>
+              <div class="mt-0.5 truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
+                {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
+              </div>
+            </div>
+          </label>
         {/each}
       </div>
     {/if}
@@ -391,26 +536,21 @@
   </div>
 {/snippet}
 
-{#snippet BulkPhaseStrip(phase: BulkPhase, jobs: DownloadJob[])}
+{#snippet BulkStateStrip(state: BulkUiState, jobs: DownloadJob[])}
   {@const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive}
-  {@const finalizingPhase = archive?.outputKind === 'folder'
-    ? { id: 'creating_folder' as BulkPhase, label: 'Creating folder' }
-    : { id: 'compressing' as BulkPhase, label: 'Compressing archive' }}
   {@const phases = [
-    { id: 'review' as BulkPhase, label: 'Review links' },
-    { id: 'downloading' as BulkPhase, label: 'Downloading files' },
-    { id: 'extracting' as BulkPhase, label: 'Extracting archive' },
-    finalizingPhase,
-    { id: 'ready' as BulkPhase, label: 'Ready' },
+    { id: 'review' as BulkUiState, label: 'Review links' },
+    { id: 'downloading' as BulkUiState, label: 'Downloading files' },
+    { id: 'finalizing' as BulkUiState, label: 'Finalizing output' },
+    { id: 'ready' as BulkUiState, label: 'Ready' },
   ]}
-  {@const failedPhase = archive?.error?.toLowerCase().includes('extract') || archive?.error?.toLowerCase().includes('7-zip') || archive?.error?.toLowerCase().includes('password') ? 'extracting' : finalizingPhase.id}
-  {@const activeIndex = phase === 'failed' ? phases.findIndex((item) => item.id === failedPhase) : phases.findIndex((item) => item.id === phase)}
+  {@const activeIndex = phases.findIndex((item) => item.id === state)}
   <section class="mt-3 rounded border border-border bg-background px-3 py-2">
-    <div class="grid grid-cols-5 gap-2">
+    <div class="grid grid-cols-4 gap-2">
       {#each phases as item, index (item.id)}
-        {@const isDone = phase !== 'failed' && index < activeIndex}
+        {@const isDone = state !== 'failed' && index < activeIndex}
         {@const isActive = index === activeIndex}
-        <div class={`flex min-w-0 items-center gap-1.5 text-xs font-semibold ${isActive ? phaseClass(phase) : isDone ? 'text-success' : 'text-muted-foreground'}`}>
+        <div class={`flex min-w-0 items-center gap-1.5 text-xs font-semibold ${isActive ? phaseClass(state) : isDone ? 'text-success' : 'text-muted-foreground'}`}>
           <span class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] ${isActive ? 'border-current' : isDone ? 'border-success bg-success text-success-foreground' : 'border-border'}`}>
             {#if isDone}<CheckCircle2 size={10} />{:else}{index + 1}{/if}
           </span>
@@ -418,28 +558,79 @@
         </div>
       {/each}
     </div>
-    {#if phase === 'failed' && archive?.error}
+    {#if state === 'failed' && archive?.error}
       <div class="mt-2 truncate text-xs text-destructive" title={archive.error}>{archive.error}</div>
     {/if}
-    {#if phase === 'ready' && archive?.warning}
+    {#if state === 'ready' && archive?.warning}
       <div class="mt-2 truncate text-xs text-warning" title={archive.warning}>{archive.warning}</div>
     {/if}
   </section>
 {/snippet}
 
-{#snippet ActionButton(label: string, icon: IconComponent, onClick: () => void, disabled = false, primary = false, danger = false)}
+{#snippet BulkFinalizingStrip(phase: BulkPhase | null, jobs: DownloadJob[])}
+  {@const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive}
+  {@const steps = bulkFinalizingSteps(jobs)}
+  {@const activeStep = activeBulkFinalizingStepId(phase)}
+  {@const activeIndex = steps.findIndex((item) => item.id === activeStep)}
+  <section class="mt-3 rounded border border-border bg-background px-3 py-2">
+    <div class="mb-2 flex items-center justify-between gap-3">
+      <div class="min-w-0">
+        <div class="text-xs font-semibold text-warning">Finalizing output</div>
+        <div class="mt-0.5 truncate text-xs text-muted-foreground" title={archive?.name}>{archive?.name ?? 'Bulk output'}</div>
+      </div>
+      <div class="text-xs tabular-nums text-muted-foreground">{steps.length} steps</div>
+    </div>
+    <div class="grid gap-2" style={`grid-template-columns: repeat(${steps.length}, minmax(0, 1fr));`}>
+      {#each steps as item, index (item.id)}
+        {@const isDone = activeIndex >= 0 && index < activeIndex}
+        {@const isActive = index === activeIndex}
+        <div class={`flex min-w-0 items-center gap-1.5 text-xs font-semibold ${isActive ? phaseClass(item.id) : isDone ? 'text-success' : 'text-muted-foreground'}`}>
+          <span class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] ${isActive ? 'border-current' : isDone ? 'border-success bg-success text-success-foreground' : 'border-border'}`}>
+            {#if isDone}<CheckCircle2 size={10} />{:else}{index + 1}{/if}
+          </span>
+          <span class="truncate">{bulkFinalizingStepLabels[item.id] ?? item.label}</span>
+        </div>
+      {/each}
+    </div>
+  </section>
+{/snippet}
+
+{#snippet BulkFooter()}
+  <div class="mt-3 flex min-h-[45px] shrink-0 justify-end gap-3 border-t border-border pt-3">
+    {#if bulkUiState === 'ready' && completedArchive}
+      {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy, 'show')}
+    {:else if bulkUiState === 'review'}
+      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy, isConfirmingCancel ? 'confirm' : 'cancel')}
+      {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || selectedBulkCount === 0, 'primary')}
+    {:else if bulkUiState === 'downloading'}
+      {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
+      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
+    {:else if bulkUiState === 'failed'}
+      {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet MultiFooter()}
+  <div class="mt-3 flex min-h-[45px] shrink-0 justify-end gap-3 border-t border-border pt-3">
+    {#if summary.activeCount > 0 || canPause || canResume || canCancel}
+      {@render ActionButton('Pause all', Pause, () => void runAction(() => runForJobs(jobs.filter(isPausable), pauseJob)), isBusy || !canPause)}
+      {@render ActionButton('Resume all', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, 'primary')}
+      {@render ActionButton('Cancel active', X, () => void runAction(() => runForJobs(jobs.filter(isCancelable), cancelJob)), isBusy || !canCancel, 'cancel')}
+    {:else}
+      {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet ActionButton(label: string, icon: IconComponent, onClick: () => void, disabled = false, variant: ActionVariant = 'default')}
   {@const Icon = icon}
-  {@const buttonClass = danger
-    ? 'border border-destructive/50 bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground'
-    : primary
-      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-      : 'border border-input text-foreground hover:bg-muted'}
   <button
     onclick={onClick}
     {disabled}
-    class={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${buttonClass}`}
+    class={`flex h-8 min-w-[112px] items-center justify-center gap-2 rounded-md px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${actionClass(variant)}`}
   >
-    <Icon size={16} />
+    <Icon size={17} />
     {label}
   </button>
 {/snippet}

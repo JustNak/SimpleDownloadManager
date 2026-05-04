@@ -358,6 +358,7 @@ async fn create_bulk_archive_from_ready(
     diagnostic_job_id: Option<String>,
 ) -> Result<(), String> {
     let archive_id = archive.archive_id.clone();
+    let output_kind = archive.output_kind;
     let archive_output_path = archive.output_path.display().to_string();
     let requires_extraction = match build_bulk_archive_source_plan(&archive.entries) {
         Ok(plan) => !plan.archive_sets.is_empty(),
@@ -366,6 +367,7 @@ async fn create_bulk_archive_from_ready(
                 .mark_bulk_archive_status(
                     &archive_id,
                     BulkArchiveStatus::Failed,
+                    None,
                     Some(archive_output_path.clone()),
                     Some(error.clone()),
                     None,
@@ -383,6 +385,7 @@ async fn create_bulk_archive_from_ready(
                     .mark_bulk_archive_status(
                         &archive_id,
                         BulkArchiveStatus::Failed,
+                        Some(requires_extraction),
                         Some(archive_output_path.clone()),
                         Some(error.clone()),
                         None,
@@ -395,20 +398,16 @@ async fn create_bulk_archive_from_ready(
     } else {
         None
     };
-    let finalizing_status = if archive.output_kind == BulkArchiveOutputKind::Folder {
-        BulkArchiveStatus::CreatingFolder
-    } else {
-        BulkArchiveStatus::Compressing
-    };
     let initial_status = if requires_extraction {
         BulkArchiveStatus::Extracting
     } else {
-        finalizing_status
+        BulkArchiveStatus::Combining
     };
     let snapshot = state
         .mark_bulk_archive_status(
             &archive_id,
             initial_status,
+            Some(requires_extraction),
             Some(archive_output_path.clone()),
             None,
             None,
@@ -424,6 +423,7 @@ async fn create_bulk_archive_from_ready(
                 state,
                 &archive_id,
                 archive_output_path,
+                Some(requires_extraction),
                 error.clone(),
                 diagnostic_job_id,
             )
@@ -436,7 +436,22 @@ async fn create_bulk_archive_from_ready(
         let snapshot = state
             .mark_bulk_archive_status(
                 &archive_id,
-                finalizing_status,
+                BulkArchiveStatus::Combining,
+                Some(requires_extraction),
+                Some(archive_output_path.clone()),
+                None,
+                None,
+            )
+            .await?;
+        emit_snapshot(app, &snapshot);
+    }
+
+    if output_kind == BulkArchiveOutputKind::Archive {
+        let snapshot = state
+            .mark_bulk_archive_status(
+                &archive_id,
+                BulkArchiveStatus::Compressing,
+                Some(requires_extraction),
                 Some(archive_output_path.clone()),
                 None,
                 None,
@@ -462,6 +477,7 @@ async fn create_bulk_archive_from_ready(
                 .mark_bulk_archive_status(
                     &archive_id,
                     BulkArchiveStatus::Completed,
+                    None,
                     Some(outcome.output_path.display().to_string()),
                     None,
                     cleanup_warning,
@@ -477,6 +493,7 @@ async fn create_bulk_archive_from_ready(
                 state,
                 &archive_id,
                 archive_output_path,
+                Some(requires_extraction),
                 error.clone(),
                 diagnostic_job_id,
             )
@@ -491,6 +508,7 @@ async fn mark_bulk_archive_create_failed(
     state: &SharedState,
     archive_id: &str,
     archive_output_path: String,
+    requires_extraction: Option<bool>,
     error: String,
     diagnostic_job_id: Option<String>,
 ) -> Result<(), String> {
@@ -506,6 +524,7 @@ async fn mark_bulk_archive_create_failed(
         .mark_bulk_archive_status(
             archive_id,
             BulkArchiveStatus::Failed,
+            requires_extraction,
             Some(archive_output_path),
             Some(error.clone()),
             None,

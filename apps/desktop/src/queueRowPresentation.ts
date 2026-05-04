@@ -100,12 +100,16 @@ export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueSt
     return { label: 'Compressing', tone: 'warning' };
   }
 
+  if (job.bulkArchive?.archiveStatus === 'combining') {
+    return { label: 'Combining', tone: 'warning' };
+  }
+
   if (job.bulkArchive?.archiveStatus === 'creating_folder') {
-    return { label: 'Creating folder', tone: 'warning' };
+    return { label: 'Combining', tone: 'warning' };
   }
 
   if (job.bulkArchive?.archiveStatus === 'extracting') {
-    return { label: 'Extracting', tone: 'warning' };
+    return { label: 'Uncompressing', tone: 'warning' };
   }
 
   if (isTorrentSeedingRestore(job)) {

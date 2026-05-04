@@ -252,6 +252,7 @@ impl SharedState {
         &self,
         archive_id: &str,
         archive_status: BulkArchiveStatus,
+        requires_extraction: Option<bool>,
         output_path: Option<String>,
         error: Option<String>,
         warning: Option<String>,
@@ -261,6 +262,7 @@ impl SharedState {
             state.mark_bulk_archive_status_in_memory(
                 archive_id,
                 archive_status,
+                requires_extraction,
                 output_path,
                 error,
                 warning,
@@ -350,6 +352,7 @@ impl SharedState {
                 BulkArchiveStatus::Completed => "Bulk archive is already completed.".into(),
                 BulkArchiveStatus::Pending => "Bulk archive is not ready to retry yet.".into(),
                 BulkArchiveStatus::Extracting
+                | BulkArchiveStatus::Combining
                 | BulkArchiveStatus::CreatingFolder
                 | BulkArchiveStatus::Compressing => {
                     "Bulk archive creation is already running.".into()
@@ -628,6 +631,7 @@ impl RuntimeState {
         &mut self,
         archive_id: &str,
         archive_status: BulkArchiveStatus,
+        requires_extraction: Option<bool>,
         output_path: Option<String>,
         error: Option<String>,
         warning: Option<String>,
@@ -641,6 +645,9 @@ impl RuntimeState {
             }
 
             archive.archive_status = archive_status;
+            if let Some(requires_extraction) = requires_extraction {
+                archive.requires_extraction = Some(requires_extraction);
+            }
             archive.output_path = output_path.clone();
             archive.error = error.clone();
             archive.warning = warning.clone();

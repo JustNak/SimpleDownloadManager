@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { deriveBulkPhase } from '../src/batchProgress.ts';
+import { deriveBulkPhase, deriveBulkUiState } from '../src/batchProgress.ts';
 import type { DownloadJob } from '../src/types.ts';
 
 const baseJob: DownloadJob = {
@@ -64,4 +64,38 @@ assert.equal(
   ]),
   'review',
   'paused newly-added bulk batches should wait in the review phase until the user clicks Start',
+);
+
+assert.equal(
+  deriveBulkPhase([
+    {
+      ...baseJob,
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bulk-download.zip',
+        archiveStatus: 'combining',
+        outputKind: 'folder',
+        requiresExtraction: false,
+      },
+    },
+  ]),
+  'combining',
+  'bulk progress should expose combining as a distinct finalizing phase',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    {
+      ...baseJob,
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bulk-download.zip',
+        archiveStatus: 'combining',
+        outputKind: 'folder',
+        requiresExtraction: false,
+      },
+    },
+  ]),
+  'finalizing',
+  'combining should keep the popup in the no-action finalizing state',
 );

@@ -36,7 +36,7 @@ export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type StartupLaunchMode = 'open' | 'tray';
 export type BulkOutputKind = 'archive' | 'folder';
-export type BulkArchiveStatus = 'pending' | 'extracting' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
+export type BulkArchiveStatus = 'pending' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
 export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'experimental';
@@ -98,6 +98,7 @@ export interface DownloadJob {
     name: string;
     outputKind?: BulkOutputKind;
     archiveStatus?: BulkArchiveStatus;
+    requiresExtraction?: boolean;
     outputPath?: string;
     error?: string;
     warning?: string;

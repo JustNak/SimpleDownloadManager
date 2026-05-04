@@ -109,7 +109,7 @@ function deriveAggregateState(
 ): DownloadJob['state'] {
   if (archiveStatus === 'failed' || members.some((job) => job.state === FAILED)) return FAILED;
   if (archiveStatus === 'completed') return COMPLETED;
-  if (archiveStatus === 'extracting' || archiveStatus === 'compressing') return DOWNLOADING;
+  if (archiveStatus === 'extracting' || archiveStatus === 'combining' || archiveStatus === 'creating_folder' || archiveStatus === 'compressing') return DOWNLOADING;
   if (members.some((job) => job.state === DOWNLOADING)) return DOWNLOADING;
   if (members.some((job) => job.state === STARTING)) return STARTING;
   if (members.some((job) => job.state === QUEUED)) return QUEUED;

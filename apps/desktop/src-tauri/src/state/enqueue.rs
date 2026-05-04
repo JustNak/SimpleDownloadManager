@@ -152,6 +152,7 @@ impl SharedState {
                     name,
                     output_kind: bulk_output_kind,
                     archive_status: BulkArchiveStatus::Pending,
+                    requires_extraction: None,
                     output_path: None,
                     error: None,
                     warning: None,

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import {
+  activeBulkFinalizingStepId,
+  bulkFinalizingSteps,
+  bulkReviewStartSelection,
   calculateBatchProgress,
   deriveBulkPhase,
+  deriveBulkUiState,
   progressPopupIntentForSubmission,
 } from '../src/batchProgress.ts';
 import type { AddJobResult, AddJobsResult } from '../src/backend.ts';
@@ -101,6 +105,170 @@ assert.equal(
   ]),
   'failed',
   'bulk phase should report failed archive creation',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({
+      id: 'job_1',
+      state: 'paused',
+      progress: 0,
+      downloadedBytes: 0,
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+  ]),
+  'review',
+  'bulk UI should enter review while every pending member is paused at zero progress',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({
+      id: 'job_1',
+      state: 'downloading',
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' },
+    }),
+  ]),
+  'downloading',
+  'bulk UI should enter downloading after selected jobs are resumed',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'combining', outputKind: 'folder' },
+    }),
+  ]),
+  'finalizing',
+  'bulk UI should enter finalizing while completed members are being combined',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'completed', outputPath: 'C:\\Downloads\\bundle.zip' },
+    }),
+  ]),
+  'ready',
+  'bulk UI should enter ready when the combined output is available',
+);
+
+assert.deepEqual(
+  bulkReviewStartSelection([
+    job({ id: 'job_1', state: 'paused' }),
+    job({ id: 'job_2', state: 'paused' }),
+    job({ id: 'job_3', state: 'paused' }),
+  ], new Set(['job_1', 'job_3'])),
+  {
+    includedJobs: [job({ id: 'job_1', state: 'paused' }), job({ id: 'job_3', state: 'paused' })],
+    excludedJobs: [job({ id: 'job_2', state: 'paused' })],
+    resumableJobs: [job({ id: 'job_1', state: 'paused' }), job({ id: 'job_3', state: 'paused' })],
+  },
+  'starting a reviewed bulk batch should delete unchecked jobs and resume only checked resumable jobs',
+);
+
+assert.deepEqual(
+  bulkFinalizingSteps([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle.zip',
+        outputKind: 'archive',
+        archiveStatus: 'extracting',
+        requiresExtraction: true,
+      },
+    }),
+  ]),
+  [
+    { id: 'uncompressing', label: 'Uncompressing' },
+    { id: 'combining', label: 'Combining' },
+    { id: 'compressing', label: 'Compressing' },
+  ],
+  'archive output with extraction should show uncompressing, combining, then compressing',
+);
+
+assert.deepEqual(
+  bulkFinalizingSteps([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle.zip',
+        outputKind: 'archive',
+        archiveStatus: 'combining',
+        requiresExtraction: false,
+      },
+    }),
+  ]),
+  [
+    { id: 'combining', label: 'Combining' },
+    { id: 'compressing', label: 'Compressing' },
+  ],
+  'archive output without extraction should skip uncompressing but still show combining and compressing',
+);
+
+assert.deepEqual(
+  bulkFinalizingSteps([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle',
+        outputKind: 'folder',
+        archiveStatus: 'combining',
+        requiresExtraction: true,
+      },
+    }),
+  ]),
+  [
+    { id: 'uncompressing', label: 'Uncompressing' },
+    { id: 'combining', label: 'Combining' },
+  ],
+  'folder output with extraction should show uncompressing and combining only',
+);
+
+assert.deepEqual(
+  bulkFinalizingSteps([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle',
+        outputKind: 'folder',
+        archiveStatus: 'combining',
+        requiresExtraction: false,
+      },
+    }),
+  ]),
+  [{ id: 'combining', label: 'Combining' }],
+  'folder output without extraction should show combining only before ready',
+);
+
+assert.equal(
+  activeBulkFinalizingStepId('extracting'),
+  'uncompressing',
+  'extracting archive status should activate the uncompressing finalizing step',
+);
+
+assert.equal(
+  activeBulkFinalizingStepId('combining'),
+  'combining',
+  'combining archive status should activate the combining finalizing step',
+);
+
+assert.equal(
+  activeBulkFinalizingStepId('compressing'),
+  'compressing',
+  'compressing archive status should activate the compressing finalizing step',
 );
 
 const singleQueued: AddJobResult = { jobId: 'job_1', filename: 'file.zip', status: 'queued' };

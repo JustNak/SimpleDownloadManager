@@ -3,7 +3,20 @@ import type { DownloadJob } from './types';
 
 export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
-export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'creating_folder' | 'compressing' | 'ready' | 'failed';
+export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed';
+export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed';
+export type BulkFinalizingStepId = 'uncompressing' | 'combining' | 'compressing';
+
+export interface BulkFinalizingStep {
+  id: BulkFinalizingStepId;
+  label: string;
+}
+
+export interface BulkReviewStartSelection {
+  includedJobs: DownloadJob[];
+  excludedJobs: DownloadJob[];
+  resumableJobs: DownloadJob[];
+}
 
 export interface ProgressBatchContext {
   batchId?: string;
@@ -76,8 +89,11 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'compressing')) {
     return 'compressing';
   }
+  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'combining')) {
+    return 'combining';
+  }
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'creating_folder')) {
-    return 'creating_folder';
+    return 'combining';
   }
   if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'extracting')) {
     return 'extracting';
@@ -86,9 +102,58 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
     return 'ready';
   }
   if (jobs.length > 0 && jobs.every((job) => job.state === 'completed')) {
-    return 'compressing';
+    const outputKind = archiveJobs.find((job) => job.bulkArchive)?.bulkArchive?.outputKind ?? 'archive';
+    return outputKind === 'folder' ? 'combining' : 'compressing';
   }
   return 'downloading';
+}
+
+export function deriveBulkUiState(jobs: DownloadJob[]): BulkUiState {
+  const phase = deriveBulkPhase(jobs);
+  if (phase === 'review' || phase === 'ready' || phase === 'failed') return phase;
+  if (phase === 'extracting' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing') {
+    return 'finalizing';
+  }
+  return 'downloading';
+}
+
+export function bulkReviewStartSelection(
+  jobs: DownloadJob[],
+  selectedJobIds: ReadonlySet<string>,
+): BulkReviewStartSelection {
+  const includedJobs = jobs.filter((job) => selectedJobIds.has(job.id));
+  const excludedJobs = jobs.filter((job) => !selectedJobIds.has(job.id));
+  return {
+    includedJobs,
+    excludedJobs,
+    resumableJobs: includedJobs.filter(isResumableReviewJob),
+  };
+}
+
+export function bulkFinalizingSteps(jobs: DownloadJob[]): BulkFinalizingStep[] {
+  const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive;
+  const outputKind = archive?.outputKind ?? 'archive';
+  const shouldShowUncompressing = archive?.requiresExtraction === true || archive?.archiveStatus === 'extracting';
+  const steps: BulkFinalizingStep[] = [];
+
+  if (shouldShowUncompressing) {
+    steps.push({ id: 'uncompressing', label: 'Uncompressing' });
+  }
+
+  steps.push({ id: 'combining', label: 'Combining' });
+
+  if (outputKind === 'archive') {
+    steps.push({ id: 'compressing', label: 'Compressing' });
+  }
+
+  return steps;
+}
+
+export function activeBulkFinalizingStepId(phase: BulkPhase | null): BulkFinalizingStepId | null {
+  if (phase === 'extracting') return 'uncompressing';
+  if (phase === 'combining' || phase === 'creating_folder') return 'combining';
+  if (phase === 'compressing') return 'compressing';
+  return null;
 }
 
 export function progressPopupIntentForSubmission(
@@ -123,4 +188,8 @@ export function progressPopupIntentForSubmission(
 function clampProgress(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, value));
+}
+
+function isResumableReviewJob(job: DownloadJob) {
+  return ['paused', 'failed', 'canceled'].includes(job.state);
 }

@@ -257,10 +257,10 @@ fn torrent_progress_window_geometry() -> ProgressWindowGeometry {
 
 fn batch_progress_window_geometry() -> ProgressWindowGeometry {
     ProgressWindowGeometry {
-        width: 560.0,
-        height: 430.0,
-        min_width: 560.0,
-        min_height: 430.0,
+        width: 640.0,
+        height: 480.0,
+        min_width: 640.0,
+        min_height: 480.0,
     }
 }
 
@@ -368,8 +368,8 @@ mod tests {
     fn batch_progress_window_minimum_matches_content_size() {
         let geometry = super::batch_progress_window_geometry();
 
-        assert_eq!(geometry.width, 560.0);
-        assert_eq!(geometry.height, 430.0);
+        assert_eq!(geometry.width, 640.0);
+        assert_eq!(geometry.height, 480.0);
         assert_eq!(geometry.min_width, geometry.width);
         assert_eq!(geometry.min_height, geometry.height);
     }

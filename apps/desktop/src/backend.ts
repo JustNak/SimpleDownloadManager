@@ -897,7 +897,7 @@ export async function openBatchProgressWindow(context: ProgressBatchContext): Pr
     window.open(
       popupUrl(`?window=batch-progress&batchId=${encodeURIComponent(batchId)}`),
       `batch-progress-${batchId}`,
-      'width=560,height=430',
+      'width=640,height=480',
     );
     return batchId;
   }

@@ -233,6 +233,8 @@ pub struct BulkArchiveInfo {
     #[serde(default, skip_serializing_if = "is_bulk_archive_pending")]
     pub archive_status: BulkArchiveStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_extraction: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -254,6 +256,7 @@ pub enum BulkArchiveStatus {
     #[default]
     Pending,
     Extracting,
+    Combining,
     CreatingFolder,
     Compressing,
     Completed,
@@ -893,6 +896,44 @@ mod tests {
             state.jobs[0].bulk_archive.as_ref().unwrap().output_kind,
             BulkArchiveOutputKind::Archive
         );
+    }
+
+    #[test]
+    fn persisted_bulk_archives_parse_combining_metadata() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_1",
+                "url": "https://example.com/file.zip",
+                "filename": "file.zip",
+                "state": "completed",
+                "progress": 100.0,
+                "totalBytes": 100,
+                "downloadedBytes": 100,
+                "speed": 0,
+                "eta": 0,
+                "targetPath": "C:/Downloads/file.zip",
+                "tempPath": "C:/Downloads/file.zip.part",
+                "bulkArchive": {
+                  "id": "bulk_1",
+                  "name": "bulk-download.zip",
+                  "archiveStatus": "combining",
+                  "requiresExtraction": true
+                }
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("combining bulk archive metadata should parse");
+
+        let archive = state.jobs[0].bulk_archive.as_ref().unwrap();
+        assert_eq!(archive.archive_status, BulkArchiveStatus::Combining);
+        assert_eq!(archive.requires_extraction, Some(true));
     }
 
     #[test]

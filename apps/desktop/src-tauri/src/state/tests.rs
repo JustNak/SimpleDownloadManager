@@ -1474,6 +1474,7 @@ async fn resolve_completed_bulk_archive_path_returns_output_file() {
         name: "bulk-download.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Completed,
+        requires_extraction: None,
         output_path: Some(archive_path.display().to_string()),
         error: None,
         warning: None,
@@ -1507,6 +1508,7 @@ async fn resolve_completed_bulk_folder_path_returns_output_directory() {
         name: "Game".into(),
         output_kind: BulkArchiveOutputKind::Folder,
         archive_status: BulkArchiveStatus::Completed,
+        requires_extraction: None,
         output_path: Some(folder_path.display().to_string()),
         error: None,
         warning: None,
@@ -1541,6 +1543,7 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         name: "pending.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
         output_path: None,
         error: None,
         warning: None,
@@ -1551,6 +1554,7 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         name: "failed.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Failed,
+        requires_extraction: None,
         output_path: Some(download_dir.join("failed.zip").display().to_string()),
         error: Some("zip failed".into()),
         warning: None,
@@ -1562,6 +1566,7 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         name: "missing.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Completed,
+        requires_extraction: None,
         output_path: Some(completed_missing_path.display().to_string()),
         error: None,
         warning: None,
@@ -2346,6 +2351,7 @@ fn bulk_archive_status_updates_all_archive_members() {
         name: "bundle.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
         output_path: None,
         error: None,
         warning: None,
@@ -2363,6 +2369,7 @@ fn bulk_archive_status_updates_all_archive_members() {
     state.mark_bulk_archive_status_in_memory(
         "bulk_1",
         BulkArchiveStatus::Compressing,
+        Some(true),
         Some("C:/Downloads/bundle.zip".into()),
         None,
         None,
@@ -2380,10 +2387,14 @@ fn bulk_archive_status_updates_all_archive_members() {
     assert!(archive_members
         .iter()
         .all(|archive| archive.output_path.as_deref() == Some("C:/Downloads/bundle.zip")));
+    assert!(archive_members
+        .iter()
+        .all(|archive| archive.requires_extraction == Some(true)));
 
     state.mark_bulk_archive_status_in_memory(
         "bulk_1",
         BulkArchiveStatus::Failed,
+        None,
         Some("C:/Downloads/bundle.zip".into()),
         Some("zip failed".into()),
         None,
@@ -2403,6 +2414,7 @@ fn bulk_archive_status_updates_all_archive_members() {
     state.mark_bulk_archive_status_in_memory(
         "bulk_1",
         BulkArchiveStatus::Completed,
+        None,
         Some("C:/Downloads/bundle.zip".into()),
         None,
         Some("cleanup warning".into()),
@@ -2541,6 +2553,7 @@ async fn delete_completed_bulk_member_from_disk_removes_archive_output() {
         name: "bulk-download.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Completed,
+        requires_extraction: None,
         output_path: Some(archive_path.display().to_string()),
         error: None,
         warning: None,
@@ -2572,6 +2585,7 @@ async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
         name: "Game.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Failed,
+        requires_extraction: None,
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
@@ -2614,6 +2628,7 @@ async fn bulk_archive_ready_for_retry_rejects_missing_parts() {
         name: "Game.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Failed,
+        requires_extraction: None,
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
@@ -2654,6 +2669,7 @@ async fn bulk_archive_ready_for_retry_rejects_unknown_incomplete_running_and_com
         name: format!("{id}.zip"),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: status,
+        requires_extraction: None,
         output_path: Some(download_dir.join(format!("{id}.zip")).display().to_string()),
         error: if status == BulkArchiveStatus::Failed {
             Some("locked".into())
@@ -2761,6 +2777,7 @@ async fn delete_failed_bulk_members_from_disk_removes_downloaded_parts() {
         name: "Game.zip".into(),
         output_kind: BulkArchiveOutputKind::Archive,
         archive_status: BulkArchiveStatus::Failed,
+        requires_extraction: None,
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
