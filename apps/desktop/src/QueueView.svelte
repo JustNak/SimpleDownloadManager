@@ -59,22 +59,31 @@
     shouldOpenJobFileOnDoubleClick,
   } from './queueInteractions';
   import { getVirtualQueueWindow } from './queueVirtualization';
+  import {
+    DETAILS_CLOSE_THRESHOLD,
+    DETAILS_DEFAULT_HEIGHT,
+    DETAILS_MIN_HEIGHT,
+    QUEUE_TABLE_GRID_CLASS,
+    clamp,
+    detailsLevelForHeight,
+    getDetailsMaxHeight,
+    queueAlignmentClass,
+    queueDateCellClass,
+    queueHeaderCellClass,
+    queueHeaderSelfClass,
+    queueMetricCellClass,
+    queueRowSizeClass,
+    queueTableCellClass,
+    snapDetailsHeight,
+    type DetailsLevel,
+    type QueueTableAlignment,
+  } from './queueViewLayout';
   import { formatBytes, formatTime, getHost } from './popupShared';
   import type { DownloadJob, QueueRowSize } from './types';
   import { JobState } from './types';
   import { isBulkAggregateJob, type QueueDisplayJob } from './bulkQueueRows';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
-  type DetailsLevel = 'compact' | 'standard' | 'expanded';
-  type QueueTableAlignment = 'start' | 'center' | 'end';
-
-  const DETAILS_MIN_HEIGHT = 104;
-  const DETAILS_CLOSE_THRESHOLD = 84;
-  const DETAILS_DEFAULT_HEIGHT = 164;
-  const DETAILS_EXPANDED_HEIGHT = 220;
-  const DETAILS_MAX_HEIGHT = 300;
-  const TABLE_MIN_HEIGHT = 180;
-  const QUEUE_TABLE_GRID_CLASS = 'grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px]';
 
   interface Props {
     jobs: QueueDisplayJob[];
@@ -407,22 +416,6 @@
     isResizingDetails = true;
   }
 
-  function queueRowSizeClass(size: QueueRowSize): string {
-    switch (size) {
-      case 'compact':
-        return 'min-h-[28px] py-0 text-xs';
-      case 'small':
-        return 'min-h-[34px] py-0.5 text-xs';
-      case 'large':
-        return 'min-h-[54px] py-1.5 text-sm';
-      case 'damn':
-        return 'min-h-[68px] py-2.5 text-base';
-      case 'medium':
-      default:
-        return 'min-h-[42px] py-1 text-sm';
-    }
-  }
-
   function statusBadgeClass(tone: QueueStatusTone) {
     switch (tone) {
       case 'success':
@@ -569,34 +562,6 @@
     return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0;
   }
 
-  function queueAlignmentClass(align: QueueTableAlignment) {
-    if (align === 'center') return 'justify-center text-center';
-    if (align === 'end') return 'justify-end text-right';
-    return 'justify-start text-left';
-  }
-
-  function queueHeaderSelfClass(align: QueueTableAlignment) {
-    if (align === 'center') return 'justify-self-center';
-    if (align === 'end') return 'justify-self-end';
-    return 'justify-self-start';
-  }
-
-  function queueHeaderCellClass(align: QueueTableAlignment = 'start') {
-    return `flex min-w-0 items-center px-1.5 ${queueAlignmentClass(align)}`;
-  }
-
-  function queueTableCellClass(align: QueueTableAlignment = 'start') {
-    return `flex min-w-0 items-center px-1.5 tabular-nums text-muted-foreground ${queueAlignmentClass(align)} truncate`;
-  }
-
-  function queueDateCellClass() {
-    return queueTableCellClass('center');
-  }
-
-  function queueMetricCellClass() {
-    return queueTableCellClass('center');
-  }
-
   function torrentMetricValue(metric: ReturnType<typeof torrentDetailMetrics>[number]) {
     if (metric.kind === 'upload') return `${formatBytes(metric.value)}/s`;
     if (metric.kind === 'peers') return `${metric.value} peers`;
@@ -641,31 +606,6 @@
     if (column === 'Date') return 'date';
     if (column === 'Size') return 'size';
     return null;
-  }
-
-  function getDetailsMaxHeight(containerHeight: number) {
-    if (!Number.isFinite(containerHeight) || containerHeight <= 0) return DETAILS_MAX_HEIGHT;
-    return Math.max(DETAILS_MIN_HEIGHT, Math.min(DETAILS_MAX_HEIGHT, containerHeight - TABLE_MIN_HEIGHT));
-  }
-
-  function detailsLevelForHeight(height: number): 'compact' | 'standard' | 'expanded' {
-    if (height < DETAILS_DEFAULT_HEIGHT) return 'compact';
-    if (height < DETAILS_EXPANDED_HEIGHT) return 'standard';
-    return 'expanded';
-  }
-
-  function snapDetailsHeight(value: number, maxHeight: number) {
-    const snapPoints = [
-      DETAILS_MIN_HEIGHT,
-      Math.min(DETAILS_DEFAULT_HEIGHT, maxHeight),
-      Math.min(DETAILS_EXPANDED_HEIGHT, maxHeight),
-      maxHeight,
-    ].filter((height, index, heights) => height >= DETAILS_MIN_HEIGHT && heights.indexOf(height) === index).sort((a, b) => a - b);
-    return snapPoints.reduce((closest, height) => Math.abs(height - value) < Math.abs(closest - value) ? height : closest, snapPoints[0] ?? DETAILS_MIN_HEIGHT);
-  }
-
-  function clamp(value: number, min: number, max: number) {
-    return Math.max(min, Math.min(max, value));
   }
 
   function getContextMenuPosition(jobId: string, x: number, y: number) {

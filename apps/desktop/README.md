@@ -1,10 +1,10 @@
 # Desktop App
 
-This package contains the React/Tauri desktop shell for Simple Download Manager.
+This package contains the Svelte/Tauri desktop shell for Simple Download Manager.
 
 ## Layout
 
-- `src/` contains the React UI, queue interactions, settings, prompt windows, and typed backend command wrappers.
+- `src/` contains the Svelte UI, queue interactions, settings, prompt windows, and typed backend command wrappers.
 - `src-tauri/` contains the Rust backend: queue state, download workers, native-host IPC, storage, commands, windows, and diagnostics.
 - `tests/` contains Node-based TypeScript assertion tests for UI-independent logic.
 

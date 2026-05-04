@@ -99,20 +99,25 @@ pub fn is_fuckingfast_page_url(raw_url: &str) -> bool {
 
 fn extract_fuckingfast_direct_url(html: &str) -> Result<String, HosterResolutionError> {
     let candidates = extract_window_open_literal_urls(html);
+    let mut saw_invalid_window_open_candidate = false;
     for candidate in candidates {
         if validate_fuckingfast_direct_url(&candidate) {
             return Ok(candidate);
         }
 
-        return Err(resolution_error(
-            "FuckingFast page pointed at an unexpected download host.".into(),
-        ));
+        saw_invalid_window_open_candidate = true;
     }
 
     if let Some(candidate) = extract_any_fuckingfast_direct_url(html) {
         if validate_fuckingfast_direct_url(&candidate) {
             return Ok(candidate);
         }
+    }
+
+    if saw_invalid_window_open_candidate {
+        return Err(resolution_error(
+            "FuckingFast page pointed at an unexpected download host.".into(),
+        ));
     }
 
     Err(resolution_error(
@@ -290,5 +295,115 @@ fn resolution_error(message: String) -> HosterResolutionError {
     HosterResolutionError {
         code: "HOSTER_RESOLUTION_FAILED",
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuckingfast_resolver_extracts_direct_link_and_fragment_filename() {
+        let html = r#"
+            <html>
+              <head><title>Ignored title</title></head>
+              <body>
+                <script>
+                  function download() {
+                    window.open("https://dl.fuckingfast.co/dl/direct-token_123")
+                  }
+                </script>
+              </body>
+            </html>
+        "#;
+
+        let resolved = resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar",
+            html,
+        )
+        .expect("fuckingfast page should resolve");
+
+        assert_eq!(
+            resolved.url,
+            "https://dl.fuckingfast.co/dl/direct-token_123"
+        );
+        assert_eq!(
+            resolved.filename_hint.as_deref(),
+            Some("archive.part01.rar")
+        );
+    }
+
+    #[test]
+    fn fuckingfast_resolver_uses_page_title_when_fragment_is_missing() {
+        let html = r#"
+            <html>
+              <head>
+                <meta name="title" content="I_Am_Jesus_Christ.part02.rar">
+              </head>
+              <body>
+                <script>window.open("https://dl.fuckingfast.co/dl/direct-token_456")</script>
+              </body>
+            </html>
+        "#;
+
+        let resolved =
+            resolve_hoster_link_from_html("https://fuckingfast.co/ecw0lw398okf", html)
+                .expect("fuckingfast page should resolve");
+
+        assert_eq!(
+            resolved.url,
+            "https://dl.fuckingfast.co/dl/direct-token_456"
+        );
+        assert_eq!(
+            resolved.filename_hint.as_deref(),
+            Some("I_Am_Jesus_Christ.part02.rar")
+        );
+    }
+
+    #[test]
+    fn hoster_resolver_leaves_unsupported_hosts_unchanged() {
+        let resolved = resolve_hoster_link_from_html("https://example.com/file.zip", "<html></html>")
+            .expect("unsupported hosts should pass through");
+
+        assert_eq!(resolved.url, "https://example.com/file.zip");
+        assert_eq!(resolved.filename_hint, None);
+    }
+
+    #[test]
+    fn fuckingfast_resolver_rejects_pages_without_direct_download_link() {
+        let error = resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf",
+            "<html><button>DOWNLOAD</button></html>",
+        )
+        .expect_err("missing direct link should fail");
+
+        assert_eq!(error.code, "HOSTER_RESOLUTION_FAILED");
+    }
+
+    #[test]
+    fn fuckingfast_resolver_rejects_direct_links_on_unexpected_hosts() {
+        let error = resolve_hoster_link_from_html(
+            "https://fuckingfast.co/ecw0lw398okf",
+            r#"<script>window.open("https://evil.example/dl/direct-token_123")</script>"#,
+        )
+        .expect_err("unexpected direct host should fail");
+
+        assert_eq!(error.code, "HOSTER_RESOLUTION_FAILED");
+    }
+
+    #[test]
+    fn fuckingfast_resolver_skips_invalid_window_open_candidates() {
+        let html = r#"
+            <script>window.open("https://evil.example/dl/direct-token_123")</script>
+            <script>window.open("https://dl.fuckingfast.co/dl/direct-token_456")</script>
+        "#;
+
+        let resolved = resolve_hoster_link_from_html("https://fuckingfast.co/ecw0lw398okf", html)
+            .expect("resolver should continue past invalid candidates");
+
+        assert_eq!(
+            resolved.url,
+            "https://dl.fuckingfast.co/dl/direct-token_456"
+        );
     }
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const backendSource = await readFile(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendSource = await readFile(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 
 assert.match(
   backendSource,

@@ -32,6 +32,7 @@
   import { getErrorMessage } from './errors';
   import { applyAppearance } from './appearance';
   import { runPopupAction } from './popupActions';
+  import { createDefaultSettings } from './defaultSettings';
 
   type IconComponent = Component<{ size?: number; class?: string }>;
   type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm' | 'show';
@@ -194,6 +195,15 @@
         bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
       },
     ];
+    const previewSettings = createDefaultSettings();
+    previewSettings.torrent = {
+      ...previewSettings.torrent,
+      seedMode: 'ratio',
+      seedRatioLimit: 2,
+      seedTimeLimitMinutes: 120,
+      portForwardingPort: 6881,
+    };
+
     return {
       context: {
         kind: 'bulk',
@@ -202,44 +212,7 @@
         archiveName: 'bulk-download.zip',
       },
       jobs: previewJobs,
-      settings: {
-        downloadDirectory: 'C:\\Users\\You\\Downloads',
-        maxConcurrentDownloads: 3,
-        autoRetryAttempts: 3,
-        speedLimitKibPerSecond: 0,
-        downloadPerformanceMode: 'balanced',
-        torrent: {
-          enabled: true,
-          downloadDirectory: 'C:\\Users\\You\\Downloads\\Torrent',
-          seedMode: 'ratio',
-          seedRatioLimit: 2,
-          seedTimeLimitMinutes: 120,
-          uploadLimitKibPerSecond: 0,
-          portForwardingEnabled: false,
-          portForwardingPort: 6881,
-          peerConnectionWatchdogMode: 'diagnose',
-        },
-        notificationsEnabled: true,
-        theme: 'system',
-        accentColor: '#3b82f6',
-        showDetailsOnClick: true,
-        queueRowSize: 'medium',
-        startOnStartup: false,
-        startupLaunchMode: 'open',
-        extensionIntegration: {
-          enabled: true,
-          downloadHandoffMode: 'ask',
-          listenPort: 17654,
-          contextMenuEnabled: true,
-          showProgressAfterHandoff: true,
-          showBadgeStatus: true,
-          excludedHosts: [],
-          ignoredFileExtensions: [],
-          authenticatedHandoffEnabled: false,
-          protectedDownloadAuthScope: 'off',
-          authenticatedHandoffHosts: [],
-        },
-      },
+      settings: previewSettings,
     };
   }
 

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const queueSource = readFileSync(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
 const batchSource = readFileSync(new URL('../src/BatchProgressWindow.svelte', import.meta.url), 'utf8');
 
@@ -35,4 +36,4 @@ assert.match(batchSource, /isConfirmingCancel/, 'bulk Cancel should use the same
 assert.match(batchSource, /bulkUiState === 'finalizing'[\s\S]*BulkFinalizingStrip/, 'bulk finalizing state should render the adaptive no-action phase strip');
 assert.doesNotMatch(batchSource, /bulkUiState === 'finalizing'[\s\S]{0,360}ActionButton/, 'bulk finalizing state should not render footer actions');
 assert.doesNotMatch(batchSource, /ActionButton\(bulkOpenLabel\(completedArchive\)/, 'ready bulk popup should expose only Show, not a second Open action');
-assert.match(backendSource, /width=640,height=480/, 'browser fallback batch progress popup should use the redesigned 640x480 size');
+assert.match(backendPreviewSource, /width=640,height=480/, 'browser fallback batch progress popup should use the redesigned 640x480 size');

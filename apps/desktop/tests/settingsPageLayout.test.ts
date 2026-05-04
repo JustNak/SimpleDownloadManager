@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
 const sectionsSource = readFileSync(new URL('../src/settingsSections.ts', import.meta.url), 'utf8');
 
-assert.match(source, /settings-surface mx-auto w-full max-w-6xl p-4/, 'settings content should keep the React centered max-width form layout');
+assert.match(source, /settings-surface mx-auto w-full max-w-6xl p-4/, 'settings content should keep the Svelte centered max-width form layout');
 assert.match(sectionsSource, /export const SETTINGS_SECTIONS = \[/, 'settings section list should live in the lightweight app-shell metadata module');
 
 for (const [sectionId, label] of [
@@ -19,9 +19,9 @@ for (const [sectionId, label] of [
   assert.match(source, new RegExp(`<section id="${sectionId}" class="scroll-mt-4"`), `settings section ${sectionId} should render as a scroll anchor`);
 }
 
-assert.match(source, /sticky top-0 z-30[\s\S]*bg-surface\/95[\s\S]*backdrop-blur/, 'settings header should keep the React sticky translucent header');
-assert.match(source, /Configure downloads, appearance, notifications, and native host diagnostics\./, 'settings subtitle should match React');
-assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep React cancel and save actions');
+assert.match(source, /sticky top-0 z-30[\s\S]*bg-surface\/95[\s\S]*backdrop-blur/, 'settings header should keep the Svelte sticky translucent header');
+assert.match(source, /Configure downloads, appearance, notifications, and native host diagnostics\./, 'settings subtitle should match Svelte');
+assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep Svelte cancel and save actions');
 assert.match(source, /CategorySettingsCard\('General'/, 'general settings should render through the category card helper');
 assert.match(source, /Beta channel updates/, 'app update card should be present');
 assert.match(source, /CategorySettingsCard\('Torrenting'/, 'torrent settings should render the torrenting category card');
@@ -29,7 +29,7 @@ assert.match(source, /CategorySettingsCard\('Appearance'/, 'appearance settings 
 assert.match(source, /CategorySettingsCard\('Web Extension'/, 'extension settings should render the web extension category card');
 assert.match(source, /CategorySettingsCard\('Native Host'/, 'native host diagnostics should render the native host category card');
 assert.match(source, /#snippet CategorySettingsCard[\s\S]*rounded-md border border-border\/60 bg-card/, 'settings categories should use one softened card wrapper per category');
-assert.match(source, /#snippet CategorySettingsCard[\s\S]*border-b border-border\/45 bg-header px-4 py-2/, 'category cards should keep a softened React-style section header treatment');
+assert.match(source, /#snippet CategorySettingsCard[\s\S]*border-b border-border\/45 bg-header px-4 py-2/, 'category cards should keep a softened Svelte-style section header treatment');
 assert.match(source, /#snippet SwitchFieldRow/, 'switch settings should share the flat field-row treatment inside category cards');
 assert.match(source, /#snippet FieldRow[\s\S]*border-t border-border\/35/, 'field rows should use toned-down separators');
 assert.match(source, /#snippet SwitchFieldRow[\s\S]*border-t border-border\/35/, 'switch rows should use toned-down separators');
@@ -59,7 +59,7 @@ assert.match(source, /#snippet FieldRow[\s\S]*title=\{description\}[\s\S]*cursor
 assert.match(source, /#snippet SwitchFieldRow[\s\S]*title=\{description\}[\s\S]*cursor-help/, 'switch labels should expose descriptions as hover tooltips');
 assert.doesNotMatch(source, /<p class="mt-0\.5 text-xs leading-4 text-muted-foreground" title=\{tooltip\}>\{description\}<\/p>/, 'field descriptions should not render as wrapping helper text');
 assert.doesNotMatch(source, /<div class="mt-0\.5 text-xs leading-4 text-muted-foreground" title=\{description\}>\{description\}<\/div>/, 'switch descriptions should not render as wrapping helper text');
-assert.match(source, /isExcludedSitesDialogOpen/, 'excluded sites should use the React dialog workflow');
+assert.match(source, /isExcludedSitesDialogOpen/, 'excluded sites should use the Svelte dialog workflow');
 assert.match(source, /onRefreshDiagnostics/, 'native host diagnostics should keep the refresh callback');
 assert.match(source, /onCheckForUpdates/, 'app updates section should keep the manual update callback');
 assert.match(source, /Recent Events[\s\S]*max-h-56 overflow-auto rounded-md border border-border\/55 bg-zinc-950 font-mono shadow-inner/, 'recent events should render as a compact console-like box');

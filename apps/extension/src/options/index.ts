@@ -1,4 +1,5 @@
 import {
+  DEFAULT_EXTENSION_LISTEN_PORT,
   normalizeExcludedHostPattern,
   type DownloadHandoffMode,
   type ExtensionIntegrationSettings,
@@ -40,7 +41,7 @@ function renderState(state: PopupStateResponse) {
 
   if (enabledToggle) enabledToggle.checked = settings.enabled;
   if (handoffMode) handoffMode.value = settings.downloadHandoffMode;
-  if (listenPortInput) listenPortInput.value = String(settings.listenPort ?? 1420);
+  if (listenPortInput) listenPortInput.value = String(settings.listenPort ?? DEFAULT_EXTENSION_LISTEN_PORT);
   if (contextMenuToggle) contextMenuToggle.checked = settings.contextMenuEnabled;
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
@@ -312,7 +313,7 @@ function normalizeHost(value: string): string {
 
 function normalizeListenPort(value: string): number {
   const port = Number.parseInt(value, 10);
-  return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+  return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_EXTENSION_LISTEN_PORT;
 }
 
 async function refreshState() {

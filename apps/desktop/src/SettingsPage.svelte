@@ -38,6 +38,7 @@
     parseExcludedHostInput,
     removeExcludedHost,
   } from './settingsExcludedSites';
+  import { DEFAULT_EXTENSION_LISTEN_PORT } from './defaultSettings';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
@@ -224,7 +225,7 @@
 
   function normalizeListenPort(value: string): number {
     const port = Number.parseInt(value, 10);
-    return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : 1420;
+    return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_EXTENSION_LISTEN_PORT;
   }
 
   function normalizeTorrentPort(value: string): number {

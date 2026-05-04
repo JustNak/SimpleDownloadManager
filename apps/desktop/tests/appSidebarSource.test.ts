@@ -16,8 +16,8 @@ assert.match(source, /class="shrink-0 space-y-2"/, 'the Settings footer should s
 assert.match(source, /import \{ SETTINGS_SECTIONS, type SettingsSectionId \} from '\.\/settingsSections'/, 'the app shell should consume the shared settings section list');
 assert.doesNotMatch(source, /^import\s+.*\.\/SettingsPage\.svelte/m, 'the app shell should lazy-load the heavy settings page component');
 assert.match(source, /let activeSettingsSectionId = \$state<SettingsSectionId>\(SETTINGS_SECTIONS\[0\]\.id\)/, 'settings view should track the active settings section');
-assert.match(source, /SettingsSidebar\(activeSettingsSectionId/, 'settings view should restore the React settings sidebar outside the settings form');
-assert.match(source, /Back to downloads/, 'settings sidebar should expose the React back action');
+assert.match(source, /SettingsSidebar\(activeSettingsSectionId/, 'settings view should keep the Svelte settings sidebar outside the settings form');
+assert.match(source, /Back to downloads/, 'settings sidebar should expose the Svelte back action');
 assert.match(source, /shrink-0 space-y-2 border-b border-border\/35 pb-2/, 'settings sidebar header divider should use the softened settings separator');
 assert.match(source, /function handleSettingsSectionClick\(sectionId: SettingsSectionId\)[\s\S]*activeSettingsSectionId = section\.id/, 'settings sidebar should update the active section from the shell');
 assert.match(source, /SettingsSidebar\(activeSettingsSectionId[\s\S]*handleSettingsSectionClick/, 'settings sidebar section clicks should go through the guarded section-navigation helper');

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const progressSource = readFileSync(new URL('../src/DownloadProgressWindow.svelte', import.meta.url), 'utf8');
-const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
 
 assert.match(progressSource, /@render ProgressView\(/, 'download progress controller should render the compact progress view');
@@ -20,4 +20,4 @@ assert.match(progressSource, /case 'cancel':[\s\S]*border-destructive bg-destruc
 assert.match(progressSource, /case 'confirm':[\s\S]*border-border bg-white text-black[\s\S]*cursor-pointer/, 'download progress Confirm should be a white button with black text and an action cursor');
 assert.match(progressSource, /disabled:cursor-not-allowed/, 'download progress action buttons should show a disabled cursor while busy');
 assert.match(windowsSource, /width:\s*460\.0,[\s\S]*height:\s*280\.0,/, 'download progress popup geometry should stay compact for normal downloads');
-assert.match(backendSource, /width=460,height=280/, 'browser fallback download progress popup should keep the compact 460x280 geometry');
+assert.match(backendPreviewSource, /width=460,height=280/, 'browser fallback download progress popup should keep the compact 460x280 geometry');

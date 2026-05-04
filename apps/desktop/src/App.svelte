@@ -39,7 +39,7 @@
   import ToastArea from './ToastArea.svelte';
   import Titlebar from './Titlebar.svelte';
   import { compareDownloadsForSort, readStoredSortMode, writeStoredSortMode, type SortMode } from './downloadSorting';
-  import { DEFAULT_ACCENT_COLOR, applyAppearance } from './appearance';
+  import { applyAppearance } from './appearance';
   import { DOWNLOAD_CATEGORIES, type DownloadCategory } from './downloadCategories';
   import {
     categoryView,
@@ -123,16 +123,16 @@
   } from './appUpdates';
   import type { DiagnosticsSnapshot } from './types';
   import { formatBytes } from './popupShared';
+  import { createDefaultSettings } from './defaultSettings';
   type AddDownloadOutcome = import('./AddDownloadModal.svelte').AddDownloadOutcome;
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
-  const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
   const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
 
   let connectionState = $state<ConnectionState>(ConnectionState.Checking);
   let jobs = $state<DownloadJob[]>([]);
-  let settings = $state<Settings>(defaultSettings());
+  let settings = $state<Settings>(createDefaultSettings());
   let toasts = $state<ToastMessage[]>([]);
   let view = $state<ViewState>('all');
   let searchQuery = $state('');
@@ -427,47 +427,6 @@
       selectedJobId = null;
     }
   });
-
-  function defaultSettings(): Settings {
-    return {
-      downloadDirectory: DEFAULT_DOWNLOAD_DIRECTORY,
-      maxConcurrentDownloads: 3,
-      autoRetryAttempts: 3,
-      speedLimitKibPerSecond: 0,
-      downloadPerformanceMode: 'balanced',
-      torrent: {
-        enabled: true,
-        downloadDirectory: `${DEFAULT_DOWNLOAD_DIRECTORY}\\Torrent`,
-        seedMode: 'forever',
-        seedRatioLimit: 1,
-        seedTimeLimitMinutes: 60,
-        uploadLimitKibPerSecond: 0,
-        portForwardingEnabled: false,
-        portForwardingPort: 42000,
-        peerConnectionWatchdogMode: 'diagnose',
-      },
-      notificationsEnabled: true,
-      theme: 'system',
-      accentColor: DEFAULT_ACCENT_COLOR,
-      showDetailsOnClick: true,
-      queueRowSize: 'medium',
-      startOnStartup: false,
-      startupLaunchMode: 'open',
-      extensionIntegration: {
-        enabled: true,
-        downloadHandoffMode: 'ask',
-        listenPort: 1420,
-        contextMenuEnabled: true,
-        showProgressAfterHandoff: true,
-        showBadgeStatus: true,
-        excludedHosts: [],
-        ignoredFileExtensions: [],
-        authenticatedHandoffEnabled: false,
-        protectedDownloadAuthScope: 'off',
-        authenticatedHandoffHosts: [],
-      },
-    };
-  }
 
   function initialSelectedJobIdFromSearch(search: string): string | null {
     const selected = new URLSearchParams(search).get('selectJob')?.trim();

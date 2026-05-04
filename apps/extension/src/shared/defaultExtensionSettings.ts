@@ -1,15 +1,17 @@
 import {
+  DEFAULT_EXTENSION_EXCLUDED_HOSTS,
+  DEFAULT_EXTENSION_LISTEN_PORT,
   normalizeExcludedHostPattern,
   type ExtensionIntegrationSettings,
   type ProtectedDownloadAuthScope,
 } from '@myapp/protocol';
 
-export const DEFAULT_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
+export const DEFAULT_EXCLUDED_HOSTS = DEFAULT_EXTENSION_EXCLUDED_HOSTS;
 
 export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   enabled: true,
   downloadHandoffMode: 'ask',
-  listenPort: 1420,
+  listenPort: DEFAULT_EXTENSION_LISTEN_PORT,
   contextMenuEnabled: true,
   showProgressAfterHandoff: true,
   showBadgeStatus: true,

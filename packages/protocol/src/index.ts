@@ -8,6 +8,7 @@ export const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH = 64;
 export const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH = 16 * 1024;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
+export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
 export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
