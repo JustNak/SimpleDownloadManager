@@ -1,7 +1,7 @@
 use crate::download::{
-    apply_torrent_runtime_settings, forget_known_torrent_sessions,
-    forget_torrent_session_for_restart, schedule_downloads, schedule_external_reseed,
-    EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
+    apply_torrent_runtime_settings, clear_in_memory_torrent_engine_if_idle,
+    forget_known_torrent_sessions, forget_torrent_session_for_restart, schedule_downloads,
+    schedule_external_reseed, EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS,
 };
 use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
@@ -763,7 +763,9 @@ pub async fn save_settings(
     let snapshot = state.save_settings(settings).await?;
     let saved_settings = snapshot.settings.clone();
     emit_snapshot(&app, &snapshot);
-    apply_torrent_runtime_settings(&saved_settings.torrent);
+    if let Err(error) = apply_torrent_runtime_settings(state.inner()).await {
+        eprintln!("failed to refresh torrent runtime settings: {error}");
+    }
     schedule_downloads(app, state.inner().clone());
     Ok(saved_settings)
 }
@@ -795,6 +797,17 @@ pub async fn clear_torrent_session_cache(
                 format!(
                     "Could not forget in-memory torrent sessions before cache cleanup: {error}"
                 ),
+                None,
+            )
+            .await;
+    }
+
+    if let Err(error) = clear_in_memory_torrent_engine_if_idle(state.inner()).await {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "torrent",
+                format!("Could not reset in-memory torrent engine during cache cleanup: {error}"),
                 None,
             )
             .await;
@@ -1607,7 +1620,7 @@ mod tests {
             .find("pub async fn save_settings(")
             .expect("save_settings command should exist");
         let runtime_apply = production_source[save_settings..]
-            .find("apply_torrent_runtime_settings(&saved_settings.torrent);")
+            .find("apply_torrent_runtime_settings(state.inner()).await")
             .expect("save_settings should apply torrent runtime settings")
             + save_settings;
         let schedule = production_source[save_settings..]

@@ -988,6 +988,34 @@ async fn torrent_session_cache_clear_blocks_active_torrents() {
 }
 
 #[tokio::test]
+async fn torrent_session_cache_clear_blocks_active_torrent_worker_even_when_paused() {
+    let download_dir = test_runtime_dir("torrent-cache-active-worker");
+    let mut paused_job = download_job("job_1", JobState::Paused, ResumeSupport::Unsupported, 100);
+    paused_job.transfer_kind = TransferKind::Torrent;
+    paused_job.torrent = Some(TorrentInfo {
+        engine_id: Some(7),
+        info_hash: Some("420f3778a160fbe6eb0a67c8470256be13b0ecc8".into()),
+        uploaded_bytes: 2048,
+        ratio: 1.0,
+        ..TorrentInfo::default()
+    });
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![paused_job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+    }
+
+    let error = state
+        .prepare_torrent_session_cache_clear()
+        .await
+        .expect_err("active torrent workers should block cache clearing");
+
+    assert_eq!(error.code, "TORRENT_CACHE_ACTIVE");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn torrent_session_cache_clear_resets_runtime_identity_and_reseed_state() {
     let download_dir = test_runtime_dir("torrent-cache-runtime-reset");
     let mut paused_job = download_job("job_1", JobState::Paused, ResumeSupport::Unsupported, 100);

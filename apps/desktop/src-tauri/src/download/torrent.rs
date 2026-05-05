@@ -1328,21 +1328,5 @@ pub(super) async fn cleanup_pending_torrent_metadata(
 }
 
 pub(super) async fn torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
-    let settings = state.settings().await;
-    let default_output_folder = if settings.torrent.download_directory.trim().is_empty() {
-        PathBuf::from(default_torrent_download_directory_for(
-            &settings.download_directory,
-        ))
-    } else {
-        PathBuf::from(&settings.torrent.download_directory)
-    };
-    let data_dir = state.app_data_dir();
-    TORRENT_ENGINE
-        .get_or_try_init(|| async {
-            TorrentEngine::new(default_output_folder, data_dir, settings.torrent.clone())
-                .await
-                .map(Arc::new)
-        })
-        .await
-        .cloned()
+    managed_torrent_engine(state).await
 }

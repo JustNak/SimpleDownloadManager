@@ -75,21 +75,24 @@ impl SharedState {
             && state.active_workers.contains(id))
     }
 
+    pub async fn has_torrent_engine_blocking_work(&self) -> bool {
+        let state = self.inner.read().await;
+        state
+            .jobs
+            .iter()
+            .any(|job| is_torrent_engine_blocking_job(job, &state.active_workers))
+    }
+
     pub async fn prepare_torrent_session_cache_clear(
         &self,
     ) -> Result<TorrentSessionCacheClearState, BackendError> {
         let (snapshot, persisted, torrents) = {
             let mut state = self.inner.write().await;
-            if state.jobs.iter().any(|job| {
-                job.transfer_kind == TransferKind::Torrent
-                    && matches!(
-                        job.state,
-                        JobState::Queued
-                            | JobState::Starting
-                            | JobState::Downloading
-                            | JobState::Seeding
-                    )
-            }) {
+            if state
+                .jobs
+                .iter()
+                .any(|job| is_torrent_engine_blocking_job(job, &state.active_workers))
+            {
                 return Err(BackendError {
                     code: "TORRENT_CACHE_ACTIVE",
                     message: "Pause active, queued, or seeding torrents before clearing the torrent session cache."
@@ -819,6 +822,15 @@ impl SharedState {
         persist_state(&self.storage_path, &persisted)?;
         Ok(snapshot)
     }
+}
+
+fn is_torrent_engine_blocking_job(job: &DownloadJob, active_workers: &HashSet<String>) -> bool {
+    job.transfer_kind == TransferKind::Torrent
+        && (active_workers.contains(&job.id)
+            || matches!(
+                job.state,
+                JobState::Queued | JobState::Starting | JobState::Downloading | JobState::Seeding
+            ))
 }
 
 pub(crate) fn pending_torrent_session_cache_clear_path(app_data_dir: &Path) -> PathBuf {

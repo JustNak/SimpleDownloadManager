@@ -1215,6 +1215,181 @@ async fn fallback_tracker_usage_records_diagnostic_event() {
 }
 
 #[test]
+fn torrent_engine_config_tracks_immutable_session_settings_only() {
+    let root = PathBuf::from("C:/sdm-test");
+    let app_data_dir = root.join("data");
+    let settings = crate::storage::Settings {
+        download_directory: root.join("downloads").display().to_string(),
+        torrent: crate::storage::TorrentSettings {
+            download_directory: root.join("torrents").display().to_string(),
+            upload_limit_kib_per_second: 128,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let base = TorrentEngineConfig::from_settings(&settings, app_data_dir.clone());
+
+    let mut upload_changed = settings.clone();
+    upload_changed.torrent.upload_limit_kib_per_second = 256;
+    assert_eq!(
+        base,
+        TorrentEngineConfig::from_settings(&upload_changed, app_data_dir.clone())
+    );
+
+    let mut listener_changed = settings;
+    listener_changed.torrent.port_forwarding_enabled = true;
+    listener_changed.torrent.port_forwarding_port = 42_123;
+    assert_ne!(
+        base,
+        TorrentEngineConfig::from_settings(&listener_changed, app_data_dir)
+    );
+}
+
+#[test]
+fn torrent_engine_refresh_action_recreates_only_when_idle() {
+    let current = TorrentEngineConfig {
+        default_output_folder: PathBuf::from("C:/Downloads/Torrent"),
+        data_dir: PathBuf::from("C:/Data"),
+        port_forwarding_enabled: false,
+        port_forwarding_port: 42_000,
+    };
+    let mut desired = current.clone();
+    desired.port_forwarding_enabled = true;
+    desired.port_forwarding_port = 42_123;
+
+    assert_eq!(
+        torrent_engine_refresh_action(None, &desired, true),
+        TorrentEngineRefreshAction::Create
+    );
+    assert_eq!(
+        torrent_engine_refresh_action(Some(&current), &current, false),
+        TorrentEngineRefreshAction::Reuse
+    );
+    assert_eq!(
+        torrent_engine_refresh_action(Some(&current), &desired, false),
+        TorrentEngineRefreshAction::Recreate
+    );
+    assert_eq!(
+        torrent_engine_refresh_action(Some(&current), &desired, true),
+        TorrentEngineRefreshAction::Defer
+    );
+}
+
+#[tokio::test]
+async fn torrent_engine_manager_reuses_engine_for_upload_limit_only_change() {
+    let root = test_download_runtime_dir("torrent-engine-upload-limit");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-upload-limit-state",
+        &root,
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+    let first = manager.get_or_create(&state).await.unwrap();
+
+    let mut settings = state.settings().await;
+    settings.torrent.upload_limit_kib_per_second = 512;
+    state.save_settings(settings).await.unwrap();
+    manager.refresh_runtime_settings(&state).await.unwrap();
+
+    let second = manager.get_or_create(&state).await.unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn torrent_engine_manager_drops_idle_engine_for_immutable_change_before_next_use() {
+    let root = test_download_runtime_dir("torrent-engine-idle-recreate");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-idle-recreate-state",
+        &root,
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+    let first = manager.get_or_create(&state).await.unwrap();
+    let first_config = manager.current_config().await.unwrap();
+
+    let mut settings = state.settings().await;
+    settings.torrent.port_forwarding_enabled = true;
+    settings.torrent.port_forwarding_port = 42_123;
+    state.save_settings(settings).await.unwrap();
+    manager.refresh_runtime_settings(&state).await.unwrap();
+
+    assert_eq!(manager.current_config().await, None);
+    let second = manager.get_or_create(&state).await.unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&first, &second));
+    assert_ne!(first_config, manager.current_config().await.unwrap());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn torrent_engine_manager_defers_immutable_change_with_active_torrent_and_records_warning() {
+    let root = test_download_runtime_dir("torrent-engine-active-defers");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-active-defers-state",
+        &root,
+        vec![torrent_job("job_1", JobState::Downloading)],
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+    let first = manager.get_or_create(&state).await.unwrap();
+    let first_config = manager.current_config().await.unwrap();
+
+    let mut settings = state.settings().await;
+    settings.torrent.port_forwarding_enabled = true;
+    settings.torrent.port_forwarding_port = 42_124;
+    state.save_settings(settings).await.unwrap();
+    manager.refresh_runtime_settings(&state).await.unwrap();
+
+    assert_eq!(manager.current_config().await, Some(first_config));
+    let second = manager.get_or_create(&state).await.unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+    let snapshot = state
+        .diagnostics_snapshot(crate::storage::HostRegistrationDiagnostics {
+            status: crate::storage::HostRegistrationStatus::Missing,
+            entries: Vec::new(),
+        })
+        .await;
+    assert!(snapshot.recent_events.iter().any(|event| {
+        event.level == DiagnosticLevel::Warning
+            && event.category == "torrent"
+            && event.message.contains("restart")
+    }));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn torrent_engine_manager_cache_clear_reset_drops_idle_engine_slot() {
+    let root = test_download_runtime_dir("torrent-engine-cache-reset");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-cache-reset-state",
+        &root,
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+
+    let _engine = manager.get_or_create(&state).await.unwrap();
+    assert!(manager.current_config().await.is_some());
+
+    manager.clear_if_idle(&state).await.unwrap();
+
+    assert_eq!(manager.current_config().await, None);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[test]
 fn finished_torrent_pause_releases_engine_session() {
     let mut update = torrent_runtime_update(0, 1024, 0);
     update.finished = true;
@@ -1342,6 +1517,26 @@ fn torrent_job(id: &str, state: JobState) -> DownloadJob {
         artifact_exists: None,
         bulk_archive: None,
     }
+}
+
+async fn torrent_engine_state_for_test(
+    storage_name: &str,
+    root: &Path,
+    jobs: Vec<DownloadJob>,
+    configure: impl FnOnce(&mut crate::storage::Settings),
+) -> SharedState {
+    let state = SharedState::for_tests(test_storage_path(storage_name), jobs);
+    let mut settings = crate::storage::Settings {
+        download_directory: root.join("downloads").display().to_string(),
+        torrent: crate::storage::TorrentSettings {
+            download_directory: root.join("torrents").display().to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    configure(&mut settings);
+    state.save_settings(settings).await.unwrap();
+    state
 }
 
 fn test_storage_path(name: &str) -> PathBuf {

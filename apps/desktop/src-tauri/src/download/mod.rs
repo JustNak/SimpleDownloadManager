@@ -6,7 +6,7 @@ use crate::state::{
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,
     DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState,
-    ResumeSupport, TorrentInfo, TorrentPeerConnectionWatchdogMode, TorrentSettings, TransferKind,
+    ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode, TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
@@ -35,7 +35,7 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
-use tokio::sync::{mpsc, Mutex, OnceCell};
+use tokio::sync::{mpsc, Mutex};
 
 mod archive;
 mod client;
@@ -118,10 +118,203 @@ pub fn schedule_downloads(app: AppHandle, state: SharedState) {
     });
 }
 
-pub fn apply_torrent_runtime_settings(settings: &TorrentSettings) {
-    if let Some(engine) = TORRENT_ENGINE.get() {
-        engine.set_upload_limit(settings.upload_limit_kib_per_second);
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TorrentEngineConfig {
+    default_output_folder: PathBuf,
+    data_dir: PathBuf,
+    port_forwarding_enabled: bool,
+    port_forwarding_port: u32,
+}
+
+impl TorrentEngineConfig {
+    fn from_settings(settings: &Settings, data_dir: PathBuf) -> Self {
+        let default_output_folder = if settings.torrent.download_directory.trim().is_empty() {
+            PathBuf::from(default_torrent_download_directory_for(
+                &settings.download_directory,
+            ))
+        } else {
+            PathBuf::from(&settings.torrent.download_directory)
+        };
+
+        Self {
+            default_output_folder,
+            data_dir,
+            port_forwarding_enabled: settings.torrent.port_forwarding_enabled,
+            port_forwarding_port: settings.torrent.port_forwarding_port,
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TorrentEngineRefreshAction {
+    Create,
+    Reuse,
+    Recreate,
+    Defer,
+}
+
+fn torrent_engine_refresh_action(
+    current: Option<&TorrentEngineConfig>,
+    desired: &TorrentEngineConfig,
+    has_blocking_torrent_work: bool,
+) -> TorrentEngineRefreshAction {
+    match current {
+        None => TorrentEngineRefreshAction::Create,
+        Some(current) if current == desired => TorrentEngineRefreshAction::Reuse,
+        Some(_) if has_blocking_torrent_work => TorrentEngineRefreshAction::Defer,
+        Some(_) => TorrentEngineRefreshAction::Recreate,
+    }
+}
+
+struct TorrentEngineSlot {
+    config: TorrentEngineConfig,
+    engine: Arc<TorrentEngine>,
+}
+
+#[derive(Default)]
+struct TorrentEngineManager {
+    slot: Mutex<Option<TorrentEngineSlot>>,
+}
+
+impl TorrentEngineManager {
+    async fn get_or_create(&self, state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
+        let settings = state.settings().await;
+        let config = TorrentEngineConfig::from_settings(&settings, state.app_data_dir());
+        let has_blocking_torrent_work = state.has_torrent_engine_blocking_work().await;
+        let mut slot = self.slot.lock().await;
+
+        match torrent_engine_refresh_action(
+            slot.as_ref().map(|slot| &slot.config),
+            &config,
+            has_blocking_torrent_work,
+        ) {
+            TorrentEngineRefreshAction::Reuse | TorrentEngineRefreshAction::Defer => {
+                if let Some(slot) = slot.as_ref() {
+                    slot.engine
+                        .set_upload_limit(settings.torrent.upload_limit_kib_per_second);
+                    return Ok(slot.engine.clone());
+                }
+            }
+            TorrentEngineRefreshAction::Create | TorrentEngineRefreshAction::Recreate => {}
+        }
+
+        let engine = TorrentEngine::new(
+            config.default_output_folder.clone(),
+            config.data_dir.clone(),
+            settings.torrent.clone(),
+        )
+        .await
+        .map(Arc::new)?;
+        engine.set_upload_limit(settings.torrent.upload_limit_kib_per_second);
+        *slot = Some(TorrentEngineSlot {
+            config,
+            engine: engine.clone(),
+        });
+        Ok(engine)
+    }
+
+    async fn refresh_runtime_settings(&self, state: &SharedState) -> Result<(), String> {
+        let settings = state.settings().await;
+        let config = TorrentEngineConfig::from_settings(&settings, state.app_data_dir());
+        let has_blocking_torrent_work = state.has_torrent_engine_blocking_work().await;
+        let mut record_deferred_warning = false;
+
+        {
+            let mut slot = self.slot.lock().await;
+            let Some(current_slot) = slot.as_ref() else {
+                return Ok(());
+            };
+
+            current_slot
+                .engine
+                .set_upload_limit(settings.torrent.upload_limit_kib_per_second);
+
+            match torrent_engine_refresh_action(
+                Some(&current_slot.config),
+                &config,
+                has_blocking_torrent_work,
+            ) {
+                TorrentEngineRefreshAction::Reuse | TorrentEngineRefreshAction::Create => {}
+                TorrentEngineRefreshAction::Recreate => {
+                    *slot = None;
+                }
+                TorrentEngineRefreshAction::Defer => {
+                    record_deferred_warning = true;
+                }
+            }
+        }
+
+        if record_deferred_warning {
+            record_deferred_torrent_engine_settings_refresh(state).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn clear_if_idle(&self, state: &SharedState) -> Result<(), String> {
+        if state.has_torrent_engine_blocking_work().await {
+            return Err(
+                "Pause active, queued, or seeding torrents before resetting the torrent engine."
+                    .into(),
+            );
+        }
+
+        let mut slot = self.slot.lock().await;
+        *slot = None;
+        Ok(())
+    }
+
+    async fn current_engine(&self) -> Option<Arc<TorrentEngine>> {
+        self.slot
+            .lock()
+            .await
+            .as_ref()
+            .map(|slot| slot.engine.clone())
+    }
+
+    #[cfg(test)]
+    async fn current_config(&self) -> Option<TorrentEngineConfig> {
+        self.slot
+            .lock()
+            .await
+            .as_ref()
+            .map(|slot| slot.config.clone())
+    }
+}
+
+fn torrent_engine_manager() -> &'static TorrentEngineManager {
+    TORRENT_ENGINE_MANAGER.get_or_init(TorrentEngineManager::default)
+}
+
+pub async fn apply_torrent_runtime_settings(state: &SharedState) -> Result<(), String> {
+    torrent_engine_manager()
+        .refresh_runtime_settings(state)
+        .await
+}
+
+pub async fn clear_in_memory_torrent_engine_if_idle(state: &SharedState) -> Result<(), String> {
+    torrent_engine_manager().clear_if_idle(state).await
+}
+
+async fn record_deferred_torrent_engine_settings_refresh(
+    state: &SharedState,
+) -> Result<(), String> {
+    state
+        .record_diagnostic_event(
+            DiagnosticLevel::Warning,
+            "torrent",
+            "Torrent listener or port-forwarding changes will apply after active torrents stop or after restart.",
+            None,
+        )
+        .await
+}
+
+async fn current_torrent_engine() -> Option<Arc<TorrentEngine>> {
+    torrent_engine_manager().current_engine().await
+}
+
+async fn managed_torrent_engine(state: &SharedState) -> Result<Arc<TorrentEngine>, String> {
+    torrent_engine_manager().get_or_create(state).await
 }
 
 pub async fn forget_torrent_session_for_restart(
@@ -140,7 +333,7 @@ pub async fn forget_torrent_session_for_restart(
 }
 
 pub async fn forget_known_torrent_sessions(torrents: &[TorrentInfo]) -> Result<(), String> {
-    let Some(engine) = TORRENT_ENGINE.get() else {
+    let Some(engine) = current_torrent_engine().await else {
         return Ok(());
     };
 
@@ -327,7 +520,7 @@ async fn run_download(
 }
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
-static TORRENT_ENGINE: OnceCell<Arc<TorrentEngine>> = OnceCell::const_new();
+static TORRENT_ENGINE_MANAGER: OnceLock<TorrentEngineManager> = OnceLock::new();
 static RANGE_BACKOFFS: OnceLock<RangeBackoffRegistry> = OnceLock::new();
 
 pub async fn probe_browser_handoff_access(
