@@ -1,4 +1,4 @@
-import type { DownloadHandoffMode, ExtensionIntegrationSettings } from '@myapp/protocol';
+import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import browser from 'webextension-polyfill';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
@@ -7,8 +7,6 @@ import { applyExtensionAppearance } from '../shared/appearance';
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
 const syncButton = document.querySelector<HTMLButtonElement>('#sync-button');
 const silentDownloadToggle = document.querySelector<HTMLInputElement>('#silent-download-toggle');
-const captureModeLabel = document.querySelector<HTMLDivElement>('#capture-mode-label');
-const silentDownloadHint = document.querySelector<HTMLDivElement>('#silent-download-hint');
 const extensionToggleButton = document.querySelector<HTMLButtonElement>('#extension-toggle-button');
 const advancedButton = document.querySelector<HTMLButtonElement>('#advanced-button');
 
@@ -31,14 +29,6 @@ function renderState(state: PopupStateResponse) {
   if (silentDownloadToggle) {
     silentDownloadToggle.checked = settings?.downloadHandoffMode === 'auto';
     silentDownloadToggle.disabled = isUpdating || settings?.enabled === false;
-  }
-
-  if (silentDownloadHint) {
-    silentDownloadHint.textContent = captureModeDescription(settings?.downloadHandoffMode);
-  }
-
-  if (captureModeLabel) {
-    captureModeLabel.textContent = captureModeLabelText(settings?.downloadHandoffMode);
   }
 
   if (extensionToggleButton) {
@@ -166,28 +156,6 @@ function renderTransientError(error: unknown, fallback: string) {
       message,
     },
   };
-}
-
-function captureModeLabelText(mode: DownloadHandoffMode | undefined): string {
-  switch (mode) {
-    case 'auto':
-      return 'Silent Download';
-    case 'off':
-      return 'Browser Only';
-    default:
-      return 'Ask Before Sending';
-  }
-}
-
-function captureModeDescription(mode: DownloadHandoffMode | undefined): string {
-  switch (mode) {
-    case 'auto':
-      return 'Send downloads without a prompt.';
-    case 'off':
-      return 'Leave browser downloads in the browser.';
-    default:
-      return 'Ask before sending downloads.';
-  }
 }
 
 function fallbackErrorState(message: string): PopupStateResponse {

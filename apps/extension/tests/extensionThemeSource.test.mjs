@@ -18,7 +18,9 @@ for (const [name, html] of [['popup', popupHtml], ['options', optionsHtml]]) {
 }
 
 assert.doesNotMatch(popupHtml, /active-count|attention-count|>Active<|>Attention</, 'popup quick actions should not render queue counters');
-assert.match(popupHtml, /id="capture-mode-label"/, 'popup should name the capture mode quick control');
+assert.match(popupHtml, /id="capture-mode-label"[^>]*>Silent Download</, 'popup quick toggle should always be labeled Silent Download');
+assert.match(popupHtml, /On skips the prompt unless a duplicate needs review\./, 'popup should explain the simple silent-download on behavior');
+assert.doesNotMatch(popupHtml, /Ask Before Sending|Ask before sending downloads|Browser Only/, 'popup should not expose alternate handoff mode names');
 assert.match(popupHtml, /id="sync-button"/, 'popup should expose a manual theme/status sync action');
 assert.match(buildSource, /theme\.css/, 'extension build should copy the shared theme stylesheet into each dist folder');
 assert.match(buildSource, /appearance-preload\.js/, 'extension build should copy the appearance preload script into each dist folder');
@@ -26,6 +28,8 @@ assert.match(buildSource, /appearance-preload\.js/, 'extension build should copy
 assert.match(popupSource, /applyExtensionAppearance/, 'popup script should apply the synced desktop appearance');
 assert.match(popupSource, /sync-button/, 'popup script should wire the manual sync action');
 assert.match(popupSource, /state\.connection === 'connected' && state\.appearanceSettings/, 'popup should only cache/apply desktop appearance after a successful sync');
+assert.doesNotMatch(popupSource, /captureModeLabelText|captureModeDescription|Ask Before Sending|Ask before sending downloads|Browser Only/, 'popup script should not transition quick-toggle copy between handoff modes');
+assert.match(popupSource, /downloadHandoffMode:\s*silentDownloadToggle\.checked \? 'auto' : 'ask'/, 'silent download off should keep the default ask-before-download behavior');
 assert.match(optionsSource, /applyExtensionAppearance/, 'options script should apply the synced desktop appearance');
 assert.match(optionsSource, /state\.connection === 'connected' && state\.appearanceSettings/, 'options should only cache/apply desktop appearance after a successful sync');
 assert.match(stateSource, /appearanceSettings/, 'extension popup state should persist synced appearance settings');
