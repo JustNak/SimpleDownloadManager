@@ -5,8 +5,7 @@ import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettin
 import { applyExtensionAppearance } from '../shared/appearance';
 
 const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
-const activeCount = document.querySelector<HTMLSpanElement>('#active-count');
-const attentionCount = document.querySelector<HTMLSpanElement>('#attention-count');
+const syncButton = document.querySelector<HTMLButtonElement>('#sync-button');
 const silentDownloadToggle = document.querySelector<HTMLInputElement>('#silent-download-toggle');
 const captureModeLabel = document.querySelector<HTMLDivElement>('#capture-mode-label');
 const silentDownloadHint = document.querySelector<HTMLDivElement>('#silent-download-hint');
@@ -24,9 +23,10 @@ function renderState(state: PopupStateResponse) {
   currentState = state;
   const settings = state.extensionSettings;
 
-  applyExtensionAppearance(state.appearanceSettings);
+  if (state.connection === 'connected' && state.appearanceSettings) {
+    applyExtensionAppearance(state.appearanceSettings);
+  }
   updateConnectionStatus(state.connection);
-  updateQueueSummary(state);
 
   if (silentDownloadToggle) {
     silentDownloadToggle.checked = settings?.downloadHandoffMode === 'auto';
@@ -50,6 +50,10 @@ function renderState(state: PopupStateResponse) {
 
   if (advancedButton) {
     advancedButton.disabled = isUpdating;
+  }
+
+  if (syncButton) {
+    syncButton.disabled = isUpdating;
   }
 }
 
@@ -102,16 +106,6 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
   }
 }
 
-function updateQueueSummary(state: PopupStateResponse) {
-  if (activeCount) {
-    activeCount.textContent = String(state.queueSummary?.active ?? 0);
-  }
-
-  if (attentionCount) {
-    attentionCount.textContent = String(state.queueSummary?.attention ?? state.queueSummary?.failed ?? 0);
-  }
-}
-
 silentDownloadToggle?.addEventListener('change', () => {
   void updateSettings({
     downloadHandoffMode: silentDownloadToggle.checked ? 'auto' : 'ask',
@@ -121,6 +115,10 @@ silentDownloadToggle?.addEventListener('change', () => {
 extensionToggleButton?.addEventListener('click', () => {
   const isEnabled = currentState?.extensionSettings?.enabled !== false;
   void updateSettings({ enabled: !isEnabled });
+});
+
+syncButton?.addEventListener('click', () => {
+  void refreshState();
 });
 
 advancedButton?.addEventListener('click', async () => {
@@ -136,6 +134,22 @@ advancedButton?.addEventListener('click', async () => {
     if (currentState) renderState(currentState);
   }
 });
+
+async function refreshState() {
+  isUpdating = true;
+  if (currentState) renderState(currentState);
+
+  try {
+    await sendMessage({ type: 'popup_ping' });
+    const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
+    renderState(state);
+  } catch (error) {
+    renderTransientError(error, 'Could not sync extension status.');
+  } finally {
+    isUpdating = false;
+    if (currentState) renderState(currentState);
+  }
+}
 
 function renderTransientError(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : fallback;
@@ -187,9 +201,7 @@ function fallbackErrorState(message: string): PopupStateResponse {
 
 async function init() {
   try {
-    await sendMessage({ type: 'popup_ping' });
-    const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
-    renderState(state);
+    await refreshState();
   } catch {
     renderState({
       connection: 'error',

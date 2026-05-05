@@ -36,7 +36,9 @@ async function sendMessage<T>(message: PopupRequest): Promise<T> {
 function renderState(state: PopupStateResponse) {
   currentState = state;
   const settings = state.extensionSettings;
-  applyExtensionAppearance(state.appearanceSettings);
+  if (state.connection === 'connected' && state.appearanceSettings) {
+    applyExtensionAppearance(state.appearanceSettings);
+  }
   updateConnectionStatus(state.connection);
 
   if (!settings) return;

@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Simple Download Manager</title>
+    <script src="./appearance-preload.js"></script>
     <link rel="stylesheet" href="./theme.css" />
   </head>
   <body class="popup-page">
@@ -16,20 +17,11 @@
             <p>Browser handoff</p>
           </div>
         </div>
-        <span id="connection-status" class="status checking">Checking</span>
+        <div class="status-actions">
+          <span id="connection-status" class="status checking">Checking</span>
+          <button id="sync-button" type="button" class="button compact-button">Sync</button>
+        </div>
       </header>
-
-      <section class="popup-summary" aria-label="Download queue summary">
-        <div class="summary-metric">
-          <span class="metric-label">Active</span>
-          <span id="active-count" class="metric-value">0</span>
-        </div>
-        <div class="summary-divider"></div>
-        <div class="summary-metric">
-          <span class="metric-label">Attention</span>
-          <span id="attention-count" class="metric-value warning-value">0</span>
-        </div>
-      </section>
 
       <section class="control compact-control">
         <div>

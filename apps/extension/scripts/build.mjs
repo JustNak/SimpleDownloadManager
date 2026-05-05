@@ -34,7 +34,7 @@ const targets = [
       description: 'Send downloads to the Simple Download Manager desktop app.',
       key: releaseConfig.chromiumExtensionKey,
       icons: extensionIcons,
-      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
+      permissions: ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
       host_permissions: ['<all_urls>'],
       background: {
         service_worker: 'background.js',
@@ -60,7 +60,7 @@ const targets = [
       version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
       icons: extensionIcons,
-      permissions: ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
+      permissions: ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
       background: {
         scripts: ['background.js']
       },
@@ -109,6 +109,7 @@ async function buildTarget(target) {
   await cp(path.join(appRoot, 'src', 'popup', 'index.html'), path.join(outdir, 'popup.html'));
   await cp(path.join(appRoot, 'src', 'options', 'index.html'), path.join(outdir, 'options.html'));
   await cp(path.join(appRoot, 'src', 'shared', 'theme.css'), path.join(outdir, 'theme.css'));
+  await cp(path.join(appRoot, 'src', 'shared', 'appearance-preload.js'), path.join(outdir, 'appearance-preload.js'));
   await cp(path.join(appRoot, 'src', 'icons'), path.join(outdir, 'icons'), { recursive: true });
   await writeFile(path.join(outdir, 'manifest.json'), JSON.stringify(target.manifest, null, 2));
 }

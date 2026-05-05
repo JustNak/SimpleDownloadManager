@@ -37,6 +37,7 @@ import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { normalizeAccentColor } from '../shared/appearance';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
+const APPEARANCE_SYNC_ALARM_NAME = 'appearance-sync';
 const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
 const activeBrowserDownloadIds = new Set<number>();
 const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
@@ -254,10 +255,20 @@ async function handleBrowserDownloadDeterminingFilename(
 }
 
 browser.runtime.onInstalled.addListener(() => {
+  void ensureAppearanceSyncAlarm();
   void refreshConnectionState();
 });
 
 browser.runtime.onStartup.addListener(() => {
+  void ensureAppearanceSyncAlarm();
+  void refreshConnectionState();
+});
+
+browser.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== APPEARANCE_SYNC_ALARM_NAME) {
+    return;
+  }
+
   void refreshConnectionState();
 });
 
@@ -346,6 +357,18 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
 });
 
 registerHandoffAuthHeaderCapture();
+void ensureAppearanceSyncAlarm();
+
+async function ensureAppearanceSyncAlarm(): Promise<void> {
+  try {
+    await browser.alarms.create(APPEARANCE_SYNC_ALARM_NAME, {
+      delayInMinutes: 15,
+      periodInMinutes: 15,
+    });
+  } catch {
+    // Alarm setup failure should not block handoff or popup behavior.
+  }
+}
 
 function shouldSkipBrowserDownloadInterception(item: browser.downloads.DownloadItem): boolean {
   return shouldBypassBrowserDownload(item, browserDownloadFallbackBypass)

@@ -31,6 +31,10 @@
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
+:root.light {
+  color-scheme: light;
+}
+
 :root.dark {
   color-scheme: dark;
   --color-background: oklch(16% 0.008 247);
@@ -50,6 +54,29 @@
   --color-destructive: oklch(62% 0.17 25);
   --color-success: oklch(67% 0.15 145);
   --color-warning: oklch(75% 0.15 65);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark):not(.oled-dark) {
+    color-scheme: dark;
+    --color-background: oklch(16% 0.008 247);
+    --color-foreground: oklch(94% 0.005 247);
+    --color-surface: oklch(13.5% 0.008 247);
+    --color-sidebar: oklch(15% 0.008 247);
+    --color-command: oklch(17% 0.008 247);
+    --color-header: oklch(20% 0.009 247);
+    --color-muted: oklch(24% 0.009 247);
+    --color-muted-foreground: oklch(66% 0.01 247);
+    --color-card: oklch(18% 0.008 247);
+    --color-border: oklch(27% 0.009 247);
+    --color-input: oklch(31% 0.009 247);
+    --color-row-hover: oklch(21% 0.009 247);
+    --color-selected: oklch(27% 0.045 257);
+    --color-primary-foreground: oklch(12% 0.01 247);
+    --color-destructive: oklch(62% 0.17 25);
+    --color-success: oklch(67% 0.15 145);
+    --color-warning: oklch(75% 0.15 65);
+  }
 }
 
 :root.oled-dark {
@@ -118,6 +145,7 @@ p {
 }
 
 .popup-header,
+.status-actions,
 .options-topbar,
 .header-actions,
 .brand-lockup,
@@ -170,7 +198,6 @@ p {
 .panel-note,
 .description,
 .hint,
-.metric-label,
 .eyebrow {
   color: var(--color-muted-foreground);
 }
@@ -178,50 +205,8 @@ p {
 .brand-text p,
 .save-state,
 .panel-note,
-.metric-label,
 .eyebrow {
   font-size: 11px;
-}
-
-.popup-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
-  align-items: center;
-  min-height: 54px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-card);
-}
-
-.summary-metric {
-  min-width: 0;
-  padding: 10px 12px;
-}
-
-.summary-divider {
-  width: 1px;
-  height: 30px;
-  background: var(--color-border);
-}
-
-.metric-label {
-  display: block;
-  font-weight: 650;
-  line-height: 14px;
-}
-
-.metric-value {
-  display: block;
-  margin-top: 2px;
-  color: var(--color-foreground);
-  font-size: 18px;
-  font-weight: 750;
-  line-height: 22px;
-  font-variant-numeric: tabular-nums;
-}
-
-.warning-value {
-  color: var(--color-warning);
 }
 
 .control {
@@ -308,6 +293,17 @@ p {
 .popup-page .actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
+}
+
+.status-actions {
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.compact-button {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
 }
 
 .button,

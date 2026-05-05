@@ -1,6 +1,7 @@
 import type { AppearanceSettings, AppearanceTheme } from '@myapp/protocol';
 
 export const DEFAULT_ACCENT_COLOR = '#3b82f6';
+export const APPEARANCE_CACHE_KEY = 'simple-download-manager-appearance';
 export const DEFAULT_APPEARANCE_SETTINGS: AppearanceSettings = {
   theme: 'system',
   accentColor: DEFAULT_ACCENT_COLOR,
@@ -32,6 +33,22 @@ export function normalizeAppearanceSettings(settings?: Partial<AppearanceSetting
   };
 }
 
+export function serializeAppearanceSettings(settings?: Partial<AppearanceSettings>): string {
+  return JSON.stringify(normalizeAppearanceSettings(settings));
+}
+
+export function cachedAppearanceSettingsFromJson(rawValue: string | null | undefined): AppearanceSettings {
+  if (!rawValue) {
+    return DEFAULT_APPEARANCE_SETTINGS;
+  }
+
+  try {
+    return normalizeAppearanceSettings(JSON.parse(rawValue) as Partial<AppearanceSettings>);
+  } catch {
+    return DEFAULT_APPEARANCE_SETTINGS;
+  }
+}
+
 export function readableForegroundForHex(hex: string): string {
   const normalized = normalizeAccentColor(hex);
   const red = Number.parseInt(normalized.slice(1, 3), 16);
@@ -60,6 +77,7 @@ export function applyExtensionAppearanceToElement(
   const accent = normalizeAccentColor(normalized.accentColor);
   const foreground = readableForegroundForHex(accent);
 
+  element.classList.toggle('light', normalized.theme === 'light');
   element.classList.toggle('dark', themeClasses.dark);
   element.classList.toggle('oled-dark', themeClasses.oledDark);
   element.style.setProperty('--color-primary', accent);
@@ -75,11 +93,15 @@ export function applyExtensionAppearanceToElement(
 
 export function applyExtensionAppearance(
   settings: Partial<AppearanceSettings> | undefined,
-  options: { root?: AppearanceElement; systemPrefersDark?: boolean } = {},
+  options: { root?: AppearanceElement; systemPrefersDark?: boolean; cache?: boolean } = {},
 ): ExtensionThemeClassState {
   const root = options.root ?? document.documentElement;
   const systemPrefersDark = options.systemPrefersDark ?? getSystemPrefersDark();
-  return applyExtensionAppearanceToElement(root, settings, systemPrefersDark);
+  const normalized = normalizeAppearanceSettings(settings);
+  if (options.cache !== false) {
+    cacheAppearanceSettings(normalized);
+  }
+  return applyExtensionAppearanceToElement(root, normalized, systemPrefersDark);
 }
 
 function normalizeTheme(theme: AppearanceTheme | undefined): AppearanceTheme {
@@ -93,4 +115,16 @@ function getSystemPrefersDark(): boolean {
     return false;
   }
   return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function cacheAppearanceSettings(settings: AppearanceSettings): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage?.setItem(APPEARANCE_CACHE_KEY, serializeAppearanceSettings(settings));
+  } catch {
+    // Browser extension pages can still render correctly if localStorage is unavailable.
+  }
 }

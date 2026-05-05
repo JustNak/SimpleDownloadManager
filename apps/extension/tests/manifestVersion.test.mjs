@@ -65,11 +65,11 @@ assert.deepEqual(
 );
 assert.deepEqual(
   firefoxManifest.permissions,
-  ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
+  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
 );
 assert.deepEqual(
   chromiumManifest.permissions,
-  ['contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
+  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
   'Chromium build should request webRequest for protected-download header capture',
 );
 assert.deepEqual(
