@@ -75,9 +75,15 @@ pub(super) async fn probe_range_metadata(
     url: &str,
     handoff_auth: Option<&HandoffAuth>,
 ) -> Option<PreflightMetadata> {
-    let response = send_range_request(client, url, ByteRange { start: 0, end: 0 }, handoff_auth)
-        .await
-        .ok()?;
+    let response = send_range_request(
+        client,
+        url,
+        ByteRange { start: 0, end: 0 },
+        handoff_auth,
+        None,
+    )
+    .await
+    .ok()?;
 
     if response.status() != StatusCode::PARTIAL_CONTENT {
         return None;
@@ -98,6 +104,7 @@ pub(super) async fn probe_range_metadata(
         resume_support: ResumeSupport::Supported,
         filename: extract_filename(&response)
             .or_else(|| derive_filename_from_url(response.url().as_str())),
+        validators: entity_validators_from_headers(response.headers()),
     })
 }
 
@@ -117,6 +124,7 @@ pub(super) fn merge_preflight_metadata(
             existing.resume_support
         },
         filename: existing.filename.or(probed.filename),
+        validators: existing.validators.reconcile_with(&probed.validators),
     }
 }
 
@@ -131,8 +139,10 @@ pub(super) async fn run_segmented_download_attempt(
     client: Client,
     plan: RangePlan,
     profile: DownloadPerformanceProfile,
+    validators: EntityValidators,
 ) -> Result<DownloadOutcome, DownloadError> {
-    let mut segment_state = load_or_create_segment_state(&task.temp_path, &plan).await?;
+    let mut segment_state =
+        load_or_create_segment_state(&task.temp_path, &plan, &validators).await?;
     refresh_segment_completion_from_disk(&task.temp_path, &mut segment_state).await;
     persist_segment_state(&task.temp_path, &segment_state).await?;
     prepare_direct_segment_file(&task.temp_path, plan.total_bytes).await?;
@@ -178,18 +188,19 @@ pub(super) async fn run_segmented_download_attempt(
         temp_path: task.temp_path.clone(),
         total_bytes: plan.total_bytes,
         profile,
+        validators: validators.clone(),
         progress: progress.clone(),
         metadata: metadata.clone(),
     };
 
-    let mut handles = Vec::new();
+    let mut handles = tokio::task::JoinSet::new();
     for segment in plan.segments.iter().copied().enumerate() {
         let (index, range) = segment;
         if initial_segment_bytes[index] >= range.len() {
             continue;
         }
 
-        handles.push(tauri::async_runtime::spawn(download_segment_worker(
+        handles.spawn(download_segment_worker(
             worker_context.clone(),
             SegmentProgress {
                 index,
@@ -197,41 +208,10 @@ pub(super) async fn run_segmented_download_attempt(
                 downloaded_bytes: 0,
                 completed: false,
             },
-        )));
+        ));
     }
 
-    let mut worker_outcome = DownloadOutcome::Completed;
-    let mut worker_error = None::<DownloadError>;
-    while let Some(handle) = handles.pop() {
-        match handle.await {
-            Ok(Ok(DownloadOutcome::Completed)) => {}
-            Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
-                worker_outcome = outcome;
-                for handle in handles {
-                    handle.abort();
-                }
-                break;
-            }
-            Ok(Err(error)) => {
-                worker_error = Some(error);
-                for handle in handles {
-                    handle.abort();
-                }
-                break;
-            }
-            Err(error) => {
-                worker_error = Some(download_error(
-                    FailureCategory::Internal,
-                    format!("Segment worker failed: {error}"),
-                    true,
-                ));
-                for handle in handles {
-                    handle.abort();
-                }
-                break;
-            }
-        }
-    }
+    let (worker_outcome, mut worker_error) = await_segment_workers(handles).await;
 
     reporter_stop.store(true, Ordering::Relaxed);
     match reporter_handle.await {
@@ -327,6 +307,7 @@ pub(super) async fn download_segment_worker(
             &context.url,
             requested,
             context.handoff_auth.as_ref(),
+            Some(&context.validators),
         )
         .await
         {
@@ -564,9 +545,41 @@ pub(super) async fn report_segmented_progress(
     Ok(())
 }
 
+pub(super) async fn await_segment_workers(
+    mut handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+) -> (DownloadOutcome, Option<DownloadError>) {
+    while let Some(result) = handles.join_next().await {
+        match result {
+            Ok(Ok(DownloadOutcome::Completed)) => {}
+            Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
+                handles.abort_all();
+                return (outcome, None);
+            }
+            Ok(Err(error)) => {
+                handles.abort_all();
+                return (DownloadOutcome::Completed, Some(error));
+            }
+            Err(error) => {
+                handles.abort_all();
+                return (
+                    DownloadOutcome::Completed,
+                    Some(download_error(
+                        FailureCategory::Internal,
+                        format!("Segment worker failed: {error}"),
+                        true,
+                    )),
+                );
+            }
+        }
+    }
+
+    (DownloadOutcome::Completed, None)
+}
+
 pub(super) async fn load_or_create_segment_state(
     temp_path: &Path,
     plan: &RangePlan,
+    validators: &EntityValidators,
 ) -> Result<SegmentedDownloadState, DownloadError> {
     let meta_path = segment_meta_path(temp_path);
     if let Ok(raw) = fs::read_to_string(&meta_path).await {
@@ -578,7 +591,9 @@ pub(super) async fn load_or_create_segment_state(
                     .iter()
                     .zip(plan.segments.iter())
                     .all(|(stored, planned)| stored.range == *planned);
-            if same_plan {
+            if same_plan && !state.validators.conflicts_with(validators) {
+                let mut state = state;
+                state.validators = state.validators.reconcile_with(validators);
                 return Ok(state);
             }
         }
@@ -587,6 +602,7 @@ pub(super) async fn load_or_create_segment_state(
     cleanup_partial_artifacts(temp_path).await;
     Ok(SegmentedDownloadState {
         total_bytes: plan.total_bytes,
+        validators: validators.clone(),
         segments: plan
             .segments
             .iter()
@@ -606,16 +622,18 @@ pub(super) async fn prepare_direct_segment_file(
     temp_path: &Path,
     total_bytes: u64,
 ) -> Result<(), DownloadError> {
+    let current_len = metadata_len(temp_path).await;
     let file = OpenOptions::new()
         .create(true)
-        .truncate(true)
         .write(true)
         .open(temp_path)
         .await
         .map_err(|error| disk_error(format!("Could not create segmented partial file: {error}")))?;
-    file.set_len(total_bytes)
-        .await
-        .map_err(|error| disk_error(format!("Could not size segmented partial file: {error}")))?;
+    if current_len != Some(total_bytes) {
+        file.set_len(total_bytes).await.map_err(|error| {
+            disk_error(format!("Could not size segmented partial file: {error}"))
+        })?;
+    }
     Ok(())
 }
 

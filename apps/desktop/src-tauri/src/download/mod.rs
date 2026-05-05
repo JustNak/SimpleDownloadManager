@@ -17,7 +17,7 @@ use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
     HeaderName, HeaderValue, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE,
-    LOCATION, RANGE,
+    ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};

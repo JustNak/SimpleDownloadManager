@@ -53,6 +53,7 @@ pub(super) async fn run_http_download_attempt(
                             client.clone(),
                             plan,
                             profile,
+                            metadata.validators.clone(),
                         )
                         .await
                         {
@@ -83,6 +84,9 @@ pub(super) async fn run_http_download_attempt(
         &task.url,
         existing_bytes,
         task.handoff_auth.as_ref(),
+        preflight_metadata
+            .as_ref()
+            .map(|metadata| &metadata.validators),
     )
     .await?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
@@ -100,7 +104,7 @@ pub(super) async fn run_http_download_attempt(
             )
             .await?;
         emit_snapshot(app, &snapshot);
-        response = send_request(&client, &task.url, 0, task.handoff_auth.as_ref()).await?;
+        response = send_request(&client, &task.url, 0, task.handoff_auth.as_ref(), None).await?;
     }
 
     let total_bytes = derive_total_bytes(&response, existing_bytes).or_else(|| {

@@ -56,7 +56,48 @@ pub(super) struct SegmentProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SegmentedDownloadState {
     pub(super) total_bytes: u64,
+    #[serde(default)]
+    pub(super) validators: EntityValidators,
     pub(super) segments: Vec<SegmentProgress>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct EntityValidators {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) last_modified: Option<String>,
+}
+
+impl EntityValidators {
+    pub(super) fn if_range_value(&self) -> Option<&str> {
+        self.etag.as_deref().or(self.last_modified.as_deref())
+    }
+
+    pub(super) fn conflicts_with(&self, latest: &Self) -> bool {
+        let etag_changed = self
+            .etag
+            .as_deref()
+            .zip(latest.etag.as_deref())
+            .is_some_and(|(stored, remote)| stored != remote);
+        let last_modified_changed = self
+            .last_modified
+            .as_deref()
+            .zip(latest.last_modified.as_deref())
+            .is_some_and(|(stored, remote)| stored != remote);
+
+        etag_changed || last_modified_changed
+    }
+
+    pub(super) fn reconcile_with(&self, latest: &Self) -> Self {
+        Self {
+            etag: latest.etag.clone().or_else(|| self.etag.clone()),
+            last_modified: latest
+                .last_modified
+                .clone()
+                .or_else(|| self.last_modified.clone()),
+        }
+    }
 }
 
 pub(super) struct SegmentedProgressCounters {
@@ -104,6 +145,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) temp_path: PathBuf,
     pub(super) total_bytes: u64,
     pub(super) profile: DownloadPerformanceProfile,
+    pub(super) validators: EntityValidators,
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
 }
@@ -457,6 +499,7 @@ pub(super) struct PreflightMetadata {
     pub(super) total_bytes: Option<u64>,
     pub(super) resume_support: ResumeSupport,
     pub(super) filename: Option<String>,
+    pub(super) validators: EntityValidators,
 }
 
 impl From<String> for DownloadError {

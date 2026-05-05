@@ -1361,6 +1361,7 @@ fn preflight_metadata_uses_head_headers() {
         Some("bytes"),
         Some("attachment; filename=\"server-report.pdf\""),
         "https://example.com/download",
+        EntityValidators::default(),
     );
 
     assert_eq!(metadata.total_bytes, Some(4_096));
@@ -1531,16 +1532,29 @@ fn probed_range_metadata_wins_when_head_size_disagrees() {
             total_bytes: Some(64),
             resume_support: ResumeSupport::Supported,
             filename: Some("head.bin".into()),
+            validators: EntityValidators {
+                etag: None,
+                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+            },
         }),
         PreflightMetadata {
             total_bytes: Some(128),
             resume_support: ResumeSupport::Supported,
             filename: Some("probe.bin".into()),
+            validators: EntityValidators {
+                etag: Some("\"probe\"".into()),
+                last_modified: None,
+            },
         },
     );
 
     assert_eq!(merged.total_bytes, Some(128));
     assert_eq!(merged.filename.as_deref(), Some("head.bin"));
+    assert_eq!(merged.validators.etag.as_deref(), Some("\"probe\""));
+    assert_eq!(
+        merged.validators.last_modified.as_deref(),
+        Some("Wed, 21 Oct 2015 07:28:00 GMT")
+    );
 }
 
 #[test]
@@ -1784,7 +1798,7 @@ async fn send_request_asks_for_identity_encoding() {
     let (url, request_handle) = spawn_one_response_server(response).await;
     let client = download_client().unwrap();
 
-    let _response = send_request(&client, &url, 0, None).await.unwrap();
+    let _response = send_request(&client, &url, 0, None, None).await.unwrap();
     let request = request_handle.await.unwrap();
 
     assert!(request
@@ -1803,7 +1817,9 @@ async fn send_request_applies_authenticated_handoff_headers() {
         }],
     };
 
-    let response = send_request(&client, &url, 0, Some(&auth)).await.unwrap();
+    let response = send_request(&client, &url, 0, Some(&auth), None)
+        .await
+        .unwrap();
     let request = request_handle.await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -1890,6 +1906,20 @@ async fn direct_segment_writer_writes_into_partial_file_without_segment_artifact
 }
 
 #[tokio::test]
+async fn direct_segment_file_preparation_preserves_existing_resume_bytes() {
+    let root = test_download_runtime_dir("direct-segment-preserve");
+    let temp_path = root.join("download.bin.part");
+    tokio::fs::write(&temp_path, b"abcdefghijkl").await.unwrap();
+
+    prepare_direct_segment_file(&temp_path, 12).await.unwrap();
+
+    let bytes = tokio::fs::read(&temp_path).await.unwrap();
+    assert_eq!(bytes, b"abcdefghijkl");
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
     let root = test_download_runtime_dir("direct-segment-sidecar");
     let temp_path = root.join("download.bin.part");
@@ -1902,7 +1932,8 @@ async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
         ],
     };
 
-    let mut state = load_or_create_segment_state(&temp_path, &plan)
+    let validators = EntityValidators::default();
+    let mut state = load_or_create_segment_state(&temp_path, &plan, &validators)
         .await
         .unwrap();
     prepare_direct_segment_file(&temp_path, plan.total_bytes)
@@ -1917,7 +1948,7 @@ async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
         .await
         .unwrap();
 
-    let mut reloaded = load_or_create_segment_state(&temp_path, &plan)
+    let mut reloaded = load_or_create_segment_state(&temp_path, &plan, &validators)
         .await
         .unwrap();
     refresh_segment_completion_from_disk(&temp_path, &mut reloaded).await;
@@ -1949,6 +1980,218 @@ fn range_rejection_after_probe_requests_single_stream_fallback() {
     ));
 }
 
+#[tokio::test]
+async fn segment_state_preserves_progress_when_validators_match() {
+    let root = test_download_runtime_dir("segment-validator-match");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let validators = EntityValidators {
+        etag: Some("\"abc123\"".into()),
+        last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+    };
+    let mut state = new_segment_state_for_test(&plan, validators.clone());
+    state.segments[0].downloaded_bytes = 4;
+    state.segments[0].completed = true;
+    tokio::fs::write(&temp_path, b"abcdefghijkl").await.unwrap();
+    persist_segment_state(&temp_path, &state).await.unwrap();
+
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &validators)
+        .await
+        .unwrap();
+
+    assert_eq!(reloaded.validators, validators);
+    assert_eq!(reloaded.segments[0].downloaded_bytes, 4);
+    assert!(reloaded.segments[0].completed);
+    assert!(temp_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_state_resets_progress_when_validators_change() {
+    let root = test_download_runtime_dir("segment-validator-changed");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let mut state = new_segment_state_for_test(
+        &plan,
+        EntityValidators {
+            etag: Some("\"old\"".into()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+        },
+    );
+    state.segments[0].downloaded_bytes = 4;
+    state.segments[0].completed = true;
+    tokio::fs::write(&temp_path, b"abcdefghijkl").await.unwrap();
+    persist_segment_state(&temp_path, &state).await.unwrap();
+
+    let next_validators = EntityValidators {
+        etag: Some("\"new\"".into()),
+        last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+    };
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &next_validators)
+        .await
+        .unwrap();
+
+    assert_eq!(reloaded.validators, next_validators);
+    assert!(reloaded
+        .segments
+        .iter()
+        .all(|segment| { segment.downloaded_bytes == 0 && !segment.completed }));
+    assert!(!temp_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_state_keeps_old_progress_when_stored_validators_are_missing() {
+    let root = test_download_runtime_dir("segment-validator-missing");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let mut state = new_segment_state_for_test(&plan, EntityValidators::default());
+    state.segments[1].downloaded_bytes = 2;
+    tokio::fs::write(&temp_path, b"abcdefghijkl").await.unwrap();
+    persist_segment_state(&temp_path, &state).await.unwrap();
+
+    let next_validators = EntityValidators {
+        etag: Some("\"new\"".into()),
+        last_modified: None,
+    };
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &next_validators)
+        .await
+        .unwrap();
+
+    assert_eq!(reloaded.validators, next_validators);
+    assert_eq!(reloaded.segments[1].downloaded_bytes, 2);
+    assert!(temp_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn range_request_sends_if_range_when_resume_validator_is_available() {
+    let response = concat!(
+        "HTTP/1.1 206 Partial Content\r\n",
+        "Content-Range: bytes 4-7/12\r\n",
+        "Content-Length: 4\r\n",
+        "\r\n",
+        "efgh"
+    );
+    let (url, request_handle) = spawn_one_response_server(response).await;
+    let client = download_client().unwrap();
+    let validators = EntityValidators {
+        etag: Some("\"abc123\"".into()),
+        last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+    };
+
+    let _response = send_range_request(
+        &client,
+        &url,
+        ByteRange { start: 4, end: 7 },
+        None,
+        Some(&validators),
+    )
+    .await
+    .unwrap();
+    let request = request_handle.await.unwrap();
+    let request_lower = request.to_ascii_lowercase();
+
+    assert!(request_lower.contains("range: bytes=4-7"));
+    assert!(request_lower.contains("if-range: \"abc123\""));
+}
+
+#[tokio::test]
+async fn segment_worker_resumes_partial_range_into_existing_file() {
+    let root = test_download_runtime_dir("segment-worker-resume");
+    let temp_path = root.join("download.bin.part");
+    let response = concat!(
+        "HTTP/1.1 206 Partial Content\r\n",
+        "Content-Range: bytes 4-11/12\r\n",
+        "Content-Length: 8\r\n",
+        "\r\n",
+        "efghijkl"
+    );
+    let (url, request_handle) = spawn_one_response_server(response).await;
+    let validators = EntityValidators {
+        etag: Some("\"segment-source\"".into()),
+        last_modified: None,
+    };
+    let segment = SegmentProgress {
+        index: 0,
+        range: ByteRange { start: 0, end: 11 },
+        downloaded_bytes: 4,
+        completed: false,
+    };
+    let mut stored = SegmentedDownloadState {
+        total_bytes: 12,
+        validators: validators.clone(),
+        segments: vec![segment.clone()],
+    };
+    prepare_direct_segment_file(&temp_path, 12).await.unwrap();
+    let mut file = open_direct_segment_file(&temp_path).await.unwrap();
+    write_segment_chunk_to(&mut file, 0, b"abcd").await.unwrap();
+    drop(file);
+
+    let mut job = torrent_job("job_segment_resume", JobState::Downloading);
+    job.transfer_kind = TransferKind::Http;
+    job.torrent = None;
+    job.temp_path = temp_path.display().to_string();
+    job.target_path = root.join("download.bin").display().to_string();
+    let state = SharedState::for_tests(test_storage_path("segment-worker-resume-state"), vec![job]);
+    stored.segments[0].downloaded_bytes = 4;
+    let context = SegmentWorkerContext {
+        state,
+        client: download_client().unwrap(),
+        job_id: "job_segment_resume".into(),
+        url,
+        handoff_auth: None,
+        temp_path: temp_path.clone(),
+        total_bytes: 12,
+        profile: performance_profile(DownloadPerformanceMode::Balanced),
+        validators,
+        progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
+        metadata: Arc::new(Mutex::new(stored)),
+    };
+
+    let outcome = download_segment_worker(context, segment).await.unwrap();
+    let request = request_handle.await.unwrap();
+    let request_lower = request.to_ascii_lowercase();
+    let bytes = tokio::fs::read(&temp_path).await.unwrap();
+
+    assert_eq!(outcome, DownloadOutcome::Completed);
+    assert!(request_lower.contains("range: bytes=4-11"));
+    assert!(request_lower.contains("if-range: \"segment-source\""));
+    assert_eq!(bytes, b"abcdefghijkl");
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_worker_collector_returns_on_first_error() {
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(async {
+        Err(download_error(
+            FailureCategory::Network,
+            "segment failed quickly".into(),
+            true,
+        ))
+    });
+    workers.spawn(async {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        Ok(DownloadOutcome::Completed)
+    });
+
+    let started = Instant::now();
+    let (_outcome, error) = await_segment_workers(workers).await;
+
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_eq!(
+        error
+            .expect("first worker error should be returned")
+            .message,
+        "segment failed quickly"
+    );
+}
+
 async fn spawn_one_response_server(
     response: &'static str,
 ) -> (String, tokio::task::JoinHandle<String>) {
@@ -1964,6 +2207,39 @@ async fn spawn_one_response_server(
     });
 
     (format!("http://{address}/download.bin"), handle)
+}
+
+fn three_segment_test_plan() -> RangePlan {
+    RangePlan {
+        total_bytes: 12,
+        segments: vec![
+            ByteRange { start: 0, end: 3 },
+            ByteRange { start: 4, end: 7 },
+            ByteRange { start: 8, end: 11 },
+        ],
+    }
+}
+
+fn new_segment_state_for_test(
+    plan: &RangePlan,
+    validators: EntityValidators,
+) -> SegmentedDownloadState {
+    SegmentedDownloadState {
+        total_bytes: plan.total_bytes,
+        validators,
+        segments: plan
+            .segments
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, range)| SegmentProgress {
+                index,
+                range,
+                downloaded_bytes: 0,
+                completed: false,
+            })
+            .collect(),
+    }
 }
 
 fn test_download_runtime_dir(name: &str) -> PathBuf {
@@ -2114,7 +2390,8 @@ async fn segmented_sidecar_resets_progress_when_partial_file_is_missing() {
         ],
     };
 
-    let mut state = load_or_create_segment_state(&temp_path, &plan)
+    let validators = EntityValidators::default();
+    let mut state = load_or_create_segment_state(&temp_path, &plan, &validators)
         .await
         .unwrap();
     state.segments[0].downloaded_bytes = 4;
@@ -2130,7 +2407,7 @@ async fn segmented_sidecar_resets_progress_when_partial_file_is_missing() {
     assert!(!state.segments[1].completed);
 
     persist_segment_state(&temp_path, &state).await.unwrap();
-    let reloaded = load_or_create_segment_state(&temp_path, &plan)
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &validators)
         .await
         .unwrap();
     assert_eq!(reloaded.segments[0].downloaded_bytes, 0);

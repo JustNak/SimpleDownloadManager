@@ -91,14 +91,18 @@ pub(super) async fn send_request(
     url: &str,
     existing_bytes: u64,
     handoff_auth: Option<&HandoffAuth>,
+    validators: Option<&EntityValidators>,
 ) -> Result<reqwest::Response, DownloadError> {
     let range_header = if existing_bytes > 0 {
         Some(format!("bytes={existing_bytes}-"))
     } else {
         None
     };
+    let if_range = range_header
+        .as_ref()
+        .and_then(|_| validators.and_then(EntityValidators::if_range_value));
 
-    send_download_request(client, url, range_header, handoff_auth).await
+    send_download_request(client, url, range_header, handoff_auth, if_range).await
 }
 
 pub(super) async fn send_range_request(
@@ -106,12 +110,15 @@ pub(super) async fn send_range_request(
     url: &str,
     range: ByteRange,
     handoff_auth: Option<&HandoffAuth>,
+    validators: Option<&EntityValidators>,
 ) -> Result<reqwest::Response, DownloadError> {
+    let if_range = validators.and_then(EntityValidators::if_range_value);
     send_download_request(
         client,
         url,
         Some(format!("bytes={}-{}", range.start, range.end)),
         handoff_auth,
+        if_range,
     )
     .await
 }
@@ -121,6 +128,7 @@ pub(super) async fn send_download_request(
     url: &str,
     range_header: Option<String>,
     handoff_auth: Option<&HandoffAuth>,
+    if_range: Option<&str>,
 ) -> Result<reqwest::Response, DownloadError> {
     let mut next_retry = 0;
     let mut current_url = url.to_string();
@@ -130,6 +138,9 @@ pub(super) async fn send_download_request(
         let mut request = client.get(&current_url).header(ACCEPT_ENCODING, "identity");
         if let Some(range_header) = range_header.as_deref() {
             request = request.header(RANGE, range_header);
+        }
+        if let Some(if_range) = if_range {
+            request = request.header(IF_RANGE, if_range);
         }
         request = apply_handoff_auth_headers(request, handoff_auth)?;
 
@@ -326,6 +337,7 @@ pub(super) async fn preflight_download(
         accept_ranges,
         content_disposition,
         response.url().as_str(),
+        entity_validators_from_headers(response.headers()),
     ))
 }
 
@@ -334,6 +346,7 @@ pub(super) fn derive_preflight_metadata_from_parts(
     accept_ranges: Option<&str>,
     content_disposition: Option<&str>,
     final_url: &str,
+    validators: EntityValidators,
 ) -> PreflightMetadata {
     PreflightMetadata {
         total_bytes,
@@ -341,6 +354,22 @@ pub(super) fn derive_preflight_metadata_from_parts(
         filename: content_disposition
             .and_then(parse_content_disposition_filename)
             .or_else(|| derive_filename_from_url(final_url)),
+        validators,
+    }
+}
+
+pub(super) fn entity_validators_from_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> EntityValidators {
+    EntityValidators {
+        etag: headers
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        last_modified: headers
+            .get(LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
     }
 }
 
