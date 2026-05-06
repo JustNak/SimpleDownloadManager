@@ -18,7 +18,7 @@ assert.match(batchSource, /Combining/, 'bulk progress popup should show combinin
 assert.match(batchSource, /Compressing/, 'bulk archive output should show compression as a distinct finalizing phase');
 assert.match(batchSource, /Review links/, 'bulk progress popup should show the pre-download review phase');
 assert.match(batchSource, /deleteJobs/, 'bulk progress popup should let the initial review state cancel the queued batch');
-assert.match(batchSource, /function startBulkDownload\(\)[\s\S]*resumeJob/, 'bulk progress popup should start paused bulk jobs only after user confirmation');
+assert.match(batchSource, /function startBulkDownload\(\)[\s\S]*resumeJobs/, 'bulk progress popup should start paused bulk jobs only after user confirmation');
 assert.match(batchSource, /bulkUiState === 'review'[\s\S]*ActionButton\(isConfirmingCancel \? 'Confirm' : 'Cancel'[\s\S]*ActionButton\('Start'/, 'review footer should expose only two-step Cancel and Start before active controls');
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Pause all/, 'review footer should not show Pause all');
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Resume all/, 'review footer should not show Resume all');

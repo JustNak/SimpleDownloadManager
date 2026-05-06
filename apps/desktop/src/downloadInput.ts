@@ -1,4 +1,4 @@
-export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
+export type DownloadMode = 'single' | 'torrent' | 'bulk';
 
 export const batchUrlTextAreaWrap = 'off';
 export const batchUrlTextAreaClassName =

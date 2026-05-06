@@ -957,6 +957,17 @@
 
     const batchResult = outcome.result as AddJobsResult;
     if (batchResult.queuedCount === 0) {
+      const failedCount = batchResult.failedItems?.length ?? 0;
+      if (failedCount > 0) {
+        view = 'all';
+        addToast({
+          type: 'warning',
+          title: 'Some Links Were Not Queued',
+          message: `${failedCount} ${failedCount === 1 ? 'link needs' : 'links need'} review in the bulk progress popup.`,
+        });
+        return;
+      }
+
       view = 'all';
       addToast({
         type: 'info',
@@ -967,6 +978,16 @@
     }
 
     view = 'all';
+    const failedCount = batchResult.failedItems?.length ?? 0;
+    if (failedCount > 0) {
+      addToast({
+        type: 'warning',
+        title: 'Bulk Download Partially Added',
+        message: `${batchResult.queuedCount} ${batchResult.queuedCount === 1 ? 'download was' : 'downloads were'} queued; ${failedCount} ${failedCount === 1 ? 'link needs' : 'links need'} review.`,
+      });
+      return;
+    }
+
     addToast({
       type: 'success',
       title: outcome.mode === 'bulk' ? 'Bulk Download Added' : 'Downloads Added',

@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { Archive, FolderOpen, Link2, ListPlus, Magnet, PackagePlus, X } from '@lucide/svelte';
+  import { Archive, FolderOpen, Link2, Magnet, PackagePlus, X } from '@lucide/svelte';
   import { addJob, addJobs, browseTorrentFile, type AddJobResult, type AddJobsResult } from './backend';
   import { getErrorMessage } from './errors';
   import {
@@ -49,13 +49,13 @@
   let singleUrl = $state('');
   let torrentUrl = $state('');
   let singleSha256 = $state('');
-  let multiUrls = $state('');
   let bulkUrls = $state('');
   let archiveName = $state('bulk-download.zip');
   let archiveNameTouched = $state(false);
   let bulkOutputKind = $state<BulkOutputKind>('archive');
   let combineBulk = $state(true);
   let isSubmitting = $state(false);
+  let submitStatusLabel = $state('Adding...');
   let isImportingTorrent = $state(false);
   let errorMessage = $state('');
   let inputElement = $state<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -107,7 +107,6 @@
   function urlsForMode(activeMode: DownloadMode): string[] {
     if (activeMode === 'single') return singleUrl.trim() ? [singleUrl.trim()] : [];
     if (activeMode === 'torrent') return torrentUrl.trim() ? [torrentUrl.trim()] : [];
-    if (activeMode === 'multi') return parseDownloadUrlLines(multiUrls);
     return parseDownloadUrlLines(bulkUrls);
   }
 
@@ -170,6 +169,7 @@
       return;
     }
     isSubmitting = true;
+    submitStatusLabel = mode === 'bulk' ? 'Resolving links...' : 'Adding...';
     errorMessage = '';
 
     try {
@@ -178,9 +178,6 @@
         emitAdded(mode, result);
       } else if (mode === 'torrent') {
         const result = await addJob(urls[0], { transferKind: 'torrent' });
-        emitAdded(mode, result);
-      } else if (mode === 'multi') {
-        const result = await addJobs(urls);
         emitAdded(mode, result);
       } else {
         const trimmedArchiveName = combineBulk ? normalizeBulkOutputName(archiveName, bulkOutputKind) : undefined;
@@ -192,13 +189,13 @@
       errorMessage = getErrorMessage(error, 'Failed to add downloads.');
     } finally {
       isSubmitting = false;
+      submitStatusLabel = 'Adding...';
     }
   }
 
   const modes: Array<{ id: DownloadMode; label: string; icon: IconComponent }> = [
     { id: 'single', label: 'File', icon: Link2 },
     { id: 'torrent', label: 'Torrent', icon: Magnet },
-    { id: 'multi', label: 'Multi', icon: ListPlus },
     { id: 'bulk', label: 'Bulk', icon: PackagePlus },
   ];
 </script>
@@ -208,14 +205,14 @@
     <header class="flex items-center justify-between border-b border-border bg-header px-5 py-3">
       <div>
         <h2 id="add-download-title" class="text-base font-semibold text-foreground">New Download</h2>
-        <p class="mt-0.5 text-xs text-muted-foreground">Add a file, torrent, link list, or bulk archive.</p>
+        <p class="mt-0.5 text-xs text-muted-foreground">Add a file, torrent, or bulk links.</p>
       </div>
       <button class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground" aria-label="Close new download" title="Close" onclick={onClose}><X size={18} /></button>
     </header>
 
     <form onsubmit={submitForm}>
       <div class="border-b border-border px-5 py-3">
-        <div class="grid grid-cols-4 rounded-md border border-border bg-background p-1">
+        <div class="grid grid-cols-3 rounded-md border border-border bg-background p-1">
           {#each modes as item (item.id)}
             {@const Icon = item.icon}
             <button
@@ -260,14 +257,6 @@
               <input bind:this={inputElement} id="torrent-download-source" required class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" bind:value={torrentUrl} placeholder="magnet:?xt=urn:btih:... or https://example.com/file.torrent" />
             </div>
           </section>
-        {:else if mode === 'multi'}
-          <div>
-            <div class="mb-2 flex items-end justify-between gap-3">
-              <label class="text-xs font-semibold text-foreground" for="multi-download-urls">Download URLs</label>
-              <span class="text-xs text-muted-foreground">Paste one HTTP(S) file link per line.</span>
-            </div>
-            <textarea bind:this={inputElement} id="multi-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={multiUrls} oninput={(event) => multiUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/file-01.zip&#10;https://example.com/file-02.zip"></textarea>
-          </div>
         {:else}
           <div>
             <div class="mb-2 flex items-end justify-between gap-3">
@@ -325,7 +314,7 @@
         <div class="flex justify-end gap-3">
           <button type="button" class="h-9 rounded-md px-4 text-sm font-semibold text-foreground transition-colors hover:bg-muted" onclick={onClose}>Cancel</button>
           <button type="submit" class="h-9 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50" disabled={!canSubmit}>
-            {isSubmitting ? 'Adding...' : submitLabel}
+            {isSubmitting ? submitStatusLabel : submitLabel}
           </button>
         </div>
       </footer>

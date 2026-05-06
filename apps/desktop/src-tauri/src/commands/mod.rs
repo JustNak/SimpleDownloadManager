@@ -104,12 +104,29 @@ impl From<EnqueueResult> for AddJobResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedBatchItem {
+    pub url: String,
+    pub message: String,
+}
+
+impl From<crate::hosters::FailedHosterLink> for FailedBatchItem {
+    fn from(item: crate::hosters::FailedHosterLink) -> Self {
+        Self {
+            url: item.url,
+            message: item.message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddJobsResult {
     pub results: Vec<AddJobResult>,
     pub queued_count: usize,
     pub duplicate_count: usize,
+    pub failed_items: Vec<FailedBatchItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +190,8 @@ pub struct ProgressBatchContext {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_items: Vec<FailedBatchItem>,
 }
 
 #[derive(Debug, Default)]
@@ -473,6 +492,24 @@ pub async fn add_job(
     Ok(result.into())
 }
 
+fn add_jobs_result_from_parts(
+    results: Vec<EnqueueResult>,
+    failed_items: Vec<FailedBatchItem>,
+) -> AddJobsResult {
+    let queued_count = results
+        .iter()
+        .filter(|result| result.status == EnqueueStatus::Queued)
+        .count();
+    let duplicate_count = results.len().saturating_sub(queued_count);
+
+    AddJobsResult {
+        results: results.into_iter().map(Into::into).collect(),
+        queued_count,
+        duplicate_count,
+        failed_items,
+    }
+}
+
 #[tauri::command]
 pub async fn add_jobs(
     app: AppHandle,
@@ -485,25 +522,35 @@ pub async fn add_jobs(
 ) -> Result<AddJobsResult, String> {
     let start_paused = start_paused.unwrap_or(false);
     let bulk_output_kind = bulk_output_kind.unwrap_or_default();
+    let mut failed_items = Vec::new();
     let results = if resolve_hoster_links.unwrap_or(false) {
-        let entries = crate::hosters::resolve_hoster_links(urls)
+        let batch = crate::hosters::resolve_hoster_links_partial(urls)
             .await
-            .map_err(|error| error.message)?
+            .map_err(|error| error.message)?;
+        failed_items = batch.failed_links.into_iter().map(Into::into).collect();
+        let entries = batch
+            .links
             .into_iter()
             .map(|link| BatchDownloadEntry {
                 url: link.url,
                 filename_hint: link.filename_hint,
             })
-            .collect();
-        state
-            .enqueue_download_entries_with_bulk_options(
-                entries,
-                None,
-                bulk_archive_name,
-                start_paused,
-                bulk_output_kind,
-            )
-            .await
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            Vec::new()
+        } else {
+            let archive_name = bulk_archive_name.filter(|_| entries.len() > 1);
+            state
+                .enqueue_download_entries_with_bulk_options(
+                    entries,
+                    None,
+                    archive_name,
+                    start_paused,
+                    bulk_output_kind,
+                )
+                .await
+                .map_err(|error| error.message)?
+        }
     } else {
         state
             .enqueue_downloads_with_bulk_options(
@@ -514,8 +561,8 @@ pub async fn add_jobs(
                 bulk_output_kind,
             )
             .await
-    }
-    .map_err(|error| error.message)?;
+            .map_err(|error| error.message)?
+    };
 
     if let Some(result) = results.last() {
         emit_snapshot(&app, &result.snapshot);
@@ -529,17 +576,7 @@ pub async fn add_jobs(
         schedule_downloads(app, state.inner().clone());
     }
 
-    let queued_count = results
-        .iter()
-        .filter(|result| result.status == EnqueueStatus::Queued)
-        .count();
-    let duplicate_count = results.len().saturating_sub(queued_count);
-
-    Ok(AddJobsResult {
-        results: results.into_iter().map(Into::into).collect(),
-        queued_count,
-        duplicate_count,
-    })
+    Ok(add_jobs_result_from_parts(results, failed_items))
 }
 
 #[tauri::command]
@@ -565,6 +602,44 @@ pub async fn pause_job(
 }
 
 #[tauri::command]
+pub async fn pause_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let ids = normalized_job_ids(ids);
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut wait_for_release_ids = Vec::new();
+    for id in &ids {
+        if state
+            .torrent_pause_requires_worker_release(id)
+            .await
+            .map_err(|error| error.message)?
+        {
+            wait_for_release_ids.push(id.clone());
+        }
+    }
+
+    let mut snapshot = None;
+    for id in &ids {
+        snapshot = Some(state.pause_job(id).await.map_err(|error| error.message)?);
+    }
+    emit_optional_batch_snapshot(&app, state.inner().clone(), snapshot);
+
+    for id in wait_for_release_ids {
+        state
+            .wait_for_torrent_removal_release(&id)
+            .await
+            .map_err(|error| error.message)?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn resume_job(
     app: AppHandle,
     state: State<'_, SharedState>,
@@ -573,6 +648,25 @@ pub async fn resume_job(
     let snapshot = state.resume_job(&id).await.map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let ids = normalized_job_ids(ids);
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut snapshot = None;
+    for id in &ids {
+        snapshot = Some(state.resume_job(id).await.map_err(|error| error.message)?);
+    }
+    emit_optional_batch_snapshot(&app, state.inner().clone(), snapshot);
     Ok(())
 }
 
@@ -607,6 +701,25 @@ pub async fn cancel_job(
     let snapshot = state.cancel_job(&id).await.map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let ids = normalized_job_ids(ids);
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut snapshot = None;
+    for id in &ids {
+        snapshot = Some(state.cancel_job(id).await.map_err(|error| error.message)?);
+    }
+    emit_optional_batch_snapshot(&app, state.inner().clone(), snapshot);
     Ok(())
 }
 
@@ -702,6 +815,54 @@ pub async fn delete_job(
     emit_snapshot(&app, &snapshot);
     schedule_downloads(app, state.inner().clone());
     Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    ids: Vec<String>,
+    delete_from_disk: bool,
+) -> Result<(), String> {
+    let ids = normalized_job_ids(ids);
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    for id in &ids {
+        prepare_torrent_removal(&state, id).await?;
+    }
+
+    let mut snapshot = None;
+    for id in &ids {
+        snapshot = Some(
+            state
+                .delete_job(id, delete_from_disk)
+                .await
+                .map_err(|error| error.message)?,
+        );
+    }
+    emit_optional_batch_snapshot(&app, state.inner().clone(), snapshot);
+    Ok(())
+}
+
+fn normalized_job_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+        .collect()
+}
+
+fn emit_optional_batch_snapshot(
+    app: &AppHandle,
+    state: SharedState,
+    snapshot: Option<DesktopSnapshot>,
+) {
+    if let Some(snapshot) = snapshot {
+        emit_snapshot(app, &snapshot);
+        schedule_downloads(app.clone(), state);
+    }
 }
 
 async fn prepare_torrent_removal(state: &State<'_, SharedState>, id: &str) -> Result<(), String> {
@@ -1580,14 +1741,54 @@ mod tests {
             batch_id: "batch_123".into(),
             kind: super::ProgressBatchKind::Multi,
             job_ids: vec!["job_1".into(), "job_2".into()],
-            title: "Multi-download progress".into(),
+            title: "Bulk download progress".into(),
             archive_name: None,
+            failed_items: vec![super::FailedBatchItem {
+                url: "https://datanodes.to/61nni6me5p0n/protected.rar".into(),
+                message: "DataNodes captcha-protected downloads are not supported.".into(),
+            }],
         };
 
         registry.store(context.clone());
 
         assert_eq!(registry.get("batch_123"), Some(context));
         assert_eq!(registry.get("missing"), None);
+    }
+
+    #[test]
+    fn add_jobs_result_carries_failed_items_without_fake_job_ids() {
+        let result = super::add_jobs_result_from_parts(
+            Vec::new(),
+            vec![super::FailedBatchItem {
+                url: "https://datanodes.to/61nni6me5p0n/protected.rar".into(),
+                message: "DataNodes captcha-protected downloads are not supported.".into(),
+            }],
+        );
+
+        assert_eq!(result.queued_count, 0);
+        assert_eq!(result.duplicate_count, 0);
+        assert!(result.results.is_empty());
+        assert_eq!(result.failed_items.len(), 1);
+        assert_eq!(
+            result.failed_items[0].url,
+            "https://datanodes.to/61nni6me5p0n/protected.rar"
+        );
+    }
+
+    #[test]
+    fn scoped_batch_job_commands_are_registered_for_single_ipc_actions() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        for command in ["pause_jobs", "resume_jobs", "cancel_jobs", "delete_jobs"] {
+            assert!(
+                production_source.contains(&format!("pub async fn {command}(")),
+                "{command} should be exposed as a scoped batch command"
+            );
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@ Sources:
 MVP rules:
 
 - accept only `http`, `https`, and `magnet` where the request surface supports torrents
-- keep multi-download and bulk archive input HTTP(S)-only
+- keep bulk link and bulk archive input HTTP(S)-only
 - reject local file paths
 - reject browser-internal URLs
 - do not accept save path from the extension

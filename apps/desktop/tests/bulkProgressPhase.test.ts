@@ -132,3 +132,31 @@ assert.equal(
   'finalizing',
   'combining should keep the popup in the no-action finalizing state',
 );
+
+assert.equal(
+  deriveBulkUiState([
+    {
+      ...baseJob,
+      state: 'failed',
+      progress: 35,
+      downloadedBytes: 35,
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bulk-download.zip',
+        archiveStatus: 'pending',
+      },
+    },
+    {
+      ...baseJob,
+      id: 'job_2',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bulk-download.zip',
+        archiveStatus: 'pending',
+      },
+    },
+  ]),
+  'downloading',
+  'failed member downloads should keep the bulk popup in the recoverable download state',
+);

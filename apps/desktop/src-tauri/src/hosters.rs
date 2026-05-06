@@ -1,13 +1,21 @@
+use futures_util::{stream, StreamExt};
 use percent_encoding::percent_decode_str;
+use reqwest::header::{COOKIE, REFERER};
 use reqwest::redirect::Policy;
 use reqwest::Client;
+use serde::Deserialize;
 use std::time::Duration;
 use url::Url;
 
 const FUCKINGFAST_HOST: &str = "fuckingfast.co";
 const FUCKINGFAST_DIRECT_HOST: &str = "dl.fuckingfast.co";
+const DATANODES_HOST: &str = "datanodes.to";
+const DATANODES_DOWNLOAD_URL: &str = "https://datanodes.to/download";
+const DATANODES_DIRECT_SUFFIX: &str = ".datanodes.to";
 const HOSTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HOSTER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const DATANODES_MAX_WAIT_SECONDS: u64 = 60;
+const HOSTER_RESOLUTION_CONCURRENCY: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHosterLink {
@@ -21,9 +29,56 @@ pub struct HosterResolutionError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedHosterLink {
+    pub url: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HosterResolutionBatch {
+    pub links: Vec<ResolvedHosterLink>,
+    pub failed_links: Vec<FailedHosterLink>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HosterKind {
+    FuckingFast,
+    Datanodes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DatanodesDownloadPage {
+    code: String,
+    referer: String,
+    rand: String,
+    free_method: String,
+    premium_method: String,
+    countdown_secs: u64,
+    filename_hint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DatanodesDirectLinkResponse {
+    url: Option<String>,
+    error: Option<String>,
+}
+
+type IndexedResolvedHosterLink = Result<(usize, ResolvedHosterLink), (usize, FailedHosterLink)>;
+
 pub async fn resolve_hoster_links(
     urls: Vec<String>,
 ) -> Result<Vec<ResolvedHosterLink>, HosterResolutionError> {
+    let batch = resolve_hoster_links_partial(urls).await?;
+    if let Some(failed) = batch.failed_links.into_iter().next() {
+        return Err(resolution_error(failed.message));
+    }
+    Ok(batch.links)
+}
+
+pub async fn resolve_hoster_links_partial(
+    urls: Vec<String>,
+) -> Result<HosterResolutionBatch, HosterResolutionError> {
     let client = Client::builder()
         .connect_timeout(HOSTER_CONNECT_TIMEOUT)
         .read_timeout(HOSTER_READ_TIMEOUT)
@@ -32,34 +87,194 @@ pub async fn resolve_hoster_links(
         .build()
         .map_err(|error| resolution_error(format!("Could not create hoster resolver: {error}")))?;
 
-    let mut resolved = Vec::with_capacity(urls.len());
-    for url in urls {
-        if !is_fuckingfast_page_url(&url) {
-            resolved.push(ResolvedHosterLink {
-                url: url.trim().to_string(),
-                filename_hint: None,
-            });
-            continue;
+    let expected_len = urls.len();
+    let indexed = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
+        let client = client.clone();
+        async move {
+            let failed_url = url.trim().to_string();
+            resolve_hoster_link(&client, url)
+                .await
+                .map(|link| (index, link))
+                .map_err(|error| {
+                    (
+                        index,
+                        FailedHosterLink {
+                            url: failed_url,
+                            message: error.message,
+                        },
+                    )
+                })
         }
+    }))
+    .buffer_unordered(HOSTER_RESOLUTION_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
 
-        let response = client.get(url.trim()).send().await.map_err(|error| {
+    ordered_resolved_hoster_batch(indexed, expected_len)
+}
+
+async fn resolve_hoster_link(
+    client: &Client,
+    url: String,
+) -> Result<ResolvedHosterLink, HosterResolutionError> {
+    let trimmed_url = url.trim().to_string();
+    match hoster_kind_for_url(&trimmed_url) {
+        Some(HosterKind::FuckingFast) => resolve_fuckingfast_link(client, &trimmed_url).await,
+        Some(HosterKind::Datanodes) => resolve_datanodes_link(client, &trimmed_url).await,
+        None => Ok(ResolvedHosterLink {
+            url: trimmed_url,
+            filename_hint: None,
+        }),
+    }
+}
+
+async fn resolve_fuckingfast_link(
+    client: &Client,
+    url: &str,
+) -> Result<ResolvedHosterLink, HosterResolutionError> {
+    let response =
+        client.get(url).send().await.map_err(|error| {
             resolution_error(format!("Could not load FuckingFast page: {error}"))
         })?;
 
-        if !response.status().is_success() {
-            return Err(resolution_error(format!(
-                "Could not load FuckingFast page: HTTP {}.",
-                response.status()
-            )));
-        }
-
-        let html = response.text().await.map_err(|error| {
-            resolution_error(format!("Could not read FuckingFast page: {error}"))
-        })?;
-        resolved.push(resolve_hoster_link_from_html(&url, &html)?);
+    if !response.status().is_success() {
+        return Err(resolution_error(format!(
+            "Could not load FuckingFast page: HTTP {}.",
+            response.status()
+        )));
     }
 
-    Ok(resolved)
+    let html = response
+        .text()
+        .await
+        .map_err(|error| resolution_error(format!("Could not read FuckingFast page: {error}")))?;
+    resolve_hoster_link_from_html(url, &html)
+}
+
+async fn resolve_datanodes_link(
+    client: &Client,
+    original_url: &str,
+) -> Result<ResolvedHosterLink, HosterResolutionError> {
+    let file_code = datanodes_file_code_from_url(original_url).ok_or_else(|| {
+        resolution_error("DataNodes URL does not contain a supported file code.".into())
+    })?;
+    let cookie = format!("file_code={file_code}");
+    let response = client
+        .get(DATANODES_DOWNLOAD_URL)
+        .header(COOKIE, cookie.clone())
+        .send()
+        .await
+        .map_err(|error| resolution_error(format!("Could not load DataNodes page: {error}")))?;
+
+    if !response.status().is_success() {
+        return Err(resolution_error(format!(
+            "Could not load DataNodes page: HTTP {}.",
+            response.status()
+        )));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|error| resolution_error(format!("Could not read DataNodes page: {error}")))?;
+    let page = parse_datanodes_standard_download_page(&html)?;
+    if page.code != file_code {
+        return Err(resolution_error(
+            "DataNodes page returned a different file code than the requested link.".into(),
+        ));
+    }
+
+    let wait_seconds = page.countdown_secs.min(DATANODES_MAX_WAIT_SECONDS);
+    if wait_seconds > 0 {
+        tokio::time::sleep(Duration::from_secs(wait_seconds)).await;
+    }
+
+    let form = [
+        ("op", "download2".to_string()),
+        ("id", page.code.clone()),
+        ("rand", page.rand.clone()),
+        ("referer", page.referer.clone()),
+        ("method_free", page.free_method.clone()),
+        ("method_premium", page.premium_method.clone()),
+        ("g_captch__a", "1".to_string()),
+    ];
+    let response = client
+        .post(DATANODES_DOWNLOAD_URL)
+        .header(COOKIE, cookie)
+        .header(REFERER, page.referer.as_str())
+        .form(&form)
+        .send()
+        .await
+        .map_err(|error| {
+            resolution_error(format!(
+                "Could not request DataNodes standard download: {error}"
+            ))
+        })?;
+
+    if !response.status().is_success() {
+        return Err(resolution_error(format!(
+            "Could not request DataNodes standard download: HTTP {}.",
+            response.status()
+        )));
+    }
+
+    let json = response.text().await.map_err(|error| {
+        resolution_error(format!(
+            "Could not read DataNodes standard download response: {error}"
+        ))
+    })?;
+    let direct_url = extract_datanodes_direct_url_from_json(&json)?;
+
+    Ok(ResolvedHosterLink {
+        url: direct_url,
+        filename_hint: datanodes_filename_hint_from_url(original_url).or(page.filename_hint),
+    })
+}
+
+#[cfg(test)]
+fn ordered_resolved_hoster_links(
+    indexed: Vec<IndexedResolvedHosterLink>,
+    expected_len: usize,
+) -> Result<Vec<ResolvedHosterLink>, HosterResolutionError> {
+    let batch = ordered_resolved_hoster_batch(indexed, expected_len)?;
+    if let Some(failed) = batch.failed_links.into_iter().next() {
+        return Err(resolution_error(failed.message));
+    }
+    Ok(batch.links)
+}
+
+fn ordered_resolved_hoster_batch(
+    mut indexed: Vec<IndexedResolvedHosterLink>,
+    expected_len: usize,
+) -> Result<HosterResolutionBatch, HosterResolutionError> {
+    indexed.sort_by_key(|result| match result {
+        Ok((index, _)) | Err((index, _)) => *index,
+    });
+
+    if indexed.len() != expected_len {
+        return Err(resolution_error(
+            "Hoster resolver returned incomplete results.".into(),
+        ));
+    }
+
+    let mut links = Vec::with_capacity(expected_len);
+    let mut failed_links = Vec::new();
+    for (expected_index, result) in indexed.into_iter().enumerate() {
+        match result {
+            Ok((index, link)) if index == expected_index => links.push(link),
+            Err((index, failed)) if index == expected_index => failed_links.push(failed),
+            Ok(_) | Err(_) => {
+                return Err(resolution_error(
+                    "Hoster resolver returned results with inconsistent indexes.".into(),
+                ));
+            }
+        }
+    }
+
+    Ok(HosterResolutionBatch {
+        links,
+        failed_links,
+    })
 }
 
 pub fn resolve_hoster_link_from_html(
@@ -95,6 +310,88 @@ pub fn is_fuckingfast_page_url(raw_url: &str) -> bool {
         parsed.host_str().map(str::to_ascii_lowercase).as_deref(),
         Some(FUCKINGFAST_HOST) | Some("www.fuckingfast.co")
     )
+}
+
+pub fn is_datanodes_page_url(raw_url: &str) -> bool {
+    datanodes_file_code_from_url(raw_url).is_some()
+}
+
+fn hoster_kind_for_url(raw_url: &str) -> Option<HosterKind> {
+    if is_fuckingfast_page_url(raw_url) {
+        return Some(HosterKind::FuckingFast);
+    }
+
+    if is_datanodes_page_url(raw_url) {
+        return Some(HosterKind::Datanodes);
+    }
+
+    None
+}
+
+fn datanodes_file_code_from_url(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url.trim()).ok()?;
+
+    if !matches!(parsed.scheme(), "http" | "https") || !is_datanodes_host(parsed.host_str()) {
+        return None;
+    }
+
+    let segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>();
+    let code = segments.first()?.trim();
+    is_datanodes_file_code(code).then(|| code.to_string())
+}
+
+fn datanodes_filename_hint_from_url(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url.trim()).ok()?;
+    let segments = parsed
+        .path_segments()?
+        .filter(|segment| !segment.trim().is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 2 || !is_datanodes_file_code(segments[0]) {
+        return None;
+    }
+
+    non_empty_filename_hint(&decode_html_entities(
+        &percent_decode_str(segments.last()?).decode_utf8_lossy(),
+    ))
+}
+
+fn is_datanodes_host(host: Option<&str>) -> bool {
+    matches!(
+        host.map(str::to_ascii_lowercase).as_deref(),
+        Some(DATANODES_HOST) | Some("www.datanodes.to")
+    )
+}
+
+fn is_datanodes_file_code(value: &str) -> bool {
+    if !(6..=32).contains(&value.len()) {
+        return false;
+    }
+
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "download"
+            | "pages"
+            | "api"
+            | "check_files"
+            | "premium"
+            | "login"
+            | "register"
+            | "contact"
+            | "links"
+            | "account"
+            | "images"
+            | "theme_2023"
+            | "cdn-cgi"
+    ) {
+        return false;
+    }
+
+    value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
 }
 
 fn extract_fuckingfast_direct_url(html: &str) -> Result<String, HosterResolutionError> {
@@ -179,6 +476,147 @@ fn extract_any_fuckingfast_direct_url(html: &str) -> Option<String> {
     }
 
     None
+}
+
+fn parse_datanodes_standard_download_page(
+    html: &str,
+) -> Result<DatanodesDownloadPage, HosterResolutionError> {
+    let tag = extract_html_tag(html, "download-countdown").ok_or_else(|| {
+        resolution_error("Could not find the DataNodes standard download form.".into())
+    })?;
+    let code = datanodes_attribute_value(tag, &["code"]).ok_or_else(|| {
+        resolution_error("DataNodes standard download form is missing the file code.".into())
+    })?;
+    let free_method = datanodes_attribute_value(tag, &["free-method"]).ok_or_else(|| {
+        resolution_error(
+            "DataNodes standard download form is missing the free download method.".into(),
+        )
+    })?;
+    if free_method.trim().is_empty() {
+        return Err(resolution_error(
+            "DataNodes page did not expose a standard free download method.".into(),
+        ));
+    }
+
+    if datanodes_bool_attribute(tag, &[":has-password", "has-password"]) {
+        return Err(resolution_error(
+            "DataNodes password-protected downloads are not supported.".into(),
+        ));
+    }
+
+    if datanodes_bool_attribute(tag, &[":has-captcha", "has-captcha"]) {
+        return Err(resolution_error(
+            "DataNodes captcha-protected downloads are not supported.".into(),
+        ));
+    }
+
+    let countdown_secs = datanodes_attribute_value(tag, &[":countdown", "countdown"])
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let referer = datanodes_attribute_value(tag, &["referer"])
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DATANODES_DOWNLOAD_URL.to_string());
+    let rand = datanodes_attribute_value(tag, &["rand"]).unwrap_or_default();
+    let premium_method = datanodes_attribute_value(tag, &["premium-method"]).unwrap_or_default();
+    let filename_hint = datanodes_attribute_value(tag, &["name"])
+        .and_then(|value| non_empty_filename_hint(&decode_html_entities(&value)))
+        .or_else(|| datanodes_filename_hint_from_scan_card(html));
+
+    Ok(DatanodesDownloadPage {
+        code,
+        referer,
+        rand,
+        free_method,
+        premium_method,
+        countdown_secs,
+        filename_hint,
+    })
+}
+
+fn extract_html_tag<'a>(html: &'a str, tag_name: &str) -> Option<&'a str> {
+    let lower = html.to_ascii_lowercase();
+    let open = format!("<{}", tag_name.to_ascii_lowercase());
+    let start = lower.find(&open)?;
+    let end = lower[start..].find('>')? + start + 1;
+    Some(&html[start..end])
+}
+
+fn datanodes_attribute_value(tag: &str, attributes: &[&str]) -> Option<String> {
+    attributes.iter().find_map(|attribute| {
+        extract_attribute_value(tag, attribute).map(|value| decode_html_entities(&value))
+    })
+}
+
+fn datanodes_bool_attribute(tag: &str, attributes: &[&str]) -> bool {
+    datanodes_attribute_value(tag, attributes)
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "true" | "1"))
+        .unwrap_or(false)
+}
+
+fn datanodes_filename_hint_from_scan_card(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let attribute_index = lower.find("data-scan-file")?;
+    let tag_start = lower[..attribute_index].rfind('<')?;
+    let tag_end = lower[attribute_index..].find('>')? + attribute_index + 1;
+    extract_attribute_value(&html[tag_start..tag_end], "data-scan-file")
+        .and_then(|value| non_empty_filename_hint(&decode_html_entities(&value)))
+}
+
+fn extract_datanodes_direct_url_from_json(json: &str) -> Result<String, HosterResolutionError> {
+    let response = serde_json::from_str::<DatanodesDirectLinkResponse>(json).map_err(|error| {
+        resolution_error(format!(
+            "Could not parse DataNodes standard download response: {error}"
+        ))
+    })?;
+
+    if let Some(error) = response
+        .error
+        .and_then(|value| non_empty_filename_hint(&value))
+    {
+        return Err(resolution_error(format!(
+            "DataNodes rejected the standard download request: {error}"
+        )));
+    }
+
+    let encoded_url = response.url.ok_or_else(|| {
+        resolution_error(
+            "DataNodes standard download response did not include a direct URL.".into(),
+        )
+    })?;
+    let direct_url = decode_html_entities(&percent_decode_str(&encoded_url).decode_utf8_lossy());
+    if validate_datanodes_direct_url(&direct_url) {
+        Ok(direct_url)
+    } else {
+        Err(resolution_error(
+            "DataNodes standard download response pointed at an unexpected download host.".into(),
+        ))
+    }
+}
+
+fn validate_datanodes_direct_url(raw_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(raw_url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let Some(node_name) = host.strip_suffix(DATANODES_DIRECT_SUFFIX) else {
+        return false;
+    };
+    let Some(node_number) = node_name.strip_prefix("node") else {
+        return false;
+    };
+
+    !node_number.is_empty()
+        && node_number
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        && parsed.path().starts_with("/d/")
+        && parsed.path().len() > "/d/".len()
 }
 
 fn validate_fuckingfast_direct_url(raw_url: &str) -> bool {
@@ -346,9 +784,8 @@ mod tests {
             </html>
         "#;
 
-        let resolved =
-            resolve_hoster_link_from_html("https://fuckingfast.co/ecw0lw398okf", html)
-                .expect("fuckingfast page should resolve");
+        let resolved = resolve_hoster_link_from_html("https://fuckingfast.co/ecw0lw398okf", html)
+            .expect("fuckingfast page should resolve");
 
         assert_eq!(
             resolved.url,
@@ -362,11 +799,217 @@ mod tests {
 
     #[test]
     fn hoster_resolver_leaves_unsupported_hosts_unchanged() {
-        let resolved = resolve_hoster_link_from_html("https://example.com/file.zip", "<html></html>")
-            .expect("unsupported hosts should pass through");
+        let resolved =
+            resolve_hoster_link_from_html("https://example.com/file.zip", "<html></html>")
+                .expect("unsupported hosts should pass through");
 
         assert_eq!(resolved.url, "https://example.com/file.zip");
         assert_eq!(resolved.filename_hint, None);
+    }
+
+    #[test]
+    fn datanodes_resolver_identifies_public_file_urls_only() {
+        assert!(is_datanodes_page_url(
+            "https://datanodes.to/61nni6me5p0n/Neon-White.rar"
+        ));
+        assert!(is_datanodes_page_url(
+            "https://www.datanodes.to/61nni6me5p0n"
+        ));
+
+        for unsupported in [
+            "https://datanodes.to/download",
+            "https://datanodes.to/pages/api",
+            "https://datanodes.to/api/file/info",
+            "https://datanodes.to/check_files",
+            "https://example.com/61nni6me5p0n/Neon-White.rar",
+        ] {
+            assert!(
+                !is_datanodes_page_url(unsupported),
+                "{unsupported} should not be treated as a DataNodes file URL"
+            );
+        }
+    }
+
+    #[test]
+    fn datanodes_resolver_extracts_file_code_and_filename_hint_from_url() {
+        assert_eq!(
+            datanodes_file_code_from_url("https://datanodes.to/61nni6me5p0n/Neon-White.rar")
+                .as_deref(),
+            Some("61nni6me5p0n")
+        );
+        assert_eq!(
+            datanodes_filename_hint_from_url("https://datanodes.to/61nni6me5p0n/Neon%20White.rar")
+                .as_deref(),
+            Some("Neon White.rar")
+        );
+        assert_eq!(
+            datanodes_filename_hint_from_url("https://datanodes.to/61nni6me5p0n"),
+            None
+        );
+    }
+
+    #[test]
+    fn datanodes_resolver_parses_standard_download_page_form() {
+        let html = r#"
+            <download-countdown :countdown="5"
+                code="61nni6me5p0n" referer="https://datanodes.to/download" rand="rand-token"
+                free-method="Free Download &gt;&gt;" premium-method=""
+                :has-password="false" :has-captcha="false"
+                :has-countdown="true"
+                name="Neon-White.rar"></download-countdown>
+        "#;
+
+        let page = parse_datanodes_standard_download_page(html)
+            .expect("standard DataNodes page should parse");
+
+        assert_eq!(page.code, "61nni6me5p0n");
+        assert_eq!(page.countdown_secs, 5);
+        assert_eq!(page.referer, "https://datanodes.to/download");
+        assert_eq!(page.rand, "rand-token");
+        assert_eq!(page.free_method, "Free Download >>");
+        assert_eq!(page.premium_method, "");
+        assert_eq!(page.filename_hint.as_deref(), Some("Neon-White.rar"));
+    }
+
+    #[test]
+    fn datanodes_resolver_rejects_captcha_and_password_pages() {
+        let captcha = r#"
+            <download-countdown :countdown="5" code="61nni6me5p0n"
+                referer="https://datanodes.to/download" rand=""
+                free-method="Free Download &gt;&gt;" premium-method=""
+                :has-password="false" :has-captcha="true"></download-countdown>
+        "#;
+        let password = r#"
+            <download-countdown :countdown="5" code="61nni6me5p0n"
+                referer="https://datanodes.to/download" rand=""
+                free-method="Free Download &gt;&gt;" premium-method=""
+                :has-password="true" :has-captcha="false"></download-countdown>
+        "#;
+
+        assert!(parse_datanodes_standard_download_page(captcha).is_err());
+        assert!(parse_datanodes_standard_download_page(password).is_err());
+    }
+
+    #[test]
+    fn datanodes_resolver_decodes_and_validates_direct_link_json() {
+        let json = r#"{"url":"https%3A%2F%2Fnode41.datanodes.to%3A8443%2Fd%2Ftoken_123%2FNeon-White.rar"}"#;
+
+        let direct = extract_datanodes_direct_url_from_json(json)
+            .expect("DataNodes direct URL JSON should parse");
+
+        assert_eq!(
+            direct,
+            "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar"
+        );
+        assert!(validate_datanodes_direct_url(&direct));
+    }
+
+    #[test]
+    fn datanodes_resolver_rejects_invalid_direct_link_json() {
+        for json in [
+            r#"{"url":"https%3A%2F%2Fevil.example%2Fd%2Ftoken%2Ffile.rar"}"#,
+            r#"{"url":"https%3A%2F%2Fnode41.datanodes.to%3A8443%2Fnot-download%2Ffile.rar"}"#,
+            r#"{"error":"Premium only"}"#,
+        ] {
+            assert!(
+                extract_datanodes_direct_url_from_json(json).is_err(),
+                "{json} should not resolve to a direct DataNodes URL"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_hoster_links_are_reordered_after_parallel_resolution() {
+        let resolved = ordered_resolved_hoster_links(
+            vec![
+                Ok((
+                    2,
+                    ResolvedHosterLink {
+                        url: "https://node41.datanodes.to:8443/d/token/file.rar".into(),
+                        filename_hint: Some("file.rar".into()),
+                    },
+                )),
+                Ok((
+                    0,
+                    ResolvedHosterLink {
+                        url: "https://example.com/file.zip".into(),
+                        filename_hint: None,
+                    },
+                )),
+                Ok((
+                    1,
+                    ResolvedHosterLink {
+                        url: "https://dl.fuckingfast.co/dl/direct-token_123".into(),
+                        filename_hint: Some("archive.part01.rar".into()),
+                    },
+                )),
+            ],
+            3,
+        )
+        .expect("ordered links should be restored by input index");
+
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://example.com/file.zip",
+                "https://dl.fuckingfast.co/dl/direct-token_123",
+                "https://node41.datanodes.to:8443/d/token/file.rar",
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_hoster_resolution_preserves_success_and_failure_order() {
+        let batch = ordered_resolved_hoster_batch(
+            vec![
+                Ok((
+                    2,
+                    ResolvedHosterLink {
+                        url: "https://node41.datanodes.to:8443/d/token/file.rar".into(),
+                        filename_hint: Some("file.rar".into()),
+                    },
+                )),
+                Err((
+                    1,
+                    FailedHosterLink {
+                        url: "https://datanodes.to/61nni6me5p0n/protected.rar".into(),
+                        message: "DataNodes captcha-protected downloads are not supported.".into(),
+                    },
+                )),
+                Ok((
+                    0,
+                    ResolvedHosterLink {
+                        url: "https://example.com/file.zip".into(),
+                        filename_hint: None,
+                    },
+                )),
+            ],
+            3,
+        )
+        .expect("partial batch should preserve input order within successes and failures");
+
+        assert_eq!(
+            batch
+                .links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://example.com/file.zip",
+                "https://node41.datanodes.to:8443/d/token/file.rar",
+            ]
+        );
+        assert_eq!(
+            batch
+                .failed_links
+                .iter()
+                .map(|item| item.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://datanodes.to/61nni6me5p0n/protected.rar"]
+        );
     }
 
     #[test]

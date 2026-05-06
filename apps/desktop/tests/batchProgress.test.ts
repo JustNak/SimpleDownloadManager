@@ -319,11 +319,27 @@ const singleDuplicate: AddJobResult = { jobId: 'job_1', filename: 'file.zip', st
 const multiResult: AddJobsResult = {
   queuedCount: 2,
   duplicateCount: 1,
+  failedItems: [],
   results: [
     { jobId: 'job_1', filename: 'one.zip', status: 'queued' },
     { jobId: 'job_2', filename: 'two.zip', status: 'duplicate_existing_job' },
     { jobId: 'job_3', filename: 'three.zip', status: 'queued' },
   ],
+};
+const failedOnlyBulkResult: AddJobsResult = {
+  queuedCount: 0,
+  duplicateCount: 0,
+  results: [],
+  failedItems: [
+    {
+      url: 'https://datanodes.to/61nni6me5p0n/Game.part01.rar',
+      message: 'DataNodes captcha-protected downloads are not supported.',
+    },
+  ],
+};
+const partialBulkResult: AddJobsResult = {
+  ...multiResult,
+  failedItems: failedOnlyBulkResult.failedItems,
 };
 
 assert.deepEqual(
@@ -345,20 +361,34 @@ assert.equal(
 );
 
 assert.deepEqual(
-  progressPopupIntentForSubmission('multi', multiResult),
+  progressPopupIntentForSubmission('bulk', multiResult),
   {
     type: 'batch',
     context: {
       kind: 'multi',
       jobIds: ['job_1', 'job_3'],
-      title: 'Multi-download progress',
+      title: 'Bulk download progress',
     },
   },
-  'multi downloads should open one batch popup for queued jobs only',
+  'unchecked bulk downloads should open one plain batch popup for queued jobs only',
 );
 
 assert.deepEqual(
-  progressPopupIntentForSubmission('bulk', multiResult, 'bundle.zip'),
+  progressPopupIntentForSubmission('bulk', failedOnlyBulkResult),
+  {
+    type: 'batch',
+    context: {
+      kind: 'multi',
+      jobIds: [],
+      title: 'Bulk download progress',
+      failedItems: failedOnlyBulkResult.failedItems,
+    },
+  },
+  'bulk resolver failures should still open a batch popup without fake queued job ids',
+);
+
+assert.deepEqual(
+  progressPopupIntentForSubmission('bulk', partialBulkResult, 'bundle.zip'),
   {
     type: 'batch',
     context: {
@@ -366,7 +396,8 @@ assert.deepEqual(
       jobIds: ['job_1', 'job_3'],
       title: 'Bulk download progress',
       archiveName: 'bundle.zip',
+      failedItems: failedOnlyBulkResult.failedItems,
     },
   },
-  'bulk downloads should open one bulk popup with the archive name',
+  'partial bulk downloads should preserve queued jobs, archive context, and resolver failures',
 );

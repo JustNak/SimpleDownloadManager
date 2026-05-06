@@ -1,7 +1,9 @@
-import type { AddJobResult, AddJobsResult } from './backend';
+import type { AddJobResult, AddJobsResult, FailedBatchItem } from './backend';
 import type { DownloadJob } from './types';
 
-export type DownloadMode = 'single' | 'torrent' | 'multi' | 'bulk';
+export type { FailedBatchItem };
+
+export type DownloadMode = 'single' | 'torrent' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
 export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed';
 export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed';
@@ -24,6 +26,7 @@ export interface ProgressBatchContext {
   jobIds: string[];
   title: string;
   archiveName?: string;
+  failedItems?: FailedBatchItem[];
 }
 
 export type ProgressPopupIntent =
@@ -72,7 +75,7 @@ export function calculateBatchProgress(jobs: DownloadJob[]): BatchProgressSummar
 
 export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   const archiveJobs = jobs.filter((job) => job.bulkArchive);
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'failed' || job.state === 'failed')) {
+  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'failed')) {
     return 'failed';
   }
   if (isUntouchedBulkReviewGate(jobs)) {
@@ -179,17 +182,19 @@ export function progressPopupIntentForSubmission(
   const jobIds = batchResult.results
     .filter((item) => item.status === 'queued')
     .map((item) => item.jobId);
+  const failedItems = batchResult.failedItems ?? [];
 
-  if (jobIds.length === 0) return null;
+  if (jobIds.length === 0 && failedItems.length === 0) return null;
 
-  const isBulkArchive = mode === 'bulk' && Boolean(archiveName);
+  const isBulkArchive = Boolean(archiveName) && jobIds.length > 1;
   return {
     type: 'batch',
     context: {
       kind: isBulkArchive ? 'bulk' : 'multi',
       jobIds,
-      title: isBulkArchive ? 'Bulk download progress' : 'Multi-download progress',
+      title: 'Bulk download progress',
       ...(isBulkArchive && archiveName ? { archiveName } : {}),
+      ...(failedItems.length > 0 ? { failedItems } : {}),
     },
   };
 }

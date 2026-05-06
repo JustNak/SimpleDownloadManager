@@ -1,15 +1,16 @@
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { Archive, CheckCircle2, Download, FolderOpen, Pause, Play, X } from '@lucide/svelte';
+  import { AlertTriangle, Archive, CheckCircle2, Download, FolderOpen, Pause, Play, RotateCcw, X } from '@lucide/svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { JobState, type DownloadJob, type Settings } from './types';
   import {
-    cancelJob,
+    cancelJobs,
     deleteJobs,
     getBatchProgressSnapshot,
-    pauseJob,
+    pauseJobs,
     revealBulkArchive,
-    resumeJob,
+    resumeJobs,
+    retryBulkArchive,
     subscribeToBatchProgressSnapshot,
     type BatchProgressSnapshot,
   } from './backend';
@@ -24,6 +25,7 @@
     type BulkFinalizingStepId,
     type BulkPhase,
     type BulkUiState,
+    type FailedBatchItem,
     type ProgressBatchContext,
   } from './batchProgress';
   import PopupTitlebar from './PopupTitlebar.svelte';
@@ -57,6 +59,7 @@
 
   const summary = $derived(calculateBatchProgress(jobs));
   const progress = $derived(summary.progress);
+  const failedItems = $derived(context?.failedItems ?? []);
   const bulkPhase = $derived(context?.kind === 'bulk' ? deriveBulkPhase(jobs) : null);
   const rawBulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
   const bulkUiState = $derived(context?.kind === 'bulk'
@@ -70,6 +73,7 @@
     job.bulkArchive?.archiveStatus === 'completed'
     && Boolean(job.bulkArchive.outputPath)
   ))?.bulkArchive ?? null);
+  const failedArchive = $derived(jobs.find((job) => job.bulkArchive?.archiveStatus === 'failed')?.bulkArchive ?? null);
   const canPause = $derived(jobs.some(isPausable));
   const canResume = $derived(jobs.some(isResumable));
   const canCancel = $derived(jobs.some(isCancelable));
@@ -210,6 +214,12 @@
         jobIds: previewJobs.map((job) => job.id),
         title: 'Bulk download progress',
         archiveName: 'bulk-download.zip',
+        failedItems: [
+          {
+            url: 'https://datanodes.to/61nni6me5p0n/protected.rar',
+            message: 'DataNodes captcha-protected downloads are not supported.',
+          },
+        ],
       },
       jobs: previewJobs,
       settings: previewSettings,
@@ -231,12 +241,6 @@
       errorMessage = result.message;
     }
     isBusy = false;
-  }
-
-  async function runForJobs(targetJobs: DownloadJob[], action: (id: string) => Promise<void>) {
-    for (const job of targetJobs) {
-      await action(job.id);
-    }
   }
 
   function toggleBulkJobSelection(id: string) {
@@ -261,14 +265,15 @@
       if (selection.excludedJobs.length > 0) {
         await deleteJobs(selection.excludedJobs.map((job) => job.id), false);
       }
-      await runForJobs(selection.resumableJobs, resumeJob);
+      await resumeJobs(selection.resumableJobs.map((job) => job.id));
     });
   }
 
   function onBulkPauseResumeClick() {
     const targetJobs = canPause ? jobs.filter(isPausable) : jobs.filter(isResumable);
-    const action = canPause ? pauseJob : resumeJob;
-    void runAction(() => runForJobs(targetJobs, action));
+    void runAction(() => canPause
+      ? pauseJobs(targetJobs.map((job) => job.id))
+      : resumeJobs(targetJobs.map((job) => job.id)));
   }
 
   function onBulkCancelClick() {
@@ -281,7 +286,7 @@
     void runAction(
       () => bulkUiState === 'review'
         ? deleteJobs(targetJobs.map((job) => job.id), false)
-        : runForJobs(targetJobs, cancelJob),
+        : cancelJobs(targetJobs.map((job) => job.id)),
       { closeOnSuccess: bulkUiState === 'review' },
     );
   }
@@ -362,6 +367,20 @@
   function isTauriRuntime(): boolean {
     return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   }
+
+  function failedItemName(item: FailedBatchItem) {
+    try {
+      const parsed = new URL(item.url);
+      const segment = parsed.pathname.split('/').filter(Boolean).pop();
+      return segment ? decodeURIComponent(segment) : parsed.host;
+    } catch {
+      return item.url;
+    }
+  }
+
+  function failedItemSuffix(count: number) {
+    return count > 0 ? `, ${count} not queued` : '';
+  }
 </script>
 
 {#if !context}
@@ -386,11 +405,11 @@
           </h1>
           <div class="mt-1 text-xs text-muted-foreground">
             {#if context.kind === 'bulk' && bulkUiState === 'review'}
-              {selectedBulkCount} of {summary.totalCount} selected
+              {selectedBulkCount} of {summary.totalCount} selected{failedItemSuffix(failedItems.length)}
             {:else if context.kind === 'bulk' && bulkUiState === 'finalizing'}
               Preparing combined output
             {:else}
-              {summary.completedCount} of {summary.totalCount} completed{summary.failedCount > 0 ? `, ${summary.failedCount} failed` : ''}
+              {summary.completedCount} of {summary.totalCount} completed{summary.failedCount > 0 ? `, ${summary.failedCount} failed` : ''}{failedItemSuffix(failedItems.length)}
             {/if}
           </div>
         </div>
@@ -428,9 +447,9 @@
       {/if}
 
       {#if context.kind === 'bulk' && bulkUiState === 'review' && isUntouchedBulkReviewGate(jobs)}
-        {@render BulkReviewList(jobs)}
+        {@render BulkReviewList(jobs, failedItems)}
       {:else}
-        {@render BatchJobList(jobs)}
+        {@render BatchJobList(jobs, failedItems)}
       {/if}
 
       {#if errorMessage}
@@ -450,9 +469,9 @@
   </div>
 {/if}
 
-{#snippet BatchJobList(jobs: DownloadJob[])}
+{#snippet BatchJobList(jobs: DownloadJob[], failedItems: FailedBatchItem[])}
   <section class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
-    {#if jobs.length === 0}
+    {#if jobs.length === 0 && failedItems.length === 0}
       <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
         Waiting for queued files to appear.
       </div>
@@ -461,14 +480,17 @@
         {#each jobs as job (job.id)}
           {@render BatchJobRow(job)}
         {/each}
+        {#each failedItems as item, index (`${item.url}-${index}`)}
+          {@render FailedBatchItemRow(item)}
+        {/each}
       </div>
     {/if}
   </section>
 {/snippet}
 
-{#snippet BulkReviewList(jobs: DownloadJob[])}
+{#snippet BulkReviewList(jobs: DownloadJob[], failedItems: FailedBatchItem[])}
   <section class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
-    {#if jobs.length === 0}
+    {#if jobs.length === 0 && failedItems.length === 0}
       <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
         Waiting for queued files to appear.
       </div>
@@ -498,6 +520,9 @@
             </div>
           </label>
         {/each}
+        {#each failedItems as item, index (`${item.url}-${index}`)}
+          {@render FailedBatchItemRow(item)}
+        {/each}
       </div>
     {/if}
   </section>
@@ -522,6 +547,23 @@
       <div class="truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
         {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
       </div>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet FailedBatchItemRow(item: FailedBatchItem)}
+  <div class="grid grid-cols-[40px_minmax(0,1fr)_86px] items-center gap-2 px-3 py-2">
+    <div class="flex h-9 w-9 items-center justify-center rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
+      <AlertTriangle size={17} />
+    </div>
+    <div class="min-w-0">
+      <div class="truncate text-sm font-semibold leading-5 text-foreground" title={failedItemName(item)}>{failedItemName(item)}</div>
+      <div class="truncate text-xs text-muted-foreground" title={item.url}>{getHost(item.url)}</div>
+      <div class="mt-1 truncate text-xs text-destructive" title={item.message}>{item.message}</div>
+    </div>
+    <div class="min-w-0 text-right text-xs">
+      <div class="font-semibold text-destructive">Not queued</div>
+      <div class="mt-0.5 truncate text-muted-foreground">Resolver</div>
     </div>
   </div>
 {/snippet}
@@ -596,6 +638,9 @@
       {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
       {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
     {:else if bulkUiState === 'failed'}
+      {#if failedArchive}
+        {@render ActionButton('Retry archive', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
+      {/if}
       {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
     {/if}
   </div>
@@ -604,9 +649,9 @@
 {#snippet MultiFooter()}
   <div class="mt-3 flex min-h-[45px] shrink-0 justify-end gap-3 border-t border-border pt-3">
     {#if summary.activeCount > 0 || canPause || canResume || canCancel}
-      {@render ActionButton('Pause all', Pause, () => void runAction(() => runForJobs(jobs.filter(isPausable), pauseJob)), isBusy || !canPause)}
-      {@render ActionButton('Resume all', Play, () => void runAction(() => runForJobs(jobs.filter(isResumable), resumeJob)), isBusy || !canResume, 'primary')}
-      {@render ActionButton('Cancel active', X, () => void runAction(() => runForJobs(jobs.filter(isCancelable), cancelJob)), isBusy || !canCancel, 'cancel')}
+      {@render ActionButton('Pause all', Pause, () => void runAction(() => pauseJobs(jobs.filter(isPausable).map((job) => job.id))), isBusy || !canPause)}
+      {@render ActionButton('Resume all', Play, () => void runAction(() => resumeJobs(jobs.filter(isResumable).map((job) => job.id))), isBusy || !canResume, 'primary')}
+      {@render ActionButton('Cancel active', X, () => void runAction(() => cancelJobs(jobs.filter(isCancelable).map((job) => job.id))), isBusy || !canCancel, 'cancel')}
     {:else}
       {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
     {/if}

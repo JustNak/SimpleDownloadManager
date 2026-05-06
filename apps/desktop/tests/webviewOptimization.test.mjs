@@ -30,6 +30,10 @@ for (const symbol of ['getProgressJobSnapshot', 'subscribeToProgressJobSnapshot'
   assert.ok(backendSource.includes(`export async function ${symbol}`), `backend should expose ${symbol}`);
 }
 
+for (const symbol of ['pauseJobs', 'resumeJobs', 'cancelJobs']) {
+  assert.ok(backendSource.includes(`export async function ${symbol}`), `backend should expose scoped batch command ${symbol}`);
+}
+
 assert.doesNotMatch(appSource, /^import\s+.*\.\/SettingsPage\.svelte/m, 'main app should not eagerly import SettingsPage');
 assert.doesNotMatch(appSource, /^import\s+.*\.\/AddDownloadModal\.svelte/m, 'main app should not eagerly import AddDownloadModal');
 assert.match(appSource, /import\('\.\/SettingsPage\.svelte'\)/, 'main app should dynamically import SettingsPage when needed');
@@ -45,11 +49,17 @@ assert.match(backendSource, /app:\/\/batch-progress-snapshot/, 'backend should d
 assert.match(backendSource, /app:\/\/settings-snapshot/, 'backend should define a lightweight settings event');
 assert.doesNotMatch(progressPopupSource, /subscribeToStateChanged|getAppSnapshot/, 'single progress popup should not subscribe to full app snapshots');
 assert.doesNotMatch(batchPopupSource, /subscribeToStateChanged|getAppSnapshot|getProgressBatchContext/, 'batch popup should not subscribe to full app snapshots');
+assert.match(batchPopupSource, /pauseJobs|resumeJobs|cancelJobs/, 'batch popup should use scoped batch commands for hundreds-link actions');
+assert.doesNotMatch(batchPopupSource, /runForJobs\(targetJobs, action\)|runForJobs\(jobs\.filter/, 'batch popup should not loop per-job IPC actions for batch controls');
 assert.doesNotMatch(promptSource, /subscribeToStateChanged|getAppSnapshot/, 'download prompt should only subscribe to prompt and settings events');
 assert.equal(tauriConfig.build.removeUnusedCommands, true, 'Tauri should prune unused commands during build');
 
 for (const rustSymbol of ['ProgressJobSnapshot', 'BatchProgressSnapshot', 'SettingsSnapshot', 'DownloadUpdateBatch']) {
   assert.match(commandsSource, new RegExp(`struct ${rustSymbol}`), `commands should define ${rustSymbol}`);
+}
+
+for (const command of ['pause_jobs', 'resume_jobs', 'cancel_jobs', 'delete_jobs']) {
+  assert.match(commandsSource, new RegExp(`pub async fn ${command}\\(`), `commands should expose ${command}`);
 }
 
 assert.match(commandsSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');

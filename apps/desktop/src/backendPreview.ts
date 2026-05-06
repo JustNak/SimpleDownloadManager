@@ -270,9 +270,37 @@ export function pauseMockJob(id: string): void {
   emitMockState();
 }
 
+export function pauseMockJobs(ids: string[]): void {
+  const selectedIds = new Set(ids);
+  mockState.jobs = mockState.jobs.map((job) =>
+    selectedIds.has(job.id) && [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state)
+      ? { ...job, state: JobState.Paused, speed: 0, eta: 0 }
+      : job,
+  );
+  emitMockState();
+}
+
 export function resumeMockJob(id: string): void {
   mockState.jobs = mockState.jobs.map((job) =>
     job.id === id
+      ? {
+          ...job,
+          state: JobState.Queued,
+          speed: 0,
+          eta: 0,
+          error: undefined,
+          failureCategory: undefined,
+          retryAttempts: 0,
+        }
+      : job,
+  );
+  emitMockState();
+}
+
+export function resumeMockJobs(ids: string[]): void {
+  const selectedIds = new Set(ids);
+  mockState.jobs = mockState.jobs.map((job) =>
+    selectedIds.has(job.id) && [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state)
       ? {
           ...job,
           state: JobState.Queued,
@@ -315,6 +343,14 @@ export function resumeAllMockJobs(): void {
 
 export function cancelMockJob(id: string): void {
   mockState.jobs = mockState.jobs.map((job) => (job.id === id ? { ...job, state: JobState.Canceled } : job));
+  emitMockState();
+}
+
+export function cancelMockJobs(ids: string[]): void {
+  const selectedIds = new Set(ids);
+  mockState.jobs = mockState.jobs.map((job) =>
+    selectedIds.has(job.id) ? { ...job, state: JobState.Canceled } : job,
+  );
   emitMockState();
 }
 
@@ -512,6 +548,7 @@ export function addMockJobs(args: AddJobsCommandArgs): AddJobsResult {
     results,
     queuedCount,
     duplicateCount: results.length - queuedCount,
+    failedItems: [],
   };
 }
 

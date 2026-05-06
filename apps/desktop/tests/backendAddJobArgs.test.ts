@@ -70,7 +70,7 @@ assert.deepEqual(
     bulkArchiveName: undefined,
     resolveHosterLinks: undefined,
   },
-  'multi-download command args should not request hoster resolution',
+  'plain batch command args should not request hoster resolution',
 );
 
 assert.deepEqual(

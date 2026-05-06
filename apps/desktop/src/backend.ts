@@ -41,10 +41,16 @@ export interface AddJobResult {
   status: AddJobStatus;
 }
 
+export interface FailedBatchItem {
+  url: string;
+  message: string;
+}
+
 export interface AddJobsResult {
   results: AddJobResult[];
   queuedCount: number;
   duplicateCount: number;
+  failedItems: FailedBatchItem[];
 }
 
 export interface ExternalUseResult {
@@ -102,12 +108,36 @@ export async function pauseJob(id: string): Promise<void> {
   await invokeCommand('pause_job', { id });
 }
 
+export async function pauseJobs(ids: string[]): Promise<void> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return;
+
+  if (!isTauriRuntime()) {
+    previewBackend.pauseMockJobs(uniqueIds);
+    return;
+  }
+
+  await invokeCommand('pause_jobs', { ids: uniqueIds });
+}
+
 export async function resumeJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
     previewBackend.resumeMockJob(id);
     return;
   }
   await invokeCommand('resume_job', { id });
+}
+
+export async function resumeJobs(ids: string[]): Promise<void> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return;
+
+  if (!isTauriRuntime()) {
+    previewBackend.resumeMockJobs(uniqueIds);
+    return;
+  }
+
+  await invokeCommand('resume_jobs', { ids: uniqueIds });
 }
 
 export async function pauseAllJobs(): Promise<void> {
@@ -132,6 +162,18 @@ export async function cancelJob(id: string): Promise<void> {
     return;
   }
   await invokeCommand('cancel_job', { id });
+}
+
+export async function cancelJobs(ids: string[]): Promise<void> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (uniqueIds.length === 0) return;
+
+  if (!isTauriRuntime()) {
+    previewBackend.cancelMockJobs(uniqueIds);
+    return;
+  }
+
+  await invokeCommand('cancel_jobs', { ids: uniqueIds });
 }
 
 export async function retryJob(id: string): Promise<void> {
@@ -191,9 +233,7 @@ export async function deleteJobs(ids: string[], deleteFromDisk: boolean): Promis
     return;
   }
 
-  for (const id of uniqueIds) {
-    await invokeCommand('delete_job', { id, deleteFromDisk });
-  }
+  await invokeCommand('delete_jobs', { ids: uniqueIds, deleteFromDisk });
 }
 
 export async function renameJob(id: string, filename: string): Promise<void> {
