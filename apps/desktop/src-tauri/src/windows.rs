@@ -1,6 +1,6 @@
 use crate::storage::TransferKind;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const DOWNLOAD_PROMPT_WINDOW: &str = "download-prompt";
 pub const SELECT_JOB_EVENT: &str = "app://select-job";
@@ -23,6 +23,12 @@ struct ProgressWindowGeometry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadPromptWindowPolicy {
+    minimizable: bool,
+    always_on_top: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProgressWindowPolicy {
     minimizable: bool,
     always_on_top: bool,
@@ -30,10 +36,10 @@ struct ProgressWindowPolicy {
 
 pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
+        return show_existing_popup_window(&window);
     }
+
+    let policy = download_prompt_window_policy();
 
     WebviewWindowBuilder::new(
         app,
@@ -45,9 +51,10 @@ pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     .min_inner_size(460.0, 280.0)
     .max_inner_size(460.0, 280.0)
     .resizable(false)
+    .minimizable(policy.minimizable)
     .maximizable(false)
     .decorations(false)
-    .always_on_top(true)
+    .always_on_top(policy.always_on_top)
     .center()
     .build()
     .map(|_| ())
@@ -71,9 +78,7 @@ pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
 pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
+        return show_existing_popup_window(&window);
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -110,9 +115,7 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
 pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = torrent_progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
+        return show_existing_popup_window(&window);
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -160,9 +163,7 @@ pub fn show_progress_window_for_transfer_kind(
 pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
     let label = batch_progress_window_label(batch_id);
     if let Some(window) = app.get_webview_window(&label) {
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        return Ok(());
+        return show_existing_popup_window(&window);
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -264,11 +265,24 @@ fn batch_progress_window_geometry() -> ProgressWindowGeometry {
     }
 }
 
+fn download_prompt_window_policy() -> DownloadPromptWindowPolicy {
+    DownloadPromptWindowPolicy {
+        minimizable: true,
+        always_on_top: true,
+    }
+}
+
 fn progress_window_policy() -> ProgressWindowPolicy {
     ProgressWindowPolicy {
         minimizable: true,
         always_on_top: false,
     }
+}
+
+fn show_existing_popup_window(window: &WebviewWindow) -> Result<(), String> {
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 fn open_progress_popup_count(app: &AppHandle) -> usize {
@@ -340,6 +354,14 @@ mod tests {
 
         assert!(policy.minimizable);
         assert!(!policy.always_on_top);
+    }
+
+    #[test]
+    fn download_prompt_window_is_minimizable_and_always_on_top() {
+        let policy = super::download_prompt_window_policy();
+
+        assert!(policy.minimizable);
+        assert!(policy.always_on_top);
     }
 
     #[test]
