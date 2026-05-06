@@ -42,6 +42,7 @@ const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
 const activeBrowserDownloadIds = new Set<number>();
 const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
 let cachedExtensionSettings: ExtensionIntegrationSettings | null = null;
+let cachedExtensionSettingsPromise: Promise<ExtensionIntegrationSettings> | null = null;
 let nativeHostPingPromise: Promise<HostToExtensionResponse> | null = null;
 let refreshConnectionStatePromise: Promise<HostToExtensionResponse> | null = null;
 
@@ -550,7 +551,11 @@ async function getCachedExtensionSettings(): Promise<ExtensionIntegrationSetting
     return cachedExtensionSettings;
   }
 
-  return rememberSettings(await getExtensionSettings());
+  cachedExtensionSettingsPromise ??= getExtensionSettings().then(rememberSettings).finally(() => {
+    cachedExtensionSettingsPromise = null;
+  });
+
+  return cachedExtensionSettingsPromise;
 }
 
 function rememberSettings(settings: ExtensionIntegrationSettings): ExtensionIntegrationSettings {

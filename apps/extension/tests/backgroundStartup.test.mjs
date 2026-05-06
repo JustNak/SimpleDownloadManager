@@ -15,4 +15,13 @@ assert.match(
   /let refreshConnectionStatePromise:/,
   'connection refreshes should share an in-flight promise instead of double-pinging the native host',
 );
-
+assert.match(
+  backgroundSource,
+  /let cachedExtensionSettingsPromise: Promise<ExtensionIntegrationSettings> \| null = null;/,
+  'initial extension settings reads should share an in-flight promise',
+);
+assert.match(
+  backgroundSource,
+  /cachedExtensionSettingsPromise \?\?= getExtensionSettings\(\)\.then\(rememberSettings\)\.finally\(\(\) => \{[\s\S]*cachedExtensionSettingsPromise = null;/,
+  'cached extension settings should be loaded through a coalesced promise that clears after settling',
+);
