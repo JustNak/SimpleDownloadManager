@@ -19,6 +19,8 @@ export function firefoxAmoPackagePaths(repoRoot = defaultRepoRoot) {
     uploadZipPath: path.join(packageRoot, 'simple-download-manager-firefox-upload.zip'),
     sourceZipPath: path.join(packageRoot, 'simple-download-manager-firefox-source.zip'),
     readmePath: path.join(packageRoot, 'README.md'),
+    listingMetadataPath: path.join(packageRoot, 'AMO_LISTING_METADATA.json'),
+    privacyPolicyPath: path.join(packageRoot, 'PRIVACY_POLICY.md'),
     reviewerNotesPath: path.join(packageRoot, 'AMO_REVIEWER_NOTES.md'),
     sourceReadmePath: path.join(packageRoot, 'source', 'AMO_SOURCE_REVIEW.md'),
   };
@@ -30,20 +32,69 @@ export function firefoxAmoSourceEntries() {
     { source: 'package-lock.json' },
     { source: 'tsconfig.base.json' },
     { source: 'config/release.json' },
+    { source: 'docs/privacy-policy.md' },
     { source: 'apps/extension' },
     { source: 'packages/protocol' },
   ];
 }
 
+export function createFirefoxAmoListingMetadata() {
+  return {
+    categories: {
+      firefox: ['download-management'],
+    },
+    default_locale: 'en-US',
+    description: {
+      'en-US': [
+        'Simple Download Manager connects Firefox downloads to the local Simple Download Manager desktop app.',
+        '',
+        'Use it to send eligible browser downloads to the desktop queue, choose between prompt and silent handoff modes, keep selected sites in Firefox, and opt in to Protected Downloads for sites that require browser session headers.',
+        '',
+        'Requires the Simple Download Manager desktop app and native messaging host to be installed on the same Windows device. The extension does not use remote code, analytics, advertising, tracking, or remote configuration.',
+      ].join('\n'),
+    },
+    developer_comments: {
+      'en-US': [
+        'This listed AMO submission uses the generated Firefox ZIP at the archive root and includes a source ZIP for reviewer rebuilds.',
+        'The extension requires a local native desktop app through Firefox native messaging; it does not transmit data to a remote server.',
+        'See AMO_REVIEWER_NOTES.md, PRIVACY_POLICY.md, and apps/extension/FIREFOX_GUIDELINES.md for the detailed permission and data-transmission rationale.',
+      ].join('\n'),
+    },
+    homepage: {
+      'en-US': 'https://github.com/JustNak/SimpleDownloadManager',
+    },
+    is_experimental: false,
+    name: {
+      'en-US': 'Simple Download Manager',
+    },
+    requires_payment: false,
+    slug: 'simple-download-manager',
+    summary: {
+      'en-US': 'Send Firefox downloads to the local Simple Download Manager desktop app.',
+    },
+    tags: [
+      'download',
+      'download-manager',
+      'native-messaging',
+    ],
+    version: {
+      license: 'all-rights-reserved',
+      approval_notes: createFirefoxAmoReviewerNotes(),
+    },
+  };
+}
+
 export function createFirefoxAmoReadme(paths) {
   return `# Simple Download Manager Firefox AMO Upload
 
-This directory contains the Firefox artifacts for unlisted Mozilla signing.
+This directory contains the Firefox artifacts for public listing on addons.mozilla.org.
 
 ## Files
 
 - Upload ZIP: ${paths.uploadZipPath}
 - Source ZIP for review: ${paths.sourceZipPath}
+- Listing metadata for web-ext listed submission: ${paths.listingMetadataPath}
+- Privacy policy for the AMO listing: ${paths.privacyPolicyPath}
 - Reviewer notes: ${paths.reviewerNotesPath}
 - Firefox guideline file: apps/extension/FIREFOX_GUIDELINES.md
 
@@ -56,16 +107,48 @@ The Firefox manifest sets strict_min_version to Firefox 142.0 so required data t
 web-ext lint --source-dir apps\\extension\\dist\\firefox
 \`\`\`
 
-## Sign For Self-Distribution
+## Submit For Public AMO Listing
 
 \`\`\`powershell
-web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=unlisted --api-key=$env:AMO_JWT_ISSUER --api-secret=$env:AMO_JWT_SECRET
+web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=listed --amo-metadata=release\\firefox-amo\\AMO_LISTING_METADATA.json --api-key=$env:WEB_EXT_API_KEY --api-secret=$env:WEB_EXT_API_SECRET
 \`\`\`
+
+Use AMO API credentials from Developer Hub. The command submits the generated Firefox extension for public listing rather than downloading a self-distributed XPI.
 
 ## AMO UI Flow
 
-Open AMO Developer Hub, submit a new add-on, choose "On your own", upload simple-download-manager-firefox-upload.zip, upload simple-download-manager-firefox-source.zip if source is requested, then download the signed XPI.
-Paste AMO_REVIEWER_NOTES.md into the reviewer notes field so reviewers can verify the native messaging, download interception, and data transmission behavior quickly. Keep apps/extension/FIREFOX_GUIDELINES.md in the source package for reviewer context.
+Open AMO Developer Hub, submit a new add-on, choose "On this site", upload simple-download-manager-firefox-upload.zip, and upload simple-download-manager-firefox-source.zip when source is requested.
+Use AMO_LISTING_METADATA.json as the source of truth for the listing summary, description, category, tags, homepage, and license. Paste PRIVACY_POLICY.md into the privacy policy field and AMO_REVIEWER_NOTES.md into the reviewer notes field so reviewers can verify the native messaging, download interception, and data transmission behavior quickly. If AMO asks for a support website, use https://github.com/JustNak/SimpleDownloadManager/issues. Keep apps/extension/FIREFOX_GUIDELINES.md in the source package for reviewer context.
+`;
+}
+
+export function createFirefoxAmoPrivacyPolicy() {
+  return `# Simple Download Manager Firefox Extension Privacy Policy
+
+Simple Download Manager is a companion browser extension for the local Simple Download Manager desktop app.
+
+## Data Sent To The Local Desktop App
+
+When the extension is enabled and a download is eligible for handoff, it may send the following data from Firefox to the local native desktop app through Firefox native messaging:
+
+- Download URL.
+- Suggested filename and content length when Firefox exposes them.
+- Page URL, page title, referrer, entry point, extension version, and incognito flag when available.
+- User actions such as context-menu handoff, popup handoff, browser-download prompt, accepted handoff, canceled prompt, or fallback.
+- Extension settings such as capture mode, excluded sites, ignored file extensions, Protected Downloads settings, badge preference, and progress-window preference.
+- If Protected Downloads is enabled for a configured site, bounded browser request headers for the exact download being handed off, such as Cookie or Authorization headers after extension-side filtering.
+
+## Local-Only Use
+
+The extension sends this data only to the local native desktop app installed on the same device. The extension does not transmit data to a remote server, does not use analytics, does not use advertising, does not track users, and does not use remote configuration.
+
+## Storage
+
+The extension stores its settings in Firefox extension storage. Protected-download request headers are held only in extension memory for a short time, are capped, and are cleared when Protected Downloads is disabled.
+
+## User Controls
+
+Users can disable browser download interception, choose prompt or automatic handoff, exclude sites, ignore file extensions, disable Protected Downloads, and remove protected-download sites from the extension options page.
 `;
 }
 
@@ -74,7 +157,7 @@ export function createFirefoxAmoReviewerNotes() {
 
 Simple Download Manager is a companion extension for a local native desktop app. No remote code is used. The extension does not use remote configuration, analytics, advertising, or tracking.
 
-The source package includes apps/extension/FIREFOX_GUIDELINES.md with the Firefox-specific AMO review, manifest, permission, and packaging notes.
+This is intended for public AMO listing. The source package includes apps/extension/FIREFOX_GUIDELINES.md with the Firefox-specific AMO review, manifest, permission, and packaging notes.
 
 ## Core Functionality
 
@@ -112,7 +195,7 @@ export function createFirefoxAmoSourceReadme() {
   return `# Simple Download Manager Firefox Source Package
 
 This source package contains the files required to reproduce the uploaded extension ZIP.
-Firefox-specific review and packaging guidance is in apps/extension/FIREFOX_GUIDELINES.md.
+Firefox-specific review and packaging guidance is in apps/extension/FIREFOX_GUIDELINES.md. The listing privacy policy source is docs/privacy-policy.md.
 
 ## Rebuild
 
@@ -135,6 +218,8 @@ export async function packageFirefoxAmo(repoRoot = defaultRepoRoot) {
   await copyFirefoxExtensionFiles(paths.sourceDir, paths.uploadDir);
   await createSourceReviewPackage(paths);
   await writeFile(paths.readmePath, createFirefoxAmoReadme(paths), 'utf8');
+  await writeFile(paths.listingMetadataPath, JSON.stringify(createFirefoxAmoListingMetadata(), null, 2), 'utf8');
+  await writeFile(paths.privacyPolicyPath, createFirefoxAmoPrivacyPolicy(), 'utf8');
   await writeFile(paths.reviewerNotesPath, createFirefoxAmoReviewerNotes(), 'utf8');
   await createZipFromDirectory(paths.uploadDir, paths.uploadZipPath);
   await createZipFromDirectory(paths.sourceReviewDir, paths.sourceZipPath);

@@ -11,6 +11,8 @@ try {
 
 const {
   createFirefoxAmoReadme,
+  createFirefoxAmoListingMetadata,
+  createFirefoxAmoPrivacyPolicy,
   createFirefoxAmoReviewerNotes,
   createFirefoxAmoSourceReadme,
   copyFirefoxExtensionFiles,
@@ -28,6 +30,8 @@ assert.equal(paths.sourceReviewDir, path.join(repoRoot, 'release', 'firefox-amo'
 assert.equal(paths.uploadZipPath, path.join(repoRoot, 'release', 'firefox-amo', 'simple-download-manager-firefox-upload.zip'));
 assert.equal(paths.sourceZipPath, path.join(repoRoot, 'release', 'firefox-amo', 'simple-download-manager-firefox-source.zip'));
 assert.equal(paths.readmePath, path.join(repoRoot, 'release', 'firefox-amo', 'README.md'));
+assert.equal(paths.listingMetadataPath, path.join(repoRoot, 'release', 'firefox-amo', 'AMO_LISTING_METADATA.json'));
+assert.equal(paths.privacyPolicyPath, path.join(repoRoot, 'release', 'firefox-amo', 'PRIVACY_POLICY.md'));
 assert.equal(paths.reviewerNotesPath, path.join(repoRoot, 'release', 'firefox-amo', 'AMO_REVIEWER_NOTES.md'));
 
 const entries = firefoxAmoSourceEntries();
@@ -38,6 +42,7 @@ assert.deepEqual(
     'package-lock.json',
     'tsconfig.base.json',
     'config/release.json',
+    'docs/privacy-policy.md',
     'apps/extension',
     'packages/protocol',
   ],
@@ -50,14 +55,35 @@ assert.equal(
 
 const uploadReadme = createFirefoxAmoReadme(paths);
 assert.match(uploadReadme, /AMO Developer Hub/);
-assert.match(uploadReadme, /On your own/);
+assert.match(uploadReadme, /On this site/);
+assert.doesNotMatch(uploadReadme, /On your own/);
 assert.match(uploadReadme, /simple-download-manager-firefox-upload\.zip/);
 assert.match(uploadReadme, /simple-download-manager-firefox-source\.zip/);
+assert.match(uploadReadme, /AMO_LISTING_METADATA\.json/);
+assert.match(uploadReadme, /PRIVACY_POLICY\.md/);
 assert.match(uploadReadme, /web-ext lint --source-dir apps\\extension\\dist\\firefox/);
-assert.match(uploadReadme, /web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=unlisted/);
+assert.match(uploadReadme, /web-ext sign --source-dir apps\\extension\\dist\\firefox --channel=listed --amo-metadata=release\\firefox-amo\\AMO_LISTING_METADATA\.json/);
 assert.match(uploadReadme, /AMO_REVIEWER_NOTES\.md/);
 assert.match(uploadReadme, /Firefox 142/);
 assert.match(uploadReadme, /FIREFOX_GUIDELINES\.md/);
+
+const listingMetadata = createFirefoxAmoListingMetadata();
+assert.deepEqual(listingMetadata.categories, { firefox: ['download-management'] });
+assert.equal(listingMetadata.default_locale, 'en-US');
+assert.equal(listingMetadata.name['en-US'], 'Simple Download Manager');
+assert.match(listingMetadata.summary['en-US'], /local Simple Download Manager desktop app/);
+assert.match(listingMetadata.description['en-US'], /Requires the Simple Download Manager desktop app/);
+assert.match(listingMetadata.homepage['en-US'], /github\.com\/JustNak\/SimpleDownloadManager/);
+assert.equal('support_url' in listingMetadata, false, 'metadata should only use fields documented for add-on create');
+assert.equal(listingMetadata.requires_payment, false);
+assert.equal(listingMetadata.slug, 'simple-download-manager');
+assert.equal(listingMetadata.version.license, 'all-rights-reserved');
+assert.match(listingMetadata.version.approval_notes, /Native messaging/);
+
+const privacyPolicy = createFirefoxAmoPrivacyPolicy();
+assert.match(privacyPolicy, /Simple Download Manager Firefox Extension Privacy Policy/);
+assert.match(privacyPolicy, /local native desktop app/);
+assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
 assert.match(reviewerNotes, /Native messaging/);
@@ -72,6 +98,7 @@ assert.match(reviewerNotes, /wildcard excluded host patterns/);
 assert.match(reviewerNotes, /Protected Downloads/);
 assert.match(reviewerNotes, /exact browser download/);
 assert.match(reviewerNotes, /FIREFOX_GUIDELINES\.md/);
+assert.match(reviewerNotes, /public AMO listing/);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);
@@ -79,6 +106,7 @@ assert.match(sourceReadme, /npm run build --workspace @myapp\/extension/);
 assert.match(sourceReadme, /apps\/extension\/dist\/firefox/);
 assert.match(sourceReadme, /uploaded extension ZIP/);
 assert.match(sourceReadme, /FIREFOX_GUIDELINES\.md/);
+assert.match(sourceReadme, /docs\/privacy-policy\.md/);
 
 const rootPackage = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
 assert.equal(

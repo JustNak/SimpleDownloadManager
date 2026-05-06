@@ -10,6 +10,9 @@ const guide = await readFile(guidelinePath, 'utf8');
 
 for (const expected of [
   'AMO Review',
+  'On this site',
+  'AMO_LISTING_METADATA.json',
+  'PRIVACY_POLICY.md',
   'manifest_version',
   'version_name',
   'nativeMessaging',
