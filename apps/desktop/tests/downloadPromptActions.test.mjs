@@ -31,7 +31,8 @@ assert.match(promptSource, /confirmDuplicateAction\('overwrite'\)/, 'Overwrite s
 assert.match(promptSource, /duplicateAction:\s*'rename'/, 'Rename should send a rename duplicate action');
 assert.match(promptSource, /confirmDuplicateAction\('download_anyway'\)/, 'Download Anyway should send an allow-copy duplicate action');
 assert.doesNotMatch(promptSource, />\s*Show Existing\s*</, 'compact duplicate prompt should not keep the old Show Existing secondary action');
-assert.match(windowsSource, /\.inner_size\(460\.0,\s*280\.0\)[\s\S]*\.min_inner_size\(460\.0,\s*280\.0\)[\s\S]*\.max_inner_size\(460\.0,\s*280\.0\)/, 'download prompt window should use the compact fixed 460x280 geometry');
+assert.match(windowsSource, /fn download_prompt_window_geometry\(\) -> PopupWindowGeometry \{[\s\S]*width:\s*460\.0,[\s\S]*height:\s*280\.0,[\s\S]*min_width:\s*460\.0,[\s\S]*min_height:\s*280\.0/, 'download prompt geometry policy should keep the compact fixed 460x280 dimensions');
+assert.match(windowsSource, /WebviewWindowBuilder::new\([\s\S]*DOWNLOAD_PROMPT_WINDOW[\s\S]*\.inner_size\(geometry\.width,\s*geometry\.height\)[\s\S]*\.min_inner_size\(geometry\.min_width,\s*geometry\.min_height\)[\s\S]*\.max_inner_size\(geometry\.width,\s*geometry\.height\)/, 'download prompt window should read its compact geometry from the shared popup geometry policy');
 assert.match(promptSource, /class="flex min-h-0 flex-1 flex-col overflow-hidden bg-surface px-3 py-2"/, 'download prompt content should use a compact overflow-protected shell');
 assert.match(promptSource, /class="mt-auto flex min-h-\[38px\] shrink-0 items-center justify-between gap-2 border-t border-border pt-2"/, 'download prompt action bar should keep a predictable compact height');
 assert.match(promptSource, /#snippet MetaValue[\s\S]*min-w-0 truncate/, 'prompt metadata values should be min-width constrained and truncated');

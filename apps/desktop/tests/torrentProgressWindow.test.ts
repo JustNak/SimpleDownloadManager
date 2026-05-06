@@ -16,7 +16,7 @@ const capabilitySource = readFileSync(new URL('../src-tauri/capabilities/popups.
 assert.match(mainSource, /windowMode === 'torrent-progress'[\s\S]*import\('\.\/TorrentProgressWindow\.svelte'\)/, 'main route should lazily mount TorrentProgressWindow for ?window=torrent-progress');
 assert.match(backendPreviewSource, /job\.transferKind === 'torrent'[\s\S]*\?window=torrent-progress&jobId=\$\{encodeURIComponent\(id\)\}[\s\S]*torrent-progress-\$\{id\}[\s\S]*width=720,height=520/, 'browser fallback openProgressWindow should route torrent jobs to a 720x520 torrent popup');
 assert.match(windowsSource, /const TORRENT_PROGRESS_WINDOW_PREFIX: &str = "torrent-progress-";[\s\S]*show_torrent_progress_window[\s\S]*index\.html\?window=torrent-progress&jobId=\{job_id\}[\s\S]*torrent_progress_window_geometry/, 'native windows should define a dedicated torrent progress popup route and prefix');
-assert.match(windowsSource, /fn torrent_progress_window_geometry\(\) -> ProgressWindowGeometry \{[\s\S]*width:\s*720\.0,[\s\S]*height:\s*520\.0,[\s\S]*min_width:\s*720\.0,[\s\S]*min_height:\s*520\.0,/, 'torrent progress native geometry should match the approved larger popup size');
+assert.match(windowsSource, /fn torrent_progress_window_geometry\(\) -> PopupWindowGeometry \{[\s\S]*width:\s*720\.0,[\s\S]*height:\s*520\.0,[\s\S]*min_width:\s*720\.0,[\s\S]*min_height:\s*520\.0,/, 'torrent progress native geometry should match the approved larger popup size');
 assert.match(capabilitySource, /"torrent-progress-\*"/, 'Tauri capabilities should allow the torrent progress popup label');
 
 for (const label of ['Torrent session', 'Info hash', 'Down', 'Up', 'ETA', 'Peers', 'Seeds', 'Ratio', 'Files', 'Save to', 'Source']) {

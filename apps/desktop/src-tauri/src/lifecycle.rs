@@ -5,8 +5,8 @@ use crate::storage::{MainWindowState, Settings, StartupLaunchMode};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, RunEvent, Runtime, Size,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+    App, AppHandle, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, Position,
+    RunEvent, Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
 
 #[cfg(windows)]
@@ -38,6 +38,7 @@ const INSTALLER_STARTUP_ARG: &str = "--installer-startup";
 const INSTALLER_TRAY_ARG: &str = "--installer-tray";
 const MAIN_WINDOW_TITLE: &str = "Simple Download Manager";
 const TRAY_MENU_OPEN: &str = "open";
+const TRAY_MENU_RESET_WINDOWS: &str = "reset-windows";
 const TRAY_MENU_EXIT: &str = "exit";
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\SimpleDownloadManager.SingleInstance";
 const SINGLE_INSTANCE_REQUEST_ID: &str = "desktop-single-instance";
@@ -403,6 +404,7 @@ pub fn initialize_main_window<R: Runtime>(
 
 pub fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     if window.label() != MAIN_WINDOW_LABEL {
+        crate::windows::handle_popup_window_event(window, event);
         return;
     }
 
@@ -466,6 +468,49 @@ fn show_main_window_internal<R: Runtime>(
     window.set_focus().map_err(|error| error.to_string())
 }
 
+pub fn reset_windows<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    reset_main_window(app)?;
+    crate::windows::reset_popup_windows(app);
+    Ok(())
+}
+
+fn reset_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let config = main_window_config();
+    let window = ensure_main_window(app, None)?;
+    let _ = window.unmaximize();
+    let _ = window.unminimize();
+    window
+        .set_size(Size::Logical(LogicalSize::new(config.width, config.height)))
+        .map_err(|error| error.to_string())?;
+
+    if let Some(monitor) = preferred_main_window_monitor(&window)? {
+        let size = window.outer_size().unwrap_or_else(|_| {
+            let scale_factor = window.scale_factor().unwrap_or(1.0);
+            PhysicalSize::new(
+                (config.width * scale_factor).round().max(1.0) as u32,
+                (config.height * scale_factor).round().max(1.0) as u32,
+            )
+        });
+        window
+            .set_position(Position::Physical(centered_main_window_position(
+                size, monitor,
+            )))
+            .map_err(|error| error.to_string())?;
+    }
+
+    window
+        .set_skip_taskbar(false)
+        .map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+
+    if let Some(state) = app.try_state::<SharedState>() {
+        state.save_main_window_state_sync(capture_webview_window_state(&window)?)?;
+    }
+
+    Ok(())
+}
+
 pub fn hide_main_window_to_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         save_main_window_state(app)?;
@@ -524,10 +569,18 @@ fn main_window_url(selected_job_id: Option<&str>) -> String {
 fn setup_tray(app: &mut App) -> Result<(), String> {
     let open_item = MenuItem::with_id(app, TRAY_MENU_OPEN, "Open", true, None::<&str>)
         .map_err(|error| error.to_string())?;
+    let reset_windows_item = MenuItem::with_id(
+        app,
+        TRAY_MENU_RESET_WINDOWS,
+        "Reset windows",
+        true,
+        None::<&str>,
+    )
+    .map_err(|error| error.to_string())?;
     let exit_item = MenuItem::with_id(app, TRAY_MENU_EXIT, "Exit", true, None::<&str>)
         .map_err(|error| error.to_string())?;
-    let menu =
-        Menu::with_items(app, &[&open_item, &exit_item]).map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&open_item, &reset_windows_item, &exit_item])
+        .map_err(|error| error.to_string())?;
     let icon = app
         .default_window_icon()
         .ok_or_else(|| "Could not load the default application icon.".to_string())?
@@ -542,6 +595,11 @@ fn setup_tray(app: &mut App) -> Result<(), String> {
             TRAY_MENU_OPEN => {
                 if let Err(error) = show_main_window(app) {
                     eprintln!("failed to open main window from tray: {error}");
+                }
+            }
+            TRAY_MENU_RESET_WINDOWS => {
+                if let Err(error) = reset_windows(app) {
+                    eprintln!("failed to reset windows from tray: {error}");
                 }
             }
             TRAY_MENU_EXIT => exit_application(app),
@@ -624,6 +682,45 @@ fn restore_main_window_state<R: Runtime>(window: &WebviewWindow<R>, state: &Main
     } else {
         let _ = window.unmaximize();
     }
+}
+
+fn preferred_main_window_monitor<R: Runtime>(
+    window: &WebviewWindow<R>,
+) -> Result<Option<Monitor>, String> {
+    if let Some(monitor) = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(monitor));
+    }
+    if let Some(monitor) = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(monitor));
+    }
+    Ok(window
+        .available_monitors()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next())
+}
+
+fn centered_main_window_position(
+    size: PhysicalSize<u32>,
+    monitor: Monitor,
+) -> PhysicalPosition<i32> {
+    let monitor_position = monitor.position();
+    let monitor_size = monitor.size();
+    let x =
+        monitor_position.x as i64 + ((monitor_size.width as i64 - size.width as i64) / 2).max(0);
+    let y =
+        monitor_position.y as i64 + ((monitor_size.height as i64 - size.height as i64) / 2).max(0);
+    PhysicalPosition::new(clamp_i64_to_i32(x), clamp_i64_to_i32(y))
+}
+
+fn clamp_i64_to_i32(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 #[cfg(windows)]

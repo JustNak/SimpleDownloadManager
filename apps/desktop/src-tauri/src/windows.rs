@@ -1,6 +1,9 @@
 use crate::storage::TransferKind;
 use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, Position,
+    Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+};
 
 pub const DOWNLOAD_PROMPT_WINDOW: &str = "download-prompt";
 pub const SELECT_JOB_EVENT: &str = "app://select-job";
@@ -15,11 +18,28 @@ struct PopupWindowPosition {
     y: f64,
 }
 
-struct ProgressWindowGeometry {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PopupWindowGeometry {
     width: f64,
     height: f64,
     min_width: f64,
     min_height: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,12 +54,18 @@ struct ProgressWindowPolicy {
     always_on_top: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupRestoreFocus {
+    Preserve,
+}
+
 pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
-        return show_existing_popup_window(&window);
+        return show_existing_popup_window(&window, download_prompt_window_geometry());
     }
 
     let policy = download_prompt_window_policy();
+    let geometry = download_prompt_window_geometry();
 
     WebviewWindowBuilder::new(
         app,
@@ -47,9 +73,9 @@ pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html?window=download-prompt".into()),
     )
     .title("New download detected")
-    .inner_size(460.0, 280.0)
-    .min_inner_size(460.0, 280.0)
-    .max_inner_size(460.0, 280.0)
+    .inner_size(geometry.width, geometry.height)
+    .min_inner_size(geometry.min_width, geometry.min_height)
+    .max_inner_size(geometry.width, geometry.height)
     .resizable(false)
     .minimizable(policy.minimizable)
     .maximizable(false)
@@ -78,7 +104,7 @@ pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
 pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window);
+        return show_existing_popup_window(&window, progress_window_geometry());
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -115,7 +141,7 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
 pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = torrent_progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window);
+        return show_existing_popup_window(&window, torrent_progress_window_geometry());
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -163,7 +189,7 @@ pub fn show_progress_window_for_transfer_kind(
 pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
     let label = batch_progress_window_label(batch_id);
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window);
+        return show_existing_popup_window(&window, batch_progress_window_geometry());
     }
 
     let open_progress_windows = open_progress_popup_count(app);
@@ -214,6 +240,30 @@ pub fn focus_job_in_main_window(app: &AppHandle, job_id: &str) {
     }
 }
 
+pub fn reset_popup_windows<R: Runtime>(app: &AppHandle<R>) {
+    for (label, window) in app.webview_windows() {
+        if let Some(geometry) = popup_window_geometry_for_label(&label) {
+            repair_existing_popup_window(&window, geometry, PopupRestoreFocus::Preserve);
+        }
+    }
+}
+
+pub fn handle_popup_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    let WindowEvent::Focused(true) = event else {
+        return;
+    };
+
+    let label = window.label();
+    let Some(geometry) = popup_window_geometry_for_label(label) else {
+        return;
+    };
+    let Some(webview_window) = window.app_handle().get_webview_window(label) else {
+        return;
+    };
+
+    repair_existing_popup_window(&webview_window, geometry, PopupRestoreFocus::Preserve);
+}
+
 pub fn progress_window_label(job_id: &str) -> String {
     let safe_job_id: String = job_id
         .chars()
@@ -238,8 +288,8 @@ pub fn torrent_progress_window_label(job_id: &str) -> String {
     format!("{TORRENT_PROGRESS_WINDOW_PREFIX}{safe_job_id}")
 }
 
-fn progress_window_geometry() -> ProgressWindowGeometry {
-    ProgressWindowGeometry {
+fn download_prompt_window_geometry() -> PopupWindowGeometry {
+    PopupWindowGeometry {
         width: 460.0,
         height: 280.0,
         min_width: 460.0,
@@ -247,8 +297,17 @@ fn progress_window_geometry() -> ProgressWindowGeometry {
     }
 }
 
-fn torrent_progress_window_geometry() -> ProgressWindowGeometry {
-    ProgressWindowGeometry {
+fn progress_window_geometry() -> PopupWindowGeometry {
+    PopupWindowGeometry {
+        width: 460.0,
+        height: 280.0,
+        min_width: 460.0,
+        min_height: 280.0,
+    }
+}
+
+fn torrent_progress_window_geometry() -> PopupWindowGeometry {
+    PopupWindowGeometry {
         width: 720.0,
         height: 520.0,
         min_width: 720.0,
@@ -256,8 +315,8 @@ fn torrent_progress_window_geometry() -> ProgressWindowGeometry {
     }
 }
 
-fn batch_progress_window_geometry() -> ProgressWindowGeometry {
-    ProgressWindowGeometry {
+fn batch_progress_window_geometry() -> PopupWindowGeometry {
+    PopupWindowGeometry {
         width: 640.0,
         height: 480.0,
         min_width: 640.0,
@@ -279,10 +338,165 @@ fn progress_window_policy() -> ProgressWindowPolicy {
     }
 }
 
-fn show_existing_popup_window(window: &WebviewWindow) -> Result<(), String> {
-    window.unminimize().map_err(|error| error.to_string())?;
+fn show_existing_popup_window(
+    window: &WebviewWindow,
+    geometry: PopupWindowGeometry,
+) -> Result<(), String> {
+    let _ = window.unminimize();
     window.show().map_err(|error| error.to_string())?;
+    repair_popup_window_bounds(window, geometry);
     window.set_focus().map_err(|error| error.to_string())
+}
+
+fn repair_existing_popup_window<R: Runtime>(
+    window: &WebviewWindow<R>,
+    geometry: PopupWindowGeometry,
+    _focus: PopupRestoreFocus,
+) {
+    let _ = window.unminimize();
+    if let Err(error) = window.show() {
+        eprintln!("failed to show popup window during repair: {error}");
+        return;
+    }
+    repair_popup_window_bounds(window, geometry);
+}
+
+fn repair_popup_window_bounds<R: Runtime>(
+    window: &WebviewWindow<R>,
+    geometry: PopupWindowGeometry,
+) {
+    if let Err(error) = window.set_size(Size::Logical(LogicalSize::new(
+        geometry.width,
+        geometry.height,
+    ))) {
+        eprintln!("failed to reset popup window size: {error}");
+    }
+
+    let size = popup_outer_size(window, geometry);
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
+
+    let monitors = match window.available_monitors() {
+        Ok(monitors) => monitors,
+        Err(error) => {
+            eprintln!("failed to inspect monitors for popup repair: {error}");
+            return;
+        }
+    };
+    if monitors.is_empty() {
+        return;
+    }
+
+    let position = window.outer_position().ok();
+    let rect = position.map(|position| WindowRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    });
+
+    if rect
+        .map(|rect| popup_rect_is_visible_on_any_monitor(rect, &monitors))
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let Some(monitor) = preferred_popup_monitor(window, &monitors) else {
+        return;
+    };
+    let _ = window.set_position(Position::Physical(centered_popup_position(size, monitor)));
+}
+
+fn popup_outer_size<R: Runtime>(
+    window: &WebviewWindow<R>,
+    geometry: PopupWindowGeometry,
+) -> PhysicalSize<u32> {
+    window.outer_size().unwrap_or_else(|_| {
+        let scale_factor = window.scale_factor().unwrap_or(1.0);
+        PhysicalSize::new(
+            (geometry.width * scale_factor).round().max(1.0) as u32,
+            (geometry.height * scale_factor).round().max(1.0) as u32,
+        )
+    })
+}
+
+fn preferred_popup_monitor<R: Runtime>(
+    window: &WebviewWindow<R>,
+    monitors: &[Monitor],
+) -> Option<MonitorRect> {
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        return Some(MonitorRect::from_monitor(&monitor));
+    }
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        return Some(MonitorRect::from_monitor(&monitor));
+    }
+    monitors.first().map(MonitorRect::from_monitor)
+}
+
+fn popup_window_geometry_for_label(label: &str) -> Option<PopupWindowGeometry> {
+    if label == DOWNLOAD_PROMPT_WINDOW {
+        return Some(download_prompt_window_geometry());
+    }
+    if label.starts_with(PROGRESS_WINDOW_PREFIX) {
+        return Some(progress_window_geometry());
+    }
+    if label.starts_with(TORRENT_PROGRESS_WINDOW_PREFIX) {
+        return Some(torrent_progress_window_geometry());
+    }
+    if label.starts_with(BATCH_PROGRESS_WINDOW_PREFIX) {
+        return Some(batch_progress_window_geometry());
+    }
+    None
+}
+
+fn popup_rect_is_visible_on_any_monitor(rect: WindowRect, monitors: &[Monitor]) -> bool {
+    monitors
+        .iter()
+        .map(MonitorRect::from_monitor)
+        .any(|monitor| popup_rect_is_visible_on_monitor(rect, monitor))
+}
+
+fn popup_rect_is_visible_on_monitor(rect: WindowRect, monitor: MonitorRect) -> bool {
+    const MIN_VISIBLE_WIDTH: i64 = 80;
+    const MIN_VISIBLE_HEIGHT: i64 = 44;
+
+    let visible_width = intersection_length(rect.x, rect.width, monitor.x, monitor.width);
+    let visible_height = intersection_length(rect.y, rect.height, monitor.y, monitor.height);
+    visible_width >= MIN_VISIBLE_WIDTH.min(rect.width as i64)
+        && visible_height >= MIN_VISIBLE_HEIGHT.min(rect.height as i64)
+}
+
+fn intersection_length(a_start: i32, a_length: u32, b_start: i32, b_length: u32) -> i64 {
+    let a_start = a_start as i64;
+    let b_start = b_start as i64;
+    let a_end = a_start + a_length as i64;
+    let b_end = b_start + b_length as i64;
+    (a_end.min(b_end) - a_start.max(b_start)).max(0)
+}
+
+fn centered_popup_position(size: PhysicalSize<u32>, monitor: MonitorRect) -> PhysicalPosition<i32> {
+    let x = monitor.x as i64 + ((monitor.width as i64 - size.width as i64) / 2).max(0);
+    let y = monitor.y as i64 + ((monitor.height as i64 - size.height as i64) / 2).max(0);
+    PhysicalPosition::new(clamp_i64_to_i32(x), clamp_i64_to_i32(y))
+}
+
+fn clamp_i64_to_i32(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+impl MonitorRect {
+    fn from_monitor(monitor: &Monitor) -> Self {
+        let position = monitor.position();
+        let size = monitor.size();
+        Self {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        }
+    }
 }
 
 fn open_progress_popup_count(app: &AppHandle) -> usize {
@@ -349,6 +563,16 @@ mod tests {
     }
 
     #[test]
+    fn download_prompt_window_minimum_matches_content_size() {
+        let geometry = super::download_prompt_window_geometry();
+
+        assert_eq!(geometry.width, 460.0);
+        assert_eq!(geometry.height, 280.0);
+        assert_eq!(geometry.min_width, geometry.width);
+        assert_eq!(geometry.min_height, geometry.height);
+    }
+
+    #[test]
     fn progress_windows_are_minimizable_and_not_always_on_top() {
         let policy = super::progress_window_policy();
 
@@ -376,6 +600,72 @@ mod tests {
             super::progress_window_position(Some(prompt_position), 2),
             Some(super::PopupWindowPosition { x: 336.0, y: 277.0 })
         );
+    }
+
+    #[test]
+    fn popup_rect_requires_meaningful_visible_area() {
+        let monitor = super::MonitorRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+
+        assert!(super::popup_rect_is_visible_on_monitor(
+            super::WindowRect {
+                x: 100,
+                y: 100,
+                width: 460,
+                height: 280,
+            },
+            monitor,
+        ));
+        assert!(!super::popup_rect_is_visible_on_monitor(
+            super::WindowRect {
+                x: -450,
+                y: 100,
+                width: 460,
+                height: 280,
+            },
+            monitor,
+        ));
+    }
+
+    #[test]
+    fn centered_popup_position_uses_monitor_bounds() {
+        assert_eq!(
+            super::centered_popup_position(
+                tauri::PhysicalSize::new(460, 280),
+                super::MonitorRect {
+                    x: -1920,
+                    y: 120,
+                    width: 1920,
+                    height: 1080,
+                },
+            ),
+            tauri::PhysicalPosition::new(-1190, 520)
+        );
+    }
+
+    #[test]
+    fn popup_label_maps_to_restore_geometry() {
+        assert_eq!(
+            super::popup_window_geometry_for_label(super::DOWNLOAD_PROMPT_WINDOW),
+            Some(super::download_prompt_window_geometry())
+        );
+        assert_eq!(
+            super::popup_window_geometry_for_label("download-progress-job-1"),
+            Some(super::progress_window_geometry())
+        );
+        assert_eq!(
+            super::popup_window_geometry_for_label("torrent-progress-job-1"),
+            Some(super::torrent_progress_window_geometry())
+        );
+        assert_eq!(
+            super::popup_window_geometry_for_label("batch-progress-batch-1"),
+            Some(super::batch_progress_window_geometry())
+        );
+        assert_eq!(super::popup_window_geometry_for_label("main"), None);
     }
 
     #[test]
