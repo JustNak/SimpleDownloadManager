@@ -4,6 +4,7 @@ use reqwest::header::{COOKIE, REFERER};
 use reqwest::redirect::Policy;
 use reqwest::Client;
 use serde::Deserialize;
+use std::future::Future;
 use std::time::Duration;
 use url::Url;
 
@@ -12,9 +13,11 @@ const FUCKINGFAST_DIRECT_HOST: &str = "dl.fuckingfast.co";
 const DATANODES_HOST: &str = "datanodes.to";
 const DATANODES_DOWNLOAD_URL: &str = "https://datanodes.to/download";
 const DATANODES_DIRECT_SUFFIX: &str = ".datanodes.to";
+const DATANODES_FREE_METHOD: &str = "Free Download >>";
 const HOSTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HOSTER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const DATANODES_MAX_WAIT_SECONDS: u64 = 60;
+const DATANODES_MAX_PRELIMINARY_STEPS: usize = 2;
 const HOSTER_RESOLUTION_CONCURRENCY: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,46 +191,19 @@ async fn resolve_datanodes_link(
         .text()
         .await
         .map_err(|error| resolution_error(format!("Could not read DataNodes page: {error}")))?;
-    let page = if extract_html_tag(&html, "download-countdown").is_some() {
-        parse_datanodes_standard_download_page(&html)?
-    } else {
-        let preliminary = parse_datanodes_preliminary_download_page(&html, &file_code)?;
-        let form = [
-            ("op", preliminary.op),
-            ("usr_login", preliminary.usr_login),
-            ("id", preliminary.id),
-            ("fname", preliminary.fname),
-            ("referer", preliminary.referer),
-            ("method_free", preliminary.method_free),
-        ];
-        let response = client
-            .post(preliminary.action_url)
-            .header(COOKIE, cookie.clone())
-            .header(REFERER, DATANODES_DOWNLOAD_URL)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|error| {
-                resolution_error(format!(
-                    "Could not request DataNodes preliminary download: {error}"
-                ))
-            })?;
-
-        if !response.status().is_success() {
-            return Err(resolution_error(format!(
-                "Could not request DataNodes preliminary download: HTTP {}.",
-                response.status()
-            )));
-        }
-
-        let html = response.text().await.map_err(|error| {
-            resolution_error(format!(
-                "Could not read DataNodes preliminary download response: {error}"
-            ))
-        })?;
-        parse_datanodes_standard_download_page(&html)?
-    };
-    validate_datanodes_standard_page_code(&page, &file_code)?;
+    let page =
+        resolve_datanodes_download_page_from_html(html, &file_code, {
+            let client = client.clone();
+            let cookie = cookie.clone();
+            move |preliminary| {
+                let client = client.clone();
+                let cookie = cookie.clone();
+                async move {
+                    request_datanodes_preliminary_download(&client, &cookie, preliminary).await
+                }
+            }
+        })
+        .await?;
 
     let wait_seconds = page.countdown_secs.min(DATANODES_MAX_WAIT_SECONDS);
     if wait_seconds > 0 {
@@ -273,6 +249,76 @@ async fn resolve_datanodes_link(
     Ok(ResolvedHosterLink {
         url: direct_url,
         filename_hint: datanodes_filename_hint_from_url(original_url).or(page.filename_hint),
+    })
+}
+
+async fn resolve_datanodes_download_page_from_html<F, Fut>(
+    mut html: String,
+    file_code: &str,
+    mut request_preliminary: F,
+) -> Result<DatanodesDownloadPage, HosterResolutionError>
+where
+    F: FnMut(DatanodesPreliminaryDownloadPage) -> Fut,
+    Fut: Future<Output = Result<String, HosterResolutionError>>,
+{
+    let mut preliminary_steps = 0;
+    loop {
+        if extract_html_tag(&html, "download-countdown").is_some() {
+            let page = parse_datanodes_standard_download_page(&html)?;
+            validate_datanodes_standard_page_code(&page, file_code)?;
+            return Ok(page);
+        }
+
+        if preliminary_steps >= DATANODES_MAX_PRELIMINARY_STEPS {
+            return Err(resolution_error(
+                "DataNodes preliminary download flow did not reach the standard download form."
+                    .into(),
+            ));
+        }
+
+        let preliminary = parse_datanodes_preliminary_download_page(&html, file_code)?;
+        html = request_preliminary(preliminary).await?;
+        preliminary_steps += 1;
+    }
+}
+
+async fn request_datanodes_preliminary_download(
+    client: &Client,
+    cookie: &str,
+    preliminary: DatanodesPreliminaryDownloadPage,
+) -> Result<String, HosterResolutionError> {
+    let form = [
+        ("op", preliminary.op),
+        ("usr_login", preliminary.usr_login),
+        ("id", preliminary.id),
+        ("fname", preliminary.fname),
+        ("referer", preliminary.referer),
+        ("method_free", preliminary.method_free),
+    ];
+    let response = client
+        .post(preliminary.action_url)
+        .header(COOKIE, cookie)
+        .header(REFERER, DATANODES_DOWNLOAD_URL)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|error| {
+            resolution_error(format!(
+                "Could not request DataNodes preliminary download: {error}"
+            ))
+        })?;
+
+    if !response.status().is_success() {
+        return Err(resolution_error(format!(
+            "Could not request DataNodes preliminary download: HTTP {}.",
+            response.status()
+        )));
+    }
+
+    response.text().await.map_err(|error| {
+        resolution_error(format!(
+            "Could not read DataNodes preliminary download response: {error}"
+        ))
     })
 }
 
@@ -613,7 +659,7 @@ fn parse_datanodes_preliminary_download_page(
     let fname = extract_named_form_value(form, "fname").ok_or_else(|| {
         resolution_error("DataNodes preliminary download form is missing the filename.".into())
     })?;
-    let method_free = extract_named_form_value(form, "method_free").ok_or_else(|| {
+    let method_free = extract_datanodes_preliminary_free_method(form).ok_or_else(|| {
         resolution_error(
             "DataNodes preliminary download form is missing the free download method.".into(),
         )
@@ -680,6 +726,104 @@ fn extract_named_form_value(form: &str, name: &str) -> Option<String> {
     extract_named_tag_attribute(form, "input", name, "value")
         .or_else(|| extract_named_tag_attribute(form, "button", name, "value"))
         .map(|value| decode_html_entities(&value))
+}
+
+fn extract_datanodes_preliminary_free_method(form: &str) -> Option<String> {
+    extract_named_form_value(form, "method_free")
+        .and_then(|value| non_empty_filename_hint(&value))
+        .or_else(|| extract_datanodes_actionable_free_method(form))
+}
+
+fn extract_datanodes_actionable_free_method(form: &str) -> Option<String> {
+    ["input", "button", "a", "label", "div"]
+        .iter()
+        .find_map(|tag_name| extract_datanodes_free_method_from_elements(form, tag_name))
+}
+
+fn extract_datanodes_free_method_from_elements(html: &str, tag_name: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = format!("<{}", tag_name.to_ascii_lowercase());
+    let close = format!("</{}>", tag_name.to_ascii_lowercase());
+    let mut search_from = 0;
+    while let Some(relative_index) = lower[search_from..].find(&open) {
+        let start = search_from + relative_index;
+        let tag_end = lower[start..].find('>')? + start + 1;
+        let opening_tag = &html[start..tag_end];
+        let inner_html = if tag_name.eq_ignore_ascii_case("input") {
+            ""
+        } else {
+            lower[tag_end..]
+                .find(&close)
+                .map(|end| &html[tag_end..tag_end + end])
+                .unwrap_or_default()
+        };
+
+        if datanodes_element_is_actionable_free_method(tag_name, opening_tag, inner_html) {
+            return extract_attribute_value(opening_tag, "value")
+                .map(|value| decode_html_entities(&value))
+                .and_then(|value| datanodes_signal_mentions_free_download(&value).then_some(value))
+                .or_else(|| Some(DATANODES_FREE_METHOD.to_string()));
+        }
+
+        search_from = tag_end;
+    }
+
+    None
+}
+
+fn datanodes_element_is_actionable_free_method(
+    tag_name: &str,
+    opening_tag: &str,
+    inner_html: &str,
+) -> bool {
+    let tag_signal = decode_html_entities(opening_tag).to_ascii_lowercase();
+    let text_signal = html_fragment_text(inner_html).to_ascii_lowercase();
+    let combined_signal = format!("{tag_signal} {text_signal}");
+    if !datanodes_signal_mentions_free_download(&combined_signal) {
+        return false;
+    }
+
+    match tag_name.to_ascii_lowercase().as_str() {
+        "button" => true,
+        "input" => {
+            !datanodes_attribute_equals(&tag_signal, "type", "hidden")
+                && datanodes_signal_mentions_free_download(&tag_signal)
+        }
+        "a" => {
+            tag_signal.contains("href=")
+                || tag_signal.contains("onclick")
+                || datanodes_attribute_equals(&tag_signal, "role", "button")
+                || datanodes_opening_tag_has_free_marker(&tag_signal)
+        }
+        "label" | "div" => {
+            datanodes_opening_tag_has_free_marker(&tag_signal)
+                || datanodes_attribute_equals(&tag_signal, "role", "button")
+                || tag_signal.contains("onclick")
+        }
+        _ => false,
+    }
+}
+
+fn datanodes_signal_mentions_free_download(signal: &str) -> bool {
+    let normalized = signal.replace('_', " ").replace('-', " ");
+    signal.contains("method_free")
+        || signal.contains("method-free")
+        || signal.contains("free_download")
+        || signal.contains("free-download")
+        || normalized.contains("free download")
+}
+
+fn datanodes_opening_tag_has_free_marker(tag_signal: &str) -> bool {
+    datanodes_signal_mentions_free_download(tag_signal)
+        || tag_signal
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .any(|part| part == "free" || part == "method_free")
+}
+
+fn datanodes_attribute_equals(tag_signal: &str, attribute: &str, expected_value: &str) -> bool {
+    extract_attribute_value(tag_signal, attribute)
+        .map(|value| value.eq_ignore_ascii_case(expected_value))
+        .unwrap_or(false)
 }
 
 fn extract_named_tag_attribute(
@@ -860,6 +1004,27 @@ fn filename_hint_from_title(html: &str) -> Option<String> {
     let start = lower.find("<title>")? + "<title>".len();
     let end = lower[start..].find("</title>")? + start;
     non_empty_filename_hint(&decode_html_entities(&html[start..end]))
+}
+
+fn html_fragment_text(html: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => {
+                in_tag = true;
+                text.push(' ');
+            }
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+
+    decode_html_entities(&text)
 }
 
 fn has_title_name_attribute(tag_lower: &str) -> bool {
@@ -1089,6 +1254,116 @@ mod tests {
         assert_eq!(page.fname, "REVEIL_--_fitgirl-repacks.site_--_.part09.rar");
         assert_eq!(page.referer, "");
         assert_eq!(page.method_free, "Free Download >>");
+    }
+
+    #[test]
+    fn datanodes_resolver_parses_preliminary_free_download_card_without_method_free() {
+        let html = r#"
+            <form method="POST" action="/download" id="downloadForm" class="download-options">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="usr_login" value="">
+                <input type="hidden" name="id" value="wrpbp7ne3rby">
+                <input type="hidden" name="fname" value="REVEIL_--_fitgirl-repacks.site_--_.part09.rar">
+                <input type="hidden" name="referer" value="">
+                <button type="submit" id="free-download-option" class="download-option free">
+                    <span>Free Download</span>
+                    <span>Standard speed</span>
+                </button>
+            </form>
+        "#;
+
+        let page = parse_datanodes_preliminary_download_page(html, "wrpbp7ne3rby")
+            .expect("preliminary DataNodes free-download card should parse");
+
+        assert_eq!(page.method_free, "Free Download >>");
+    }
+
+    #[test]
+    fn datanodes_resolver_does_not_infer_free_method_from_comparison_table() {
+        let html = r#"
+            <form method="POST" action="/download" id="downloadForm">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="id" value="wrpbp7ne3rby">
+                <input type="hidden" name="fname" value="file.rar">
+                <input type="hidden" name="referer" value="">
+            </form>
+            <table>
+                <tr><th>Download type</th><td>Free</td><td>Premium</td></tr>
+                <tr><th>Download speed</th><td>Standard</td><td>Maximum</td></tr>
+            </table>
+        "#;
+
+        let error = parse_datanodes_preliminary_download_page(html, "wrpbp7ne3rby")
+            .expect_err("comparison table alone should not count as a free method");
+
+        assert_eq!(
+            error.message,
+            "DataNodes preliminary download form is missing the free download method."
+        );
+    }
+
+    #[tokio::test]
+    async fn datanodes_resolver_advances_two_preliminary_pages_before_standard_page() {
+        let first_html = r#"
+            <form method="POST" action="/download" id="downloadForm">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="id" value="wrpbp7ne3rby">
+                <input type="hidden" name="fname" value="file.rar">
+                <input type="hidden" name="referer" value="">
+                <button type="submit" name="method_free" value="Continue to Download">
+                    Continue to Download
+                </button>
+            </form>
+        "#;
+        let second_html = r#"
+            <form method="POST" action="/download" id="downloadForm">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="id" value="wrpbp7ne3rby">
+                <input type="hidden" name="fname" value="file.rar">
+                <input type="hidden" name="referer" value="">
+                <button type="submit" id="free-download-option" class="download-option free">
+                    <span>Free Download</span>
+                    <span>Standard speed</span>
+                </button>
+            </form>
+        "#;
+        let standard_html = r#"
+            <download-countdown :countdown="5"
+                code="wrpbp7ne3rby" referer="https://datanodes.to/download" rand="rand-token"
+                free-method="Free Download &gt;&gt;" premium-method=""
+                :has-password="false" :has-captcha="false"
+                :has-countdown="true"
+                name="file.rar"></download-countdown>
+        "#;
+        let responses = std::cell::RefCell::new(
+            vec![second_html.to_string(), standard_html.to_string()].into_iter(),
+        );
+        let submitted_methods = std::cell::RefCell::new(Vec::new());
+
+        let page = resolve_datanodes_download_page_from_html(
+            first_html.to_string(),
+            "wrpbp7ne3rby",
+            |preliminary| {
+                submitted_methods
+                    .borrow_mut()
+                    .push(preliminary.method_free.clone());
+                futures_util::future::ready(Ok(responses
+                    .borrow_mut()
+                    .next()
+                    .expect("mock response")))
+            },
+        )
+        .await
+        .expect("two preliminary DataNodes pages should reach the standard page");
+
+        assert_eq!(page.code, "wrpbp7ne3rby");
+        assert_eq!(
+            submitted_methods.into_inner(),
+            vec![
+                "Continue to Download".to_string(),
+                "Free Download >>".to_string()
+            ]
+        );
     }
 
     #[test]
