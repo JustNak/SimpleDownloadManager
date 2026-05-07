@@ -41,9 +41,10 @@ pub(crate) use torrent::{
     should_stop_seeding,
 };
 pub use types::{
-    BackendError, BatchDownloadEntry, BulkArchiveEntry, BulkArchiveReady, DownloadTask,
-    DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt,
-    ExternalUsePreparation, TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
+    BackendError, BatchDownloadEntry, BulkArchiveEntry, BulkArchiveReady,
+    BulkMemberAutoRestartCandidate, BulkMemberRetryCandidate, DownloadTask, DuplicatePolicy,
+    EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation,
+    TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
     TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult, TorrentSessionCacheClearState,
     WorkerControl,
 };

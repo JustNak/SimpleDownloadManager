@@ -67,6 +67,7 @@
     exportDiagnosticsReport,
     getDiagnostics,
     getAppSnapshot,
+    getInstalledVersion,
     installUpdate,
     openBatchProgressWindow,
     openBulkArchive,
@@ -82,6 +83,7 @@
     resumeJob,
     restartJob,
     retryBulkArchive,
+    retryBulkMembers,
     retryFailedJobs,
     retryJob,
     runHostRegistrationFix,
@@ -149,6 +151,7 @@
   let isSavingSettings = $state(false);
   let activeSettingsSectionId = $state<SettingsSectionId>(SETTINGS_SECTIONS[0].id);
   let updateState = $state<AppUpdateState>(initialAppUpdateState);
+  let installedVersion = $state('Preview build');
   let isUpdatePromptOpen = $state(false);
   let commandMenuOpen = $state(false);
   let commandMenuRoot: HTMLDivElement | null = $state(null);
@@ -211,6 +214,12 @@
             message: getErrorMessage(initialData.diagnosticsError, 'Download state loaded, but diagnostics could not be refreshed.'),
           });
         }
+
+        void getInstalledVersion()
+          .then((version) => {
+            if (isMounted) installedVersion = version;
+          })
+          .catch(() => undefined);
 
         disposers.push(await subscribeToStateChanged((nextSnapshot) => {
           if (applyDesktopSnapshotWhenVisible(nextSnapshot)) {
@@ -654,14 +663,40 @@
 
   async function handleRetry(id: string) {
     try {
-      const row = queueRowById(id);
-      if (row && isBulkAggregateJob(row)) {
-        await retryBulkArchive(row.bulkArchiveId);
-        addToast({ type: 'info', title: 'Retrying Archive', message: 'Bulk archive creation was started again.' });
-        return;
-      }
       await retryJob(id);
       addToast({ type: 'info', title: 'Retrying Download', message: 'The download was added back to the queue.' });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleRetryBulkMembers(id: string) {
+    try {
+      const row = queueRowById(id);
+      if (!row || !isBulkAggregateJob(row)) return;
+
+      const result = await retryBulkMembers(row.bulkArchiveId);
+      const failedCount = result.failedItems.length;
+      const queuedLabel = result.queuedCount === 1 ? 'member download was' : 'member downloads were';
+      const lookupLabel = failedCount === 1 ? 'link lookup failed' : 'link lookups failed';
+      addToast({
+        type: failedCount > 0 ? (result.queuedCount > 0 ? 'warning' : 'error') : 'info',
+        title: result.queuedCount > 0 ? 'Retrying Bulk Members' : 'Bulk Retry Failed',
+        message: failedCount > 0
+          ? `${result.queuedCount} ${queuedLabel} queued. ${failedCount} ${lookupLabel}.`
+          : `${result.queuedCount} ${queuedLabel} queued.`,
+      });
+    } catch (error) {
+      addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function handleRetryArchive(id: string) {
+    try {
+      const row = queueRowById(id);
+      if (!row || !isBulkAggregateJob(row)) return;
+      await retryBulkArchive(row.bulkArchiveId);
+      addToast({ type: 'info', title: 'Retrying Archive', message: 'Bulk archive creation was started again.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
     }
@@ -1285,6 +1320,7 @@
               onCopyDiagnostics={() => void handleCopyDiagnostics()}
               onExportDiagnostics={() => void handleExportDiagnostics()}
               {updateState}
+              installedVersion={installedVersion}
               onCheckForUpdates={() => void handleCheckForUpdates('manual')}
               onInstallUpdate={() => void handleInstallUpdate()}
             />
@@ -1306,6 +1342,8 @@
           onResume={(id) => void handleResume(id)}
           onCancel={(id) => void handleCancel(id)}
           onRetry={(id) => void handleRetry(id)}
+          onRetryBulkMembers={(id) => void handleRetryBulkMembers(id)}
+          onRetryArchive={(id) => void handleRetryArchive(id)}
           onRestart={(id) => void handleRestart(id)}
           onDelete={(ids, deleteFromDisk) => void handleDeleteMany(ids, deleteFromDisk)}
           onRename={(id, filename) => void handleRename(id, filename)}

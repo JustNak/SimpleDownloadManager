@@ -147,3 +147,32 @@ const completedRows = groupBulkQueueRows([
 
 assert.equal(completedRows[0].state, 'completed', 'completed archive rows should represent the archive status');
 assert.equal(completedRows[0].targetPath, 'C:\\Downloads\\bulk-download.zip', 'completed aggregate target should be the archive output path');
+
+const failedMemberRows = groupBulkQueueRows([
+  job({
+    id: 'part_failed',
+    filename: 'Game.part01.rar',
+    state: 'failed',
+    error: 'HTTP 403',
+    failureCategory: 'http',
+    bulkArchive,
+  }),
+  job({
+    id: 'part_completed',
+    filename: 'Game.part02.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    bulkArchive,
+  }),
+]);
+
+if (!isBulkAggregateJob(failedMemberRows[0])) {
+  throw new Error('failed member aggregate should expose bulk metadata');
+}
+assert.equal(
+  failedMemberRows[0].bulkRetryableMemberCount,
+  1,
+  'aggregate rows should count failed pending HTTP members that can be retried',
+);

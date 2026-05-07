@@ -26,7 +26,7 @@
     X,
   } from '@lucide/svelte';
   import type { DiagnosticsSnapshot, QueueRowSize, Settings } from './types';
-  import type { AppUpdateState, AppUpdateVersionTone } from './appUpdates';
+  import { updateVersionIndicator, type AppUpdateState, type AppUpdateVersionTone } from './appUpdates';
   import { DEFAULT_ACCENT_COLOR, normalizeAccentColor } from './appearance';
   import { defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
   import { settingsEqual, shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
@@ -59,6 +59,7 @@
     onCopyDiagnostics: () => void;
     onExportDiagnostics: () => void;
     updateState: AppUpdateState;
+    installedVersion: string;
     onCheckForUpdates: () => void;
     onInstallUpdate: () => void;
   }
@@ -80,6 +81,7 @@
     onCopyDiagnostics,
     onExportDiagnostics,
     updateState,
+    installedVersion,
     onCheckForUpdates,
     onInstallUpdate,
   }: Props = $props();
@@ -100,6 +102,7 @@
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
   const recentDiagnosticEvents = $derived(diagnostics?.recentEvents ? [...diagnostics.recentEvents].reverse() : []);
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
+  const updateVersion = $derived(updateVersionIndicator(updateState, installedVersion));
 
   $effect(() => {
     const nextSettings = settings;
@@ -439,8 +442,8 @@
     </div>
 
     <div class="grid gap-3 border-y border-border/40 py-3 md:grid-cols-2">
-      {@render VersionIndicator('Current', updateState.availableUpdate?.currentVersion ?? '0.5.1-beta', 'current')}
-      {@render VersionIndicator('Latest', updateState.availableUpdate?.version ?? (updateState.status === 'checking' ? 'Checking...' : updateState.status === 'error' ? 'Unavailable' : 'Check pending'), updateState.availableUpdate ? 'available' : updateState.status === 'error' ? 'error' : 'pending')}
+      {@render VersionIndicator('Current', updateVersion.currentVersion, 'current')}
+      {@render VersionIndicator('Latest', updateVersion.newVersion, updateVersion.newVersionTone)}
     </div>
 
     {#if updateState.status === 'downloading' || updateState.status === 'installing'}

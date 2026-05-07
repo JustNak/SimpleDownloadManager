@@ -1512,6 +1512,8 @@ fn torrent_job(id: &str, state: JobState) -> DownloadJob {
         failure_category: None,
         resume_support: ResumeSupport::Unknown,
         retry_attempts: 0,
+        auto_restart_attempts: 0,
+        resolved_from_url: None,
         target_path: format!("C:/Downloads/torrent-{id}"),
         temp_path: format!("C:/Downloads/torrent-{id}.part"),
         artifact_exists: None,

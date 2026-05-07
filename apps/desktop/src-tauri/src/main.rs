@@ -103,6 +103,7 @@ fn main() {
             commands::open_bulk_archive,
             commands::reveal_bulk_archive,
             commands::retry_bulk_archive,
+            commands::retry_bulk_members,
             commands::open_install_docs,
             commands::run_host_registration_fix,
             commands::test_extension_handoff,

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
+const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
 const sectionsSource = readFileSync(new URL('../src/settingsSections.ts', import.meta.url), 'utf8');
 
 assert.match(source, /settings-surface mx-auto w-full max-w-6xl p-4/, 'settings content should keep the Svelte centered max-width form layout');
@@ -24,6 +26,13 @@ assert.match(source, /Configure downloads, appearance, notifications, and native
 assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep Svelte cancel and save actions');
 assert.match(source, /CategorySettingsCard\('General'/, 'general settings should render through the category card helper');
 assert.match(source, /Beta channel updates/, 'app update card should be present');
+assert.doesNotMatch(source, /0\.5\.1-beta/, 'app update current version should not use the stale hardcoded 0.5.1-beta fallback');
+assert.match(source, /installedVersion:\s*string/, 'settings page should receive the installed app version from the app shell');
+assert.match(source, /updateVersionIndicator\(updateState,\s*installedVersion\)/, 'app update version rows should use the shared installed-version indicator helper');
+assert.match(appSource, /getInstalledVersion/, 'app shell should read the installed app version through the backend wrapper');
+assert.match(backendSource, /plugin:app\|version/, 'backend wrapper should invoke the existing Tauri app version command directly so removeUnusedCommands preserves it');
+assert.match(appSource, /let installedVersion = \$state/, 'app shell should keep installed version state for settings rendering');
+assert.match(appSource, /installedVersion=\{installedVersion\}/, 'app shell should pass the installed version into settings');
 assert.match(source, /CategorySettingsCard\('Torrenting'/, 'torrent settings should render the torrenting category card');
 assert.match(source, /CategorySettingsCard\('Appearance'/, 'appearance settings should render the appearance category card');
 assert.match(source, /CategorySettingsCard\('Web Extension'/, 'extension settings should render the web extension category card');

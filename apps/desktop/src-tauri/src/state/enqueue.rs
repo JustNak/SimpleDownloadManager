@@ -64,6 +64,7 @@ impl SharedState {
             .map(|url| BatchDownloadEntry {
                 url,
                 filename_hint: None,
+                resolved_from_url: None,
             })
             .collect();
         self.enqueue_download_entries_with_bulk_options(
@@ -124,6 +125,9 @@ impl SharedState {
                 normalize_download_url(&entry.url).map(|url| BatchDownloadEntry {
                     url,
                     filename_hint: entry.filename_hint,
+                    resolved_from_url: normalize_optional_resolved_from_url(
+                        entry.resolved_from_url,
+                    ),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -172,6 +176,7 @@ impl SharedState {
                         transfer_kind: Some(TransferKind::Http),
                         bulk_archive: bulk_archive.clone(),
                         start_paused,
+                        resolved_from_url: entry.resolved_from_url,
                         ..Default::default()
                     },
                 )
@@ -254,6 +259,13 @@ impl SharedState {
         let state = self.inner.read().await;
         state.prepare_download_prompt(id, url, source, filename_hint, total_bytes)
     }
+}
+
+fn normalize_optional_resolved_from_url(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 impl RuntimeState {
@@ -421,6 +433,8 @@ impl RuntimeState {
             failure_category: None,
             resume_support: ResumeSupport::Unknown,
             retry_attempts: 0,
+            auto_restart_attempts: 0,
+            resolved_from_url: options.resolved_from_url,
             target_path: target_path.display().to_string(),
             temp_path: temp_path.display().to_string(),
             artifact_exists: None,

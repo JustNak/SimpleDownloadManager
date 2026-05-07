@@ -90,6 +90,8 @@ export interface DownloadJob {
   failureCategory?: FailureCategory;
   resumeSupport?: ResumeSupport;
   retryAttempts?: number;
+  autoRestartAttempts?: number;
+  resolvedFromUrl?: string;
   targetPath?: string;
   tempPath?: string;
   artifactExists?: boolean;

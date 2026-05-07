@@ -214,6 +214,10 @@ pub struct DownloadJob {
     #[serde(default)]
     pub retry_attempts: u32,
     #[serde(default)]
+    pub auto_restart_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_from_url: Option<String>,
+    #[serde(default)]
     pub target_path: String,
     #[serde(default)]
     pub temp_path: String,
@@ -861,6 +865,8 @@ mod tests {
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
         assert_eq!(state.jobs[0].retry_attempts, 0);
+        assert_eq!(state.jobs[0].auto_restart_attempts, 0);
+        assert_eq!(state.jobs[0].resolved_from_url, None);
         assert_eq!(state.jobs[0].transfer_kind, TransferKind::Http);
         assert_eq!(state.jobs[0].integrity_check, None);
         assert!(state.diagnostic_events.is_empty());

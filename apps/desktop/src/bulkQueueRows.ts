@@ -6,6 +6,7 @@ export interface BulkAggregateDownloadJob extends DownloadJob {
   bulkArchiveId: string;
   bulkArchiveOutputPath?: string;
   bulkArchiveMemberSearchText: string;
+  bulkRetryableMemberCount: number;
 }
 
 export type QueueDisplayJob = DownloadJob | BulkAggregateDownloadJob;
@@ -97,10 +98,17 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     bulkMemberIds: members.map((job) => job.id),
     bulkArchiveId: archive?.id ?? first.id,
     bulkArchiveOutputPath: archive?.outputPath,
+    bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,
     bulkArchiveMemberSearchText: members
       .map((job) => `${job.filename} ${job.url} ${job.targetPath ?? ''}`)
       .join(' '),
   };
+}
+
+function isRetryableBulkMember(job: DownloadJob): boolean {
+  return job.transferKind === 'http'
+    && job.state === FAILED
+    && job.bulkArchive?.archiveStatus === 'pending';
 }
 
 function deriveAggregateState(

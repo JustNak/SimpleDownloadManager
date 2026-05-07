@@ -64,6 +64,7 @@ impl RuntimeState {
                 job.error = None;
                 job.failure_category = None;
                 job.retry_attempts = 0;
+                job.auto_restart_attempts = 0;
                 job.speed = 0;
                 job.eta = 0;
             }
@@ -242,6 +243,11 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
     if job.temp_path.trim().is_empty() {
         job.temp_path = format!("{}.part", job.target_path);
     }
+
+    job.resolved_from_url = job.resolved_from_url.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
 
     if matches!(
         job.state,

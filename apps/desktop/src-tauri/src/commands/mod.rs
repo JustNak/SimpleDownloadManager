@@ -12,7 +12,8 @@ use crate::state::{
 };
 use crate::storage::{
     BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
-    DownloadPrompt, DownloadSource, HostRegistrationStatus, JobState, Settings, TransferKind,
+    DownloadPrompt, DownloadSource, FailureCategory, HostRegistrationStatus, JobState, Settings,
+    TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window, progress_window_label,
@@ -126,6 +127,13 @@ pub struct AddJobsResult {
     pub results: Vec<AddJobResult>,
     pub queued_count: usize,
     pub duplicate_count: usize,
+    pub failed_items: Vec<FailedBatchItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkMemberRetryResult {
+    pub queued_count: usize,
     pub failed_items: Vec<FailedBatchItem>,
 }
 
@@ -534,6 +542,7 @@ pub async fn add_jobs(
             .map(|link| BatchDownloadEntry {
                 url: link.url,
                 filename_hint: link.filename_hint,
+                resolved_from_url: link.resolved_from_url,
             })
             .collect::<Vec<_>>();
         if entries.is_empty() {
@@ -1253,6 +1262,67 @@ pub async fn retry_bulk_archive(
 }
 
 #[tauri::command]
+pub async fn retry_bulk_members(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    archive_id: String,
+) -> Result<BulkMemberRetryResult, String> {
+    let candidates = state
+        .bulk_member_retry_candidates(&archive_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut queued_count = 0;
+    let mut failed_items = Vec::new();
+    let mut snapshot = None;
+
+    for candidate in candidates {
+        let resolved_url = if candidate.resolved_from_url.is_some() {
+            match crate::hosters::resolve_hoster_links(vec![candidate.source_url.clone()]).await {
+                Ok(mut links) => links
+                    .pop()
+                    .map(|link| link.url)
+                    .unwrap_or_else(|| candidate.source_url.clone()),
+                Err(error) => {
+                    let message = format!("Could not refresh bulk member link: {}", error.message);
+                    snapshot = Some(
+                        state
+                            .fail_job(&candidate.id, message.clone(), FailureCategory::Http)
+                            .await?,
+                    );
+                    failed_items.push(FailedBatchItem {
+                        url: candidate.source_url,
+                        message,
+                    });
+                    continue;
+                }
+            }
+        } else {
+            candidate.source_url.clone()
+        };
+
+        snapshot = Some(
+            state
+                .retry_bulk_member(&candidate.id, resolved_url)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+        queued_count += 1;
+    }
+
+    if let Some(snapshot) = snapshot {
+        emit_snapshot(&app, &snapshot);
+    }
+    if queued_count > 0 {
+        schedule_downloads(app, state.inner().clone());
+    }
+
+    Ok(BulkMemberRetryResult {
+        queued_count,
+        failed_items,
+    })
+}
+
+#[tauri::command]
 pub async fn open_install_docs() -> Result<(), String> {
     let docs_path = resolve_install_resource_path("install.md")?;
 
@@ -1792,6 +1862,24 @@ mod tests {
     }
 
     #[test]
+    fn bulk_member_retry_command_refreshes_links_and_records_lookup_failures() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        assert!(production_source.contains("pub async fn retry_bulk_members("));
+        assert!(
+            production_source.contains("resolve_hoster_links(vec![candidate.source_url.clone()])")
+        );
+        assert!(production_source.contains(".retry_bulk_member(&candidate.id, resolved_url)"));
+        assert!(production_source
+            .contains(".fail_job(&candidate.id, message.clone(), FailureCategory::Http)"));
+        assert!(production_source.contains("failed_items.push(FailedBatchItem"));
+    }
+
+    #[test]
     fn external_use_commands_schedule_auto_reseed() {
         let source = include_str!("mod.rs");
         let production_source = source
@@ -1943,6 +2031,8 @@ mod tests {
             failure_category: None,
             resume_support: ResumeSupport::Supported,
             retry_attempts: 1,
+            auto_restart_attempts: 0,
+            resolved_from_url: None,
             target_path: "C:/Downloads/file.zip".into(),
             temp_path: "C:/Downloads/file.zip.part".into(),
             artifact_exists: None,

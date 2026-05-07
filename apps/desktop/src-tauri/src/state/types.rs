@@ -126,12 +126,28 @@ pub struct EnqueueOptions {
     pub bulk_archive: Option<BulkArchiveInfo>,
     pub handoff_auth: Option<HandoffAuth>,
     pub start_paused: bool,
+    pub resolved_from_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct BatchDownloadEntry {
     pub url: String,
     pub filename_hint: Option<String>,
+    pub resolved_from_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkMemberAutoRestartCandidate {
+    pub resolved_from_url: Option<String>,
+    pub attempt: u32,
+    pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkMemberRetryCandidate {
+    pub id: String,
+    pub source_url: String,
+    pub resolved_from_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

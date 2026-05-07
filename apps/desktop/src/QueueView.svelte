@@ -100,6 +100,8 @@
     onResume: (id: string) => void;
     onCancel: (id: string) => void;
     onRetry: (id: string) => void;
+    onRetryBulkMembers: (id: string) => void;
+    onRetryArchive: (id: string) => void;
     onRestart: (id: string) => void;
     onOpen: (id: string) => void;
     onReveal: (id: string) => void;
@@ -124,6 +126,8 @@
     onResume,
     onCancel,
     onRetry,
+    onRetryBulkMembers,
+    onRetryArchive,
     onRestart,
     onOpen,
     onReveal,
@@ -638,6 +642,10 @@
     return isBulkAggregateJob(job) && job.bulkArchive?.archiveStatus === 'failed';
   }
 
+  function canRetryBulkMembers(job: DownloadJob): boolean {
+    return isBulkAggregateJob(job) && job.bulkRetryableMemberCount > 0;
+  }
+
   function canOpenSelectedDeletePrompt(job: QueueDisplayJob): boolean {
     return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
   }
@@ -993,17 +1001,21 @@
     {#if isCompletedBulkAggregate(job)}
       {@render MenuItem(FolderOpen, 'Show', () => onReveal(job.id))}
       {@render MenuItem(FileArchive, bulkOpenLabel(job), () => onOpen(job.id))}
+      {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else if isFailedBulkAggregate(job)}
       {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
-      {@render MenuItem(RotateCcw, 'Retry archive', () => onRetry(job.id))}
+      {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
+      {@render MenuItem(RotateCcw, 'Retry archive', () => onRetryArchive(job.id))}
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else if isCanceledBulkAggregate(job)}
+      {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else}
       {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
+      {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
       {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id))}{/if}
       {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
       {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
@@ -1029,9 +1041,13 @@
   {/if}
 {/snippet}
 
-{#snippet MenuItem(icon: IconComponent, label: string, onClick: () => void, destructive = false)}
+{#snippet MenuItem(icon: IconComponent, label: string, onClick: () => void, destructive = false, disabled = false)}
   {@const Icon = icon}
-  <button class={`flex h-9 w-full items-center gap-2 px-3 text-left text-sm transition-colors hover:bg-muted ${destructive ? 'text-destructive' : 'text-foreground'}`} onclick={() => { onClick(); closeMenus(); }}>
+  <button
+    class={`flex h-9 w-full items-center gap-2 px-3 text-left text-sm transition-colors ${disabled ? 'cursor-not-allowed opacity-45' : 'hover:bg-muted'} ${destructive ? 'text-destructive' : 'text-foreground'}`}
+    {disabled}
+    onclick={() => { onClick(); closeMenus(); }}
+  >
     <span class={destructive ? 'text-destructive' : 'text-muted-foreground'}><Icon size={16} /></span>
     <span class="min-w-0 flex-1 truncate">{label}</span>
   </button>

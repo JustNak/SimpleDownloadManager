@@ -24,6 +24,7 @@ const HOSTER_RESOLUTION_CONCURRENCY: usize = 6;
 pub struct ResolvedHosterLink {
     pub url: String,
     pub filename_hint: Option<String>,
+    pub resolved_from_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +139,7 @@ async fn resolve_hoster_link(
         None => Ok(ResolvedHosterLink {
             url: trimmed_url,
             filename_hint: None,
+            resolved_from_url: None,
         }),
     }
 }
@@ -247,6 +249,7 @@ async fn resolve_datanodes_link(
     let direct_url = extract_datanodes_direct_url_from_json(&json)?;
 
     Ok(ResolvedHosterLink {
+        resolved_from_url: original_url_for_resolved_link(original_url, &direct_url),
         url: direct_url,
         filename_hint: datanodes_filename_hint_from_url(original_url).or(page.filename_hint),
     })
@@ -376,16 +379,23 @@ pub fn resolve_hoster_link_from_html(
         return Ok(ResolvedHosterLink {
             url: original_url.trim().to_string(),
             filename_hint: None,
+            resolved_from_url: None,
         });
     }
 
     let direct_url = extract_fuckingfast_direct_url(html)?;
     Ok(ResolvedHosterLink {
+        resolved_from_url: original_url_for_resolved_link(original_url, &direct_url),
         url: direct_url,
         filename_hint: filename_hint_from_fragment(original_url)
             .or_else(|| filename_hint_from_meta_title(html))
             .or_else(|| filename_hint_from_title(html)),
     })
+}
+
+fn original_url_for_resolved_link(original_url: &str, resolved_url: &str) -> Option<String> {
+    let trimmed = original_url.trim();
+    (!trimmed.is_empty() && trimmed != resolved_url).then(|| trimmed.to_string())
 }
 
 pub fn is_fuckingfast_page_url(raw_url: &str) -> bool {
@@ -922,39 +932,73 @@ fn extract_datanodes_direct_url_from_json(json: &str) -> Result<String, HosterRe
         )
     })?;
     let direct_url = decode_html_entities(&percent_decode_str(&encoded_url).decode_utf8_lossy());
-    if validate_datanodes_direct_url(&direct_url) {
-        Ok(direct_url)
-    } else {
+    if let Some(reason) = datanodes_direct_url_rejection_reason(&direct_url) {
         Err(resolution_error(
-            "DataNodes standard download response pointed at an unexpected download host.".into(),
+            format!(
+                "DataNodes standard download response pointed at an unexpected download host: {reason}."
+            ),
         ))
+    } else {
+        Ok(direct_url)
     }
 }
 
+#[cfg(test)]
 fn validate_datanodes_direct_url(raw_url: &str) -> bool {
+    datanodes_direct_url_rejection_reason(raw_url).is_none()
+}
+
+fn datanodes_direct_url_rejection_reason(raw_url: &str) -> Option<String> {
     let Ok(parsed) = Url::parse(raw_url) else {
-        return false;
+        return Some("URL could not be parsed".into());
     };
     if parsed.scheme() != "https" {
-        return false;
+        return Some(format!("scheme `{}` is not https", parsed.scheme()));
     }
 
     let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
-        return false;
-    };
-    let Some(node_name) = host.strip_suffix(DATANODES_DIRECT_SUFFIX) else {
-        return false;
-    };
-    let Some(node_number) = node_name.strip_prefix("node") else {
-        return false;
+        return Some("URL did not include a host".into());
     };
 
-    !node_number.is_empty()
-        && node_number
-            .chars()
-            .all(|character| character.is_ascii_digit())
-        && parsed.path().starts_with("/d/")
-        && parsed.path().len() > "/d/".len()
+    if !is_datanodes_direct_file_host(&host) {
+        return Some(format!(
+            "host `{host}` is not a supported DataNodes file server"
+        ));
+    }
+
+    let path = parsed.path();
+    if !path.starts_with("/d/") || path.len() <= "/d/".len() {
+        return Some(format!(
+            "path `{path}` is not a DataNodes file download path"
+        ));
+    }
+
+    None
+}
+
+fn is_datanodes_direct_file_host(host: &str) -> bool {
+    let Some(subdomain) = host.strip_suffix(DATANODES_DIRECT_SUFFIX) else {
+        return false;
+    };
+    if subdomain.is_empty() || subdomain == "www" {
+        return false;
+    }
+
+    subdomain.split('.').all(is_valid_datanodes_subdomain_label)
+}
+
+fn is_valid_datanodes_subdomain_label(label: &str) -> bool {
+    if label.is_empty() || label.len() > 63 {
+        return false;
+    }
+
+    let first = label.as_bytes()[0];
+    let last = label.as_bytes()[label.len() - 1];
+    first.is_ascii_alphanumeric()
+        && last.is_ascii_alphanumeric()
+        && label
+            .bytes()
+            .all(|character| character.is_ascii_alphanumeric() || character == b'-')
 }
 
 fn validate_fuckingfast_direct_url(raw_url: &str) -> bool {
@@ -1101,6 +1145,7 @@ mod tests {
 
     #[test]
     fn fuckingfast_resolver_extracts_direct_link_and_fragment_filename() {
+        let original_url = "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar";
         let html = r#"
             <html>
               <head><title>Ignored title</title></head>
@@ -1114,11 +1159,8 @@ mod tests {
             </html>
         "#;
 
-        let resolved = resolve_hoster_link_from_html(
-            "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar",
-            html,
-        )
-        .expect("fuckingfast page should resolve");
+        let resolved = resolve_hoster_link_from_html(original_url, html)
+            .expect("fuckingfast page should resolve");
 
         assert_eq!(
             resolved.url,
@@ -1128,6 +1170,7 @@ mod tests {
             resolved.filename_hint.as_deref(),
             Some("archive.part01.rar")
         );
+        assert_eq!(resolved.resolved_from_url.as_deref(), Some(original_url));
     }
 
     #[test]
@@ -1164,6 +1207,7 @@ mod tests {
 
         assert_eq!(resolved.url, "https://example.com/file.zip");
         assert_eq!(resolved.filename_hint, None);
+        assert_eq!(resolved.resolved_from_url, None);
     }
 
     #[test]
@@ -1430,6 +1474,67 @@ mod tests {
     }
 
     #[test]
+    fn datanodes_resolver_accepts_datanodes_file_server_subdomains() {
+        for host in [
+            "node41.datanodes.to:8443",
+            "dl.datanodes.to",
+            "cdn2.datanodes.to",
+            "stor03.datanodes.to",
+            "mnode.datanodes.to",
+            "rocket.datanodes.to",
+        ] {
+            let direct_url = format!("https://{host}/d/token_123/file.rar");
+            let json = format!(r#"{{"url":"{direct_url}"}}"#);
+
+            let direct = extract_datanodes_direct_url_from_json(&json)
+                .expect("DataNodes file-server direct URL should parse");
+
+            assert_eq!(direct, direct_url);
+            assert!(
+                validate_datanodes_direct_url(&direct),
+                "{direct} should be treated as a DataNodes direct file URL"
+            );
+        }
+    }
+
+    #[test]
+    fn datanodes_resolver_rejects_non_file_direct_urls_with_reason() {
+        for (direct_url, expected_reason) in [
+            (
+                "https://datanodes.to/d/token/file.rar",
+                "host `datanodes.to` is not a supported DataNodes file server",
+            ),
+            (
+                "https://www.datanodes.to/d/token/file.rar",
+                "host `www.datanodes.to` is not a supported DataNodes file server",
+            ),
+            (
+                "https://evil.example/d/token/file.rar",
+                "host `evil.example` is not a supported DataNodes file server",
+            ),
+            (
+                "http://node41.datanodes.to/d/token/file.rar",
+                "scheme `http` is not https",
+            ),
+            (
+                "https://node41.datanodes.to/not-download/file.rar",
+                "path `/not-download/file.rar` is not a DataNodes file download path",
+            ),
+        ] {
+            let json = format!(r#"{{"url":"{direct_url}"}}"#);
+
+            let error = extract_datanodes_direct_url_from_json(&json)
+                .expect_err("invalid DataNodes direct URL should be rejected");
+
+            assert!(
+                error.message.contains(expected_reason),
+                "{direct_url} should explain rejection reason; got: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
     fn datanodes_resolver_rejects_invalid_direct_link_json() {
         for json in [
             r#"{"url":"https%3A%2F%2Fevil.example%2Fd%2Ftoken%2Ffile.rar"}"#,
@@ -1452,6 +1557,9 @@ mod tests {
                     ResolvedHosterLink {
                         url: "https://node41.datanodes.to:8443/d/token/file.rar".into(),
                         filename_hint: Some("file.rar".into()),
+                        resolved_from_url: Some(
+                            "https://datanodes.to/61nni6me5p0n/file.rar".into(),
+                        ),
                     },
                 )),
                 Ok((
@@ -1459,6 +1567,7 @@ mod tests {
                     ResolvedHosterLink {
                         url: "https://example.com/file.zip".into(),
                         filename_hint: None,
+                        resolved_from_url: None,
                     },
                 )),
                 Ok((
@@ -1466,6 +1575,9 @@ mod tests {
                     ResolvedHosterLink {
                         url: "https://dl.fuckingfast.co/dl/direct-token_123".into(),
                         filename_hint: Some("archive.part01.rar".into()),
+                        resolved_from_url: Some(
+                            "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar".into(),
+                        ),
                     },
                 )),
             ],
@@ -1495,6 +1607,9 @@ mod tests {
                     ResolvedHosterLink {
                         url: "https://node41.datanodes.to:8443/d/token/file.rar".into(),
                         filename_hint: Some("file.rar".into()),
+                        resolved_from_url: Some(
+                            "https://datanodes.to/61nni6me5p0n/file.rar".into(),
+                        ),
                     },
                 )),
                 Err((
@@ -1509,6 +1624,7 @@ mod tests {
                     ResolvedHosterLink {
                         url: "https://example.com/file.zip".into(),
                         filename_hint: None,
+                        resolved_from_url: None,
                     },
                 )),
             ],

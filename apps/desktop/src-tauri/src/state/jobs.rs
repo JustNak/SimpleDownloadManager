@@ -52,6 +52,7 @@ impl SharedState {
                     job.error = None;
                     job.failure_category = None;
                     job.retry_attempts = 0;
+                    job.auto_restart_attempts = 0;
                     job.speed = 0;
                     job.eta = 0;
                     reset_integrity_for_retry(job);
@@ -136,6 +137,7 @@ impl SharedState {
                 job.error = None;
                 job.failure_category = None;
                 job.retry_attempts = 0;
+                job.auto_restart_attempts = 0;
                 reset_integrity_for_retry(job);
                 format!("Canceled {}", job.filename)
             };
@@ -165,6 +167,7 @@ impl SharedState {
                 job.error = None;
                 job.failure_category = None;
                 job.retry_attempts = 0;
+                job.auto_restart_attempts = 0;
                 reset_integrity_for_retry(job);
                 format!("Retry queued for {}", job.filename)
             };
@@ -211,6 +214,158 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn bulk_member_auto_restart_candidate(
+        &self,
+        id: &str,
+        failure_category: FailureCategory,
+    ) -> Result<Option<BulkMemberAutoRestartCandidate>, String> {
+        let state = self.inner.read().await;
+        let Some(job) = state.job(id) else {
+            return Ok(None);
+        };
+        let max_attempts = state.settings.auto_retry_attempts.min(10);
+
+        if max_attempts == 0
+            || job.auto_restart_attempts >= max_attempts
+            || !bulk_member_auto_restart_failure_category(failure_category)
+            || job.transfer_kind != TransferKind::Http
+            || !job
+                .bulk_archive
+                .as_ref()
+                .is_some_and(|archive| archive.archive_status == BulkArchiveStatus::Pending)
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(BulkMemberAutoRestartCandidate {
+            resolved_from_url: job.resolved_from_url.clone(),
+            attempt: job.auto_restart_attempts.saturating_add(1),
+            max_attempts,
+        }))
+    }
+
+    pub async fn auto_restart_bulk_member(
+        &self,
+        id: &str,
+        resolved_url: String,
+        attempt: u32,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
+            state.active_workers.remove(id);
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
+                remove_file_if_exists(Path::new(&job.temp_path))?;
+                reset_job_for_restart(job);
+                job.url = resolved_url;
+                job.auto_restart_attempts = attempt;
+                format!("Auto-restart queued for {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    pub async fn bulk_member_retry_candidates(
+        &self,
+        archive_id: &str,
+    ) -> Result<Vec<BulkMemberRetryCandidate>, String> {
+        let state = self.inner.read().await;
+        let members = state
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.bulk_archive
+                    .as_ref()
+                    .is_some_and(|archive| archive.id == archive_id)
+            })
+            .collect::<Vec<_>>();
+
+        if members.is_empty() {
+            return Err("Bulk archive was not found.".into());
+        }
+        if members.iter().any(|job| {
+            job.bulk_archive
+                .as_ref()
+                .is_some_and(|archive| archive.archive_status != BulkArchiveStatus::Pending)
+        }) {
+            return Err(
+                "Bulk member retry is only available while the bulk archive is pending.".into(),
+            );
+        }
+
+        let candidates = members
+            .into_iter()
+            .filter(|job| job.transfer_kind == TransferKind::Http && job.state == JobState::Failed)
+            .map(|job| {
+                let resolved_from_url = job
+                    .resolved_from_url
+                    .clone()
+                    .filter(|url| !url.trim().is_empty());
+                let source_url = resolved_from_url.clone().unwrap_or_else(|| job.url.clone());
+                BulkMemberRetryCandidate {
+                    id: job.id.clone(),
+                    source_url,
+                    resolved_from_url,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if candidates.is_empty() {
+            return Err("No failed bulk member downloads are available to retry.".into());
+        }
+
+        Ok(candidates)
+    }
+
+    pub async fn retry_bulk_member(
+        &self,
+        id: &str,
+        resolved_url: String,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
+            state.active_workers.remove(id);
+            let event_message = {
+                let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
+                if job.transfer_kind != TransferKind::Http
+                    || job.state != JobState::Failed
+                    || !job
+                        .bulk_archive
+                        .as_ref()
+                        .is_some_and(|archive| archive.archive_status == BulkArchiveStatus::Pending)
+                {
+                    return Err("Only failed pending HTTP bulk members can be retried.".into());
+                }
+
+                remove_file_if_exists(Path::new(&job.temp_path))?;
+                reset_job_for_restart(job);
+                job.url = resolved_url;
+                format!("Retry queued for bulk member {}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn torrent_restart_cleanup_info(
         &self,
         id: &str,
@@ -250,6 +405,7 @@ impl SharedState {
                     job.error = None;
                     job.failure_category = None;
                     job.retry_attempts = 0;
+                    job.auto_restart_attempts = 0;
                     reset_integrity_for_retry(job);
                 }
             }
@@ -396,8 +552,12 @@ impl SharedState {
             let active = state.active_workers.contains(id);
 
             (
-                job.transfer_kind != TransferKind::Torrent && job.state == JobState::Canceled && active,
-                job.transfer_kind == TransferKind::Torrent && job.state == JobState::Paused && active,
+                job.transfer_kind != TransferKind::Torrent
+                    && job.state == JobState::Canceled
+                    && active,
+                job.transfer_kind == TransferKind::Torrent
+                    && job.state == JobState::Paused
+                    && active,
             )
         };
 
@@ -575,6 +735,7 @@ pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
     job.failure_category = None;
     job.resume_support = ResumeSupport::Unknown;
     job.retry_attempts = 0;
+    job.auto_restart_attempts = 0;
     reset_integrity_for_retry(job);
     if job.transfer_kind == TransferKind::Torrent {
         job.torrent = Some(TorrentInfo::default());
@@ -586,6 +747,16 @@ pub(super) fn reset_integrity_for_retry(job: &mut DownloadJob) {
         check.actual = None;
         check.status = IntegrityStatus::Pending;
     }
+}
+
+pub(super) fn bulk_member_auto_restart_failure_category(failure_category: FailureCategory) -> bool {
+    matches!(
+        failure_category,
+        FailureCategory::Network
+            | FailureCategory::Server
+            | FailureCategory::Http
+            | FailureCategory::Resume
+    )
 }
 
 pub(super) fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {

@@ -57,6 +57,16 @@ assert.deepEqual(
   'checking state should show a pending new-version indicator',
 );
 
+assert.deepEqual(
+  updateVersionIndicator({ ...checking, status: 'error', errorMessage: 'network unavailable' }, '0.3.49-alpha'),
+  {
+    currentVersion: '0.3.49-alpha',
+    newVersion: 'Unavailable',
+    newVersionTone: 'error',
+  },
+  'error state should keep showing the installed version as current',
+);
+
 const started = applyInstallProgressEvent(available, {
   event: 'started',
   data: { contentLength: 100 },

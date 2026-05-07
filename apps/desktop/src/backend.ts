@@ -53,6 +53,11 @@ export interface AddJobsResult {
   failedItems: FailedBatchItem[];
 }
 
+export interface BulkMemberRetryResult {
+  queuedCount: number;
+  failedItems: FailedBatchItem[];
+}
+
 export interface ExternalUseResult {
   pausedTorrent: boolean;
   autoReseedRetrySeconds?: number;
@@ -391,6 +396,11 @@ export async function retryBulkArchive(archiveId: string): Promise<void> {
   await invokeCommand('retry_bulk_archive', { archiveId });
 }
 
+export async function retryBulkMembers(archiveId: string): Promise<BulkMemberRetryResult> {
+  if (!isTauriRuntime()) return { queuedCount: 0, failedItems: [] };
+  return invokeCommand<BulkMemberRetryResult>('retry_bulk_members', { archiveId });
+}
+
 export async function openInstallDocs(): Promise<void> {
   if (!isTauriRuntime()) return;
   await invokeCommand('open_install_docs');
@@ -414,6 +424,11 @@ export async function exportDiagnosticsReport(): Promise<string | null> {
 export async function checkForUpdate(): Promise<AppUpdateMetadata | null> {
   if (!isTauriRuntime()) return null;
   return invokeCommand<AppUpdateMetadata | null>('check_for_update');
+}
+
+export async function getInstalledVersion(): Promise<string> {
+  if (!isTauriRuntime()) return 'Preview build';
+  return invokeCommand<string>('plugin:app|version');
 }
 
 export async function installUpdate(): Promise<void> {

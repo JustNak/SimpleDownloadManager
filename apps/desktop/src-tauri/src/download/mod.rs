@@ -472,22 +472,16 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                             }
                         }
                     }
-                } else if let Ok(snapshot) = state
-                    .fail_job(&task.id, error.message.clone(), error.category)
-                    .await
-                {
-                    emit_snapshot(&app, &snapshot);
-                    notify_download_failure(
-                        &app,
-                        &state,
-                        &task,
-                        snapshot
-                            .jobs
-                            .iter()
-                            .find(|job| job.id == task.id)
-                            .and_then(|job| job.error.as_deref()),
-                    )
-                    .await;
+                } else {
+                    match try_auto_restart_failed_bulk_member(&app, &state, &task, &error).await {
+                        BulkMemberAutoRestartOutcome::Restarted => {}
+                        BulkMemberAutoRestartOutcome::NotEligible => {
+                            fail_job_and_notify(&app, &state, &task, &error).await;
+                        }
+                        BulkMemberAutoRestartOutcome::Failed(recovery_error) => {
+                            fail_job_and_notify(&app, &state, &task, &recovery_error).await;
+                        }
+                    }
                 }
             }
         }
@@ -495,6 +489,100 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
         state.clear_handoff_auth(&task.id).await;
         schedule_downloads(app, state);
     });
+}
+
+enum BulkMemberAutoRestartOutcome {
+    Restarted,
+    NotEligible,
+    Failed(DownloadError),
+}
+
+async fn try_auto_restart_failed_bulk_member(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    error: &DownloadError,
+) -> BulkMemberAutoRestartOutcome {
+    let candidate = match state
+        .bulk_member_auto_restart_candidate(&task.id, error.category)
+        .await
+    {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => return BulkMemberAutoRestartOutcome::NotEligible,
+        Err(message) => {
+            return BulkMemberAutoRestartOutcome::Failed(download_error(
+                FailureCategory::Internal,
+                format!("Could not prepare bulk member auto-restart: {message}"),
+                false,
+            ))
+        }
+    };
+
+    let resolved_url = if let Some(source_url) = candidate.resolved_from_url.as_deref() {
+        match crate::hosters::resolve_hoster_links(vec![source_url.to_string()]).await {
+            Ok(mut links) => links
+                .pop()
+                .map(|link| link.url)
+                .unwrap_or_else(|| source_url.to_string()),
+            Err(error) => {
+                return BulkMemberAutoRestartOutcome::Failed(download_error(
+                    FailureCategory::Http,
+                    format!("Could not refresh bulk member link: {}", error.message),
+                    false,
+                ))
+            }
+        }
+    } else {
+        task.url.clone()
+    };
+
+    match state
+        .auto_restart_bulk_member(&task.id, resolved_url, candidate.attempt)
+        .await
+    {
+        Ok(snapshot) => {
+            emit_snapshot(app, &snapshot);
+            BulkMemberAutoRestartOutcome::Restarted
+        }
+        Err(message) => BulkMemberAutoRestartOutcome::Failed(download_error(
+            auto_restart_reset_failure_category(&message),
+            format!("Could not auto-restart bulk member: {message}"),
+            false,
+        )),
+    }
+}
+
+fn auto_restart_reset_failure_category(message: &str) -> FailureCategory {
+    if message.contains("partial download file") || message.contains("download directory") {
+        FailureCategory::Disk
+    } else {
+        FailureCategory::Internal
+    }
+}
+
+async fn fail_job_and_notify(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    error: &DownloadError,
+) {
+    if let Ok(snapshot) = state
+        .fail_job(&task.id, error.message.clone(), error.category)
+        .await
+    {
+        emit_snapshot(app, &snapshot);
+        notify_download_failure(
+            app,
+            state,
+            task,
+            snapshot
+                .jobs
+                .iter()
+                .find(|job| job.id == task.id)
+                .and_then(|job| job.error.as_deref()),
+        )
+        .await;
+    }
 }
 
 async fn run_download(
