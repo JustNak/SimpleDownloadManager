@@ -265,29 +265,26 @@
             </div>
             <textarea bind:this={inputElement} id="bulk-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={bulkUrls} oninput={(event) => bulkUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/assets/model.fbx&#10;https://example.com/assets/textures.zip&#10;https://example.com/assets/readme.pdf"></textarea>
           </div>
-          <div class="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[1fr_220px]">
-            <label class="flex items-start gap-3 text-sm">
-              <input type="checkbox" bind:checked={combineBulk} class="mt-1 h-4 w-4 accent-primary" />
-              <span>
-                <span class="flex items-center gap-2 font-medium text-foreground">
-                  <Archive size={16} />
-                  Combine downloads
-                </span>
-                <span class="mt-1 block text-xs leading-5 text-muted-foreground">Links are queued together with an output name so the batch can be collected as one archive or folder.</span>
+          <div class="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[minmax(0,132px)_minmax(0,1fr)]">
+            <label class="flex cursor-help items-center gap-2 text-sm" title="Save as one archive or folder.">
+              <input type="checkbox" bind:checked={combineBulk} class="h-4 w-4 shrink-0 accent-primary" />
+              <span class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
+                <Archive size={16} class="shrink-0" />
+                <span class="min-w-0 whitespace-nowrap">File Combine</span>
               </span>
             </label>
-            <div class="flex min-w-0 flex-col gap-2">
-              <div class="grid grid-cols-2 rounded-md border border-border bg-card p-1">
-                <button type="button" class={`flex h-8 items-center justify-center gap-1.5 rounded-[4px] text-xs font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
-                  <Archive size={14} />
+            <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-0">
+              <input class="h-9 min-w-0 flex-1 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 sm:rounded-r-none sm:border-r-0" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
+              <div class="grid w-full shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0.5 sm:w-[136px] sm:rounded-l-none">
+                <button type="button" class={`flex h-8 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
+                  <Archive size={13} />
                   <span>Archive</span>
                 </button>
-                <button type="button" class={`flex h-8 items-center justify-center gap-1.5 rounded-[4px] text-xs font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
-                  <FolderOpen size={14} />
+                <button type="button" class={`flex h-8 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
+                  <FolderOpen size={13} />
                   <span>Folder</span>
                 </button>
               </div>
-              <input class="h-9 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
             </div>
           </div>
         {/if}

@@ -67,6 +67,7 @@
     exportDiagnosticsReport,
     getDiagnostics,
     getAppSnapshot,
+    APP_VERSION,
     getInstalledVersion,
     installUpdate,
     openBatchProgressWindow,
@@ -151,7 +152,7 @@
   let isSavingSettings = $state(false);
   let activeSettingsSectionId = $state<SettingsSectionId>(SETTINGS_SECTIONS[0].id);
   let updateState = $state<AppUpdateState>(initialAppUpdateState);
-  let installedVersion = $state('Preview build');
+  let installedVersion = $state(APP_VERSION);
   let isUpdatePromptOpen = $state(false);
   let commandMenuOpen = $state(false);
   let commandMenuRoot: HTMLDivElement | null = $state(null);

@@ -25,6 +25,14 @@ assert.match(source, /defaultBulkArchiveNameForUrls/, 'bulk archive names should
 assert.match(source, /bulkOutputKind/, 'bulk modal should track whether combine output is an archive or folder');
 assert.match(source, /Archive[\s\S]*Folder/, 'bulk modal should offer Archive and Folder output choices');
 assert.match(source, /setBulkOutputKind/, 'bulk modal should normalize the output name when switching Archive and Folder');
+assert.match(source, /File Combine/, 'bulk combine label should use the concise File Combine wording');
+assert.match(source, /<span class="min-w-0 whitespace-nowrap">File Combine<\/span>/, 'bulk combine label should stay on one line in the compact label column');
+assert.doesNotMatch(source, /Combine downloads/, 'bulk combine should not use the old Combine downloads label');
+assert.match(source, /title="Save as one archive or folder\."/, 'bulk combine helper copy should live in a hover tooltip instead of visible helper text');
+assert.doesNotMatch(source, /<span class="mt-1 block text-xs leading-5 text-muted-foreground">Save as one archive or folder\.<\/span>/, 'bulk combine should not render a visible description under the label');
+assert.match(source, /md:grid-cols-\[minmax\(0,132px\)_minmax\(0,1fr\)\]/, 'bulk combine row should keep a compact File Combine label column and wide controls column');
+assert.match(source, /<input class="h-9 min-w-0 flex-1[\s\S]*aria-label="Bulk output name"[\s\S]*<div class="grid w-full shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0\.5 sm:w-\[136px\] sm:rounded-l-none">/, 'bulk output name input should be the flexible first segment with compact integrated Archive and Folder controls after it');
+assert.doesNotMatch(source, /md:grid-cols-\[170px_minmax\(0,1fr\)\]/, 'bulk output controls should not reserve a fixed grid column before the name input');
 assert.match(source, /archiveNameTouched/, 'manual bulk archive names should not be overwritten by later pasted links');
 assert.match(source, /addJobs\(urls, trimmedArchiveName, \{ resolveHosterLinks: true, startPaused: true, bulkOutputKind \}\)/, 'bulk submissions should resolve hoster links, pass output kind, and wait for explicit popup Start');
 assert.match(source, /Resolving links\.\.\./, 'bulk submissions should show resolver-specific wait feedback while hoster links are being prepared');

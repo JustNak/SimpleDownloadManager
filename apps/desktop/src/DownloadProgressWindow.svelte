@@ -22,7 +22,6 @@
     errorMessage: string;
     runAction: PopupActionRunner;
     onCancelClick: () => void;
-    onClose: () => void;
   }
 
   function statusText(job: DownloadJob) {
@@ -43,6 +42,10 @@
     return job.totalBytes > 0
       ? `${formatBytes(job.downloadedBytes)} / ${formatBytes(job.totalBytes)}`
       : formatBytes(job.downloadedBytes);
+  }
+
+  function isActiveProgressJob(job: DownloadJob) {
+    return [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
   }
 
   function actionClass(variant: ActionVariant) {
@@ -74,7 +77,6 @@
     popup.errorMessage,
     popup.runAction,
     popup.onCancelClick,
-    popup.onClose,
   )}
 {/if}
 
@@ -87,7 +89,6 @@
   errorMessage: string,
   runAction: PopupActionRunner,
   onCancelClick: () => void,
-  onClose: () => void,
 )}
   <div class="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
     <PopupTitlebar title="Download progress" />
@@ -133,14 +134,23 @@
       {/if}
 
       <div class="mt-auto flex justify-end gap-2 border-t border-border pt-2">
-        {#if job.state === JobState.Paused}{@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}{/if}
-        {#if job.state === JobState.Downloading || job.state === JobState.Queued || job.state === JobState.Starting}{@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}{/if}
-        {#if job.state === JobState.Failed}{@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}{/if}
-        {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Open in browser', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
-        {@render Action('Reveal', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, job.state === JobState.Completed ? { closeOnSuccess: true } : undefined))}
-        {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, job.state === JobState.Completed ? { closeOnSuccess: true } : undefined))}
-        {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
-        {@render Action('Close', X, isBusy, onClose)}
+        {#if isActiveProgressJob(job)}
+          {@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}
+          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+        {/if}
+        {#if job.state === JobState.Paused}
+          {@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}
+          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+        {/if}
+        {#if job.state === JobState.Failed}
+          {@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}
+          {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Open in browser', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
+          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+        {/if}
+        {#if job.state === JobState.Completed}
+          {@render Action('Show', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
+          {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), 'primary')}
+        {/if}
       </div>
     </main>
   </div>

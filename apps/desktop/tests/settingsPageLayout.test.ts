@@ -30,6 +30,11 @@ assert.doesNotMatch(source, /0\.5\.1-beta/, 'app update current version should n
 assert.match(source, /installedVersion:\s*string/, 'settings page should receive the installed app version from the app shell');
 assert.match(source, /updateVersionIndicator\(updateState,\s*installedVersion\)/, 'app update version rows should use the shared installed-version indicator helper');
 assert.match(appSource, /getInstalledVersion/, 'app shell should read the installed app version through the backend wrapper');
+assert.doesNotMatch(appSource, /Preview build/, 'app shell should not initialize update version rows with the non-version Preview build fallback');
+assert.doesNotMatch(backendSource, /return 'Preview build'/, 'backend version wrapper should not return the non-version Preview build fallback');
+assert.match(backendSource, /import desktopPackage from '\.\.\/package\.json'/, 'backend should read the desktop package version for browser preview and fallbacks');
+assert.match(backendSource, /export const APP_VERSION = desktopPackage\.version/, 'backend should expose the desktop package version as an exact app-version fallback');
+assert.match(appSource, /let installedVersion = \$state\(APP_VERSION\)/, 'app shell should initialize installed version state from the exact package version');
 assert.match(backendSource, /plugin:app\|version/, 'backend wrapper should invoke the existing Tauri app version command directly so removeUnusedCommands preserves it');
 assert.match(appSource, /let installedVersion = \$state/, 'app shell should keep installed version state for settings rendering');
 assert.match(appSource, /installedVersion=\{installedVersion\}/, 'app shell should pass the installed version into settings');

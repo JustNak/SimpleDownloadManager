@@ -5,7 +5,10 @@ import type { ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, buildAddJobsCommandArgs, type AddJobOptions, type AddJobsOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
 import * as previewBackend from './backendPreview';
+import desktopPackage from '../package.json';
 export { applyDownloadUpdateBatch } from './downloadUpdateBatch';
+
+export const APP_VERSION = desktopPackage.version;
 
 export interface DesktopSnapshot {
   connectionState: ConnectionState;
@@ -427,8 +430,12 @@ export async function checkForUpdate(): Promise<AppUpdateMetadata | null> {
 }
 
 export async function getInstalledVersion(): Promise<string> {
-  if (!isTauriRuntime()) return 'Preview build';
-  return invokeCommand<string>('plugin:app|version');
+  if (!isTauriRuntime()) return APP_VERSION;
+  try {
+    return await invokeCommand<string>('plugin:app|version');
+  } catch {
+    return APP_VERSION;
+  }
 }
 
 export async function installUpdate(): Promise<void> {

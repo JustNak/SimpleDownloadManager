@@ -38,6 +38,7 @@ assert.deepEqual(
   new Set([
     'core:event:allow-listen',
     'core:event:allow-unlisten',
+    'core:app:allow-version',
     'core:window:allow-minimize',
     'core:window:allow-is-maximized',
     'core:window:allow-toggle-maximize',
