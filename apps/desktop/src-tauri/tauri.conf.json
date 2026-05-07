@@ -33,6 +33,8 @@
     ],
     "windows": {
       "nsis": {
+        "template": "./windows/installer.nsi",
+        "headerImage": "./windows/installer-header.bmp",
         "installerHooks": "./windows/hooks.nsh"
       }
     }

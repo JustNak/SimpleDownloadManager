@@ -791,6 +791,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_installer_configure_without_startup_as_disabled() {
+        assert_eq!(
+            super::installer_launch_options_from_args([
+                "simple-download-manager.exe",
+                "--installer-configure",
+            ]),
+            Some(super::InstallerLaunchOptions {
+                start_on_startup: false,
+                startup_launch_mode: crate::storage::StartupLaunchMode::Open,
+            })
+        );
+    }
+
+    #[test]
     fn parses_installer_startup_launch_options() {
         assert_eq!(
             super::installer_launch_options_from_args([
