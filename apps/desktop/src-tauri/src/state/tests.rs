@@ -2931,6 +2931,53 @@ async fn delete_failed_bulk_members_from_disk_removes_downloaded_parts() {
 }
 
 #[tokio::test]
+async fn delete_canceled_active_job_waits_for_worker_release_before_disk_cleanup() {
+    let download_dir = test_runtime_dir("delete-canceled-active-waits");
+    let target_path = download_dir.join("active-file.zip");
+    let temp_path = download_dir.join("active-file.zip.part");
+    std::fs::write(&target_path, b"target").unwrap();
+    std::fs::write(&temp_path, b"partial").unwrap();
+
+    let mut canceled_job = download_job("job_1", JobState::Canceled, ResumeSupport::Supported, 25);
+    canceled_job.target_path = target_path.display().to_string();
+    canceled_job.temp_path = temp_path.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![canceled_job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_1".into());
+    }
+
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_state = state.clone();
+    let release_flag = released.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .remove("job_1");
+        release_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let snapshot = state
+        .delete_job("job_1", true)
+        .await
+        .expect("canceled active deletion should wait for the worker to release");
+
+    assert!(
+        released.load(std::sync::atomic::Ordering::SeqCst),
+        "delete should wait for the active worker release before removing files"
+    );
+    assert!(snapshot.jobs.is_empty());
+    assert!(!target_path.exists());
+    assert!(!temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_reseed() {
     let download_dir = test_runtime_dir("delete-paused-seeding-torrent");
     let target_path = download_dir.join("seeded-output");

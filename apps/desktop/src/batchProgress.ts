@@ -20,6 +20,12 @@ export interface BulkReviewStartSelection {
   resumableJobs: DownloadJob[];
 }
 
+export interface BulkCancelConfirmPlan {
+  cancelJobIds: string[];
+  deleteJobIds: string[];
+  closeOnSuccess: boolean;
+}
+
 export interface ProgressBatchContext {
   batchId?: string;
   kind: ProgressBatchKind;
@@ -142,6 +148,22 @@ export function bulkReviewStartSelection(
   };
 }
 
+export function bulkCancelConfirmPlan(
+  jobs: DownloadJob[],
+  state: BulkUiState | null,
+): BulkCancelConfirmPlan {
+  const deleteJobIds = jobs.map((job) => job.id).filter(Boolean);
+  const cancelJobIds = state === 'downloading'
+    ? jobs.filter(isCancelableBulkCancelJob).map((job) => job.id).filter(Boolean)
+    : [];
+
+  return {
+    cancelJobIds,
+    deleteJobIds,
+    closeOnSuccess: state === 'review' || state === 'downloading',
+  };
+}
+
 export function bulkFinalizingSteps(jobs: DownloadJob[]): BulkFinalizingStep[] {
   const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive;
   const outputKind = archive?.outputKind ?? 'archive';
@@ -206,4 +228,8 @@ function clampProgress(value: number) {
 
 function isResumableReviewJob(job: DownloadJob) {
   return ['paused', 'failed', 'canceled'].includes(job.state);
+}
+
+function isCancelableBulkCancelJob(job: DownloadJob) {
+  return ['queued', 'starting', 'downloading', 'seeding', 'paused'].includes(job.state);
 }

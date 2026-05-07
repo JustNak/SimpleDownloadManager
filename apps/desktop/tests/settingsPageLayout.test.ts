@@ -64,3 +64,6 @@ assert.match(source, /onRefreshDiagnostics/, 'native host diagnostics should kee
 assert.match(source, /onCheckForUpdates/, 'app updates section should keep the manual update callback');
 assert.match(source, /Recent Events[\s\S]*max-h-56 overflow-auto rounded-md border border-border\/55 bg-zinc-950 font-mono shadow-inner/, 'recent events should render as a compact console-like box');
 assert.match(source, /diagnosticLevelConsoleClass/, 'recent event levels should use console-specific colors');
+assert.match(source, /const recentDiagnosticEvents = \$derived\(diagnostics\?\.recentEvents \? \[\.\.\.diagnostics\.recentEvents\]\.reverse\(\) : \[\]\)/, 'recent events should use a reversed display copy so newest entries render first');
+assert.match(source, /\{#if recentDiagnosticEvents\.length\}[\s\S]*\{#each recentDiagnosticEvents as event\}/, 'recent events should render from the newest-first display list');
+assert.doesNotMatch(source, /\{#each diagnostics\.recentEvents as event\}/, 'recent events should not render directly from the backend-ordered diagnostics array');

@@ -31,6 +31,11 @@ assert.match(batchSource, /bulkHasStarted/, 'bulk popup should keep local starte
 assert.match(batchSource, /isUntouchedBulkReviewGate/, 'bulk popup should derive the first review gate from untouched pending jobs');
 assert.match(batchSource, /bulkReviewStartSelection/, 'bulk Start should partition included and excluded review rows');
 assert.match(batchSource, /deleteJobs\(selection\.excludedJobs\.map\(\(job\) => job\.id\), false\)/, 'bulk Start should remove unchecked review rows without deleting files from disk');
+assert.match(batchSource, /bulkCancelConfirmPlan/, 'bulk Cancel confirmation should use the tested bulk cleanup plan');
+assert.match(batchSource, /deleteJobs\(plan\.deleteJobIds,\s*true\)/, 'bulk Cancel confirmation should delete all popup batch members from disk');
+assert.match(batchSource, /closeOnSuccess:\s*plan\.closeOnSuccess/, 'successful bulk Cancel confirmation should close the popup after disk cleanup');
+assert.match(batchSource, /canBulkCancelDelete/, 'bulk downloading Cancel should remain available when popup jobs can be deleted even if none are cancelable');
+assert.match(batchSource, /isBusy \|\| !canBulkCancelDelete/, 'bulk downloading Cancel should disable only when no popup jobs can be deleted');
 assert.doesNotMatch(batchSource, /bulkUiState === 'review'[\s\S]{0,280}Resume/, 'bulk review footer should say Start, not Resume');
 assert.match(batchSource, /isConfirmingCancel/, 'bulk Cancel should use the same two-step confirmation transition as other progress popups');
 assert.match(batchSource, /bulkUiState === 'finalizing'[\s\S]*BulkFinalizingStrip/, 'bulk finalizing state should render the adaptive no-action phase strip');

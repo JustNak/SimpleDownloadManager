@@ -16,6 +16,7 @@
   } from './backend';
   import {
     activeBulkFinalizingStepId,
+    bulkCancelConfirmPlan,
     bulkFinalizingSteps,
     bulkReviewStartSelection,
     calculateBatchProgress,
@@ -77,6 +78,7 @@
   const canPause = $derived(jobs.some(isPausable));
   const canResume = $derived(jobs.some(isResumable));
   const canCancel = $derived(jobs.some(isCancelable));
+  const canBulkCancelDelete = $derived(jobs.length > 0);
 
   $effect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
@@ -282,12 +284,15 @@
       return;
     }
 
-    const targetJobs = bulkUiState === 'review' ? jobs : jobs.filter(isCancelable);
+    const plan = bulkCancelConfirmPlan(jobs, bulkUiState);
     void runAction(
-      () => bulkUiState === 'review'
-        ? deleteJobs(targetJobs.map((job) => job.id), false)
-        : cancelJobs(targetJobs.map((job) => job.id)),
-      { closeOnSuccess: bulkUiState === 'review' },
+      async () => {
+        if (plan.cancelJobIds.length > 0) {
+          await cancelJobs(plan.cancelJobIds);
+        }
+        await deleteJobs(plan.deleteJobIds, true);
+      },
+      { closeOnSuccess: plan.closeOnSuccess },
     );
   }
 
@@ -636,7 +641,7 @@
       {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || selectedBulkCount === 0, 'primary')}
     {:else if bulkUiState === 'downloading'}
       {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
-      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
+      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canBulkCancelDelete, isConfirmingCancel ? 'confirm' : 'cancel')}
     {:else if bulkUiState === 'failed'}
       {#if failedArchive}
         {@render ActionButton('Retry archive', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}

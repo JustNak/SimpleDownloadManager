@@ -333,7 +333,7 @@ impl SharedState {
         delete_from_disk: bool,
     ) -> Result<DesktopSnapshot, BackendError> {
         if delete_from_disk {
-            self.wait_for_paused_torrent_delete_release(id).await?;
+            self.wait_for_disk_delete_release(id).await?;
             let (target_path, temp_path, bulk_archive_output_path) = {
                 let state = self.inner.read().await;
                 let job =
@@ -382,8 +382,8 @@ impl SharedState {
         self.remove_job(id).await
     }
 
-    async fn wait_for_paused_torrent_delete_release(&self, id: &str) -> Result<(), BackendError> {
-        let should_wait = {
+    async fn wait_for_disk_delete_release(&self, id: &str) -> Result<(), BackendError> {
+        let (wait_for_canceled_worker, wait_for_paused_torrent) = {
             let state = self.inner.read().await;
             let job = state
                 .jobs
@@ -393,13 +393,23 @@ impl SharedState {
                     code: "INTERNAL_ERROR",
                     message: "Job not found.".into(),
                 })?;
+            let active = state.active_workers.contains(id);
 
-            job.transfer_kind == TransferKind::Torrent
-                && job.state == JobState::Paused
-                && state.active_workers.contains(id)
+            (
+                job.transfer_kind != TransferKind::Torrent && job.state == JobState::Canceled && active,
+                job.transfer_kind == TransferKind::Torrent && job.state == JobState::Paused && active,
+            )
         };
 
-        if should_wait {
+        if wait_for_canceled_worker {
+            self.wait_for_active_worker_release(
+                id,
+                "The download was canceled, but its file handles are still being released. Try again in a moment.",
+            )
+            .await?;
+        }
+
+        if wait_for_paused_torrent {
             self.wait_for_external_use_release(
                 id,
                 EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT,
@@ -409,6 +419,46 @@ impl SharedState {
         }
 
         Ok(())
+    }
+
+    async fn wait_for_active_worker_release(
+        &self,
+        id: &str,
+        timeout_message: &str,
+    ) -> Result<(), BackendError> {
+        let started_at = Instant::now();
+        let poll_interval = EXTERNAL_USE_HANDLE_RELEASE_POLL;
+
+        loop {
+            let ready = {
+                let state = self.inner.read().await;
+                if !state.jobs.iter().any(|job| job.id == id) {
+                    return Err(BackendError {
+                        code: "INTERNAL_ERROR",
+                        message: "Job not found.".into(),
+                    });
+                }
+
+                !state.active_workers.contains(id)
+            };
+
+            if ready {
+                return Ok(());
+            }
+
+            let elapsed = started_at.elapsed();
+            if elapsed >= EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: timeout_message.into(),
+                });
+            }
+
+            tokio::time::sleep(
+                poll_interval.min(EXTERNAL_USE_HANDLE_RELEASE_TIMEOUT.saturating_sub(elapsed)),
+            )
+            .await;
+        }
     }
 
     pub async fn rename_job(

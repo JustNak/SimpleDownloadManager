@@ -98,6 +98,7 @@
   const isDirty = $derived(!settingsEqual(completeSettingsDraft(), settings));
   const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
+  const recentDiagnosticEvents = $derived(diagnostics?.recentEvents ? [...diagnostics.recentEvents].reverse() : []);
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
 
   $effect(() => {
@@ -600,9 +601,9 @@
 
     <div>
       <div class="mb-3 text-sm font-semibold text-foreground">Recent Events</div>
-      {#if diagnostics?.recentEvents?.length}
+      {#if recentDiagnosticEvents.length}
         <div class="max-h-56 overflow-auto rounded-md border border-border/55 bg-zinc-950 font-mono shadow-inner">
-          {#each diagnostics.recentEvents as event}
+          {#each recentDiagnosticEvents as event}
             <div class="grid grid-cols-[132px_76px_minmax(0,1fr)] gap-3 border-b border-white/10 px-3 py-2 text-[11px] leading-5 last:border-b-0">
               <span class="text-zinc-500">{formatDiagnosticEventTime(event.timestamp)}</span>
               <span class={`uppercase tracking-[0.08em] ${diagnosticLevelConsoleClass(event.level)}`}>{event.level}</span>

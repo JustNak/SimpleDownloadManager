@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   activeBulkFinalizingStepId,
   bulkFinalizingSteps,
+  bulkCancelConfirmPlan,
   bulkReviewStartSelection,
   calculateBatchProgress,
   deriveBulkPhase,
@@ -212,6 +213,50 @@ assert.deepEqual(
     resumableJobs: [job({ id: 'job_1', state: 'paused' }), job({ id: 'job_3', state: 'paused' })],
   },
   'starting a reviewed bulk batch should delete unchecked jobs and resume only checked resumable jobs',
+);
+
+assert.deepEqual(
+  bulkCancelConfirmPlan([
+    job({ id: 'job_1', state: 'paused' }),
+    job({ id: 'job_2', state: 'queued' }),
+  ], 'review'),
+  {
+    cancelJobIds: [],
+    deleteJobIds: ['job_1', 'job_2'],
+    closeOnSuccess: true,
+  },
+  'confirming bulk cancel in review should delete the whole batch from disk without a cancel step',
+);
+
+assert.deepEqual(
+  bulkCancelConfirmPlan([
+    job({ id: 'job_1', state: 'completed' }),
+    job({ id: 'job_2', state: 'downloading' }),
+    job({ id: 'job_3', state: 'failed' }),
+    job({ id: 'job_4', state: 'canceled' }),
+  ], 'downloading'),
+  {
+    cancelJobIds: ['job_2'],
+    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
+    closeOnSuccess: true,
+  },
+  'confirming bulk cancel while downloading should cancel active members but delete every popup member from disk',
+);
+
+assert.deepEqual(
+  bulkCancelConfirmPlan([
+    job({ id: 'job_1', state: 'starting' }),
+    job({ id: 'job_2', state: 'queued' }),
+    job({ id: 'job_3', state: 'paused' }),
+    job({ id: 'job_4', state: 'seeding' }),
+    job({ id: 'job_5', state: 'completed' }),
+  ], 'downloading'),
+  {
+    cancelJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
+    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4', 'job_5'],
+    closeOnSuccess: true,
+  },
+  'mixed active and completed bulk batches should still delete the whole popup batch',
 );
 
 assert.deepEqual(
