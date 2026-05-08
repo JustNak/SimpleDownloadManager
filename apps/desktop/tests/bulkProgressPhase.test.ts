@@ -99,6 +99,45 @@ assert.equal(
   'queued or paused zero-progress pending bulk members should still show Start and selection before the user starts the popup',
 );
 
+const omittedPendingArchiveJobs: DownloadJob[] = [
+  {
+    ...baseJob,
+    id: 'job_1',
+    state: 'paused',
+    progress: 0,
+    totalBytes: 0,
+    downloadedBytes: 0,
+    bulkArchive: {
+      id: 'bulk_omitted_pending',
+      name: 'Omitted-Pending.zip',
+    },
+  },
+  {
+    ...baseJob,
+    id: 'job_2',
+    state: 'queued',
+    progress: 0,
+    totalBytes: 0,
+    downloadedBytes: 0,
+    bulkArchive: {
+      id: 'bulk_omitted_pending',
+      name: 'Omitted-Pending.zip',
+    },
+  },
+];
+
+assert.equal(
+  deriveBulkPhase(omittedPendingArchiveJobs),
+  'review',
+  'bulk review should treat omitted archiveStatus as the backend default pending status',
+);
+
+assert.equal(
+  deriveBulkUiState(omittedPendingArchiveJobs),
+  'review',
+  'bulk UI should keep the review checklist when pending archiveStatus is omitted by serialization',
+);
+
 assert.equal(
   deriveBulkPhase([
     {

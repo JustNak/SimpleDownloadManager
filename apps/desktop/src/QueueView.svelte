@@ -138,7 +138,6 @@
   }: Props = $props();
 
   let selectedJobIds = new SvelteSet<string>();
-  let openMenuJobId = $state<string | null>(null);
   let contextMenu = $state<{ jobId: string; x: number; y: number } | null>(null);
   let renamePromptJob = $state<QueueDisplayJob | null>(null);
   let renameValue = $state('');
@@ -196,7 +195,7 @@
   });
 
   $effect(() => {
-    if (!openMenuJobId && !contextMenu) return;
+    if (!contextMenu) return;
     const closeMenu = () => closeMenus();
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') closeMenus();
@@ -402,14 +401,28 @@
   }
 
   function closeMenus() {
-    openMenuJobId = null;
     contextMenu = null;
   }
 
-  function openContextMenu(job: DownloadJob, event: MouseEvent) {
+  function openJobMenu(job: QueueDisplayJob, x: number, y: number) {
+    const isSelectedMultiContext = selectedJobIds.size > 1 && selectedJobIds.has(job.id);
+    if (!isSelectedMultiContext) selectSingleJob(job.id);
+    contextMenu = getContextMenuPosition(job.id, x, y);
+  }
+
+  function openContextMenu(job: QueueDisplayJob, event: MouseEvent) {
     event.preventDefault();
-    if (!selectedJobIds.has(job.id)) selectSingleJob(job.id);
-    contextMenu = getContextMenuPosition(job.id, event.clientX, event.clientY);
+    event.stopPropagation();
+    openJobMenu(job, event.clientX, event.clientY);
+  }
+
+  function openActionsMenu(job: QueueDisplayJob, event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    const rect = target.getBoundingClientRect();
+    openJobMenu(job, Math.round(rect.right - 192), Math.round(rect.bottom + 4));
   }
 
   function startDetailsResize(clientY: number) {
@@ -757,11 +770,7 @@
                 closeMenus();
                 onOpen(job.id);
               }}
-              oncontextmenu={(event) => {
-                const isSelectedMultiContext = selectedJobIds.size > 1 && selectedJobIds.has(job.id);
-                if (!isSelectedMultiContext) selectSingleJob(job.id);
-                openContextMenu(job, event);
-              }}
+              oncontextmenu={(event) => openContextMenu(job, event)}
               onkeydown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
@@ -829,18 +838,10 @@
                     class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground"
                     title="More actions"
                     aria-label="More actions"
-                    onclick={(event) => {
-                      event.stopPropagation();
-                      openMenuJobId = openMenuJobId === job.id ? null : job.id;
-                    }}
+                    onclick={(event) => openActionsMenu(job, event)}
                   >
                     <MoreHorizontal size={18} />
                   </button>
-                  {#if openMenuJobId === job.id}
-                    <div class="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl" role="menu" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
-                      {@render RowMenu(job, 'actions')}
-                    </div>
-                  {/if}
                 {/if}
               </div>
             </div>
@@ -889,7 +890,7 @@
   {#if job}
     <button class="fixed inset-0 z-30 cursor-default" aria-label="Close context menu" onclick={() => contextMenu = null}></button>
     <div class="fixed z-[70] w-48 overflow-hidden rounded-md border border-border bg-card py-1 shadow-2xl" role="menu" tabindex="-1" style={`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`} onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
-      {@render RowMenu(job, 'context')}
+      {@render RowMenu(job)}
     </div>
   {/if}
 {/if}
@@ -992,7 +993,7 @@
   </span>
 {/snippet}
 
-{#snippet RowMenu(job: QueueDisplayJob, mode: 'actions' | 'context')}
+{#snippet RowMenu(job: QueueDisplayJob)}
   {@const menuJobs = selectedJobsFor(job)}
   {@const removableJobs = menuJobs.filter((candidate) => !isBulkAggregateJob(candidate) && canRemoveDownloadImmediately(candidate))}
   {@const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state)}
@@ -1020,23 +1021,18 @@
       {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
       {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
     {/if}
-  {:else if mode === 'context'}
+  {:else}
     {@render MenuItem(FileText, 'Open File', () => onOpen(job.id))}
     {@render MenuItem(FolderOpen, 'Open Folder', () => onReveal(job.id))}
     {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
+    {#if canRetry}{@render MenuItem(RotateCcw, 'Restart', () => onRestart(job.id))}{/if}
+    {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id))}{/if}
+    {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
     {#if canSwapFailedDownloadToBrowser(job)}{@render MenuItem(ExternalLink, 'Open in browser', () => onSwapFailedToBrowser(job.id))}{/if}
+    {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
     {#if removableJobs.length > 0}
       {@render MenuItem(Pencil, 'Rename', () => openRename(job))}
       {@render MenuItem(Trash2, menuJobs.length === 1 ? deleteActionLabelForJob(job) : getDeleteContextMenuLabel(menuJobs.length), () => openDeletePrompt(job), true)}
-    {/if}
-  {:else}
-    {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
-    {#if job.targetPath}{@render MenuItem(FolderOpen, 'Show in folder', () => onReveal(job.id))}{/if}
-    {#if canRetry}{@render MenuItem(RotateCcw, 'Restart', () => onRestart(job.id))}{/if}
-    {#if canSwapFailedDownloadToBrowser(job)}{@render MenuItem(ExternalLink, 'Swap', () => onSwapFailedToBrowser(job.id))}{/if}
-    {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
-    {#if removableJobs.length > 0}
-      {@render MenuItem(Trash2, deleteActionLabelForJob(job), () => openDeletePrompt(job), true)}
     {/if}
   {/if}
 {/snippet}

@@ -45,6 +45,7 @@ assert.ok(batchUrlTextAreaClassName.includes('overflow-x-auto'), 'batch URL inpu
 
 assert.equal(downloadSubmitLabel('single', 1, true), 'Start Download');
 assert.equal(downloadSubmitLabel('torrent', 1, true), 'Add Torrent');
-assert.equal(downloadSubmitLabel('bulk', 1, true), 'Queue 1 Download and Combine');
-assert.equal(downloadSubmitLabel('bulk', 2, true), 'Queue 2 Downloads and Combine');
+assert.equal(downloadSubmitLabel('bulk', 0, true), 'Proceed');
+assert.equal(downloadSubmitLabel('bulk', 1, true), 'Proceed');
+assert.equal(downloadSubmitLabel('bulk', 2, true), 'Proceed');
 assert.equal(downloadSubmitLabel('bulk', 2, false), 'Queue 2 Downloads');

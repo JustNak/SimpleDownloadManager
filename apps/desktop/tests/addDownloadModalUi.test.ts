@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../src/AddDownloadModal.svelte', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../src/app.css', import.meta.url), 'utf8');
 
 assert.match(source, /bg-background\/60 p-4 backdrop-blur-\[1px\]/, 'modal backdrop should keep the Svelte translucent background and blur');
 assert.match(source, /w-full max-w-xl[\s\S]*rounded-md[\s\S]*bg-card[\s\S]*animate-in fade-in zoom-in-95/, 'modal shell should keep the Svelte width, radius, card surface, and entrance animation');
 assert.match(source, /New Download/, 'modal title should match the Svelte capitalization');
 assert.match(source, /Add a file, torrent, or bulk links\./, 'modal subtitle should match the Svelte copy');
 assert.match(source, /Close new download/, 'close button should keep the Svelte accessible label');
+assert.match(source, /import \{ tick \} from 'svelte'/, 'modal should import tick so the loading buffer can render before submit work begins');
 assert.match(source, /grid grid-cols-3 rounded-md border border-border bg-background p-1/, 'download mode tabs should use the compact Svelte segmented control');
 for (const label of ['File', 'Torrent', 'Bulk']) {
   assert.match(source, new RegExp(`label: '${label}'`), `download mode label ${label} should match Svelte`);
@@ -23,6 +25,9 @@ assert.match(source, /progressPopupIntentForSubmission/, 'added downloads should
 assert.match(source, /mode === 'torrent'[\s\S]*transferKind: 'torrent'/, 'torrent submissions should keep the torrent transfer kind');
 assert.match(source, /defaultBulkArchiveNameForUrls/, 'bulk archive names should be suggested from pasted multipart links');
 assert.match(source, /bulkOutputKind/, 'bulk modal should track whether combine output is an archive or folder');
+assert.match(source, /let archiveName = \$state\('bulk-download'\)/, 'bulk combine should default to a folder-safe output name');
+assert.match(source, /let bulkOutputKind = \$state<BulkOutputKind>\('folder'\)/, 'bulk combine should toggle Folder on by default');
+assert.doesNotMatch(source, /let bulkOutputKind = \$state<BulkOutputKind>\('archive'\)/, 'bulk combine should not default to Archive');
 assert.match(source, /Archive[\s\S]*Folder/, 'bulk modal should offer Archive and Folder output choices');
 assert.match(source, /setBulkOutputKind/, 'bulk modal should normalize the output name when switching Archive and Folder');
 assert.match(source, /File Combine/, 'bulk combine label should use the concise File Combine wording');
@@ -30,10 +35,17 @@ assert.match(source, /<span class="min-w-0 whitespace-nowrap">File Combine<\/spa
 assert.doesNotMatch(source, /Combine downloads/, 'bulk combine should not use the old Combine downloads label');
 assert.match(source, /title="Save as one archive or folder\."/, 'bulk combine helper copy should live in a hover tooltip instead of visible helper text');
 assert.doesNotMatch(source, /<span class="mt-1 block text-xs leading-5 text-muted-foreground">Save as one archive or folder\.<\/span>/, 'bulk combine should not render a visible description under the label');
-assert.match(source, /md:grid-cols-\[minmax\(0,132px\)_minmax\(0,1fr\)\]/, 'bulk combine row should keep a compact File Combine label column and wide controls column');
-assert.match(source, /<input class="h-9 min-w-0 flex-1[\s\S]*aria-label="Bulk output name"[\s\S]*<div class="grid w-full shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0\.5 sm:w-\[136px\] sm:rounded-l-none">/, 'bulk output name input should be the flexible first segment with compact integrated Archive and Folder controls after it');
+assert.match(source, /space-y-3 rounded-md border border-border bg-background px-3 py-4/, 'bulk combine panel should stack its controls so the name input can own a full row');
+assert.match(source, /<div class="flex items-center justify-between gap-3">[\s\S]*File Combine[\s\S]*<div class="grid w-\[136px\] shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0\.5">/, 'bulk combine header should keep the label and compact Archive and Folder selector on the first row');
+assert.match(source, /<\/div>\s*<input class="h-10 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"[\s\S]*aria-label="Bulk output name" \/>/, 'bulk output name input should be a full-width row under the File Combine header');
+assert.doesNotMatch(source, /md:grid-cols-\[minmax\(0,140px\)_minmax\(0,1fr\)\]/, 'bulk combine panel should not keep the old two-column grid layout');
 assert.doesNotMatch(source, /md:grid-cols-\[170px_minmax\(0,1fr\)\]/, 'bulk output controls should not reserve a fixed grid column before the name input');
 assert.match(source, /archiveNameTouched/, 'manual bulk archive names should not be overwritten by later pasted links');
 assert.match(source, /addJobs\(urls, trimmedArchiveName, \{ resolveHosterLinks: true, startPaused: true, bulkOutputKind \}\)/, 'bulk submissions should resolve hoster links, pass output kind, and wait for explicit popup Start');
 assert.match(source, /Resolving links\.\.\./, 'bulk submissions should show resolver-specific wait feedback while hoster links are being prepared');
-assert.match(source, /readyLabel/, 'footer should use the Svelte ready-label wording instead of generic item copy');
+assert.match(source, /isSubmitting = true;[\s\S]*submitStatusLabel = mode === 'bulk' \? 'Resolving links\.\.\.' : 'Adding\.\.\.';[\s\S]*await tick\(\);[\s\S]*try \{/, 'submit should yield after setting the loading state so the buffer can paint before backend work starts');
+assert.doesNotMatch(source, /rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground[\s\S]*<span>\{readyLabel\}<\/span>/, 'the standalone ready summary box should be removed');
+assert.doesNotMatch(source, /Queue only/, 'single-file mode should not show the old Queue only summary text');
+assert.match(source, /\{#if isSubmitting\}[\s\S]*animate-\[download-buffer_1\.1s_ease-in-out_infinite\][\s\S]*\{\/if\}[\s\S]*<footer/, 'submitting should show a thin indeterminate buffer above the footer');
+assert.match(styles, /@keyframes download-buffer[\s\S]*translateX\(-100%\)[\s\S]*translateX\(300%\)/, 'download buffer animation should define the indeterminate keyframes used by the modal');
+assert.match(source, /<footer class="flex items-center justify-between gap-3 border-t border-border px-5 py-3">[\s\S]*\{#if mode === 'bulk'\}[\s\S]*<span class="text-xs font-semibold text-primary">\{readyLabel\}<\/span>[\s\S]*\{:else if mode === 'torrent'\}/, 'footer should show the accent ready label only for bulk mode and keep torrent import in the left slot');

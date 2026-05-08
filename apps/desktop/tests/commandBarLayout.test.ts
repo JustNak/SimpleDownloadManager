@@ -22,6 +22,7 @@ assert.match(source, /function handleSortModeChange\(nextSortMode: SortMode\)[\s
 assert.match(source, /const activeSettingsSection = \$derived\(SETTINGS_SECTIONS\.find/, 'settings titlebar should know the active settings section instead of leaving the center titlebar blank');
 assert.match(source, /class="settings-titlebar flex h-full min-w-0 flex-1 items-center justify-between gap-3"/, 'settings view should keep visible titlebar content when section navigation changes');
 assert.match(source, /activeSettingsSection\.label/, 'settings titlebar should show the current section label');
+assert.doesNotMatch(source, /Configure downloads, appearance, notifications, and diagnostics\./, 'settings titlebar should not show the long descriptive helper copy');
 assert.match(source, /event\.key !== 'F11'[\s\S]*mainWindow\.toggleMaximize\(\)/, 'F11 should toggle the native main window maximize state');
 assert.match(source, /event\.key !== 'Escape' \|\| view !== 'settings'[\s\S]*requestViewChange\('all'\)/, 'Escape in Settings should return to All Downloads through the guarded view-change path');
 assert.match(source, /strong[\s\S]*border border-primary\/60 bg-primary text-primary-foreground shadow-sm/, 'the strong toolbar variant should use the primary accent treatment');

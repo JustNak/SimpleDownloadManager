@@ -18,9 +18,11 @@ use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::time::Duration;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 #[cfg(windows)]
 use winreg::enums::HKEY_CURRENT_USER;
 #[cfg(windows)]
@@ -64,10 +66,18 @@ struct ExistingInstanceWakeRetryPolicy {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SingleInstanceMutexDecision {
+    ContinueStartup,
+    NotifyExisting,
+}
+
+#[cfg(windows)]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
+                let _ = ReleaseMutex(self.handle);
                 CloseHandle(self.handle);
             }
         }
@@ -109,23 +119,46 @@ pub enum MainWindowCloseAction {
 #[cfg(windows)]
 pub fn acquire_single_instance_or_notify() -> Result<Option<SingleInstanceGuard>, String> {
     let mutex_name = wide_null(SINGLE_INSTANCE_MUTEX_NAME);
-    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr()) };
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, mutex_name.as_ptr()) };
     if handle.is_null() {
         return Err("Could not create application single-instance mutex.".into());
     }
 
-    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-    if already_running {
-        if let Err(error) = notify_existing_instance_show_window() {
-            eprintln!("failed to notify existing app instance: {error}");
+    let wait_result = unsafe { WaitForSingleObject(handle, 0) };
+    match single_instance_mutex_wait_decision(wait_result) {
+        Ok(SingleInstanceMutexDecision::ContinueStartup) => {
+            Ok(Some(SingleInstanceGuard { handle }))
         }
-        unsafe {
-            CloseHandle(handle);
+        Ok(SingleInstanceMutexDecision::NotifyExisting) => {
+            if let Err(error) = notify_existing_instance_show_window() {
+                eprintln!("failed to notify existing app instance: {error}");
+            }
+            unsafe {
+                CloseHandle(handle);
+            }
+            Ok(None)
         }
-        return Ok(None);
+        Err(error) => {
+            unsafe {
+                CloseHandle(handle);
+            }
+            Err(error)
+        }
     }
+}
 
-    Ok(Some(SingleInstanceGuard { handle }))
+#[cfg(windows)]
+fn single_instance_mutex_wait_decision(
+    wait_result: u32,
+) -> Result<SingleInstanceMutexDecision, String> {
+    match wait_result {
+        WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(SingleInstanceMutexDecision::ContinueStartup),
+        WAIT_TIMEOUT => Ok(SingleInstanceMutexDecision::NotifyExisting),
+        WAIT_FAILED => Err("Could not inspect application single-instance mutex.".into()),
+        other => Err(format!(
+            "Unexpected single-instance mutex wait result: {other}."
+        )),
+    }
 }
 
 #[cfg(windows)]
@@ -988,5 +1021,37 @@ mod tests {
         assert!(!super::is_retryable_existing_instance_wake_error(
             &std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
         ));
+    }
+
+    #[test]
+    fn single_instance_mutex_wait_continues_for_first_owner() {
+        assert_eq!(
+            super::single_instance_mutex_wait_decision(0x00000000).unwrap(),
+            super::SingleInstanceMutexDecision::ContinueStartup
+        );
+    }
+
+    #[test]
+    fn single_instance_mutex_wait_continues_for_abandoned_owner() {
+        assert_eq!(
+            super::single_instance_mutex_wait_decision(0x00000080).unwrap(),
+            super::SingleInstanceMutexDecision::ContinueStartup
+        );
+    }
+
+    #[test]
+    fn single_instance_mutex_wait_notifies_live_existing_owner() {
+        assert_eq!(
+            super::single_instance_mutex_wait_decision(0x00000102).unwrap(),
+            super::SingleInstanceMutexDecision::NotifyExisting
+        );
+    }
+
+    #[test]
+    fn single_instance_mutex_wait_reports_failed_probe() {
+        let error = super::single_instance_mutex_wait_decision(0xFFFFFFFF)
+            .expect_err("failed mutex wait should surface a startup error");
+
+        assert!(error.contains("single-instance mutex"));
     }
 }

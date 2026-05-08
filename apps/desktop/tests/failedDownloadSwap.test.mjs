@@ -15,7 +15,8 @@ assert.match(backendSource, /invokeCommand\('swap_failed_download_to_browser', \
 assert.match(commandSource, /pub async fn swap_failed_download_to_browser\(/, 'Tauri backend should expose a command for failed-download browser swap');
 assert.match(mainSource, /commands::swap_failed_download_to_browser/, 'failed-download browser swap command should be registered with Tauri');
 assert.match(progressSource, /swapFailedDownloadToBrowser/, 'failed progress popup should import and call the failed-download browser action');
-assert.match(progressSource, /canSwapFailedDownloadToBrowser\(job\)[\s\S]*Open in browser/, 'failed progress popup should render browser handoff for eligible downloads');
+assert.match(progressSource, /canSwapFailedDownloadToBrowser\(job\)[\s\S]*Swap/, 'failed progress popup should label browser handoff as Swap for eligible downloads');
+assert.doesNotMatch(progressSource, /Open in browser/, 'failed progress popup should not use the old Open in browser label');
 assert.match(appSource, /async function handleSwapFailedToBrowser\(id: string\)/, 'main app should handle failed-download browser handoff from queue surfaces');
 assert.match(appSource, /onSwapFailedToBrowser=\{\(id\) => void handleSwapFailedToBrowser\(id\)\}/, 'QueueView should receive the failed-download browser handler');
 assert.match(queueSource, /onSwapFailedToBrowser: \(id: string\) => void/, 'QueueView props should include a failed-download browser handler');

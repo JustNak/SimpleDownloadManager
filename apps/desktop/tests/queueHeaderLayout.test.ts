@@ -41,8 +41,14 @@ assert.match(source, /#snippet DetailsGrid[\s\S]*lg:divide-x lg:divide-border\/3
 assert.match(source, /#snippet CompactDetailItem[\s\S]*grid grid-cols-\[minmax\(84px,110px\)_minmax\(0,1fr\)\]/, 'compact detail items should be flat label/value rows');
 assert.doesNotMatch(source, /rounded-sm border border-border\/70 bg-background\/35 px-2\.5 py-1\.5/, 'compact detail items should not keep the previous card-style wrapper');
 assert.match(source, /title=\{value\}>\{value\}/, 'compact detail values should keep the full value available as hover text while truncating visually');
-assert.match(source, /openMenuJobId === job\.id[\s\S]*RowMenu\(job, 'actions'\)/, 'row action menu should render the shared row menu');
-assert.match(source, /contextMenu[\s\S]*RowMenu\(job, 'context'\)/, 'right-click context menu should render the shared row menu');
+assert.doesNotMatch(source, /openMenuJobId/, 'queue should not keep a separate inline actions menu state');
+assert.match(source, /function openJobMenu\(job: QueueDisplayJob, x: number, y: number\)[\s\S]*isSelectedMultiContext[\s\S]*contextMenu = getContextMenuPosition\(job\.id, x, y\)/, 'right-click and More actions should share one job menu opener');
+assert.match(source, /function openActionsMenu\(job: QueueDisplayJob, event: MouseEvent\)[\s\S]*const target = event\.currentTarget;[\s\S]*target instanceof HTMLElement[\s\S]*openJobMenu\(job, Math\.round\(rect\.right - 192\), Math\.round\(rect\.bottom \+ 4\)\)/, 'More actions should open the same context menu positioned from the button');
+assert.match(source, /oncontextmenu=\{\(event\) => openContextMenu\(job, event\)\}/, 'right-click should open the shared job menu');
+assert.match(source, /aria-label="More actions"[\s\S]*onclick=\{\(event\) => openActionsMenu\(job, event\)\}/, 'the row ellipsis should open the shared job menu');
+assert.match(source, /contextMenu[\s\S]*RowMenu\(job\)/, 'the shared context menu should render the single row menu implementation');
+assert.match(source, /#snippet RowMenu\(job: QueueDisplayJob\)/, 'row menu should not branch between separate context and action modes');
+assert.doesNotMatch(source, /RowMenu\(job, 'actions'\)|RowMenu\(job, 'context'\)|mode === 'actions'|mode === 'context'/, 'row menus should not keep separate option sets for right-click and ellipsis');
 assert.match(source, /function sortableHeaderClass\(column: SortColumn[\s\S]*active[\s\S]*\? 'text-primary'/, 'active sorted queue headers should be highlighted with accent text only');
 assert.doesNotMatch(source, /bg-primary-soft text-primary ring-1 ring-primary\/25/, 'sortable queue headers should not render a boxed active highlight');
 assert.match(source, /function sortableHeaderClass\(column: SortColumn[\s\S]*inline-flex w-fit max-w-full items-center/, 'sortable queue headers should render as compact text controls');

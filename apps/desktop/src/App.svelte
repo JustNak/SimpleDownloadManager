@@ -1229,9 +1229,6 @@
           <span class="text-muted-foreground">/</span>
           <span class="truncate text-muted-foreground">{activeSettingsSection.label}</span>
         </div>
-        <div class="hidden min-w-0 items-center text-xs text-muted-foreground md:flex">
-          <span class="truncate">Configure downloads, appearance, notifications, and diagnostics.</span>
-        </div>
       </div>
     {/if}
   </Titlebar>

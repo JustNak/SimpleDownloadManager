@@ -53,8 +53,6 @@
   let selectedBulkJobIds = $state<Set<string>>(new Set());
   let reviewSelectionSignature = $state('');
   let lastBulkUiState = $state<BulkUiState | null>(null);
-  let bulkHasStarted = $state(false);
-  let lastBatchId = $state('');
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const batchId = new URLSearchParams(window.location.search).get('batchId') || '';
 
@@ -63,11 +61,7 @@
   const failedItems = $derived(context?.failedItems ?? []);
   const bulkPhase = $derived(context?.kind === 'bulk' ? deriveBulkPhase(jobs) : null);
   const rawBulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
-  const bulkUiState = $derived(context?.kind === 'bulk'
-    ? bulkHasStarted && rawBulkUiState === 'review'
-      ? 'downloading'
-      : rawBulkUiState
-    : null);
+  const bulkUiState = $derived(context?.kind === 'bulk' ? rawBulkUiState : null);
   const isBulkReviewPhase = $derived(bulkUiState === 'review');
   const selectedBulkCount = $derived(jobs.filter((job) => selectedBulkJobIds.has(job.id)).length);
   const completedArchive = $derived(jobs.find((job) => (
@@ -121,14 +115,6 @@
       media?.removeEventListener('change', handleSystemThemeChange);
       void dispose?.();
     };
-  });
-
-  $effect(() => {
-    const nextBatchId = context?.batchId ?? batchId;
-    if (nextBatchId !== lastBatchId) {
-      bulkHasStarted = false;
-      lastBatchId = nextBatchId;
-    }
   });
 
   $effect(() => {
@@ -262,7 +248,6 @@
       return;
     }
 
-    bulkHasStarted = true;
     void runAction(async () => {
       if (selection.excludedJobs.length > 0) {
         await deleteJobs(selection.excludedJobs.map((job) => job.id), false);
@@ -633,21 +618,26 @@
 {/snippet}
 
 {#snippet BulkFooter()}
-  <div class="mt-3 flex min-h-[45px] shrink-0 justify-end gap-3 border-t border-border pt-3">
-    {#if bulkUiState === 'ready' && completedArchive}
-      {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy, 'show')}
-    {:else if bulkUiState === 'review'}
-      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy, isConfirmingCancel ? 'confirm' : 'cancel')}
-      {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || selectedBulkCount === 0, 'primary')}
-    {:else if bulkUiState === 'downloading'}
-      {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
-      {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canBulkCancelDelete, isConfirmingCancel ? 'confirm' : 'cancel')}
-    {:else if bulkUiState === 'failed'}
-      {#if failedArchive}
-        {@render ActionButton('Retry archive', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
+  <div class="mt-3 flex min-h-[45px] shrink-0 items-center justify-between gap-3 border-t border-border pt-3">
+    <div class="flex justify-start">
+      {#if bulkUiState === 'review' || bulkUiState === 'downloading'}
+        {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, bulkUiState === 'downloading' ? isBusy || !canBulkCancelDelete : isBusy, isConfirmingCancel ? 'confirm' : 'cancel')}
       {/if}
-      {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
-    {/if}
+    </div>
+    <div class="flex justify-end gap-3">
+      {#if bulkUiState === 'ready' && completedArchive}
+        {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy, 'show')}
+      {:else if bulkUiState === 'review'}
+        {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || selectedBulkCount === 0, 'primary')}
+      {:else if bulkUiState === 'downloading'}
+        {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
+      {:else if bulkUiState === 'failed'}
+        {#if failedArchive}
+          {@render ActionButton('Retry archive', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
+        {/if}
+        {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+      {/if}
+    </div>
   </div>
 {/snippet}
 

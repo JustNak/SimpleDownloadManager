@@ -144,7 +144,7 @@
         {/if}
         {#if job.state === JobState.Failed}
           {@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}
-          {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Open in browser', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
+          {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Swap', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
           {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
         {/if}
         {#if job.state === JobState.Completed}

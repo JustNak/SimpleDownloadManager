@@ -23,6 +23,7 @@ for (const [sectionId, label] of [
 
 assert.match(source, /sticky top-0 z-30[\s\S]*bg-surface\/95[\s\S]*backdrop-blur/, 'settings header should keep the Svelte sticky translucent header');
 assert.match(source, /Configure downloads, appearance, notifications, and native host diagnostics\./, 'settings subtitle should match Svelte');
+assert.doesNotMatch(appSource, /Configure downloads, appearance, notifications, and diagnostics\./, 'app titlebar should not duplicate settings description text');
 assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep Svelte cancel and save actions');
 assert.match(source, /CategorySettingsCard\('General'/, 'general settings should render through the category card helper');
 assert.match(source, /Beta channel updates/, 'app update card should be present');

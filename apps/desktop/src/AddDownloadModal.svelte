@@ -13,6 +13,7 @@
 
 <script lang="ts">
   import type { Component } from 'svelte';
+  import { tick } from 'svelte';
   import { Archive, FolderOpen, Link2, Magnet, PackagePlus, X } from '@lucide/svelte';
   import { addJob, addJobs, browseTorrentFile, type AddJobResult, type AddJobsResult } from './backend';
   import { getErrorMessage } from './errors';
@@ -50,9 +51,9 @@
   let torrentUrl = $state('');
   let singleSha256 = $state('');
   let bulkUrls = $state('');
-  let archiveName = $state('bulk-download.zip');
+  let archiveName = $state('bulk-download');
   let archiveNameTouched = $state(false);
-  let bulkOutputKind = $state<BulkOutputKind>('archive');
+  let bulkOutputKind = $state<BulkOutputKind>('folder');
   let combineBulk = $state(true);
   let isSubmitting = $state(false);
   let submitStatusLabel = $state('Adding...');
@@ -171,6 +172,7 @@
     isSubmitting = true;
     submitStatusLabel = mode === 'bulk' ? 'Resolving links...' : 'Adding...';
     errorMessage = '';
+    await tick();
 
     try {
       if (mode === 'single') {
@@ -227,7 +229,7 @@
         </div>
       </div>
 
-      <div class="space-y-3 px-5 py-4">
+      <div class="space-y-4 px-5 py-4">
         {#if mode === 'single'}
           <div>
             <div class="mb-2 flex items-end justify-between gap-3">
@@ -265,43 +267,46 @@
             </div>
             <textarea bind:this={inputElement} id="bulk-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={bulkUrls} oninput={(event) => bulkUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/assets/model.fbx&#10;https://example.com/assets/textures.zip&#10;https://example.com/assets/readme.pdf"></textarea>
           </div>
-          <div class="grid gap-3 rounded-md border border-border bg-background p-3 md:grid-cols-[minmax(0,132px)_minmax(0,1fr)]">
-            <label class="flex cursor-help items-center gap-2 text-sm" title="Save as one archive or folder.">
-              <input type="checkbox" bind:checked={combineBulk} class="h-4 w-4 shrink-0 accent-primary" />
-              <span class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-                <Archive size={16} class="shrink-0" />
-                <span class="min-w-0 whitespace-nowrap">File Combine</span>
-              </span>
-            </label>
-            <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-0">
-              <input class="h-9 min-w-0 flex-1 rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 sm:rounded-r-none sm:border-r-0" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
-              <div class="grid w-full shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0.5 sm:w-[136px] sm:rounded-l-none">
-                <button type="button" class={`flex h-8 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
+          <div class="space-y-3 rounded-md border border-border bg-background px-3 py-4">
+            <div class="flex items-center justify-between gap-3">
+              <label class="flex cursor-help items-center gap-2 text-sm" title="Save as one archive or folder.">
+                <input type="checkbox" bind:checked={combineBulk} class="h-4 w-4 shrink-0 accent-primary" />
+                <span class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
+                  <Archive size={16} class="shrink-0" />
+                  <span class="min-w-0 whitespace-nowrap">File Combine</span>
+                </span>
+              </label>
+              <div class="grid w-[136px] shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0.5">
+                <button type="button" class={`flex h-9 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
                   <Archive size={13} />
                   <span>Archive</span>
                 </button>
-                <button type="button" class={`flex h-8 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
+                <button type="button" class={`flex h-9 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
                   <FolderOpen size={13} />
                   <span>Folder</span>
                 </button>
               </div>
             </div>
+            <input class="h-10 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
           </div>
         {/if}
-
-        <div class="flex items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-          <span>{readyLabel}</span>
-          <span>{mode === 'torrent' ? 'Torrent' : mode === 'bulk' && combineBulk ? archiveName : 'Queue only'}</span>
-        </div>
 
         {#if errorMessage}
           <p class="rounded-md border border-destructive/35 bg-destructive/10 px-3 py-2 text-sm text-destructive">{errorMessage}</p>
         {/if}
       </div>
 
+      {#if isSubmitting}
+        <div class="h-0.5 overflow-hidden bg-primary/10" aria-hidden="true">
+          <div class="h-full w-1/3 animate-[download-buffer_1.1s_ease-in-out_infinite] bg-primary"></div>
+        </div>
+      {/if}
+
       <footer class="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
-        <div>
-          {#if mode === 'torrent'}
+        <div class="min-w-0">
+          {#if mode === 'bulk'}
+            <span class="text-xs font-semibold text-primary">{readyLabel}</span>
+          {:else if mode === 'torrent'}
             <button type="button" class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-semibold text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50" title="Import magnet or torrent file" onclick={() => void importTorrentFile()} disabled={isImportingTorrent}>
               {@render TorrentFileIcon()}
               <span>{isImportingTorrent ? 'Importing...' : 'Import'}</span>

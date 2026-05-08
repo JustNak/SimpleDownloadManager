@@ -22,9 +22,7 @@ export function downloadSubmitLabel(mode: DownloadMode, linkCount: number, combi
   if (mode === 'torrent') return 'Add Torrent';
 
   if (mode === 'bulk' && combineBulk) {
-    return linkCount > 0
-      ? `Queue ${downloadCountLabel(linkCount)} and Combine`
-      : 'Queue and Combine';
+    return 'Proceed';
   }
 
   return linkCount > 0 ? `Queue ${downloadCountLabel(linkCount)}` : 'Queue Downloads';

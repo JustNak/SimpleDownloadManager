@@ -6,20 +6,24 @@ use simple_download_manager_desktop_backend::{
 use tauri::Manager;
 
 fn main() {
-    let shared_state = match state::SharedState::new() {
-        Ok(state) => state,
-        Err(error) => {
-            eprintln!("failed to initialize app state: {error}");
-            std::process::exit(1);
-        }
-    };
+    let startup_args = std::env::args().collect::<Vec<_>>();
 
-    match lifecycle::apply_installer_launch_options_from_args(&shared_state, std::env::args()) {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => {
-            eprintln!("failed to apply installer startup options: {error}");
-            std::process::exit(1);
+    if lifecycle::installer_launch_options_from_args(&startup_args).is_some() {
+        let shared_state = match state::SharedState::new() {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("failed to initialize app state: {error}");
+                std::process::exit(1);
+            }
+        };
+
+        match lifecycle::apply_installer_launch_options_from_args(&shared_state, &startup_args) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("failed to apply installer startup options: {error}");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -29,6 +33,14 @@ fn main() {
         Ok(None) => return,
         Err(error) => {
             eprintln!("failed to initialize single-instance guard: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    let shared_state = match state::SharedState::new() {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("failed to initialize app state: {error}");
             std::process::exit(1);
         }
     };

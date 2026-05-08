@@ -1,5 +1,5 @@
 import type { AddJobResult, AddJobsResult, FailedBatchItem } from './backend';
-import type { DownloadJob } from './types';
+import type { BulkArchiveStatus, DownloadJob } from './types';
 
 export type { FailedBatchItem };
 
@@ -81,25 +81,25 @@ export function calculateBatchProgress(jobs: DownloadJob[]): BatchProgressSummar
 
 export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   const archiveJobs = jobs.filter((job) => job.bulkArchive);
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'failed')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'failed')) {
     return 'failed';
   }
   if (isUntouchedBulkReviewGate(jobs)) {
     return 'review';
   }
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'completed')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'completed')) {
     return 'ready';
   }
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'compressing')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'compressing')) {
     return 'compressing';
   }
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'combining')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'combining')) {
     return 'combining';
   }
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'creating_folder')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'creating_folder')) {
     return 'combining';
   }
-  if (jobs.some((job) => job.bulkArchive?.archiveStatus === 'extracting')) {
+  if (jobs.some((job) => bulkArchiveStatus(job) === 'extracting')) {
     return 'extracting';
   }
   if (jobs.length > 0 && archiveJobs.length === 0 && jobs.every((job) => job.state === 'completed')) {
@@ -122,7 +122,7 @@ export function isUntouchedBulkReviewGate(jobs: DownloadJob[]): boolean {
       && job.downloadedBytes === 0
       && job.progress === 0
     ))
-    && archiveJobs.every((job) => job.bulkArchive?.archiveStatus === 'pending')
+    && archiveJobs.every((job) => bulkArchiveStatus(job) === 'pending')
   );
 }
 
@@ -224,6 +224,11 @@ export function progressPopupIntentForSubmission(
 function clampProgress(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, value));
+}
+
+function bulkArchiveStatus(job: DownloadJob): BulkArchiveStatus | null {
+  if (!job.bulkArchive) return null;
+  return job.bulkArchive.archiveStatus ?? 'pending';
 }
 
 function isResumableReviewJob(job: DownloadJob) {
