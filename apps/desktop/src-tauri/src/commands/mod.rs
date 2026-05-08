@@ -16,7 +16,7 @@ use crate::storage::{
     TransferKind,
 };
 use crate::windows::{
-    close_download_prompt_window, focus_job_in_main_window, progress_window_label,
+    close_download_prompt_window, focus_job_in_main_window_async, progress_window_label,
     show_batch_progress_window, show_download_prompt_window,
     show_progress_window_for_transfer_kind, torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
 };
@@ -1085,7 +1085,7 @@ pub async fn show_existing_download_prompt(
     .await?;
 
     if let Some(job_id) = existing_job_id {
-        focus_job_in_main_window(&app, &job_id);
+        focus_job_in_main_window_async(&app, &job_id).await;
     }
 
     Ok(())
@@ -1400,7 +1400,7 @@ pub async fn test_extension_handoff(
             PromptDecision::SwapToBrowser => {}
             PromptDecision::ShowExisting => {
                 if let Some(job) = prompt.duplicate_job {
-                    focus_job_in_main_window(&worker_app, &job.id);
+                    focus_job_in_main_window_async(&worker_app, &job.id).await;
                 }
             }
             PromptDecision::Download {

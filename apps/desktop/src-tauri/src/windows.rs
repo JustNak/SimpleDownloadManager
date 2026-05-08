@@ -229,9 +229,28 @@ pub fn focus_main_window(app: &AppHandle) {
     }
 }
 
+pub async fn focus_main_window_async(app: &AppHandle) {
+    if let Err(error) = crate::lifecycle::show_main_window_async(app).await {
+        eprintln!("failed to focus main window: {error}");
+    }
+}
+
 pub fn focus_job_in_main_window(app: &AppHandle, job_id: &str) {
     let main_window_exists = app.get_webview_window("main").is_some();
     if let Err(error) = crate::lifecycle::show_main_window_with_selected_job(app, job_id) {
+        eprintln!("failed to focus main window for job: {error}");
+        return;
+    }
+    if main_window_exists {
+        let _ = app.emit_to("main", SELECT_JOB_EVENT, job_id);
+    }
+}
+
+pub async fn focus_job_in_main_window_async(app: &AppHandle, job_id: &str) {
+    let main_window_exists = app.get_webview_window("main").is_some();
+    if let Err(error) =
+        crate::lifecycle::show_main_window_with_selected_job_async(app, job_id).await
+    {
         eprintln!("failed to focus main window for job: {error}");
         return;
     }

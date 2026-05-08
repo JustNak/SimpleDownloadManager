@@ -481,6 +481,10 @@ pub fn show_main_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     show_main_window_internal(app, None)
 }
 
+pub async fn show_main_window_async<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    show_main_window_internal_async(app, None).await
+}
+
 pub fn show_main_window_with_selected_job<R: Runtime>(
     app: &AppHandle<R>,
     job_id: &str,
@@ -488,11 +492,42 @@ pub fn show_main_window_with_selected_job<R: Runtime>(
     show_main_window_internal(app, Some(job_id))
 }
 
+pub async fn show_main_window_with_selected_job_async<R: Runtime>(
+    app: &AppHandle<R>,
+    job_id: &str,
+) -> Result<(), String> {
+    show_main_window_internal_async(app, Some(job_id)).await
+}
+
 fn show_main_window_internal<R: Runtime>(
     app: &AppHandle<R>,
     selected_job_id: Option<&str>,
 ) -> Result<(), String> {
     let window = ensure_main_window(app, selected_job_id)?;
+    activate_main_window(&window)
+}
+
+async fn show_main_window_internal_async<R: Runtime>(
+    app: &AppHandle<R>,
+    selected_job_id: Option<&str>,
+) -> Result<(), String> {
+    let restored_state = if app.get_webview_window(MAIN_WINDOW_LABEL).is_none() {
+        let state = app
+            .try_state::<SharedState>()
+            .map(|state| state.inner().clone());
+        match state {
+            Some(state) => state.main_window_state().await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let window =
+        ensure_main_window_with_restored_state(app, selected_job_id, restored_state.as_ref())?;
+    activate_main_window(&window)
+}
+
+fn activate_main_window<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
     window
         .set_skip_taskbar(false)
         .map_err(|error| error.to_string())?;
@@ -561,6 +596,17 @@ pub fn ensure_main_window<R: Runtime>(
     app: &AppHandle<R>,
     selected_job_id: Option<&str>,
 ) -> Result<WebviewWindow<R>, String> {
+    let restored_state = app
+        .try_state::<SharedState>()
+        .and_then(|state| state.main_window_state_sync());
+    ensure_main_window_with_restored_state(app, selected_job_id, restored_state.as_ref())
+}
+
+fn ensure_main_window_with_restored_state<R: Runtime>(
+    app: &AppHandle<R>,
+    selected_job_id: Option<&str>,
+    restored_state: Option<&MainWindowState>,
+) -> Result<WebviewWindow<R>, String> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         return Ok(window);
     }
@@ -580,10 +626,8 @@ pub fn ensure_main_window<R: Runtime>(
     .build()
     .map_err(|error| error.to_string())?;
 
-    if let Some(state) = app.try_state::<SharedState>() {
-        if let Some(window_state) = state.main_window_state_sync() {
-            restore_main_window_state(&window, &window_state);
-        }
+    if let Some(window_state) = restored_state {
+        restore_main_window_state(&window, window_state);
     }
 
     Ok(window)

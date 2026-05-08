@@ -12,7 +12,7 @@ use crate::storage::{
     HostRegistrationStatus, QueueSummary,
 };
 use crate::windows::{
-    focus_job_in_main_window, focus_main_window, show_download_prompt_window,
+    focus_job_in_main_window_async, focus_main_window_async, show_download_prompt_window,
     show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
 };
 use serde::{Deserialize, Serialize};
@@ -466,7 +466,7 @@ async fn handle_request(
             )
         }
         "open_app" | "show_window" => {
-            focus_main_window(&app);
+            focus_main_window_async(&app).await;
             let connection_state = register_host_contact(&app, &state).await;
             let queue_summary = state.queue_summary().await;
             let extension_settings = state.extension_integration_settings().await;
@@ -1506,7 +1506,7 @@ async fn run_prompt_download(
         PromptDecision::SwapToBrowser => HostResponse::prompt_canceled(request_id),
         PromptDecision::ShowExisting => {
             if let Some(job) = prompt.duplicate_job {
-                focus_job_in_main_window(app, &job.id);
+                focus_job_in_main_window_async(app, &job.id).await;
                 HostResponse::existing_job(request_id, job.id, job.filename)
             } else {
                 HostResponse::prompt_dismissed(request_id)
