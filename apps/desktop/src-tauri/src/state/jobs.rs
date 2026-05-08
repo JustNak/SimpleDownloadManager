@@ -228,11 +228,7 @@ impl SharedState {
         if max_attempts == 0
             || job.auto_restart_attempts >= max_attempts
             || !bulk_member_auto_restart_failure_category(failure_category)
-            || job.transfer_kind != TransferKind::Http
-            || !job
-                .bulk_archive
-                .as_ref()
-                .is_some_and(|archive| archive.archive_status == BulkArchiveStatus::Pending)
+            || !is_pending_http_bulk_member(job)
         {
             return Ok(None);
         }
@@ -241,6 +237,25 @@ impl SharedState {
             resolved_from_url: job.resolved_from_url.clone(),
             attempt: job.auto_restart_attempts.saturating_add(1),
             max_attempts,
+        }))
+    }
+
+    pub async fn bulk_member_slow_recovery_state(
+        &self,
+        id: &str,
+    ) -> Result<Option<BulkMemberSlowRecoveryState>, String> {
+        let state = self.inner.read().await;
+        let Some(job) = state.job(id) else {
+            return Ok(None);
+        };
+
+        if !is_pending_http_bulk_member(job) {
+            return Ok(None);
+        }
+
+        Ok(Some(BulkMemberSlowRecoveryState {
+            retry_attempts: job.retry_attempts,
+            max_retry_attempts: state.settings.auto_retry_attempts.min(10),
         }))
     }
 
@@ -757,6 +772,14 @@ pub(super) fn bulk_member_auto_restart_failure_category(failure_category: Failur
             | FailureCategory::Http
             | FailureCategory::Resume
     )
+}
+
+pub(super) fn is_pending_http_bulk_member(job: &DownloadJob) -> bool {
+    job.transfer_kind == TransferKind::Http
+        && job
+            .bulk_archive
+            .as_ref()
+            .is_some_and(|archive| archive.archive_status == BulkArchiveStatus::Pending)
 }
 
 pub(super) fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {

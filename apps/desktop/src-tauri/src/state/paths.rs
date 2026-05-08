@@ -278,6 +278,17 @@ pub(super) fn prepare_category_download_directory(
     Ok(category_download_directory(download_dir, filename))
 }
 
+pub(super) fn prepare_bulk_output_directory(
+    download_dir: &Path,
+    output_kind: BulkArchiveOutputKind,
+) -> Result<PathBuf, BackendError> {
+    ensure_download_category_directories(download_dir).map_err(|error| BackendError {
+        code: "DESTINATION_INVALID",
+        message: error,
+    })?;
+    Ok(bulk_output_directory(download_dir, output_kind))
+}
+
 pub(super) fn ensure_download_category_directories(download_dir: &Path) -> Result<(), String> {
     for folder in DOWNLOAD_CATEGORY_FOLDERS {
         let category_dir = download_dir.join(folder);
@@ -291,6 +302,30 @@ pub(super) fn ensure_download_category_directories(download_dir: &Path) -> Resul
 
 pub(super) fn category_download_directory(download_dir: &Path, filename: &str) -> PathBuf {
     download_dir.join(category_folder_for_filename(filename))
+}
+
+pub(super) fn bulk_output_path(
+    download_dir: &Path,
+    output_name: &str,
+    output_kind: BulkArchiveOutputKind,
+) -> PathBuf {
+    bulk_output_directory(download_dir, output_kind).join(output_name)
+}
+
+pub(super) fn bulk_output_directory(
+    download_dir: &Path,
+    output_kind: BulkArchiveOutputKind,
+) -> PathBuf {
+    download_dir.join(category_folder_for_bulk_output_kind(output_kind))
+}
+
+pub(super) fn category_folder_for_bulk_output_kind(
+    output_kind: BulkArchiveOutputKind,
+) -> &'static str {
+    match output_kind {
+        BulkArchiveOutputKind::Archive => "Compressed",
+        BulkArchiveOutputKind::Folder => "Other",
+    }
 }
 
 pub(super) fn category_folder_for_filename(filename: &str) -> &'static str {

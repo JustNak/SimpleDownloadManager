@@ -308,8 +308,8 @@ impl SharedState {
             return Ok(None);
         }
 
-        let output_dir = PathBuf::from(&state.settings.download_directory);
-        let output_path = output_dir.join(&archive.name);
+        let download_dir = PathBuf::from(&state.settings.download_directory);
+        let output_path = bulk_output_path(&download_dir, &archive.name, archive.output_kind);
 
         let mut used_names = HashSet::new();
         let mut entries = Vec::with_capacity(members.len());
@@ -384,13 +384,22 @@ impl SharedState {
             );
         }
 
+        let download_dir = PathBuf::from(&state.settings.download_directory);
+        let categorized_output_path =
+            bulk_output_path(&download_dir, &archive.name, archive.output_kind);
+        let legacy_root_output_path = download_dir.join(&archive.name);
         let output_path = archive
             .output_path
             .as_ref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(&state.settings.download_directory).join(&archive.name)
-            });
+            .map(|stored_path| {
+                if stored_path == legacy_root_output_path {
+                    categorized_output_path.clone()
+                } else {
+                    stored_path
+                }
+            })
+            .unwrap_or(categorized_output_path);
         let mut used_names = HashSet::new();
         let mut entries = Vec::with_capacity(members.len());
         for member in members {

@@ -1,7 +1,7 @@
 use crate::commands::{emit_download_update, emit_snapshot};
 use crate::state::{
-    should_stop_seeding, BulkArchiveReady, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
-    TorrentRuntimeSnapshot, WorkerControl,
+    should_stop_seeding, BulkArchiveReady, BulkMemberSlowRecoveryState, ExternalReseedAttempt,
+    SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,

@@ -1,5 +1,17 @@
 use super::*;
 
+const BULK_SLOW_RECOVERY_MIN_SIZE: u64 = 32 * 1024 * 1024;
+const BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const BULK_SLOW_RECOVERY_BALANCED_THRESHOLD: u64 = 64 * 1024;
+const BULK_SLOW_RECOVERY_FAST_THRESHOLD: u64 = 128 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BulkSlowStreamRecoveryAction {
+    Continue,
+    Retry { reset_partial: bool },
+    WarnAndContinue,
+}
+
 pub(super) async fn run_http_download_attempt(
     app: &AppHandle,
     state: &SharedState,
@@ -131,6 +143,16 @@ pub(super) async fn run_http_download_attempt(
         )
         .await?;
     emit_snapshot(app, &snapshot);
+    let bulk_slow_recovery_state = state
+        .bulk_member_slow_recovery_state(&task.id)
+        .await
+        .map_err(|error| {
+            download_error(
+                FailureCategory::Internal,
+                format!("Could not inspect bulk slow-recovery state: {error}"),
+                false,
+            )
+        })?;
 
     let file = if existing_bytes > 0 {
         OpenOptions::new()
@@ -160,6 +182,7 @@ pub(super) async fn run_http_download_attempt(
     let mut low_speed_monitor = LowSpeedMonitor::new(profile);
     let mut low_speed_bytes = 0_u64;
     let mut low_speed_started = Instant::now();
+    let mut bulk_slow_recovery_warning_recorded = false;
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
 
@@ -215,20 +238,61 @@ pub(super) async fn run_http_download_attempt(
         let elapsed = sample_started.elapsed();
 
         low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
-        if low_speed_started.elapsed() >= profile.low_speed_window {
-            if low_speed_monitor.observe(
+        let low_speed_elapsed = low_speed_started.elapsed();
+        if low_speed_elapsed >= profile.low_speed_window {
+            match bulk_slow_stream_recovery_action(
                 low_speed_bytes,
-                low_speed_started.elapsed(),
-                speed_limit.is_some(),
-            ) == LowSpeedDecision::Retry
-            {
-                file.flush().await.ok();
-                return Err(download_error(
-                    FailureCategory::Network,
-                    "Download speed stayed below the recovery threshold; retrying the stream."
-                        .into(),
-                    true,
-                ));
+                low_speed_elapsed,
+                total_bytes,
+                downloaded_bytes,
+                speed_limit,
+                profile,
+                bulk_slow_recovery_state,
+            ) {
+                BulkSlowStreamRecoveryAction::Retry { reset_partial } => {
+                    file.flush().await.ok();
+                    drop(file);
+                    if reset_partial {
+                        cleanup_partial_artifacts(&task.temp_path).await;
+                        let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
+                        emit_download_update(app, &snapshot, &task.id);
+                    }
+                    return Err(download_error(
+                        FailureCategory::Network,
+                        "Bulk member download speed stayed below the recovery threshold; retrying the stream."
+                            .into(),
+                        true,
+                    ));
+                }
+                BulkSlowStreamRecoveryAction::WarnAndContinue => {
+                    if !bulk_slow_recovery_warning_recorded {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Warning,
+                                "download",
+                                "Bulk member download speed stayed below the recovery threshold after retries were exhausted; continuing the current stream.",
+                                Some(task.id.clone()),
+                            )
+                            .await;
+                        bulk_slow_recovery_warning_recorded = true;
+                    }
+                }
+                BulkSlowStreamRecoveryAction::Continue => {
+                    if low_speed_monitor.observe(
+                        low_speed_bytes,
+                        low_speed_elapsed,
+                        speed_limit.is_some(),
+                    ) == LowSpeedDecision::Retry
+                    {
+                        file.flush().await.ok();
+                        return Err(download_error(
+                            FailureCategory::Network,
+                            "Download speed stayed below the recovery threshold; retrying the stream."
+                                .into(),
+                            true,
+                        ));
+                    }
+                }
             }
             low_speed_bytes = 0;
             low_speed_started = Instant::now();
@@ -344,6 +408,51 @@ pub(super) async fn handle_bulk_archive_after_completion(
     }
 
     Ok(())
+}
+
+pub(super) fn bulk_slow_stream_recovery_action(
+    sample_bytes: u64,
+    elapsed: Duration,
+    total_bytes: Option<u64>,
+    downloaded_bytes: u64,
+    speed_limit: Option<u64>,
+    profile: DownloadPerformanceProfile,
+    recovery_state: Option<BulkMemberSlowRecoveryState>,
+) -> BulkSlowStreamRecoveryAction {
+    let Some(recovery_state) = recovery_state else {
+        return BulkSlowStreamRecoveryAction::Continue;
+    };
+    let Some(total_bytes) = total_bytes else {
+        return BulkSlowStreamRecoveryAction::Continue;
+    };
+    if speed_limit.is_some()
+        || total_bytes < BULK_SLOW_RECOVERY_MIN_SIZE
+        || elapsed < profile.low_speed_window
+        || elapsed.is_zero()
+    {
+        return BulkSlowStreamRecoveryAction::Continue;
+    }
+
+    let sample_speed = (sample_bytes as f64 / elapsed.as_secs_f64()) as u64;
+    if sample_speed >= bulk_slow_recovery_threshold(profile) {
+        return BulkSlowStreamRecoveryAction::Continue;
+    }
+
+    if recovery_state.retry_attempts >= recovery_state.max_retry_attempts {
+        return BulkSlowStreamRecoveryAction::WarnAndContinue;
+    }
+
+    BulkSlowStreamRecoveryAction::Retry {
+        reset_partial: downloaded_bytes < BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES,
+    }
+}
+
+fn bulk_slow_recovery_threshold(profile: DownloadPerformanceProfile) -> u64 {
+    if profile.max_segments >= 12 {
+        BULK_SLOW_RECOVERY_FAST_THRESHOLD
+    } else {
+        BULK_SLOW_RECOVERY_BALANCED_THRESHOLD
+    }
 }
 
 pub(super) async fn retry_bulk_archive_creation(

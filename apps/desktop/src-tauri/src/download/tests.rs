@@ -1963,6 +1963,125 @@ fn host_range_backoff_expires_after_ten_minutes() {
     assert!(!backoff.is_backed_off(url, now + RANGE_BACKOFF_DURATION));
 }
 
+#[test]
+fn range_backoff_does_not_apply_to_different_files_on_same_host() {
+    let backoff = RangeBackoffRegistry::default();
+    let now = Instant::now();
+    let rejected_url = "https://dl.fuckingfast.co/dl/token-part03/Game.part03.rar?download=1";
+    let other_path_url = "https://dl.fuckingfast.co/dl/token-part04/Game.part04.rar?download=1";
+    let other_query_url = "https://dl.fuckingfast.co/dl/token-part03/Game.part03.rar?download=2";
+
+    backoff.record_rejection(rejected_url, now);
+
+    assert!(backoff.is_backed_off(rejected_url, now + Duration::from_secs(1)));
+    assert!(!backoff.is_backed_off(other_path_url, now + Duration::from_secs(1)));
+    assert!(!backoff.is_backed_off(other_query_url, now + Duration::from_secs(1)));
+}
+
+#[test]
+fn large_bulk_member_at_seventeen_kib_per_second_requests_partial_reset_retry() {
+    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let recovery_state = crate::state::BulkMemberSlowRecoveryState {
+        retry_attempts: 0,
+        max_retry_attempts: 3,
+    };
+
+    assert_eq!(
+        bulk_slow_stream_recovery_action(
+            17 * 1024 * 20,
+            Duration::from_secs(20),
+            Some(500 * 1024 * 1024),
+            2 * 1024 * 1024,
+            None,
+            profile,
+            Some(recovery_state),
+        ),
+        BulkSlowStreamRecoveryAction::Retry {
+            reset_partial: true
+        }
+    );
+}
+
+#[test]
+fn bulk_slow_recovery_ignores_non_bulk_and_speed_limited_downloads() {
+    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let recovery_state = crate::state::BulkMemberSlowRecoveryState {
+        retry_attempts: 0,
+        max_retry_attempts: 3,
+    };
+
+    assert_eq!(
+        bulk_slow_stream_recovery_action(
+            17 * 1024 * 20,
+            Duration::from_secs(20),
+            Some(500 * 1024 * 1024),
+            2 * 1024 * 1024,
+            None,
+            profile,
+            None,
+        ),
+        BulkSlowStreamRecoveryAction::Continue
+    );
+    assert_eq!(
+        bulk_slow_stream_recovery_action(
+            17 * 1024 * 20,
+            Duration::from_secs(20),
+            Some(500 * 1024 * 1024),
+            2 * 1024 * 1024,
+            Some(64 * 1024),
+            profile,
+            Some(recovery_state),
+        ),
+        BulkSlowStreamRecoveryAction::Continue
+    );
+}
+
+#[test]
+fn near_complete_bulk_slow_recovery_preserves_partial_file() {
+    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let recovery_state = crate::state::BulkMemberSlowRecoveryState {
+        retry_attempts: 1,
+        max_retry_attempts: 3,
+    };
+
+    assert_eq!(
+        bulk_slow_stream_recovery_action(
+            17 * 1024 * 20,
+            Duration::from_secs(20),
+            Some(500 * 1024 * 1024),
+            499 * 1024 * 1024,
+            None,
+            profile,
+            Some(recovery_state),
+        ),
+        BulkSlowStreamRecoveryAction::Retry {
+            reset_partial: false
+        }
+    );
+}
+
+#[test]
+fn exhausted_bulk_slow_recovery_keeps_stream_active() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let recovery_state = crate::state::BulkMemberSlowRecoveryState {
+        retry_attempts: 3,
+        max_retry_attempts: 3,
+    };
+
+    assert_eq!(
+        bulk_slow_stream_recovery_action(
+            64 * 1024 * 15,
+            Duration::from_secs(15),
+            Some(500 * 1024 * 1024),
+            2 * 1024 * 1024,
+            None,
+            profile,
+            Some(recovery_state),
+        ),
+        BulkSlowStreamRecoveryAction::WarnAndContinue
+    );
+}
+
 #[tokio::test]
 async fn range_probe_metadata_uses_partial_content_total_and_identity_header() {
     let response = concat!(

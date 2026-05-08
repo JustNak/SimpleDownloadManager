@@ -78,11 +78,22 @@ pub(super) fn range_backoffs() -> &'static RangeBackoffRegistry {
 pub(super) fn range_backoff_key(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
+    let path = if parsed.path().is_empty() {
+        "/"
+    } else {
+        parsed.path()
+    };
+    let query = parsed
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
     Some(format!(
-        "{}://{}:{}",
+        "{}://{}:{}{}{}",
         parsed.scheme(),
         host.to_ascii_lowercase(),
-        parsed.port_or_known_default().unwrap_or(0)
+        parsed.port_or_known_default().unwrap_or(0),
+        path,
+        query
     ))
 }
 

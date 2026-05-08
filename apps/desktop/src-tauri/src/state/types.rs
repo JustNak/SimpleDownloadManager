@@ -143,6 +143,12 @@ pub struct BulkMemberAutoRestartCandidate {
     pub max_attempts: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulkMemberSlowRecoveryState {
+    pub retry_attempts: u32,
+    pub max_retry_attempts: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkMemberRetryCandidate {
     pub id: String,
