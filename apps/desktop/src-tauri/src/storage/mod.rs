@@ -267,6 +267,18 @@ pub enum BulkArchiveStatus {
     Failed,
 }
 
+impl BulkArchiveStatus {
+    pub fn is_finalizing(self) -> bool {
+        matches!(
+            self,
+            BulkArchiveStatus::Extracting
+                | BulkArchiveStatus::Combining
+                | BulkArchiveStatus::CreatingFolder
+                | BulkArchiveStatus::Compressing
+        )
+    }
+}
+
 fn is_bulk_output_archive(kind: &BulkArchiveOutputKind) -> bool {
     *kind == BulkArchiveOutputKind::Archive
 }

@@ -113,10 +113,12 @@
   import {
     applyInstallProgressEvent,
     beginUpdateInstall,
+    bulkUpdateBlockerForJobs,
     failUpdateCheck,
     failUpdateInstall,
     finishUpdateCheck,
     initialAppUpdateState,
+    shouldOpenUpdatePrompt,
     shouldNotifyUpdateCheckFailure,
     shouldRunStartupUpdateCheck,
     startUpdateCheck,
@@ -162,6 +164,7 @@
 
   let progressSamples: ProgressSample[] = [];
   let startupUpdateCheckStarted = false;
+  let deferredStartupUpdateCheck = false;
   let pendingVisibleSnapshot: DesktopSnapshot | null = null;
   let lastDiagnosticsRefreshAt = 0;
   let settingsPageLoad: Promise<void> | null = null;
@@ -178,6 +181,7 @@
     return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   });
   const progressMetricsByJobId = $derived(calculateDownloadProgressMetricsByJobId(jobs, progressSamples));
+  const bulkUpdateBlocker = $derived(bulkUpdateBlockerForJobs(jobs));
   const canPauseAny = $derived(jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state)));
   const canResumeAny = $derived(jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state)));
   const canRetryFailed = $derived(canRetryFailedDownloads(jobs));
@@ -232,9 +236,12 @@
           applyDownloadUpdateBatchWhenVisible(batch);
         }));
 
-        if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted)) {
+        const startupBlocker = bulkUpdateBlockerForJobs(initialData.snapshot.jobs);
+        if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted, startupBlocker)) {
           startupUpdateCheckStarted = true;
           void handleCheckForUpdates('startup');
+        } else if (!startupUpdateCheckStarted && startupBlocker) {
+          deferredStartupUpdateCheck = true;
         }
       } catch (error) {
         if (isMounted) {
@@ -257,6 +264,13 @@
         void dispose();
       }
     };
+  });
+
+  $effect(() => {
+    if (!deferredStartupUpdateCheck || startupUpdateCheckStarted || bulkUpdateBlocker) return;
+    deferredStartupUpdateCheck = false;
+    startupUpdateCheckStarted = true;
+    void handleCheckForUpdates('startup');
   });
 
   $effect(() => {
@@ -587,6 +601,18 @@
       updateState = finishUpdateCheck(updateState, update);
 
       if (update) {
+        const blocker = bulkUpdateBlockerForJobs(jobs);
+        if (!shouldOpenUpdatePrompt(blocker)) {
+          isUpdatePromptOpen = false;
+          addToast({
+            type: 'warning',
+            title: 'Update Deferred',
+            message: `Simple Download Manager ${update.version} is ready. ${blocker.message}`,
+            autoClose: false,
+          });
+          return;
+        }
+
         isUpdatePromptOpen = true;
         addToast({
           type: 'info',
@@ -610,6 +636,12 @@
   }
 
   async function handleInstallUpdate() {
+    const blocker = bulkUpdateBlockerForJobs(jobs);
+    if (blocker) {
+      addToast({ type: 'warning', title: 'Update Deferred', message: blocker.message, autoClose: false });
+      return;
+    }
+
     updateState = beginUpdateInstall(updateState);
     try {
       await installUpdate();
@@ -697,7 +729,7 @@
       const row = queueRowById(id);
       if (!row || !isBulkAggregateJob(row)) return;
       await retryBulkArchive(row.bulkArchiveId);
-      addToast({ type: 'info', title: 'Retrying Archive', message: 'Bulk archive creation was started again.' });
+      addToast({ type: 'info', title: 'Fixing Archive', message: 'Bulk archive creation was started again.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
     }
@@ -1319,6 +1351,7 @@
               onExportDiagnostics={() => void handleExportDiagnostics()}
               {updateState}
               installedVersion={installedVersion}
+              updateInstallBlocked={Boolean(bulkUpdateBlocker)}
               onCheckForUpdates={() => void handleCheckForUpdates('manual')}
               onInstallUpdate={() => void handleInstallUpdate()}
             />

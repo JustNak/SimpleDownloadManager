@@ -1007,7 +1007,7 @@
     {:else if isFailedBulkAggregate(job)}
       {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
-      {@render MenuItem(RotateCcw, 'Retry archive', () => onRetryArchive(job.id))}
+      {@render MenuItem(RotateCcw, 'Fix archive', () => onRetryArchive(job.id), false, !job.bulkArchiveFixable)}
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else if isCanceledBulkAggregate(job)}

@@ -1809,6 +1809,35 @@ fn normalize_job_populates_missing_created_at() {
 }
 
 #[test]
+fn normalize_job_marks_stale_bulk_finalization_failed() {
+    let mut job = download_job("job_stale_bulk", JobState::Completed, ResumeSupport::Supported, 100);
+    job.bulk_archive = Some(BulkArchiveInfo {
+        id: "bulk_stale".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Extracting,
+        requires_extraction: Some(true),
+        output_path: Some("C:/Downloads/Game.zip".into()),
+        error: None,
+        warning: None,
+    });
+
+    let normalized = normalize_job(job, &Settings::default());
+    let archive = normalized
+        .bulk_archive
+        .expect("bulk archive metadata should be preserved");
+
+    assert_eq!(archive.id, "bulk_stale");
+    assert_eq!(archive.archive_status, BulkArchiveStatus::Failed);
+    assert_eq!(archive.output_path.as_deref(), Some("C:/Downloads/Game.zip"));
+    assert!(archive
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("interrupted"));
+}
+
+#[test]
 fn pause_all_jobs_only_pauses_schedulable_jobs() {
     let mut state = runtime_state_with_jobs(vec![
         download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0),

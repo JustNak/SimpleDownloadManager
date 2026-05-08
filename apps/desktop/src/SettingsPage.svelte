@@ -60,6 +60,7 @@
     onExportDiagnostics: () => void;
     updateState: AppUpdateState;
     installedVersion: string;
+    updateInstallBlocked: boolean;
     onCheckForUpdates: () => void;
     onInstallUpdate: () => void;
   }
@@ -82,6 +83,7 @@
     onExportDiagnostics,
     updateState,
     installedVersion,
+    updateInstallBlocked,
     onCheckForUpdates,
     onInstallUpdate,
   }: Props = $props();
@@ -257,6 +259,7 @@
 
   function renderUpdateStatus(state: AppUpdateState): string {
     if (state.status === 'checking') return 'Checking GitHub Releases for a newer beta build.';
+    if (state.status === 'available' && state.availableUpdate && updateInstallBlocked) return `Version ${state.availableUpdate.version} is ready after active bulk downloads pause or finish.`;
     if (state.status === 'available' && state.availableUpdate) return `Version ${state.availableUpdate.version} is available.`;
     if (state.status === 'not_available') return 'You are running the latest beta build.';
     if (state.status === 'downloading') return 'Downloading the signed update package.';
@@ -460,7 +463,7 @@
 
     {#if updateState.availableUpdate}
       <div class="flex justify-end">
-        <button type="button" onclick={onInstallUpdate} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
+        <button type="button" onclick={onInstallUpdate} disabled={updateIsBusy || updateInstallBlocked} class="flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
           <Download size={16} />
           Install Update
         </button>

@@ -7,6 +7,7 @@ export interface BulkAggregateDownloadJob extends DownloadJob {
   bulkArchiveOutputPath?: string;
   bulkArchiveMemberSearchText: string;
   bulkRetryableMemberCount: number;
+  bulkArchiveFixable: boolean;
 }
 
 export type QueueDisplayJob = DownloadJob | BulkAggregateDownloadJob;
@@ -99,6 +100,7 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     bulkArchiveId: archive?.id ?? first.id,
     bulkArchiveOutputPath: archive?.outputPath,
     bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,
+    bulkArchiveFixable: isFixableBulkArchive(members, archive?.archiveStatus),
     bulkArchiveMemberSearchText: members
       .map((job) => `${job.filename} ${job.url} ${job.targetPath ?? ''}`)
       .join(' '),
@@ -109,6 +111,15 @@ function isRetryableBulkMember(job: DownloadJob): boolean {
   return job.transferKind === 'http'
     && job.state === FAILED
     && job.bulkArchive?.archiveStatus === 'pending';
+}
+
+function isFixableBulkArchive(
+  members: readonly DownloadJob[],
+  archiveStatus: BulkArchiveStatus | undefined,
+): boolean {
+  return archiveStatus === FAILED
+    && members.length >= 2
+    && members.every((job) => job.transferKind === 'http' && job.state === COMPLETED);
 }
 
 function deriveAggregateState(

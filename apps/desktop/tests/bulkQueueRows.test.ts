@@ -176,3 +176,47 @@ assert.equal(
   1,
   'aggregate rows should count failed pending HTTP members that can be retried',
 );
+
+const failedArchiveRows = groupBulkQueueRows([
+  job({
+    id: 'part_done_1',
+    filename: 'Game.part01.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    targetPath: 'C:\\Downloads\\Game.part01.rar',
+    bulkArchive: {
+      id: 'bulk_failed_archive',
+      name: 'Game.zip',
+      archiveStatus: 'failed',
+      outputPath: 'C:\\Downloads\\Game.zip',
+      error: 'Bulk archive finalization was interrupted by app shutdown.',
+    },
+  }),
+  job({
+    id: 'part_done_2',
+    filename: 'Game.part02.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    targetPath: 'C:\\Downloads\\Game.part02.rar',
+    bulkArchive: {
+      id: 'bulk_failed_archive',
+      name: 'Game.zip',
+      archiveStatus: 'failed',
+      outputPath: 'C:\\Downloads\\Game.zip',
+      error: 'Bulk archive finalization was interrupted by app shutdown.',
+    },
+  }),
+]);
+
+if (!isBulkAggregateJob(failedArchiveRows[0])) {
+  throw new Error('failed archive aggregate should expose bulk metadata');
+}
+assert.equal(
+  failedArchiveRows[0].bulkArchiveFixable,
+  true,
+  'failed bulk archives with every member completed should expose a Fix archive action',
+);

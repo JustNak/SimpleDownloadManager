@@ -258,6 +258,8 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
         job.eta = 0;
     }
 
+    mark_stale_bulk_archive_finalization_failed(&mut job);
+
     if job.created_at == 0 {
         job.created_at = current_unix_timestamp_millis();
     }
@@ -265,6 +267,21 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
     job.artifact_exists = None;
 
     job
+}
+
+fn mark_stale_bulk_archive_finalization_failed(job: &mut DownloadJob) {
+    let Some(archive) = &mut job.bulk_archive else {
+        return;
+    };
+    if !archive.archive_status.is_finalizing() {
+        return;
+    }
+
+    archive.archive_status = BulkArchiveStatus::Failed;
+    archive.error = Some(
+        "Bulk archive finalization was interrupted by app shutdown. Use Fix archive to finish it."
+            .into(),
+    );
 }
 
 pub(super) fn clear_transient_job_state(mut job: DownloadJob) -> DownloadJob {

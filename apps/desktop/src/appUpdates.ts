@@ -1,3 +1,5 @@
+import type { DownloadJob } from './types';
+
 export type UpdateCheckMode = 'startup' | 'manual';
 export type AppUpdateStatus =
   | 'idle'
@@ -37,6 +39,14 @@ export interface AppUpdateVersionIndicator {
   newVersionTone: AppUpdateVersionTone;
 }
 
+export type BulkUpdateBlockerKind = 'bulk_download' | 'bulk_archive';
+
+export interface BulkUpdateBlocker {
+  kind: BulkUpdateBlockerKind;
+  archiveId: string;
+  message: string;
+}
+
 export const initialAppUpdateState: AppUpdateState = {
   status: 'idle',
   availableUpdate: null,
@@ -46,8 +56,51 @@ export const initialAppUpdateState: AppUpdateState = {
   totalBytes: null,
 };
 
-export function shouldRunStartupUpdateCheck(hasChecked: boolean): boolean {
-  return !hasChecked;
+const activeBulkMemberStates = new Set<string>(['queued', 'starting', 'downloading']);
+const finalizingBulkArchiveStatuses = new Set<string>([
+  'extracting',
+  'combining',
+  'creating_folder',
+  'compressing',
+]);
+
+export function bulkUpdateBlockerForJobs(jobs: readonly DownloadJob[]): BulkUpdateBlocker | null {
+  for (const job of jobs) {
+    const archive = job.transferKind === 'http' ? job.bulkArchive : undefined;
+    if (!archive?.id) continue;
+    if (activeBulkMemberStates.has(job.state)) {
+      return {
+        kind: 'bulk_download',
+        archiveId: archive.id,
+        message: 'Finish or pause active bulk downloads before installing the update.',
+      };
+    }
+  }
+
+  for (const job of jobs) {
+    const archive = job.transferKind === 'http' ? job.bulkArchive : undefined;
+    if (!archive?.id || !archive.archiveStatus) continue;
+    if (finalizingBulkArchiveStatuses.has(archive.archiveStatus)) {
+      return {
+        kind: 'bulk_archive',
+        archiveId: archive.id,
+        message: 'Wait for bulk archive finalization to finish before installing the update.',
+      };
+    }
+  }
+
+  return null;
+}
+
+export function shouldRunStartupUpdateCheck(
+  hasChecked: boolean,
+  blocker: BulkUpdateBlocker | null = null,
+): boolean {
+  return !hasChecked && !blocker;
+}
+
+export function shouldOpenUpdatePrompt(blocker: BulkUpdateBlocker | null): blocker is null {
+  return !blocker;
 }
 
 export function shouldNotifyUpdateCheckFailure(mode: UpdateCheckMode): boolean {
