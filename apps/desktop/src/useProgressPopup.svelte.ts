@@ -68,10 +68,15 @@ export function useProgressPopup(): ProgressPopupState {
       if (disposed) return;
       applySnapshotAppearance(snapshot);
       applySnapshotJob(snapshot);
-      dispose = await subscribeToProgressJobSnapshot((nextSnapshot) => {
+      const nextDispose = await subscribeToProgressJobSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
         applySnapshotJob(nextSnapshot);
       });
+      if (disposed) {
+        void nextDispose();
+        return;
+      }
+      dispose = nextDispose;
     }
 
     void initialize();

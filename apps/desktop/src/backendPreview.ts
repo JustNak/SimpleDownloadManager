@@ -1,5 +1,4 @@
-import type { BulkOutputKind } from './bulkArchiveNaming';
-import type { ProgressBatchContext } from './batchProgress';
+import { createStoredProgressBatchContext as createSharedStoredProgressBatchContext, type ProgressBatchContext } from './batchProgress';
 import { createDefaultSettings, DEFAULT_DOWNLOAD_DIRECTORY } from './defaultSettings';
 import { canSwapFailedDownloadToBrowser } from './queueCommands';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings, type TorrentSessionCacheClearResult, type TransferKind } from './types';
@@ -18,7 +17,6 @@ interface AddJobsCommandArgs {
   bulkArchiveName?: string;
   resolveHosterLinks?: boolean;
   startPaused?: boolean;
-  bulkOutputKind?: BulkOutputKind;
 }
 
 const mockNow = Date.now();
@@ -506,7 +504,7 @@ export function addMockJobs(args: AddJobsCommandArgs): AddJobsResult {
     ? {
         id: crypto.randomUUID(),
         name: args.bulkArchiveName,
-        outputKind: args.bulkOutputKind ?? 'archive',
+        outputKind: 'folder' as const,
         archiveStatus: 'pending' as const,
       }
     : undefined;
@@ -605,20 +603,18 @@ export function openMockProgressWindow(id: string): void {
 }
 
 export function openMockBatchProgressWindow(context: ProgressBatchContext): string {
-  const batchId = context.batchId ?? createBatchId();
-  const storedContext = { ...context, batchId };
+  const storedContext = createSharedStoredProgressBatchContext(context);
   storeMockProgressBatchContext(storedContext);
   window.open(
-    popupUrl(`?window=batch-progress&batchId=${encodeURIComponent(batchId)}`),
-    `batch-progress-${batchId}`,
+    popupUrl(`?window=batch-progress&batchId=${encodeURIComponent(storedContext.batchId)}`),
+    `batch-progress-${storedContext.batchId}`,
     'width=640,height=480',
   );
-  return batchId;
+  return storedContext.batchId;
 }
 
 export function createStoredProgressBatchContext(context: ProgressBatchContext): ProgressBatchContext & { batchId: string } {
-  const batchId = context.batchId ?? createBatchId();
-  const storedContext = { ...context, batchId };
+  const storedContext = createSharedStoredProgressBatchContext(context);
   storeMockProgressBatchContext(storedContext);
   return storedContext;
 }
@@ -697,13 +693,6 @@ function filenameFromUrl(url: string): string {
       return segment;
     }
   }
-}
-
-function createBatchId() {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return `batch_${crypto.randomUUID()}`;
-  }
-  return `batch_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 function popupUrl(path: string) {

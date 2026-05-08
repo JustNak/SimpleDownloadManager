@@ -5,8 +5,9 @@ use crate::state::{
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,
-    DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState,
-    ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode, TransferKind,
+    BulkFinalizeMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
+    JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
+    TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
@@ -17,7 +18,7 @@ use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
     HeaderName, HeaderValue, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE,
-    ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
+    CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};

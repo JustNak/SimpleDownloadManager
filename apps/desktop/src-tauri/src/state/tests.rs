@@ -1600,6 +1600,9 @@ async fn resolve_completed_bulk_archive_path_returns_output_file() {
         output_path: Some(archive_path.display().to_string()),
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job = download_job("job_24", JobState::Completed, ResumeSupport::Supported, 100);
     job.bulk_archive = Some(archive);
@@ -1634,6 +1637,9 @@ async fn resolve_completed_bulk_folder_path_returns_output_directory() {
         output_path: Some(folder_path.display().to_string()),
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job = download_job("job_31", JobState::Completed, ResumeSupport::Supported, 100);
     job.bulk_archive = Some(archive);
@@ -1669,6 +1675,9 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let mut failed_job = download_job("job_26", JobState::Completed, ResumeSupport::Supported, 100);
     failed_job.bulk_archive = Some(BulkArchiveInfo {
@@ -1680,6 +1689,9 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         output_path: Some(download_dir.join("failed.zip").display().to_string()),
         error: Some("zip failed".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let mut missing_job =
         download_job("job_30", JobState::Completed, ResumeSupport::Supported, 100);
@@ -1692,6 +1704,9 @@ async fn resolve_bulk_archive_path_rejects_incomplete_failed_missing_and_unknown
         output_path: Some(completed_missing_path.display().to_string()),
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let state = shared_state_with_jobs(
         download_dir.join("state.json"),
@@ -1810,7 +1825,12 @@ fn normalize_job_populates_missing_created_at() {
 
 #[test]
 fn normalize_job_marks_stale_bulk_finalization_failed() {
-    let mut job = download_job("job_stale_bulk", JobState::Completed, ResumeSupport::Supported, 100);
+    let mut job = download_job(
+        "job_stale_bulk",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
     job.bulk_archive = Some(BulkArchiveInfo {
         id: "bulk_stale".into(),
         name: "Game.zip".into(),
@@ -1820,6 +1840,9 @@ fn normalize_job_marks_stale_bulk_finalization_failed() {
         output_path: Some("C:/Downloads/Game.zip".into()),
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
 
     let normalized = normalize_job(job, &Settings::default());
@@ -1829,7 +1852,10 @@ fn normalize_job_marks_stale_bulk_finalization_failed() {
 
     assert_eq!(archive.id, "bulk_stale");
     assert_eq!(archive.archive_status, BulkArchiveStatus::Failed);
-    assert_eq!(archive.output_path.as_deref(), Some("C:/Downloads/Game.zip"));
+    assert_eq!(
+        archive.output_path.as_deref(),
+        Some("C:/Downloads/Game.zip")
+    );
     assert!(archive
         .error
         .as_deref()
@@ -2127,6 +2153,49 @@ async fn enqueue_download_entries_can_start_bulk_batches_paused() {
 }
 
 #[tokio::test]
+async fn enqueue_download_entries_defaults_omitted_bulk_output_kind_to_folder() {
+    let download_dir = test_runtime_dir("enqueue-batch-default-folder-output-kind");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_options(
+            vec![
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part01.rar".into(),
+                    filename_hint: None,
+                    resolved_from_url: None,
+                },
+                BatchDownloadEntry {
+                    url: "https://example.com/Game.part02.rar".into(),
+                    filename_hint: None,
+                    resolved_from_url: None,
+                },
+            ],
+            None,
+            Some("Game".into()),
+            true,
+        )
+        .await
+        .expect("bulk batch should enqueue with folder output by default");
+
+    let snapshot = &results.last().unwrap().snapshot;
+    assert!(snapshot.jobs.iter().all(|job| {
+        job.bulk_archive
+            .as_ref()
+            .is_some_and(|archive| archive.output_kind == BulkArchiveOutputKind::Folder)
+    }));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn enqueue_download_entries_stores_folder_bulk_output_kind() {
     let download_dir = test_runtime_dir("enqueue-batch-folder-output-kind");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
@@ -2171,8 +2240,8 @@ async fn enqueue_download_entries_stores_folder_bulk_output_kind() {
 }
 
 #[tokio::test]
-async fn bulk_archive_ready_uses_compressed_category_for_archive_output() {
-    let download_dir = test_runtime_dir("bulk-archive-ready-compressed-category");
+async fn bulk_archive_ready_uses_other_category_for_default_folder_output() {
+    let download_dir = test_runtime_dir("bulk-archive-ready-default-folder-category");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
     state
         .save_settings(Settings {
@@ -2190,7 +2259,7 @@ async fn bulk_archive_ready_uses_compressed_category_for_archive_output() {
             true,
         )
         .await
-        .expect("bulk archive batch should enqueue");
+        .expect("bulk folder batch should enqueue");
     let job_id = results[0].job_id.clone();
     complete_bulk_members_for_ready(&state).await;
 
@@ -2200,7 +2269,11 @@ async fn bulk_archive_ready_uses_compressed_category_for_archive_output() {
         .expect("bulk ready lookup should succeed")
         .expect("completed members should be ready");
 
-    assert_eq!(ready.output_path, download_dir.join("Compressed").join("Game.zip"));
+    assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
+    assert_eq!(
+        ready.output_path,
+        download_dir.join("Other").join("Game.zip")
+    );
     assert_ne!(ready.output_path, download_dir.join("Game.zip"));
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -2274,7 +2347,10 @@ async fn bulk_folder_output_named_like_zip_stays_in_other_category() {
         .expect("bulk ready lookup should succeed")
         .expect("completed members should be ready");
 
-    assert_eq!(ready.output_path, download_dir.join("Other").join("Game.zip"));
+    assert_eq!(
+        ready.output_path,
+        download_dir.join("Other").join("Game.zip")
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -2290,7 +2366,7 @@ async fn bulk_enqueue_rejects_existing_categorized_output_path() {
         })
         .await
         .unwrap();
-    std::fs::write(download_dir.join("Compressed").join("Game.zip"), b"existing").unwrap();
+    std::fs::write(download_dir.join("Other").join("Game.zip"), b"existing").unwrap();
 
     let error = state
         .enqueue_download_entries_with_options(
@@ -2303,7 +2379,7 @@ async fn bulk_enqueue_rejects_existing_categorized_output_path() {
         .unwrap_err();
 
     assert_eq!(error.code, "DESTINATION_EXISTS");
-    assert!(error.message.contains("Compressed"));
+    assert!(error.message.contains("Other"));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -2688,6 +2764,9 @@ fn bulk_archive_status_updates_all_archive_members() {
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut first = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     let mut second = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
@@ -2706,6 +2785,9 @@ fn bulk_archive_status_updates_all_archive_members() {
         Some("C:/Downloads/bundle.zip".into()),
         None,
         None,
+        Some(BulkFinalizeMode::Zip),
+        Some(1024),
+        Some(0),
     );
 
     let mut archive_members = state
@@ -2731,6 +2813,9 @@ fn bulk_archive_status_updates_all_archive_members() {
         Some("C:/Downloads/bundle.zip".into()),
         Some("zip failed".into()),
         None,
+        None,
+        None,
+        None,
     );
     archive_members = state
         .jobs
@@ -2751,6 +2836,9 @@ fn bulk_archive_status_updates_all_archive_members() {
         Some("C:/Downloads/bundle.zip".into()),
         None,
         Some("cleanup warning".into()),
+        Some(BulkFinalizeMode::Zip),
+        Some(1024),
+        Some(1024),
     );
     archive_members = state
         .jobs
@@ -2890,6 +2978,9 @@ async fn delete_completed_bulk_member_from_disk_removes_archive_output() {
         output_path: Some(archive_path.display().to_string()),
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
 
@@ -2922,6 +3013,9 @@ async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     job_1.filename = "Game.part01.rar".into();
@@ -2945,7 +3039,11 @@ async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
         .expect("failed archive should be retryable");
 
     assert_eq!(ready.archive_id, "bulk_retry");
-    assert_eq!(ready.output_path, download_dir.join("Compressed").join("Game.zip"));
+    assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
+    assert_eq!(
+        ready.output_path,
+        download_dir.join("Other").join("Game.zip")
+    );
     assert_eq!(ready.entries.len(), 2);
     assert_eq!(ready.entries[0].source_path, part_1);
     assert_eq!(ready.entries[1].source_path, part_2);
@@ -2970,6 +3068,9 @@ async fn bulk_archive_ready_for_retry_without_output_path_uses_categorized_path(
         output_path: None,
         error: Some("locked".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     job_1.filename = "Game.part01.rar".into();
@@ -2992,7 +3093,11 @@ async fn bulk_archive_ready_for_retry_without_output_path_uses_categorized_path(
         .await
         .expect("failed archive should be retryable");
 
-    assert_eq!(ready.output_path, download_dir.join("Compressed").join("Game.zip"));
+    assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
+    assert_eq!(
+        ready.output_path,
+        download_dir.join("Other").join("Game.zip")
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -3015,6 +3120,9 @@ async fn bulk_archive_ready_for_retry_preserves_nonlegacy_stored_output_path() {
         output_path: Some(custom_output.display().to_string()),
         error: Some("locked".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     job_1.filename = "Game.part01.rar".into();
@@ -3058,6 +3166,9 @@ async fn bulk_archive_ready_for_retry_rejects_missing_parts() {
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     job_1.filename = "Game.part01.rar".into();
@@ -3103,6 +3214,9 @@ async fn bulk_archive_ready_for_retry_rejects_unknown_incomplete_running_and_com
             None
         },
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
 
     let mut pending_job = download_job(
@@ -3210,6 +3324,9 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
     state
@@ -3261,6 +3378,9 @@ async fn bulk_member_auto_restart_candidate_rejects_exhausted_non_bulk_and_faile
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut exhausted = download_job(
         "job_exhausted",
@@ -3347,6 +3467,9 @@ async fn bulk_member_slow_recovery_state_accepts_pending_http_bulk_members() {
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     });
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
     state
@@ -3384,6 +3507,9 @@ async fn bulk_member_slow_recovery_state_rejects_non_pending_http_bulk_members()
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let non_bulk = download_job(
         "job_plain_slow",
@@ -3457,6 +3583,9 @@ async fn auto_restart_bulk_member_resets_partial_state_and_preserves_bulk_identi
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job = download_job(
         "job_auto_reset",
@@ -3532,6 +3661,9 @@ async fn bulk_member_retry_candidates_accept_failed_pending_http_members() {
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
 
     let mut hoster_member = download_job(
@@ -3604,6 +3736,9 @@ async fn bulk_member_retry_candidates_reject_nonfailed_nonhttp_and_nonpending_ar
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
 
     let mut active_member = download_job(
@@ -3703,6 +3838,9 @@ async fn retry_bulk_member_resets_partial_state_and_preserves_bulk_identity() {
         output_path: None,
         error: None,
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job = download_job(
         "job_manual_retry",
@@ -3774,6 +3912,9 @@ async fn delete_failed_bulk_members_from_disk_removes_downloaded_parts() {
         output_path: Some(download_dir.join("Game.zip").display().to_string()),
         error: Some("locked".into()),
         warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     };
     let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
     job_1.target_path = part_1.display().to_string();

@@ -529,7 +529,8 @@ pub async fn add_jobs(
     bulk_output_kind: Option<BulkArchiveOutputKind>,
 ) -> Result<AddJobsResult, String> {
     let start_paused = start_paused.unwrap_or(false);
-    let bulk_output_kind = bulk_output_kind.unwrap_or_default();
+    let _ = bulk_output_kind;
+    let bulk_output_kind = BulkArchiveOutputKind::Folder;
     let mut failed_items = Vec::new();
     let results = if resolve_hoster_links.unwrap_or(false) {
         let batch = crate::hosters::resolve_hoster_links_partial(urls)

@@ -322,10 +322,8 @@ pub(super) fn bulk_output_directory(
 pub(super) fn category_folder_for_bulk_output_kind(
     output_kind: BulkArchiveOutputKind,
 ) -> &'static str {
-    match output_kind {
-        BulkArchiveOutputKind::Archive => "Compressed",
-        BulkArchiveOutputKind::Folder => "Other",
-    }
+    let _ = output_kind;
+    "Other"
 }
 
 pub(super) fn category_folder_for_filename(filename: &str) -> &'static str {
@@ -461,22 +459,12 @@ pub(super) fn sanitize_filename(input: &str) -> String {
     }
 }
 
-pub(super) fn normalize_archive_filename(input: &str) -> String {
-    let mut filename = sanitize_filename(input);
-    if !filename.to_ascii_lowercase().ends_with(".zip") {
-        filename.push_str(".zip");
-    }
-    filename
-}
-
 pub(super) fn normalize_bulk_output_name(
     input: &str,
     output_kind: BulkArchiveOutputKind,
 ) -> String {
-    match output_kind {
-        BulkArchiveOutputKind::Archive => normalize_archive_filename(input),
-        BulkArchiveOutputKind::Folder => sanitize_filename(input),
-    }
+    let _ = output_kind;
+    sanitize_filename(input)
 }
 
 pub(super) fn unique_archive_entry_name(

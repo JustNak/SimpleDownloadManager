@@ -14,7 +14,7 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import { tick } from 'svelte';
-  import { Archive, FolderOpen, Link2, Magnet, PackagePlus, X } from '@lucide/svelte';
+  import { Link2, Magnet, PackagePlus, X } from '@lucide/svelte';
   import { addJob, addJobs, browseTorrentFile, type AddJobResult, type AddJobsResult } from './backend';
   import { getErrorMessage } from './errors';
   import {
@@ -30,11 +30,8 @@
   } from './downloadInput';
   import { validateOptionalSha256 } from './downloadIntegrity';
   import {
-    defaultBulkArchiveNameForUrls,
     defaultBulkOutputNameForUrls,
     normalizeBulkOutputName,
-    stripZipExtension,
-    type BulkOutputKind,
   } from './bulkArchiveNaming';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
@@ -53,7 +50,6 @@
   let bulkUrls = $state('');
   let archiveName = $state('bulk-download');
   let archiveNameTouched = $state(false);
-  let bulkOutputKind = $state<BulkOutputKind>('folder');
   let combineBulk = $state(true);
   let isSubmitting = $state(false);
   let submitStatusLabel = $state('Adding...');
@@ -62,10 +58,7 @@
   let inputElement = $state<HTMLInputElement | HTMLTextAreaElement | null>(null);
 
   const activeUrls = $derived(urlsForMode(mode));
-  const suggestedBulkArchiveName = $derived(defaultBulkArchiveNameForUrls(parseDownloadUrlLines(bulkUrls)));
-  const suggestedBulkOutputName = $derived(bulkOutputKind === 'archive'
-    ? suggestedBulkArchiveName
-    : defaultBulkOutputNameForUrls(parseDownloadUrlLines(bulkUrls), 'folder'));
+  const suggestedBulkOutputName = $derived(defaultBulkOutputNameForUrls(parseDownloadUrlLines(bulkUrls)));
   const canSubmit = $derived(activeUrls.length > 0 && !isSubmitting && !(mode === 'bulk' && combineBulk && !archiveName.trim()));
   const submitLabel = $derived(downloadSubmitLabel(mode, activeUrls.length, combineBulk));
   const readyLabel = $derived(mode === 'torrent'
@@ -131,19 +124,6 @@
     return activeMode === 'torrent' ? 'Enter a valid magnet link or torrent URL.' : 'Enter a valid URL.';
   }
 
-  function setBulkOutputKind(nextKind: BulkOutputKind) {
-    if (bulkOutputKind === nextKind) return;
-    const wasTouched = archiveNameTouched;
-    bulkOutputKind = nextKind;
-    if (wasTouched) {
-      archiveName = nextKind === 'folder'
-        ? normalizeBulkOutputName(stripZipExtension(archiveName), 'folder')
-        : normalizeBulkOutputName(archiveName, 'archive');
-    } else {
-      archiveName = defaultBulkOutputNameForUrls(parseDownloadUrlLines(bulkUrls), nextKind);
-    }
-  }
-
   async function importTorrentFile() {
     isImportingTorrent = true;
     errorMessage = '';
@@ -182,8 +162,8 @@
         const result = await addJob(urls[0], { transferKind: 'torrent' });
         emitAdded(mode, result);
       } else {
-        const trimmedArchiveName = combineBulk ? normalizeBulkOutputName(archiveName, bulkOutputKind) : undefined;
-        const result = await addJobs(urls, trimmedArchiveName, { resolveHosterLinks: true, startPaused: true, bulkOutputKind });
+        const trimmedArchiveName = combineBulk ? normalizeBulkOutputName(archiveName) : undefined;
+        const result = await addJobs(urls, trimmedArchiveName, { resolveHosterLinks: true, startPaused: true });
         emitAdded(mode, result, trimmedArchiveName);
       }
       onClose();
@@ -268,26 +248,16 @@
             <textarea bind:this={inputElement} id="bulk-download-urls" rows="7" wrap={batchUrlTextAreaWrap} class={batchUrlTextAreaClassName} value={bulkUrls} oninput={(event) => bulkUrls = ensureTrailingEditableLine(event.currentTarget.value)} placeholder="https://example.com/assets/model.fbx&#10;https://example.com/assets/textures.zip&#10;https://example.com/assets/readme.pdf"></textarea>
           </div>
           <div class="space-y-3 rounded-md border border-border bg-background px-3 py-4">
-            <div class="flex items-center justify-between gap-3">
-              <label class="flex cursor-help items-center gap-2 text-sm" title="Save as one archive or folder.">
+            <div class="flex items-center gap-3">
+              <label class="flex cursor-help items-center gap-2 text-sm" title="Keep completed files together.">
                 <input type="checkbox" bind:checked={combineBulk} class="h-4 w-4 shrink-0 accent-primary" />
                 <span class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-                  <Archive size={16} class="shrink-0" />
+                  <PackagePlus size={16} class="shrink-0" />
                   <span class="min-w-0 whitespace-nowrap">File Combine</span>
                 </span>
               </label>
-              <div class="grid w-[136px] shrink-0 grid-cols-2 rounded-md border border-border bg-card p-0.5">
-                <button type="button" class={`flex h-9 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'archive' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('archive')} disabled={!combineBulk}>
-                  <Archive size={13} />
-                  <span>Archive</span>
-                </button>
-                <button type="button" class={`flex h-9 items-center justify-center gap-1 rounded-[3px] text-[11px] font-semibold transition ${bulkOutputKind === 'folder' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`} onclick={() => setBulkOutputKind('folder')} disabled={!combineBulk}>
-                  <FolderOpen size={13} />
-                  <span>Folder</span>
-                </button>
-              </div>
             </div>
-            <input class="h-10 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value, bulkOutputKind); }} disabled={!combineBulk} aria-label="Bulk output name" />
+            <input class="h-10 w-full rounded-md border border-input bg-card px-3 text-sm text-foreground outline-none transition focus:border-primary disabled:cursor-not-allowed disabled:opacity-50" value={archiveName} oninput={(event) => { archiveNameTouched = true; archiveName = normalizeBulkOutputName(event.currentTarget.value); }} disabled={!combineBulk} aria-label="Bulk output name" />
           </div>
         {/if}
 

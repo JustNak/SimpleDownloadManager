@@ -17,27 +17,64 @@ pub(super) async fn run_http_download_attempt(
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
+    let mut current_url = match refresh_hoster_url_before_attempt(state, task).await {
+        Ok(Some(url)) => url,
+        Ok(None) | Err(_) => task.url.clone(),
+    };
+    let mut refreshed_after_failure = false;
+
+    loop {
+        match run_http_download_attempt_for_url(app, state, task, &current_url).await {
+            Ok(outcome) => return Ok(outcome),
+            Err(error)
+                if !refreshed_after_failure
+                    && hoster_refresh_error_allows_retry(&error)
+                    && task.resolved_from_url.is_some() =>
+            {
+                refreshed_after_failure = true;
+                match refresh_hoster_url_after_failure(state, task, &error).await {
+                    Ok(Some(url)) => {
+                        cleanup_partial_artifacts(&task.temp_path).await;
+                        let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
+                        emit_download_update(app, &snapshot, &task.id);
+                        current_url = url;
+                    }
+                    Ok(None) | Err(_) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn run_http_download_attempt_for_url(
+    app: &AppHandle,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    effective_url: &str,
+) -> Result<DownloadOutcome, DownloadError> {
     ensure_parent_directory(&task.target_path)
         .await
         .map_err(disk_error)?;
 
     let mut existing_bytes = metadata_len(&task.temp_path).await.unwrap_or(0);
     let client = download_client()?;
+    let request_auth = request_auth_for_task_url(task, effective_url);
     let speed_limit = state.speed_limit_bytes_per_second().await;
     let profile = performance_profile(state.download_performance_mode().await);
 
     let mut preflight_metadata =
-        preflight_download(&client, &task.url, task.handoff_auth.as_ref()).await;
+        preflight_download(&client, effective_url, request_auth.as_ref()).await;
 
     let has_segment_state = segment_meta_path(&task.temp_path).exists();
     let can_try_segmented = (existing_bytes == 0 || has_segment_state)
         && speed_limit.is_none()
         && profile.max_segments >= 2
-        && !range_backoffs().is_backed_off(&task.url, Instant::now());
+        && !range_backoffs().is_backed_off(effective_url, Instant::now());
 
     if can_try_segmented {
         let probe_metadata =
-            probe_range_metadata(&client, &task.url, task.handoff_auth.as_ref()).await;
+            probe_range_metadata(&client, effective_url, request_auth.as_ref()).await;
         let mut range_probe_supported = false;
         match probe_metadata {
             Some(metadata) => {
@@ -45,7 +82,7 @@ pub(super) async fn run_http_download_attempt(
                 preflight_metadata = Some(merge_preflight_metadata(preflight_metadata, metadata));
             }
             None => {
-                range_backoffs().record_rejection(&task.url, Instant::now());
+                range_backoffs().record_rejection(effective_url, Instant::now());
             }
         }
 
@@ -63,6 +100,8 @@ pub(super) async fn run_http_download_attempt(
                             state,
                             task,
                             client.clone(),
+                            effective_url.to_string(),
+                            request_auth.clone(),
                             plan,
                             profile,
                             metadata.validators.clone(),
@@ -71,7 +110,7 @@ pub(super) async fn run_http_download_attempt(
                         {
                             Ok(outcome) => return Ok(outcome),
                             Err(error) if segmented_error_allows_single_stream_fallback(&error) => {
-                                range_backoffs().record_rejection(&task.url, Instant::now());
+                                range_backoffs().record_rejection(effective_url, Instant::now());
                                 cleanup_partial_artifacts(&task.temp_path).await;
                                 existing_bytes = 0;
                             }
@@ -93,14 +132,15 @@ pub(super) async fn run_http_download_attempt(
 
     let mut response = send_request(
         &client,
-        &task.url,
+        effective_url,
         existing_bytes,
-        task.handoff_auth.as_ref(),
+        request_auth.as_ref(),
         preflight_metadata
             .as_ref()
             .map(|metadata| &metadata.validators),
     )
     .await?;
+    reject_hoster_html_response(task, &response)?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
 
     if existing_bytes > 0 && !supports_resume {
@@ -116,7 +156,8 @@ pub(super) async fn run_http_download_attempt(
             )
             .await?;
         emit_snapshot(app, &snapshot);
-        response = send_request(&client, &task.url, 0, task.handoff_auth.as_ref(), None).await?;
+        response = send_request(&client, effective_url, 0, request_auth.as_ref(), None).await?;
+        reject_hoster_html_response(task, &response)?;
     }
 
     let total_bytes = derive_total_bytes(&response, existing_bytes).or_else(|| {
@@ -356,6 +397,129 @@ pub(super) async fn run_http_download_attempt(
     Ok(DownloadOutcome::Completed)
 }
 
+fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Option<HandoffAuth> {
+    let mut auth = task.handoff_auth.clone().unwrap_or(HandoffAuth {
+        headers: Vec::new(),
+    });
+    if let Some(context) = crate::hosters::hoster_download_context_for_resolved_url(
+        url,
+        task.resolved_from_url.as_deref(),
+    ) {
+        for header in context.headers {
+            if auth
+                .headers
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&header.name))
+            {
+                continue;
+            }
+            auth.headers.push(header);
+        }
+    }
+
+    (!auth.headers.is_empty()).then_some(auth)
+}
+
+async fn refresh_hoster_url_before_attempt(
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+) -> Result<Option<String>, DownloadError> {
+    let result = refresh_hoster_url_for_task(task).await;
+    if let Err(error) = &result {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download",
+                format!(
+                    "Could not refresh hoster link before download: {}",
+                    error.message
+                ),
+                Some(task.id.clone()),
+            )
+            .await;
+    }
+    result
+}
+
+async fn refresh_hoster_url_after_failure(
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    failure: &DownloadError,
+) -> Result<Option<String>, DownloadError> {
+    let result = refresh_hoster_url_for_task(task).await;
+    if let Err(error) = &result {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download",
+                format!(
+                    "Could not refresh hoster link after download failure ({}): {}",
+                    failure.message, error.message
+                ),
+                Some(task.id.clone()),
+            )
+            .await;
+    }
+    result
+}
+
+async fn refresh_hoster_url_for_task(
+    task: &crate::state::DownloadTask,
+) -> Result<Option<String>, DownloadError> {
+    let Some(source_url) = task.resolved_from_url.as_deref() else {
+        return Ok(None);
+    };
+    let refreshed = crate::hosters::refresh_resolved_hoster_link(source_url)
+        .await
+        .map_err(|error| {
+            download_error(
+                FailureCategory::Http,
+                format!("Could not refresh hoster link: {}", error.message),
+                true,
+            )
+        })?;
+    Ok(Some(refreshed.url))
+}
+
+pub(super) fn hoster_refresh_error_allows_retry(error: &DownloadError) -> bool {
+    match error.category {
+        FailureCategory::Resume => true,
+        FailureCategory::Http => {
+            error.message.contains("403")
+                || error.message.contains("404")
+                || error.message.contains("410")
+                || error.message.contains("416")
+                || error.message.to_ascii_lowercase().contains("html")
+        }
+        FailureCategory::Network => error.message.to_ascii_lowercase().contains("ended early"),
+        _ => false,
+    }
+}
+
+fn reject_hoster_html_response(
+    task: &crate::state::DownloadTask,
+    response: &reqwest::Response,
+) -> Result<(), DownloadError> {
+    if task.resolved_from_url.is_none() {
+        return Ok(());
+    }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if content_type.contains("text/html") || content_type.contains("application/xhtml") {
+        return Err(download_error(
+            FailureCategory::Http,
+            "Hoster direct link returned HTML instead of file content.".into(),
+            true,
+        ));
+    }
+
+    Ok(())
+}
+
 pub(super) async fn complete_http_download(
     app: &AppHandle,
     state: &SharedState,
@@ -471,18 +635,19 @@ async fn create_bulk_archive_from_ready(
     diagnostic_job_id: Option<String>,
 ) -> Result<(), String> {
     let archive_id = archive.archive_id.clone();
-    let output_kind = archive.output_kind;
-    let archive_output_path = archive.output_path.display().to_string();
-    let requires_extraction = match build_bulk_archive_source_plan(&archive.entries) {
-        Ok(plan) => !plan.archive_sets.is_empty(),
+    let plan = match bulk_finalization_plan(&archive) {
+        Ok(plan) => plan,
         Err(error) => {
             let snapshot = state
                 .mark_bulk_archive_status(
                     &archive_id,
                     BulkArchiveStatus::Failed,
                     None,
-                    Some(archive_output_path.clone()),
+                    Some(archive.output_path.display().to_string()),
                     Some(error.clone()),
+                    None,
+                    None,
+                    None,
                     None,
                 )
                 .await?;
@@ -490,6 +655,13 @@ async fn create_bulk_archive_from_ready(
             return Err(error);
         }
     };
+    let archive = BulkArchiveReady {
+        output_kind: plan.output_kind,
+        ..archive
+    };
+    let output_kind = archive.output_kind;
+    let archive_output_path = archive.output_path.display().to_string();
+    let requires_extraction = plan.requires_extraction;
     let seven_zip_path = if requires_extraction {
         match crate::sidecars::resolve_seven_zip_binary_path() {
             Ok(path) => Some(path),
@@ -502,6 +674,9 @@ async fn create_bulk_archive_from_ready(
                         Some(archive_output_path.clone()),
                         Some(error.clone()),
                         None,
+                        Some(plan.finalize_mode),
+                        Some(plan.total_completed_bytes),
+                        Some(0),
                     )
                     .await?;
                 emit_snapshot(app, &snapshot);
@@ -523,7 +698,10 @@ async fn create_bulk_archive_from_ready(
             Some(requires_extraction),
             Some(archive_output_path.clone()),
             None,
-            None,
+            plan.warning.clone(),
+            Some(plan.finalize_mode),
+            Some(plan.total_completed_bytes),
+            Some(0),
         )
         .await?;
     emit_snapshot(app, &snapshot);
@@ -553,7 +731,10 @@ async fn create_bulk_archive_from_ready(
                 Some(requires_extraction),
                 Some(archive_output_path.clone()),
                 None,
-                None,
+                plan.warning.clone(),
+                Some(plan.finalize_mode),
+                Some(plan.total_completed_bytes),
+                Some(0),
             )
             .await?;
         emit_snapshot(app, &snapshot);
@@ -567,7 +748,10 @@ async fn create_bulk_archive_from_ready(
                 Some(requires_extraction),
                 Some(archive_output_path.clone()),
                 None,
-                None,
+                plan.warning.clone(),
+                Some(BulkFinalizeMode::Zip),
+                Some(plan.total_completed_bytes),
+                Some(0),
             )
             .await?;
         emit_snapshot(app, &snapshot);
@@ -594,6 +778,9 @@ async fn create_bulk_archive_from_ready(
                     Some(outcome.output_path.display().to_string()),
                     None,
                     cleanup_warning,
+                    Some(plan.finalize_mode),
+                    Some(plan.total_completed_bytes),
+                    Some(plan.total_completed_bytes),
                 )
                 .await?;
             emit_snapshot(app, &snapshot);
@@ -640,6 +827,9 @@ async fn mark_bulk_archive_create_failed(
             requires_extraction,
             Some(archive_output_path),
             Some(error.clone()),
+            None,
+            None,
+            None,
             None,
         )
         .await?;

@@ -46,7 +46,7 @@ impl SharedState {
             source,
             bulk_archive_name,
             start_paused,
-            BulkArchiveOutputKind::Archive,
+            BulkArchiveOutputKind::Folder,
         )
         .await
     }
@@ -99,7 +99,7 @@ impl SharedState {
             source,
             bulk_archive_name,
             start_paused,
-            BulkArchiveOutputKind::Archive,
+            BulkArchiveOutputKind::Folder,
         )
         .await
     }
@@ -110,8 +110,9 @@ impl SharedState {
         source: Option<DownloadSource>,
         bulk_archive_name: Option<String>,
         start_paused: bool,
-        bulk_output_kind: BulkArchiveOutputKind,
+        _bulk_output_kind: BulkArchiveOutputKind,
     ) -> Result<Vec<EnqueueResult>, BackendError> {
+        let bulk_output_kind = BulkArchiveOutputKind::Folder;
         if entries.is_empty() {
             return Err(BackendError {
                 code: "INVALID_URL",
@@ -162,6 +163,9 @@ impl SharedState {
                     output_path: None,
                     error: None,
                     warning: None,
+                    finalize_total_bytes: None,
+                    finalize_processed_bytes: None,
+                    finalize_mode: None,
                 })
             } else {
                 None

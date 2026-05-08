@@ -36,6 +36,7 @@ export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type StartupLaunchMode = 'open' | 'tray';
 export type BulkOutputKind = 'archive' | 'folder';
+export type BulkFinalizeMode = 'move' | 'extract' | 'zip';
 export type BulkArchiveStatus = 'pending' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
@@ -104,6 +105,9 @@ export interface DownloadJob {
     outputPath?: string;
     error?: string;
     warning?: string;
+    finalizeTotalBytes?: number;
+    finalizeProcessedBytes?: number;
+    finalizeMode?: BulkFinalizeMode;
   };
 }
 

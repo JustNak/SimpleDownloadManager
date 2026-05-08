@@ -256,6 +256,9 @@ impl SharedState {
         output_path: Option<String>,
         error: Option<String>,
         warning: Option<String>,
+        finalize_mode: Option<BulkFinalizeMode>,
+        finalize_total_bytes: Option<u64>,
+        finalize_processed_bytes: Option<u64>,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
@@ -266,6 +269,9 @@ impl SharedState {
                 output_path,
                 error,
                 warning,
+                finalize_mode,
+                finalize_total_bytes,
+                finalize_processed_bytes,
             );
             (state.snapshot(), state.persisted())
         };
@@ -309,7 +315,8 @@ impl SharedState {
         }
 
         let download_dir = PathBuf::from(&state.settings.download_directory);
-        let output_path = bulk_output_path(&download_dir, &archive.name, archive.output_kind);
+        let output_kind = BulkArchiveOutputKind::Folder;
+        let output_path = bulk_output_path(&download_dir, &archive.name, output_kind);
 
         let mut used_names = HashSet::new();
         let mut entries = Vec::with_capacity(members.len());
@@ -328,7 +335,7 @@ impl SharedState {
 
         Ok(Some(BulkArchiveReady {
             archive_id: archive.id.clone(),
-            output_kind: archive.output_kind,
+            output_kind,
             output_path,
             entries,
         }))
@@ -385,8 +392,8 @@ impl SharedState {
         }
 
         let download_dir = PathBuf::from(&state.settings.download_directory);
-        let categorized_output_path =
-            bulk_output_path(&download_dir, &archive.name, archive.output_kind);
+        let output_kind = BulkArchiveOutputKind::Folder;
+        let categorized_output_path = bulk_output_path(&download_dir, &archive.name, output_kind);
         let legacy_root_output_path = download_dir.join(&archive.name);
         let output_path = archive
             .output_path
@@ -421,7 +428,7 @@ impl SharedState {
 
         Ok(BulkArchiveReady {
             archive_id: archive.id,
-            output_kind: archive.output_kind,
+            output_kind,
             output_path,
             entries,
         })
@@ -644,6 +651,9 @@ impl RuntimeState {
         output_path: Option<String>,
         error: Option<String>,
         warning: Option<String>,
+        finalize_mode: Option<BulkFinalizeMode>,
+        finalize_total_bytes: Option<u64>,
+        finalize_processed_bytes: Option<u64>,
     ) {
         for job in &mut self.jobs {
             let Some(archive) = &mut job.bulk_archive else {
@@ -660,6 +670,15 @@ impl RuntimeState {
             archive.output_path = output_path.clone();
             archive.error = error.clone();
             archive.warning = warning.clone();
+            if let Some(finalize_mode) = finalize_mode {
+                archive.finalize_mode = Some(finalize_mode);
+            }
+            if let Some(finalize_total_bytes) = finalize_total_bytes {
+                archive.finalize_total_bytes = Some(finalize_total_bytes);
+            }
+            if let Some(finalize_processed_bytes) = finalize_processed_bytes {
+                archive.finalize_processed_bytes = Some(finalize_processed_bytes);
+            }
         }
     }
 }

@@ -664,7 +664,7 @@
   }
 
   function bulkOpenLabel(job: DownloadJob): string {
-    return job.bulkArchive?.outputKind === 'folder' ? 'Open Folder' : 'Open File';
+    return 'Open Folder';
   }
 </script>
 
@@ -1007,7 +1007,7 @@
     {:else if isFailedBulkAggregate(job)}
       {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
-      {@render MenuItem(RotateCcw, 'Fix archive', () => onRetryArchive(job.id), false, !job.bulkArchiveFixable)}
+      {@render MenuItem(RotateCcw, 'Fix folder', () => onRetryArchive(job.id), false, !job.bulkArchiveFixable)}
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else if isCanceledBulkAggregate(job)}

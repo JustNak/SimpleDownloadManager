@@ -52,6 +52,7 @@ impl SharedState {
                         transfer_kind: job.transfer_kind,
                         torrent: job.torrent.clone(),
                         handoff_auth: auth_by_job.get(&job.id).cloned(),
+                        resolved_from_url: job.resolved_from_url.clone(),
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
                     };

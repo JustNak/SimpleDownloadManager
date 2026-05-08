@@ -20,4 +20,4 @@ assert.match(appSource, /retryBulkMembers\(row\.bulkArchiveId\)/, 'bulk aggregat
 assert.match(queueSource, /function isFailedBulkAggregate[\s\S]*archiveStatus === 'failed'/, 'QueueView should identify failed bulk aggregate rows');
 assert.match(queueSource, /bulkRetryableMemberCount > 0/, 'QueueView should enable bulk member retry only when failed members exist');
 assert.match(queueSource, /Retry'[\s\S]*onRetryBulkMembers[\s\S]*bulkRetryableMemberCount <= 0/, 'bulk aggregate menus should expose a disabled-capable Retry action for member downloads');
-assert.match(queueSource, /isFailedBulkAggregate\(job\)[\s\S]*Show Popup[\s\S]*Fix archive[\s\S]*bulkArchiveFixable[\s\S]*Delete[\s\S]*Delete from disk/, 'failed bulk aggregate menus should expose popup, fix, delete, and disk-delete actions');
+assert.match(queueSource, /isFailedBulkAggregate\(job\)[\s\S]*Show Popup[\s\S]*Fix folder[\s\S]*bulkArchiveFixable[\s\S]*Delete[\s\S]*Delete from disk/, 'failed bulk aggregate menus should expose popup, fix, delete, and disk-delete actions');

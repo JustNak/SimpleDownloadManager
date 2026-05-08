@@ -266,8 +266,8 @@ assert.deepEqual(
       state: 'completed',
       bulkArchive: {
         id: 'bulk_1',
-        name: 'bundle.zip',
-        outputKind: 'archive',
+        name: 'bundle',
+        outputKind: 'folder',
         archiveStatus: 'extracting',
         requiresExtraction: true,
       },
@@ -276,9 +276,8 @@ assert.deepEqual(
   [
     { id: 'uncompressing', label: 'Uncompressing' },
     { id: 'combining', label: 'Combining' },
-    { id: 'compressing', label: 'Compressing' },
   ],
-  'archive output with extraction should show uncompressing, combining, then compressing',
+  'folder output with extraction should show uncompressing, then combining',
 );
 
 assert.deepEqual(
@@ -288,18 +287,15 @@ assert.deepEqual(
       state: 'completed',
       bulkArchive: {
         id: 'bulk_1',
-        name: 'bundle.zip',
-        outputKind: 'archive',
+        name: 'bundle',
+        outputKind: 'folder',
         archiveStatus: 'combining',
         requiresExtraction: false,
       },
     }),
   ]),
-  [
-    { id: 'combining', label: 'Combining' },
-    { id: 'compressing', label: 'Compressing' },
-  ],
-  'archive output without extraction should skip uncompressing but still show combining and compressing',
+  [{ id: 'combining', label: 'Combining' }],
+  'folder output without extraction should show combining only',
 );
 
 assert.deepEqual(

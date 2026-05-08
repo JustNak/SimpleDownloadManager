@@ -244,6 +244,12 @@ pub struct BulkArchiveInfo {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_processed_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalize_mode: Option<BulkFinalizeMode>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +271,14 @@ pub enum BulkArchiveStatus {
     Compressing,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkFinalizeMode {
+    Move,
+    Extract,
+    Zip,
 }
 
 impl BulkArchiveStatus {

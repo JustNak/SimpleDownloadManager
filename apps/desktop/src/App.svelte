@@ -226,15 +226,25 @@
           })
           .catch(() => undefined);
 
-        disposers.push(await subscribeToStateChanged((nextSnapshot) => {
+        const stateDispose = await subscribeToStateChanged((nextSnapshot) => {
           if (applyDesktopSnapshotWhenVisible(nextSnapshot)) {
             void refreshDiagnostics({ silent: true });
           }
-        }));
+        });
+        if (!isMounted) {
+          void stateDispose();
+          return;
+        }
+        disposers.push(stateDispose);
 
-        disposers.push(await subscribeToDownloadUpdateBatch((batch) => {
+        const downloadBatchDispose = await subscribeToDownloadUpdateBatch((batch) => {
           applyDownloadUpdateBatchWhenVisible(batch);
-        }));
+        });
+        if (!isMounted) {
+          void downloadBatchDispose();
+          return;
+        }
+        disposers.push(downloadBatchDispose);
 
         const startupBlocker = bulkUpdateBlockerForJobs(initialData.snapshot.jobs);
         if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted, startupBlocker)) {
@@ -275,31 +285,45 @@
 
   $effect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
+    let disposed = false;
 
     async function subscribe() {
-      dispose = await subscribeToUpdateInstallProgress((event) => {
+      const nextDispose = await subscribeToUpdateInstallProgress((event) => {
         updateState = applyInstallProgressEvent(updateState, event);
       });
+      if (disposed) {
+        void nextDispose();
+        return;
+      }
+      dispose = nextDispose;
     }
 
     void subscribe();
     return () => {
+      disposed = true;
       void dispose?.();
     };
   });
 
   $effect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
+    let disposed = false;
 
     async function subscribe() {
-      dispose = await subscribeToSelectedJobRequested((jobId) => {
+      const nextDispose = await subscribeToSelectedJobRequested((jobId) => {
         view = 'all';
         selectedJobId = jobId;
       });
+      if (disposed) {
+        void nextDispose();
+        return;
+      }
+      dispose = nextDispose;
     }
 
     void subscribe();
     return () => {
+      disposed = true;
       void dispose?.();
     };
   });
@@ -729,7 +753,7 @@
       const row = queueRowById(id);
       if (!row || !isBulkAggregateJob(row)) return;
       await retryBulkArchive(row.bulkArchiveId);
-      addToast({ type: 'info', title: 'Fixing Archive', message: 'Bulk archive creation was started again.' });
+      addToast({ type: 'info', title: 'Fixing Folder', message: 'Bulk folder finalization was started again.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
     }

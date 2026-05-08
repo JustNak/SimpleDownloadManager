@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Component } from 'svelte';
-  import { AlertTriangle, Archive, CheckCircle2, Download, FolderOpen, Pause, Play, RotateCcw, X } from '@lucide/svelte';
+  import { AlertTriangle, CheckCircle2, Download, FolderOpen, Pause, Play, RotateCcw, X } from '@lucide/svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { JobState, type DownloadJob, type Settings } from './types';
   import {
@@ -36,13 +36,14 @@
   import { applyAppearance } from './appearance';
   import { runPopupAction } from './popupActions';
   import { createDefaultSettings } from './defaultSettings';
+  import { getVirtualQueueWindow } from './queueVirtualization';
 
   type IconComponent = Component<{ size?: number; class?: string }>;
   type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm' | 'show';
   const bulkFinalizingStepLabels: Record<BulkFinalizingStepId, string> = {
     uncompressing: 'Uncompressing',
     combining: 'Combining',
-    compressing: 'Compressing',
+    compressing: 'Finalizing',
   };
 
   let context = $state<ProgressBatchContext | null>(null);
@@ -53,6 +54,9 @@
   let selectedBulkJobIds = $state<Set<string>>(new Set());
   let reviewSelectionSignature = $state('');
   let lastBulkUiState = $state<BulkUiState | null>(null);
+  let batchListScrollRoot: HTMLElement | null = $state(null);
+  let batchListScrollTop = $state(0);
+  let batchListViewportHeight = $state(0);
   const currentWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const batchId = new URLSearchParams(window.location.search).get('batchId') || '';
 
@@ -73,6 +77,13 @@
   const canResume = $derived(jobs.some(isResumable));
   const canCancel = $derived(jobs.some(isCancelable));
   const canBulkCancelDelete = $derived(jobs.length > 0);
+  const virtualBatchQueue = $derived(getVirtualQueueWindow({
+    totalCount: jobs.length,
+    rowSize: 'large',
+    scrollTop: batchListScrollTop,
+    viewportHeight: batchListViewportHeight,
+  }));
+  const renderedBatchJobs = $derived(virtualBatchQueue.enabled ? jobs.slice(virtualBatchQueue.startIndex, virtualBatchQueue.endIndex) : jobs);
 
   $effect(() => {
     let dispose: (() => void | Promise<void>) | undefined;
@@ -99,11 +110,16 @@
         jobs = snapshot.jobs;
       }
 
-      dispose = await subscribeToBatchProgressSnapshot((nextSnapshot) => {
+      const nextDispose = await subscribeToBatchProgressSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
         context = nextSnapshot.context;
         jobs = nextSnapshot.jobs;
       });
+      if (disposed) {
+        void nextDispose();
+        return;
+      }
+      dispose = nextDispose;
     }
 
     void initialize().catch((error) => {
@@ -114,6 +130,25 @@
       disposed = true;
       media?.removeEventListener('change', handleSystemThemeChange);
       void dispose?.();
+    };
+  });
+
+  $effect(() => {
+    const scrollRoot = batchListScrollRoot;
+    if (!scrollRoot) return;
+
+    const updateScrollMetrics = () => {
+      batchListScrollTop = scrollRoot.scrollTop;
+      batchListViewportHeight = scrollRoot.clientHeight;
+    };
+
+    updateScrollMetrics();
+    const resizeObserver = new ResizeObserver(updateScrollMetrics);
+    resizeObserver.observe(scrollRoot);
+    scrollRoot.addEventListener('scroll', updateScrollMetrics, { passive: true });
+    return () => {
+      resizeObserver.disconnect();
+      scrollRoot.removeEventListener('scroll', updateScrollMetrics);
     };
   });
 
@@ -154,7 +189,7 @@
         speed: 0,
         eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\model.fbx',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download', outputKind: 'folder', archiveStatus: 'pending' },
       },
       {
         id: 'preview-2',
@@ -169,7 +204,7 @@
         speed: 0,
         eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\textures.zip',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download', outputKind: 'folder', archiveStatus: 'pending' },
       },
       {
         id: 'preview-3',
@@ -184,7 +219,7 @@
         speed: 0,
         eta: 0,
         targetPath: 'C:\\Users\\You\\Downloads\\readme.pdf',
-        bulkArchive: { id: 'preview-bulk', name: 'bulk-download.zip', outputKind: 'archive', archiveStatus: 'pending' },
+        bulkArchive: { id: 'preview-bulk', name: 'bulk-download', outputKind: 'folder', archiveStatus: 'pending' },
       },
     ];
     const previewSettings = createDefaultSettings();
@@ -387,7 +422,7 @@
     <main class="flex min-h-0 flex-1 flex-col bg-surface px-5 py-3">
       <section class="flex items-start gap-3">
         <div class="flex h-12 w-11 shrink-0 items-center justify-center rounded-md border border-border bg-background text-primary">
-          {#if context.kind === 'bulk'}<Archive size={24} />{:else}<Download size={22} />{/if}
+          {#if context.kind === 'bulk'}<FolderOpen size={24} />{:else}<Download size={22} />{/if}
         </div>
         <div class="min-w-0 flex-1">
           <h1 class="truncate text-base font-semibold leading-5 text-foreground" title={context.archiveName ?? context.title}>
@@ -460,16 +495,22 @@
 {/if}
 
 {#snippet BatchJobList(jobs: DownloadJob[], failedItems: FailedBatchItem[])}
-  <section class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
+  <section bind:this={batchListScrollRoot} class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
     {#if jobs.length === 0 && failedItems.length === 0}
       <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
         Waiting for queued files to appear.
       </div>
     {:else}
       <div class="divide-y divide-border/60">
-        {#each jobs as job (job.id)}
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.topPadding}px;`}></div>
+        {/if}
+        {#each renderedBatchJobs as job (job.id)}
           {@render BatchJobRow(job)}
         {/each}
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.bottomPadding}px;`}></div>
+        {/if}
         {#each failedItems as item, index (`${item.url}-${index}`)}
           {@render FailedBatchItemRow(item)}
         {/each}
@@ -479,14 +520,17 @@
 {/snippet}
 
 {#snippet BulkReviewList(jobs: DownloadJob[], failedItems: FailedBatchItem[])}
-  <section class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
+  <section bind:this={batchListScrollRoot} class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
     {#if jobs.length === 0 && failedItems.length === 0}
       <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
         Waiting for queued files to appear.
       </div>
     {:else}
       <div class="divide-y divide-border/60">
-        {#each jobs as job (job.id)}
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.topPadding}px;`}></div>
+        {/if}
+        {#each renderedBatchJobs as job (job.id)}
           <label class="grid cursor-pointer grid-cols-[28px_40px_minmax(0,1fr)_82px] items-center gap-2 px-3 py-2 transition hover:bg-row-hover">
             <input
               type="checkbox"
@@ -510,6 +554,9 @@
             </div>
           </label>
         {/each}
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.bottomPadding}px;`}></div>
+        {/if}
         {#each failedItems as item, index (`${item.url}-${index}`)}
           {@render FailedBatchItemRow(item)}
         {/each}
@@ -633,7 +680,7 @@
         {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
       {:else if bulkUiState === 'failed'}
         {#if failedArchive}
-          {@render ActionButton('Retry archive', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
+          {@render ActionButton('Retry folder', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
         {/if}
         {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
       {/if}

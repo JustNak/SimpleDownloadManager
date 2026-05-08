@@ -13,11 +13,11 @@ assert.match(appSource, /groupBulkQueueRows\(jobs\)/, 'App should group bulk mem
 assert.match(appSource, /openBatchProgressWindow\(\{[\s\S]*kind: 'bulk'[\s\S]*bulkMemberIds/, 'bulk aggregate Show Popup should open the batch progress popup for all member jobs');
 assert.match(backendSource, /export async function openBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level open wrapper');
 assert.match(backendSource, /export async function revealBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level reveal wrapper');
-assert.match(queueSource, /function bulkOpenLabel[\s\S]*Open Folder[\s\S]*Open File/, 'completed bulk aggregate menus should label folder outputs as Open Folder and archives as Open File');
+assert.match(queueSource, /function bulkOpenLabel[\s\S]*return 'Open Folder'/, 'completed bulk aggregate menus should always label folder outputs as Open Folder');
 assert.doesNotMatch(batchSource, /Reveal completed/, 'bulk progress popup should not expose the old Reveal completed action');
 assert.match(batchSource, /Uncompressing/, 'bulk progress popup should show uncompressing as a distinct finalizing phase');
 assert.match(batchSource, /Combining/, 'bulk progress popup should show combining as a distinct finalizing phase');
-assert.match(batchSource, /Compressing/, 'bulk archive output should show compression as a distinct finalizing phase');
+assert.doesNotMatch(batchSource, /Compressing/, 'bulk folder output should not expose a compression finalizing phase');
 assert.match(batchSource, /Review links/, 'bulk progress popup should show the pre-download review phase');
 assert.match(batchSource, /deleteJobs/, 'bulk progress popup should let the initial review state cancel the queued batch');
 assert.match(batchSource, /function startBulkDownload\(\)[\s\S]*resumeJobs/, 'bulk progress popup should start paused bulk jobs only after user confirmation');
@@ -28,7 +28,7 @@ assert.match(bulkFooterSource, /<div class="flex justify-end gap-3">[\s\S]*bulkU
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Pause all/, 'review footer should not show Pause all');
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Resume all/, 'review footer should not show Resume all');
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Cancel active/, 'review footer should not show Cancel active');
-assert.match(batchSource, /archive\?\.warning/, 'bulk progress popup should surface cleanup warnings after a completed archive');
+assert.match(batchSource, /archive\?\.warning/, 'bulk progress popup should surface cleanup warnings after completed folder finalization');
 assert.doesNotMatch(batchSource, /summary\.activeCount === 0[\s\S]{0,240}Pause all/, 'inactive batch popup footer should not keep disabled pause controls visible');
 assert.match(batchSource, /selectedBulkJobIds/, 'bulk review rows should track local checked include state');
 assert.match(batchSource, /type="checkbox"/, 'bulk review rows should expose per-file include checkboxes');

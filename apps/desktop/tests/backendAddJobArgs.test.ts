@@ -76,31 +76,14 @@ assert.deepEqual(
 assert.deepEqual(
   buildAddJobsCommandArgs(
     ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
-    ' bulk-download.zip ',
-    { resolveHosterLinks: true, startPaused: true, bulkOutputKind: 'archive' },
+    ' bulk-download ',
+    { resolveHosterLinks: true, startPaused: true },
   ),
   {
     urls: ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
-    bulkArchiveName: 'bulk-download.zip',
+    bulkArchiveName: 'bulk-download',
     resolveHosterLinks: true,
     startPaused: true,
-    bulkOutputKind: 'archive',
   },
-  'bulk command args should request hoster resolution and paused review when enabled',
-);
-
-assert.deepEqual(
-  buildAddJobsCommandArgs(
-    ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
-    ' Game ',
-    { resolveHosterLinks: true, startPaused: true, bulkOutputKind: 'folder' },
-  ),
-  {
-    urls: ['https://fuckingfast.co/ecw0lw398okf#archive.part01.rar'],
-    bulkArchiveName: 'Game',
-    resolveHosterLinks: true,
-    startPaused: true,
-    bulkOutputKind: 'folder',
-  },
-  'folder bulk command args should pass the selected output kind',
+  'bulk command args should request hoster resolution and paused review without an output-kind option',
 );

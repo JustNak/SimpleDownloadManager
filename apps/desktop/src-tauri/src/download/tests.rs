@@ -44,6 +44,36 @@ fn http_status_errors_are_classified_by_recoverability() {
 }
 
 #[test]
+fn hoster_refresh_retries_expired_links_range_failures_and_early_eof() {
+    let forbidden = error_for_http_status(StatusCode::FORBIDDEN, false);
+    assert!(hoster_refresh_error_allows_retry(&forbidden));
+
+    let gone = error_for_http_status(StatusCode::GONE, false);
+    assert!(hoster_refresh_error_allows_retry(&gone));
+
+    let range_rejected = download_error(
+        FailureCategory::Resume,
+        "The remote server rejected the resume request.".into(),
+        false,
+    );
+    assert!(hoster_refresh_error_allows_retry(&range_rejected));
+
+    let early_eof = download_error(
+        FailureCategory::Network,
+        "Download ended early. Received 1024 of 4096 bytes.".into(),
+        true,
+    );
+    assert!(hoster_refresh_error_allows_retry(&early_eof));
+
+    let integrity = download_error(
+        FailureCategory::Integrity,
+        "Downloaded file checksum did not match.".into(),
+        false,
+    );
+    assert!(!hoster_refresh_error_allows_retry(&integrity));
+}
+
+#[test]
 fn retry_delay_caps_at_last_configured_delay() {
     assert_eq!(retry_delay_for_attempt(0), REQUEST_RETRY_DELAYS[0]);
     assert_eq!(
@@ -338,6 +368,74 @@ fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
     );
     assert!(!readme.exists());
     assert!(!cover.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_finalization_plan_counts_bytes_and_uses_move_for_folder_output() {
+    let root = test_download_runtime_dir("bulk-finalization-plan-folder");
+    let readme = root.join("readme.txt");
+    let cover = root.join("cover.jpg");
+    std::fs::write(&readme, b"readme").unwrap();
+    std::fs::write(&cover, b"cover").unwrap();
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_folder_plan".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Bundle"),
+        entries: vec![
+            crate::state::BulkArchiveEntry {
+                source_path: readme,
+                archive_name: "readme.txt".into(),
+            },
+            crate::state::BulkArchiveEntry {
+                source_path: cover,
+                archive_name: "cover.jpg".into(),
+            },
+        ],
+    };
+
+    let plan = bulk_finalization_plan(&archive).expect("folder plan should be built");
+
+    assert_eq!(plan.total_completed_bytes, 11);
+    assert_eq!(plan.finalize_mode, BulkFinalizeMode::Move);
+    assert_eq!(plan.output_kind, BulkArchiveOutputKind::Folder);
+    assert!(!plan.requires_extraction);
+    assert_eq!(plan.scratch_space_bytes, 0);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_finalization_plan_normalizes_huge_requests_to_folder_output() {
+    let root = test_download_runtime_dir("bulk-finalization-plan-huge-folder");
+    let source = root.join("huge.bin");
+    let file = std::fs::File::create(&source).unwrap();
+    file.set_len(HUGE_BULK_ARCHIVE_THRESHOLD_BYTES).unwrap();
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_zip_plan".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("huge"),
+        entries: vec![crate::state::BulkArchiveEntry {
+            source_path: source,
+            archive_name: "huge.bin".into(),
+        }],
+    };
+
+    let plan = bulk_finalization_plan(&archive).expect("zip plan should be built");
+
+    assert_eq!(
+        plan.total_completed_bytes,
+        HUGE_BULK_ARCHIVE_THRESHOLD_BYTES
+    );
+    assert_eq!(plan.output_kind, BulkArchiveOutputKind::Folder);
+    assert_eq!(plan.finalize_mode, BulkFinalizeMode::Move);
+    assert!(
+        plan.warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("100 GiB")),
+        "huge bulk folder finalization should carry an early warning"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1430,6 +1528,7 @@ fn cached_torrent_metadata_source_is_preferred_for_resume() {
             ..TorrentInfo::default()
         }),
         handoff_auth: None,
+        resolved_from_url: None,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
     };
@@ -1460,6 +1559,7 @@ fn cached_torrent_metadata_source_falls_back_to_original_source_when_absent() {
             ..TorrentInfo::default()
         }),
         handoff_auth: None,
+        resolved_from_url: None,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
     };

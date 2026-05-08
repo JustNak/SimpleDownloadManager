@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const mainSource = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const backendSource = await readFile(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const batchProgressSource = await readFile(new URL('../src/batchProgress.ts', import.meta.url), 'utf8');
 const progressPopupSource = await readFile(new URL('../src/useProgressPopup.svelte.ts', import.meta.url), 'utf8');
 const batchPopupSource = await readFile(new URL('../src/BatchProgressWindow.svelte', import.meta.url), 'utf8');
 const promptSource = await readFile(new URL('../src/DownloadPromptWindow.svelte', import.meta.url), 'utf8');
@@ -47,11 +48,19 @@ assert.match(backendSource, /applyDownloadUpdateBatch/, 'backend should expose a
 assert.match(backendSource, /app:\/\/progress-job-snapshot/, 'backend should define a lightweight progress job event');
 assert.match(backendSource, /app:\/\/batch-progress-snapshot/, 'backend should define a lightweight batch progress event');
 assert.match(backendSource, /app:\/\/settings-snapshot/, 'backend should define a lightweight settings event');
+assert.doesNotMatch(backendSource, /^import\s+\*\s+as\s+previewBackend\s+from\s+['"]\.\/backendPreview['"]/m, 'backend should not eagerly import browser-preview mocks into production webview chunks');
+assert.match(backendSource, /import\(['"]\.\/backendPreview['"]\)/, 'backend should lazy-load browser-preview mocks only when preview mode is active');
+assert.match(batchProgressSource, /export function createStoredProgressBatchContext/, 'batch progress should provide a lightweight stored-context helper outside preview mocks');
 assert.doesNotMatch(progressPopupSource, /subscribeToStateChanged|getAppSnapshot/, 'single progress popup should not subscribe to full app snapshots');
 assert.doesNotMatch(batchPopupSource, /subscribeToStateChanged|getAppSnapshot|getProgressBatchContext/, 'batch popup should not subscribe to full app snapshots');
+assert.match(batchPopupSource, /getVirtualQueueWindow/, 'batch popup should virtualize large job lists');
+assert.match(batchPopupSource, /renderedBatchJobs/, 'batch popup should render only the virtual job window for large batches');
 assert.match(batchPopupSource, /pauseJobs|resumeJobs|cancelJobs/, 'batch popup should use scoped batch commands for hundreds-link actions');
 assert.doesNotMatch(batchPopupSource, /runForJobs\(targetJobs, action\)|runForJobs\(jobs\.filter/, 'batch popup should not loop per-job IPC actions for batch controls');
 assert.doesNotMatch(promptSource, /subscribeToStateChanged|getAppSnapshot/, 'download prompt should only subscribe to prompt and settings events');
+assert.match(progressPopupSource, /const nextDispose = await subscribeToProgressJobSnapshot[\s\S]*if \(disposed\) \{[\s\S]*void nextDispose\(\);[\s\S]*return;[\s\S]*dispose = nextDispose/, 'progress popup should immediately release late async subscriptions after teardown');
+assert.match(batchPopupSource, /const nextDispose = await subscribeToBatchProgressSnapshot[\s\S]*if \(disposed\) \{[\s\S]*void nextDispose\(\);[\s\S]*return;[\s\S]*dispose = nextDispose/, 'batch popup should immediately release late async subscriptions after teardown');
+assert.match(promptSource, /const nextPromptDispose = await subscribeToDownloadPromptChanged[\s\S]*if \(disposed\) \{[\s\S]*void nextPromptDispose\(\);[\s\S]*return;[\s\S]*promptDispose = nextPromptDispose/, 'download prompt should immediately release late prompt subscriptions after teardown');
 assert.equal(tauriConfig.build.removeUnusedCommands, true, 'Tauri should prune unused commands during build');
 
 for (const rustSymbol of ['ProgressJobSnapshot', 'BatchProgressSnapshot', 'SettingsSnapshot', 'DownloadUpdateBatch']) {

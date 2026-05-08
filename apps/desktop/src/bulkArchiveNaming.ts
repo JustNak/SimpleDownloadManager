@@ -1,6 +1,6 @@
 const unsafeArchiveNameChars = /[<>:"/\\|?*\u0000-\u001F]/g;
 
-export type BulkOutputKind = 'archive' | 'folder';
+export type BulkOutputKind = 'folder';
 
 const multipartSuffixes = [
   /\.part\d+\.rar$/i,
@@ -8,38 +8,30 @@ const multipartSuffixes = [
   /\.0*1$/i,
 ];
 
-export function normalizeArchiveName(value: string) {
-  const sanitized = value.replace(unsafeArchiveNameChars, '').trimStart();
-  if (!sanitized) return '';
-  return sanitized.toLowerCase().endsWith('.zip') ? sanitized : `${sanitized}.zip`;
-}
-
 export function normalizeFolderName(value: string) {
   const sanitized = value.replace(unsafeArchiveNameChars, '').trim().replace(/^\.+|\.+$/g, '');
   return sanitized || 'bulk-download';
 }
 
-export function normalizeBulkOutputName(value: string, outputKind: BulkOutputKind) {
-  return outputKind === 'folder' ? normalizeFolderName(value) : normalizeArchiveName(value);
+export function normalizeBulkOutputName(value: string, outputKind: BulkOutputKind = 'folder') {
+  void outputKind;
+  return normalizeFolderName(value);
 }
 
-export function stripZipExtension(value: string) {
-  return value.toLowerCase().endsWith('.zip') ? value.slice(0, -4) : value;
-}
-
-export function defaultBulkArchiveNameForUrls(urls: string[], fallback = 'bulk-download.zip') {
-  return defaultBulkOutputNameForUrls(urls, 'archive', fallback);
+export function defaultBulkArchiveNameForUrls(urls: string[], fallback = 'bulk-download') {
+  return defaultBulkOutputNameForUrls(urls, 'folder', fallback);
 }
 
 export function defaultBulkOutputNameForUrls(
   urls: string[],
-  outputKind: BulkOutputKind,
-  fallback = outputKind === 'archive' ? 'bulk-download.zip' : 'bulk-download',
+  outputKind: BulkOutputKind = 'folder',
+  fallback = 'bulk-download',
 ) {
+  void outputKind;
   for (const url of urls) {
     const filename = filenameCandidateFromUrl(url);
     const archiveStem = filename ? multipartArchiveStem(filename) : null;
-    if (archiveStem) return normalizeBulkOutputName(archiveStem, outputKind);
+    if (archiveStem) return normalizeBulkOutputName(archiveStem);
   }
 
   return fallback;

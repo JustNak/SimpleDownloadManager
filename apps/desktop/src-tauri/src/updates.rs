@@ -104,9 +104,7 @@ pub fn bulk_update_blocker_for_jobs(jobs: &[DownloadJob]) -> Option<String> {
     None
 }
 
-pub fn ensure_no_bulk_update_blocker(
-    snapshot: &DesktopSnapshot,
-) -> Result<(), UpdateCommandError> {
+pub fn ensure_no_bulk_update_blocker(snapshot: &DesktopSnapshot) -> Result<(), UpdateCommandError> {
     if bulk_update_blocker_for_jobs(&snapshot.jobs).is_some() {
         return Err(UpdateCommandError::bulk_download_active());
     }
@@ -215,36 +213,14 @@ mod tests {
 
     #[test]
     fn bulk_update_blocker_detects_active_members_and_archive_finalization() {
-        let pending_member = download_job(
-            "job_1",
-            JobState::Queued,
-            BulkArchiveStatus::Pending,
-        );
-        let paused_member = download_job(
-            "job_2",
-            JobState::Paused,
-            BulkArchiveStatus::Pending,
-        );
-        let finalizing_archive = download_job(
-            "job_3",
-            JobState::Completed,
-            BulkArchiveStatus::Compressing,
-        );
-        let completed_archive = download_job(
-            "job_4",
-            JobState::Completed,
-            BulkArchiveStatus::Completed,
-        );
-        let canceled_member = download_job(
-            "job_5",
-            JobState::Canceled,
-            BulkArchiveStatus::Pending,
-        );
-        let failed_member = download_job(
-            "job_6",
-            JobState::Failed,
-            BulkArchiveStatus::Pending,
-        );
+        let pending_member = download_job("job_1", JobState::Queued, BulkArchiveStatus::Pending);
+        let paused_member = download_job("job_2", JobState::Paused, BulkArchiveStatus::Pending);
+        let finalizing_archive =
+            download_job("job_3", JobState::Completed, BulkArchiveStatus::Compressing);
+        let completed_archive =
+            download_job("job_4", JobState::Completed, BulkArchiveStatus::Completed);
+        let canceled_member = download_job("job_5", JobState::Canceled, BulkArchiveStatus::Pending);
+        let failed_member = download_job("job_6", JobState::Failed, BulkArchiveStatus::Pending);
 
         assert_eq!(
             bulk_update_blocker_for_jobs(&[pending_member]).as_deref(),
@@ -296,11 +272,7 @@ mod tests {
         assert_eq!(serialized["message"], "network unavailable");
     }
 
-    fn download_job(
-        id: &str,
-        state: JobState,
-        archive_status: BulkArchiveStatus,
-    ) -> DownloadJob {
+    fn download_job(id: &str, state: JobState, archive_status: BulkArchiveStatus) -> DownloadJob {
         DownloadJob {
             id: id.into(),
             url: format!("https://example.com/{id}.bin"),
@@ -334,6 +306,9 @@ mod tests {
                 output_path: Some("C:/Downloads/bulk-download.zip".into()),
                 error: None,
                 warning: None,
+                finalize_total_bytes: None,
+                finalize_processed_bytes: None,
+                finalize_mode: None,
             }),
         }
     }

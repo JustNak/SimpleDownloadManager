@@ -50,6 +50,7 @@
     let promptDispose: (() => void | Promise<void>) | undefined;
     let stateDispose: (() => void | Promise<void>) | undefined;
     let latestSettings: Settings | null = null;
+    let disposed = false;
 
     const applySnapshotAppearance = (snapshot: Awaited<ReturnType<typeof getSettingsSnapshot>>) => {
       latestSettings = snapshot.settings;
@@ -63,9 +64,15 @@
     media?.addEventListener('change', handleSystemThemeChange);
 
     async function initialize() {
-      applySnapshotAppearance(await getSettingsSnapshot());
-      prompt = await getCurrentDownloadPrompt();
-      promptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
+      const settingsSnapshot = await getSettingsSnapshot();
+      if (disposed) return;
+      applySnapshotAppearance(settingsSnapshot);
+
+      const currentPrompt = await getCurrentDownloadPrompt();
+      if (disposed) return;
+      prompt = currentPrompt;
+
+      const nextPromptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
         directoryOverride = null;
         duplicateMenuOpen = false;
         isRenamingDuplicate = false;
@@ -74,13 +81,25 @@
         isBusy = false;
         prompt = nextPrompt;
       });
-      stateDispose = await subscribeToSettingsSnapshot((nextSnapshot) => {
+      if (disposed) {
+        void nextPromptDispose();
+        return;
+      }
+      promptDispose = nextPromptDispose;
+
+      const nextStateDispose = await subscribeToSettingsSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
       });
+      if (disposed) {
+        void nextStateDispose();
+        return;
+      }
+      stateDispose = nextStateDispose;
     }
 
     void initialize();
     return () => {
+      disposed = true;
       media?.removeEventListener('change', handleSystemThemeChange);
       void promptDispose?.();
       void stateDispose?.();

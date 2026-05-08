@@ -1,10 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { ConnectionState, DiagnosticsSnapshot, DownloadJob, DownloadPrompt, Settings, TorrentSessionCacheClearResult } from './types';
-import type { ProgressBatchContext } from './batchProgress';
+import { createStoredProgressBatchContext, type ProgressBatchContext } from './batchProgress';
 import { buildAddJobCommandArgs, buildAddJobsCommandArgs, type AddJobOptions, type AddJobsOptions } from './backendCommandArgs';
 import type { AppUpdateMetadata, UpdateInstallProgressEvent } from './appUpdates';
-import * as previewBackend from './backendPreview';
 import desktopPackage from '../package.json';
 export { applyDownloadUpdateBatch } from './downloadUpdateBatch';
 
@@ -75,8 +74,16 @@ const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
 const UPDATE_INSTALL_PROGRESS_EVENT = 'app://update-install-progress';
 
+type PreviewBackend = typeof import('./backendPreview');
+let previewBackendLoad: Promise<PreviewBackend> | null = null;
+
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+}
+
+function loadPreviewBackend(): Promise<PreviewBackend> {
+  previewBackendLoad ??= import('./backendPreview');
+  return previewBackendLoad;
 }
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -84,33 +91,33 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 }
 
 export async function getAppSnapshot(): Promise<DesktopSnapshot> {
-  if (!isTauriRuntime()) return previewBackend.getMockAppSnapshot();
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockAppSnapshot();
   return invokeCommand<DesktopSnapshot>('get_app_snapshot');
 }
 
 export async function getProgressJobSnapshot(id: string): Promise<ProgressJobSnapshot> {
-  if (!isTauriRuntime()) return previewBackend.getMockProgressJobSnapshot(id);
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockProgressJobSnapshot(id);
   return invokeCommand<ProgressJobSnapshot>('get_progress_job_snapshot', { id });
 }
 
 export async function getBatchProgressSnapshot(batchId: string): Promise<BatchProgressSnapshot> {
-  if (!isTauriRuntime()) return previewBackend.getMockBatchProgressSnapshot(batchId);
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockBatchProgressSnapshot(batchId);
   return invokeCommand<BatchProgressSnapshot>('get_batch_progress_snapshot', { batchId });
 }
 
 export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
-  if (!isTauriRuntime()) return previewBackend.getMockSettingsSnapshot();
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockSettingsSnapshot();
   return invokeCommand<SettingsSnapshot>('get_settings_snapshot');
 }
 
 export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {
-  if (!isTauriRuntime()) return previewBackend.getMockDiagnostics();
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockDiagnostics();
   return invokeCommand<DiagnosticsSnapshot>('get_diagnostics');
 }
 
 export async function pauseJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.pauseMockJob(id);
+    (await loadPreviewBackend()).pauseMockJob(id);
     return;
   }
   await invokeCommand('pause_job', { id });
@@ -121,7 +128,7 @@ export async function pauseJobs(ids: string[]): Promise<void> {
   if (uniqueIds.length === 0) return;
 
   if (!isTauriRuntime()) {
-    previewBackend.pauseMockJobs(uniqueIds);
+    (await loadPreviewBackend()).pauseMockJobs(uniqueIds);
     return;
   }
 
@@ -130,7 +137,7 @@ export async function pauseJobs(ids: string[]): Promise<void> {
 
 export async function resumeJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.resumeMockJob(id);
+    (await loadPreviewBackend()).resumeMockJob(id);
     return;
   }
   await invokeCommand('resume_job', { id });
@@ -141,7 +148,7 @@ export async function resumeJobs(ids: string[]): Promise<void> {
   if (uniqueIds.length === 0) return;
 
   if (!isTauriRuntime()) {
-    previewBackend.resumeMockJobs(uniqueIds);
+    (await loadPreviewBackend()).resumeMockJobs(uniqueIds);
     return;
   }
 
@@ -150,7 +157,7 @@ export async function resumeJobs(ids: string[]): Promise<void> {
 
 export async function pauseAllJobs(): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.pauseAllMockJobs();
+    (await loadPreviewBackend()).pauseAllMockJobs();
     return;
   }
   await invokeCommand('pause_all_jobs');
@@ -158,7 +165,7 @@ export async function pauseAllJobs(): Promise<void> {
 
 export async function resumeAllJobs(): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.resumeAllMockJobs();
+    (await loadPreviewBackend()).resumeAllMockJobs();
     return;
   }
   await invokeCommand('resume_all_jobs');
@@ -166,7 +173,7 @@ export async function resumeAllJobs(): Promise<void> {
 
 export async function cancelJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.cancelMockJob(id);
+    (await loadPreviewBackend()).cancelMockJob(id);
     return;
   }
   await invokeCommand('cancel_job', { id });
@@ -177,7 +184,7 @@ export async function cancelJobs(ids: string[]): Promise<void> {
   if (uniqueIds.length === 0) return;
 
   if (!isTauriRuntime()) {
-    previewBackend.cancelMockJobs(uniqueIds);
+    (await loadPreviewBackend()).cancelMockJobs(uniqueIds);
     return;
   }
 
@@ -186,7 +193,7 @@ export async function cancelJobs(ids: string[]): Promise<void> {
 
 export async function retryJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.retryMockJob(id);
+    (await loadPreviewBackend()).retryMockJob(id);
     return;
   }
   await invokeCommand('retry_job', { id });
@@ -194,7 +201,7 @@ export async function retryJob(id: string): Promise<void> {
 
 export async function restartJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.restartMockJob(id);
+    (await loadPreviewBackend()).restartMockJob(id);
     return;
   }
   await invokeCommand('restart_job', { id });
@@ -202,7 +209,7 @@ export async function restartJob(id: string): Promise<void> {
 
 export async function retryFailedJobs(): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.retryFailedMockJobs();
+    (await loadPreviewBackend()).retryFailedMockJobs();
     return;
   }
   await invokeCommand('retry_failed_jobs');
@@ -210,7 +217,7 @@ export async function retryFailedJobs(): Promise<void> {
 
 export async function swapFailedDownloadToBrowser(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.swapFailedMockDownloadToBrowser(id);
+    (await loadPreviewBackend()).swapFailedMockDownloadToBrowser(id);
     return;
   }
   await invokeCommand('swap_failed_download_to_browser', { id });
@@ -218,7 +225,7 @@ export async function swapFailedDownloadToBrowser(id: string): Promise<void> {
 
 export async function removeJob(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.removeMockJob(id);
+    (await loadPreviewBackend()).removeMockJob(id);
     return;
   }
   await invokeCommand('remove_job', { id });
@@ -226,7 +233,7 @@ export async function removeJob(id: string): Promise<void> {
 
 export async function deleteJob(id: string, deleteFromDisk: boolean): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.deleteMockJob(id);
+    (await loadPreviewBackend()).deleteMockJob(id);
     return;
   }
   await invokeCommand('delete_job', { id, deleteFromDisk });
@@ -237,7 +244,7 @@ export async function deleteJobs(ids: string[], deleteFromDisk: boolean): Promis
   if (uniqueIds.length === 0) return;
 
   if (!isTauriRuntime()) {
-    previewBackend.deleteMockJobs(uniqueIds);
+    (await loadPreviewBackend()).deleteMockJobs(uniqueIds);
     return;
   }
 
@@ -246,7 +253,7 @@ export async function deleteJobs(ids: string[], deleteFromDisk: boolean): Promis
 
 export async function renameJob(id: string, filename: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.renameMockJob(id, filename);
+    (await loadPreviewBackend()).renameMockJob(id, filename);
     return;
   }
   await invokeCommand('rename_job', { id, filename });
@@ -254,7 +261,7 @@ export async function renameJob(id: string, filename: string): Promise<void> {
 
 export async function clearCompletedJobs(): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.clearCompletedMockJobs();
+    (await loadPreviewBackend()).clearCompletedMockJobs();
     return;
   }
   await invokeCommand('clear_completed_jobs');
@@ -263,7 +270,7 @@ export async function clearCompletedJobs(): Promise<void> {
 export async function addJob(url: string, options?: AddJobOptions): Promise<AddJobResult> {
   const args = buildAddJobCommandArgs(url, options);
   if (!isTauriRuntime()) {
-    return previewBackend.addMockJob(args);
+    return (await loadPreviewBackend()).addMockJob(args);
   }
   return invokeCommand<AddJobResult>('add_job', args);
 }
@@ -276,7 +283,7 @@ export async function addJobs(urls: string[], bulkArchiveName?: string, options:
   }
 
   if (!isTauriRuntime()) {
-    return previewBackend.addMockJobs(args);
+    return (await loadPreviewBackend()).addMockJobs(args);
   }
 
   return invokeCommand<AddJobsResult>('add_jobs', args);
@@ -284,33 +291,33 @@ export async function addJobs(urls: string[], bulkArchiveName?: string, options:
 
 export async function saveSettings(settings: Settings): Promise<Settings> {
   if (!isTauriRuntime()) {
-    return previewBackend.saveMockSettings(settings);
+    return (await loadPreviewBackend()).saveMockSettings(settings);
   }
   return invokeCommand<Settings>('save_settings', { settings });
 }
 
 export async function browseDirectory(): Promise<string | null> {
-  if (!isTauriRuntime()) return previewBackend.browseMockDirectory();
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).browseMockDirectory();
   return invokeCommand<string | null>('browse_directory');
 }
 
 export async function clearTorrentSessionCache(): Promise<TorrentSessionCacheClearResult> {
   if (!isTauriRuntime()) {
-    return previewBackend.clearMockTorrentSessionCache();
+    return (await loadPreviewBackend()).clearMockTorrentSessionCache();
   }
   return invokeCommand<TorrentSessionCacheClearResult>('clear_torrent_session_cache');
 }
 
 export async function browseTorrentFile(): Promise<string | null> {
   if (!isTauriRuntime()) {
-    return previewBackend.browseMockTorrentFile();
+    return (await loadPreviewBackend()).browseMockTorrentFile();
   }
   return invokeCommand<string | null>('browse_torrent_file');
 }
 
 export async function getCurrentDownloadPrompt(): Promise<DownloadPrompt | null> {
   if (!isTauriRuntime()) {
-    return previewBackend.getMockCurrentDownloadPrompt();
+    return (await loadPreviewBackend()).getMockCurrentDownloadPrompt();
   }
   return invokeCommand<DownloadPrompt | null>('get_current_download_prompt');
 }
@@ -353,7 +360,7 @@ export async function cancelDownloadPrompt(id: string): Promise<void> {
 
 export async function openProgressWindow(id: string): Promise<void> {
   if (!isTauriRuntime()) {
-    previewBackend.openMockProgressWindow(id);
+    (await loadPreviewBackend()).openMockProgressWindow(id);
     return;
   }
   await invokeCommand('open_progress_window', { id });
@@ -361,26 +368,26 @@ export async function openProgressWindow(id: string): Promise<void> {
 
 export async function openBatchProgressWindow(context: ProgressBatchContext): Promise<string> {
   if (!isTauriRuntime()) {
-    return previewBackend.openMockBatchProgressWindow(context);
+    return (await loadPreviewBackend()).openMockBatchProgressWindow(context);
   }
 
-  const storedContext = previewBackend.createStoredProgressBatchContext(context);
+  const storedContext = createStoredProgressBatchContext(context);
   await invokeCommand('open_batch_progress_window', { context: storedContext });
   return storedContext.batchId;
 }
 
 export async function getProgressBatchContext(batchId: string): Promise<ProgressBatchContext | null> {
-  if (!isTauriRuntime()) return previewBackend.getMockProgressBatchContext(batchId);
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockProgressBatchContext(batchId);
   return invokeCommand<ProgressBatchContext | null>('get_progress_batch_context', { batchId });
 }
 
 export async function openJobFile(id: string): Promise<ExternalUseResult> {
-  if (!isTauriRuntime()) return previewBackend.prepareMockExternalUse(id);
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).prepareMockExternalUse(id);
   return invokeCommand<ExternalUseResult>('open_job_file', { id });
 }
 
 export async function revealJobInFolder(id: string): Promise<ExternalUseResult> {
-  if (!isTauriRuntime()) return previewBackend.prepareMockExternalUse(id);
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).prepareMockExternalUse(id);
   return invokeCommand<ExternalUseResult>('reveal_job_in_folder', { id });
 }
 
@@ -420,7 +427,7 @@ export async function testExtensionHandoff(): Promise<void> {
 }
 
 export async function exportDiagnosticsReport(): Promise<string | null> {
-  if (!isTauriRuntime()) return previewBackend.exportMockDiagnosticsReport();
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).exportMockDiagnosticsReport();
   return invokeCommand<string | null>('export_diagnostics_report');
 }
 
@@ -447,7 +454,7 @@ export async function subscribeToStateChanged(
   listener: (snapshot: DesktopSnapshot) => void,
 ): Promise<UnlistenFn> {
   if (!isTauriRuntime()) {
-    return previewBackend.subscribeMockStateChanged(listener);
+    return (await loadPreviewBackend()).subscribeMockStateChanged(listener);
   }
   return listen<DesktopSnapshot>(STATE_CHANGED_EVENT, (event) => listener(event.payload));
 }

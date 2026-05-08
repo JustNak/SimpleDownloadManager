@@ -35,6 +35,15 @@ export interface ProgressBatchContext {
   failedItems?: FailedBatchItem[];
 }
 
+export type StoredProgressBatchContext = ProgressBatchContext & { batchId: string };
+
+export function createStoredProgressBatchContext(context: ProgressBatchContext): StoredProgressBatchContext {
+  return {
+    ...context,
+    batchId: context.batchId ?? createProgressBatchId(),
+  };
+}
+
 export type ProgressPopupIntent =
   | { type: 'single'; jobId: string }
   | { type: 'batch'; context: ProgressBatchContext };
@@ -106,7 +115,7 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
     return 'ready';
   }
   if (jobs.length > 0 && jobs.every((job) => job.state === 'completed')) {
-    const outputKind = archiveJobs.find((job) => job.bulkArchive)?.bulkArchive?.outputKind ?? 'archive';
+    const outputKind = archiveJobs.find((job) => job.bulkArchive)?.bulkArchive?.outputKind ?? 'folder';
     return outputKind === 'folder' ? 'combining' : 'compressing';
   }
   return 'downloading';
@@ -166,7 +175,6 @@ export function bulkCancelConfirmPlan(
 
 export function bulkFinalizingSteps(jobs: DownloadJob[]): BulkFinalizingStep[] {
   const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive;
-  const outputKind = archive?.outputKind ?? 'archive';
   const shouldShowUncompressing = archive?.requiresExtraction === true || archive?.archiveStatus === 'extracting';
   const steps: BulkFinalizingStep[] = [];
 
@@ -175,10 +183,6 @@ export function bulkFinalizingSteps(jobs: DownloadJob[]): BulkFinalizingStep[] {
   }
 
   steps.push({ id: 'combining', label: 'Combining' });
-
-  if (outputKind === 'archive') {
-    steps.push({ id: 'compressing', label: 'Compressing' });
-  }
 
   return steps;
 }
@@ -224,6 +228,13 @@ export function progressPopupIntentForSubmission(
 function clampProgress(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, value));
+}
+
+function createProgressBatchId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return `batch_${crypto.randomUUID()}`;
+  }
+  return `batch_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 function bulkArchiveStatus(job: DownloadJob): BulkArchiveStatus | null {

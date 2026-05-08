@@ -1,5 +1,4 @@
 import type { TransferKind } from './types';
-import type { BulkOutputKind } from './bulkArchiveNaming';
 
 export type AddJobOptions =
   | string
@@ -13,7 +12,6 @@ export type AddJobOptions =
 export interface AddJobsOptions {
   resolveHosterLinks?: boolean;
   startPaused?: boolean;
-  bulkOutputKind?: BulkOutputKind;
 }
 
 export function buildAddJobCommandArgs(url: string, options?: AddJobOptions) {
@@ -60,6 +58,5 @@ export function buildAddJobsCommandArgs(
     bulkArchiveName: bulkArchiveName?.trim() || undefined,
     resolveHosterLinks: options.resolveHosterLinks ? true : undefined,
     ...(options.startPaused ? { startPaused: true } : {}),
-    ...(options.bulkOutputKind ? { bulkOutputKind: options.bulkOutputKind } : {}),
   };
 }

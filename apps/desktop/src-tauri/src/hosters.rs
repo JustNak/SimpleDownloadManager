@@ -1,3 +1,4 @@
+use crate::storage::{HandoffAuth, HandoffAuthHeader};
 use futures_util::{stream, StreamExt};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{COOKIE, REFERER};
@@ -45,6 +46,16 @@ pub struct HosterResolutionBatch {
     pub failed_links: Vec<FailedHosterLink>,
 }
 
+pub type HosterDownloadContext = HandoffAuth;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HosterLinkRefreshOutcome {
+    pub url: String,
+    pub filename_hint: Option<String>,
+    pub resolved_from_url: Option<String>,
+    pub download_context: Option<HosterDownloadContext>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HosterKind {
     FuckingFast,
@@ -89,6 +100,24 @@ pub async fn resolve_hoster_links(
         return Err(resolution_error(failed.message));
     }
     Ok(batch.links)
+}
+
+pub async fn refresh_resolved_hoster_link(
+    source_url: &str,
+) -> Result<HosterLinkRefreshOutcome, HosterResolutionError> {
+    let mut links = resolve_hoster_links(vec![source_url.to_string()]).await?;
+    let link = links.pop().ok_or_else(|| {
+        resolution_error("Hoster resolver did not return a refreshed link.".into())
+    })?;
+    let download_context =
+        hoster_download_context_for_resolved_url(&link.url, link.resolved_from_url.as_deref());
+
+    Ok(HosterLinkRefreshOutcome {
+        url: link.url,
+        filename_hint: link.filename_hint,
+        resolved_from_url: link.resolved_from_url,
+        download_context,
+    })
 }
 
 pub async fn resolve_hoster_links_partial(
@@ -415,6 +444,37 @@ pub fn is_fuckingfast_page_url(raw_url: &str) -> bool {
 
 pub fn is_datanodes_page_url(raw_url: &str) -> bool {
     datanodes_file_code_from_url(raw_url).is_some()
+}
+
+pub fn hoster_download_context_for_resolved_url(
+    resolved_url: &str,
+    source_url: Option<&str>,
+) -> Option<HosterDownloadContext> {
+    if datanodes_direct_url_rejection_reason(resolved_url).is_none() {
+        return datanodes_download_context_for_source_url(source_url?);
+    }
+
+    None
+}
+
+fn datanodes_download_context_for_source_url(source_url: &str) -> Option<HosterDownloadContext> {
+    let file_code = datanodes_file_code_from_url(source_url)?;
+    Some(HandoffAuth {
+        headers: vec![
+            HandoffAuthHeader {
+                name: "Cookie".into(),
+                value: format!("file_code={file_code}"),
+            },
+            HandoffAuthHeader {
+                name: "Referer".into(),
+                value: DATANODES_DOWNLOAD_URL.into(),
+            },
+            HandoffAuthHeader {
+                name: "User-Agent".into(),
+                value: "SimpleDownloadManager/0.5".into(),
+            },
+        ],
+    })
 }
 
 fn hoster_kind_for_url(raw_url: &str) -> Option<HosterKind> {
@@ -1471,6 +1531,44 @@ mod tests {
             "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar"
         );
         assert!(validate_datanodes_direct_url(&direct));
+    }
+
+    #[test]
+    fn datanodes_direct_download_context_includes_cookie_referer_and_user_agent() {
+        let context = hoster_download_context_for_resolved_url(
+            "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar",
+            Some("https://datanodes.to/61nni6me5p0n/Neon-White.rar"),
+        )
+        .expect("DataNodes direct URLs resolved from a public page should get request context");
+        let headers = context
+            .headers
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(headers.contains(&("Cookie", "file_code=61nni6me5p0n")));
+        assert!(headers.contains(&("Referer", DATANODES_DOWNLOAD_URL)));
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| *name == "User-Agent"
+                    && value.contains("SimpleDownloadManager")),
+            "DataNodes context should carry an explicit downloader User-Agent"
+        );
+    }
+
+    #[test]
+    fn datanodes_direct_download_context_rejects_missing_source_page() {
+        assert!(hoster_download_context_for_resolved_url(
+            "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar",
+            None,
+        )
+        .is_none());
+        assert!(hoster_download_context_for_resolved_url(
+            "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar",
+            Some("https://example.com/61nni6me5p0n/Neon-White.rar"),
+        )
+        .is_none());
     }
 
     #[test]

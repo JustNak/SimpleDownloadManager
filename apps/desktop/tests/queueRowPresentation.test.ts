@@ -134,8 +134,8 @@ assert.deepEqual(
     state: 'downloading',
     bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip', archiveStatus: 'compressing' },
   }),
-  { label: 'Compressing', tone: 'warning' },
-  'bulk aggregate rows should expose archive compression instead of a file download label',
+  { label: 'Finalizing', tone: 'warning' },
+  'bulk aggregate rows should expose folder finalization instead of a file download label',
 );
 
 assert.deepEqual(
@@ -144,8 +144,8 @@ assert.deepEqual(
     state: 'failed',
     bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip', archiveStatus: 'failed', error: 'zip failed' },
   }),
-  { label: 'Archive failed', tone: 'destructive' },
-  'bulk aggregate rows should expose archive creation failures distinctly',
+  { label: 'Folder failed', tone: 'destructive' },
+  'bulk aggregate rows should expose folder finalization failures distinctly',
 );
 
 assert.deepEqual(

@@ -93,11 +93,11 @@ export function torrentDisplayName(job: TorrentMetadataPendingJob): string {
 
 export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueStatusPresentation {
   if (job.bulkArchive?.archiveStatus === 'failed') {
-    return { label: 'Archive failed', tone: 'destructive' };
+    return { label: 'Folder failed', tone: 'destructive' };
   }
 
   if (job.bulkArchive?.archiveStatus === 'compressing') {
-    return { label: 'Compressing', tone: 'warning' };
+    return { label: 'Finalizing', tone: 'warning' };
   }
 
   if (job.bulkArchive?.archiveStatus === 'combining') {

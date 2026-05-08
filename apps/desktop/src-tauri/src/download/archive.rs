@@ -10,6 +10,7 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const ARCHIVE_EXTRACT_LOCK_RETRY_ATTEMPTS: usize = 8;
+pub(super) const HUGE_BULK_ARCHIVE_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024 * 1024;
 
 #[cfg(test)]
 const ARCHIVE_EXTRACT_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
@@ -29,6 +30,57 @@ pub(super) fn bulk_archive_needs_extraction(entries: &[BulkArchiveEntry]) -> boo
         .unwrap_or(true)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BulkFinalizationPlan {
+    pub(super) total_completed_bytes: u64,
+    pub(super) output_kind: BulkArchiveOutputKind,
+    pub(super) requires_extraction: bool,
+    pub(super) scratch_space_bytes: u64,
+    pub(super) same_volume_move_capable: bool,
+    pub(super) finalize_mode: BulkFinalizeMode,
+    pub(super) warning: Option<String>,
+}
+
+pub(super) fn bulk_finalization_plan(
+    archive: &BulkArchiveReady,
+) -> Result<BulkFinalizationPlan, String> {
+    let source_plan = build_bulk_archive_source_plan(&archive.entries)?;
+    let total_completed_bytes = archive.entries.iter().try_fold(0_u64, |total, entry| {
+        let metadata = std::fs::metadata(&entry.source_path).map_err(|error| {
+            format!(
+                "Could not inspect completed bulk member {}: {error}",
+                entry.source_path.display()
+            )
+        })?;
+        Ok::<u64, String>(total.saturating_add(metadata.len()))
+    })?;
+    let requires_extraction = !source_plan.archive_sets.is_empty();
+    let finalize_mode = if requires_extraction {
+        BulkFinalizeMode::Extract
+    } else {
+        BulkFinalizeMode::Move
+    };
+    let scratch_space_bytes = if requires_extraction {
+        total_completed_bytes
+    } else {
+        0
+    };
+    let same_volume_move_capable = archive
+        .entries
+        .iter()
+        .all(|entry| same_volume_for_bulk_move(&entry.source_path, &archive.output_path));
+
+    Ok(BulkFinalizationPlan {
+        total_completed_bytes,
+        output_kind: BulkArchiveOutputKind::Folder,
+        requires_extraction,
+        scratch_space_bytes,
+        same_volume_move_capable,
+        finalize_mode,
+        warning: huge_bulk_folder_warning(total_completed_bytes),
+    })
+}
+
 pub(super) fn prepare_bulk_archive_sources_without_extraction(
     archive: BulkArchiveReady,
 ) -> Result<PreparedBulkArchive, String> {
@@ -37,14 +89,7 @@ pub(super) fn prepare_bulk_archive_sources_without_extraction(
         return Err("Archive extraction requires the bundled 7-Zip sidecar.".into());
     }
     let output_path = archive.output_path;
-    let cleanup_paths = if archive.output_kind == BulkArchiveOutputKind::Folder {
-        plan.raw_entries
-            .iter()
-            .map(|entry| entry.source_path.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let cleanup_paths = Vec::new();
     let entries = prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
 
     Ok(PreparedBulkArchive {
@@ -73,14 +118,7 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
     let plan = build_bulk_archive_source_plan(&archive.entries)?;
     if plan.archive_sets.is_empty() {
         let output_path = archive.output_path;
-        let cleanup_paths = if archive.output_kind == BulkArchiveOutputKind::Folder {
-            plan.raw_entries
-                .iter()
-                .map(|entry| entry.source_path.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let cleanup_paths = Vec::new();
         let entries =
             prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
         return Ok(PreparedBulkArchive {
@@ -104,14 +142,7 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
             extract_with_lock_retry(extractor, &archive_set.first_part.source_path, &extract_dir)?;
         }
 
-        let raw_cleanup_paths = if output_kind == BulkArchiveOutputKind::Folder {
-            plan.raw_entries
-                .iter()
-                .map(|entry| entry.source_path.clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let raw_cleanup_paths = Vec::new();
         let mut entries = collect_zip_entries_from_directory(&extract_dir)?;
         entries.extend(plan.raw_entries);
         if entries.is_empty() {
@@ -673,6 +704,17 @@ fn archive_folder_name_for_output_path(output_path: &Path) -> Result<String, Str
     validate_zip_entry_name(&folder_name)
 }
 
+fn huge_bulk_folder_warning(total_completed_bytes: u64) -> Option<String> {
+    (total_completed_bytes >= HUGE_BULK_ARCHIVE_THRESHOLD_BYTES).then(|| {
+        "Bulk output is 100 GiB or larger; finalization will use folder moves/extraction instead of ZIP creation."
+            .into()
+    })
+}
+
+fn same_volume_for_bulk_move(source: &Path, output_path: &Path) -> bool {
+    source.components().next() == output_path.components().next()
+}
+
 fn temporary_output_path(
     output_path: &Path,
     output_kind: BulkArchiveOutputKind,
@@ -709,13 +751,13 @@ fn finish_prepared_folder_output(
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(temp_path)
         .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
-    copy_entries_to_folder(&prepared.entries, temp_path)?;
+    move_entries_to_folder(&prepared.entries, temp_path)?;
     std::fs::rename(temp_path, &prepared.output_path)
         .map_err(|error| format!("Could not finalize bulk output folder: {error}"))?;
     Ok(prepared.output_path.clone())
 }
 
-fn copy_entries_to_folder(entries: &[BulkArchiveEntry], output_root: &Path) -> Result<(), String> {
+fn move_entries_to_folder(entries: &[BulkArchiveEntry], output_root: &Path) -> Result<(), String> {
     for entry in entries {
         let archive_name = validate_zip_entry_name(&entry.archive_name)?;
         let mut destination = output_root.to_path_buf();
@@ -726,9 +768,19 @@ fn copy_entries_to_folder(entries: &[BulkArchiveEntry], output_root: &Path) -> R
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
         }
+        if std::fs::rename(&entry.source_path, &destination).is_ok() {
+            continue;
+        }
+
         std::fs::copy(&entry.source_path, &destination).map_err(|error| {
             format!(
                 "Could not copy {} into bulk output folder: {error}",
+                entry.source_path.display()
+            )
+        })?;
+        std::fs::remove_file(&entry.source_path).map_err(|error| {
+            format!(
+                "Could not delete {} after moving into bulk output folder: {error}",
                 entry.source_path.display()
             )
         })?;
@@ -752,7 +804,7 @@ fn cleanup_original_archive_parts(paths: &[PathBuf]) -> Vec<String> {
         .filter_map(|path| match std::fs::remove_file(path) {
             Ok(()) => None,
             Err(error) => Some(format!(
-                "Could not delete downloaded archive part {} after ZIP creation: {error}",
+                "Could not delete downloaded archive part {} after bulk finalization: {error}",
                 path.display()
             )),
         })
