@@ -3,15 +3,14 @@ import type { BulkArchiveStatus, DownloadJob } from './types';
 export interface BulkAggregateDownloadJob extends DownloadJob {
   bulkAggregate: true;
   bulkMemberIds: string[];
-  bulkMembers: DownloadJob[];
   bulkArchiveId: string;
   bulkArchiveOutputPath?: string;
-  bulkArchiveMemberSearchText: string;
   bulkRetryableMemberCount: number;
   bulkArchiveFixable: boolean;
 }
 
 export type QueueDisplayJob = DownloadJob | BulkAggregateDownloadJob;
+export type BulkMembersByArchiveId = Record<string, DownloadJob[]>;
 
 const QUEUED = 'queued' as DownloadJob['state'];
 const STARTING = 'starting' as DownloadJob['state'];
@@ -29,7 +28,7 @@ const activeStates = new Set<string>([
 ]);
 
 export function groupBulkQueueRows(jobs: readonly DownloadJob[]): QueueDisplayJob[] {
-  const rows: QueueDisplayJob[] = [];
+  const rows: Array<QueueDisplayJob | null> = [];
   const groups = new Map<string, DownloadJob[]>();
   const groupRowIndexes = new Map<string, number>();
 
@@ -43,10 +42,6 @@ export function groupBulkQueueRows(jobs: readonly DownloadJob[]): QueueDisplayJo
     const existing = groups.get(archive.id);
     if (existing) {
       existing.push(job);
-      const rowIndex = groupRowIndexes.get(archive.id);
-      if (typeof rowIndex === 'number') {
-        rows[rowIndex] = buildBulkAggregateRow(existing);
-      }
       continue;
     }
 
@@ -56,7 +51,24 @@ export function groupBulkQueueRows(jobs: readonly DownloadJob[]): QueueDisplayJo
     rows.push(buildBulkAggregateRow(group));
   }
 
-  return rows;
+  for (const [archiveId, rowIndex] of groupRowIndexes) {
+    const members = groups.get(archiveId);
+    if (members) rows[rowIndex] = buildBulkAggregateRow(members);
+  }
+
+  return rows.filter((row): row is QueueDisplayJob => row !== null);
+}
+
+export function groupBulkMembersByArchiveId(jobs: readonly DownloadJob[]): BulkMembersByArchiveId {
+  const groups: BulkMembersByArchiveId = {};
+
+  for (const job of jobs) {
+    const archive = job.transferKind === 'http' ? job.bulkArchive : undefined;
+    if (!archive?.id) continue;
+    (groups[archive.id] ??= []).push(job);
+  }
+
+  return groups;
 }
 
 export function isBulkAggregateJob(job: DownloadJob | QueueDisplayJob): job is BulkAggregateDownloadJob {
@@ -98,14 +110,10 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     bulkArchive: archive,
     bulkAggregate: true,
     bulkMemberIds: members.map((job) => job.id),
-    bulkMembers: members.map((job) => ({ ...job })),
     bulkArchiveId: archive?.id ?? first.id,
     bulkArchiveOutputPath: archive?.outputPath,
     bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,
     bulkArchiveFixable: isFixableBulkArchive(members, archive?.archiveStatus),
-    bulkArchiveMemberSearchText: members
-      .map((job) => `${job.filename} ${job.url} ${job.targetPath ?? ''}`)
-      .join(' '),
   };
 }
 

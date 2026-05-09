@@ -7,6 +7,7 @@ const backendSource = await readFile(new URL('../src/backend.ts', import.meta.ur
 const batchProgressSource = await readFile(new URL('../src/batchProgress.ts', import.meta.url), 'utf8');
 const progressPopupSource = await readFile(new URL('../src/useProgressPopup.svelte.ts', import.meta.url), 'utf8');
 const batchPopupSource = await readFile(new URL('../src/BatchProgressWindow.svelte', import.meta.url), 'utf8');
+const queueSource = await readFile(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
 const promptSource = await readFile(new URL('../src/DownloadPromptWindow.svelte', import.meta.url), 'utf8');
 const commandsSource = await readFile(new URL('../src-tauri/src/commands/mod.rs', import.meta.url), 'utf8');
 const downloadSource = await readFile(new URL('../src-tauri/src/download/mod.rs', import.meta.url), 'utf8');
@@ -53,6 +54,8 @@ assert.match(backendSource, /import\(['"]\.\/backendPreview['"]\)/, 'backend sho
 assert.match(batchProgressSource, /export function createStoredProgressBatchContext/, 'batch progress should provide a lightweight stored-context helper outside preview mocks');
 assert.doesNotMatch(progressPopupSource, /subscribeToStateChanged|getAppSnapshot/, 'single progress popup should not subscribe to full app snapshots');
 assert.doesNotMatch(batchPopupSource, /subscribeToStateChanged|getAppSnapshot|getProgressBatchContext/, 'batch popup should not subscribe to full app snapshots');
+assert.match(queueSource, /extraHeights/, 'main queue virtualization should account for expanded bulk row height');
+assert.match(queueSource, /bulkMemberVirtualQueue/, 'main bulk row expansion should virtualize large member lists');
 assert.match(batchPopupSource, /getVirtualQueueWindow/, 'batch popup should virtualize large job lists');
 assert.match(batchPopupSource, /renderedBatchJobs/, 'batch popup should render only the virtual job window for large batches');
 assert.match(batchPopupSource, /pauseJobs|resumeJobs|cancelJobs/, 'batch popup should use scoped batch commands for hundreds-link actions');

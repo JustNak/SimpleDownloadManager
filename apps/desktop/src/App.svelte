@@ -104,6 +104,7 @@
   import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
   import {
+    groupBulkMembersByArchiveId,
     groupBulkQueueRows,
     isBulkAggregateJob,
     type QueueDisplayJob,
@@ -179,11 +180,12 @@
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
   const activeSettingsSection = $derived(SETTINGS_SECTIONS.find((section) => section.id === activeSettingsSectionId) ?? SETTINGS_SECTIONS[0]);
+  const bulkMembersByArchiveId = $derived(groupBulkMembersByArchiveId(jobs));
   const queueRows = $derived(groupBulkQueueRows(jobs));
   const counts = $derived(getQueueCounts(queueRows));
   const torrentFooterStats = $derived(getTorrentFooterStats(jobs));
   const displayedJobs = $derived.by(() => {
-    const filtered = filterJobsForView(queueRows, view, searchQuery);
+    const filtered = filterJobsForView(queueRows, view, searchQuery, bulkMembersByArchiveId);
     return [...filtered].sort((a, b) => compareDownloadsForSort(a, b, sortMode));
   });
   const progressMetricsByJobId = $derived(calculateDownloadProgressMetricsByJobId(jobs, progressSamples));
@@ -1458,6 +1460,7 @@
           showDetailsOnClick={liveSettings.showDetailsOnClick}
           queueRowSize={liveSettings.queueRowSize}
           expandActiveBulkRowsByDefault={liveSettings.bulk.expandActiveRowsByDefault}
+          {bulkMembersByArchiveId}
           onSortChange={handleSortModeChange}
           {selectedJobId}
           onSelectJob={(id) => selectedJobId = id}

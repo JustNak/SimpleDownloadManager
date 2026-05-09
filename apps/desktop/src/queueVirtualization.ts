@@ -8,6 +8,8 @@ export interface VirtualQueueWindowInput {
   rowSize: QueueRowSize;
   scrollTop: number;
   viewportHeight: number;
+  rowHeightOverride?: number;
+  extraHeights?: readonly VirtualQueueExtraHeight[];
 }
 
 export interface VirtualQueueWindow {
@@ -17,6 +19,11 @@ export interface VirtualQueueWindow {
   topPadding: number;
   bottomPadding: number;
   rowHeight: number;
+}
+
+export interface VirtualQueueExtraHeight {
+  index: number;
+  height: number;
 }
 
 export function queueRowHeightForSize(size: QueueRowSize): number {
@@ -40,8 +47,12 @@ export function getVirtualQueueWindow({
   rowSize,
   scrollTop,
   viewportHeight,
+  rowHeightOverride,
+  extraHeights = [],
 }: VirtualQueueWindowInput): VirtualQueueWindow {
-  const rowHeight = queueRowHeightForSize(rowSize);
+  const rowHeight = rowHeightOverride && rowHeightOverride > 0
+    ? rowHeightOverride
+    : queueRowHeightForSize(rowSize);
   if (totalCount <= VIRTUALIZED_QUEUE_THRESHOLD) {
     return {
       enabled: false,
@@ -53,25 +64,85 @@ export function getVirtualQueueWindow({
     };
   }
 
+  const normalizedExtraHeights = normalizeExtraHeights(extraHeights, totalCount);
   const safeScrollTop = Math.max(0, scrollTop);
   const safeViewportHeight = Math.max(rowHeight, viewportHeight);
-  const firstVisibleIndex = Math.min(
-    Math.max(0, totalCount - 1),
-    Math.floor(safeScrollTop / rowHeight),
-  );
+  const firstVisibleIndex = firstVisibleItemIndex({
+    totalCount,
+    rowHeight,
+    scrollTop: safeScrollTop,
+    extraHeights: normalizedExtraHeights,
+  });
   const visibleCount = Math.ceil(safeViewportHeight / rowHeight);
   const startIndex = Math.max(0, firstVisibleIndex - QUEUE_VIRTUALIZATION_OVERSCAN);
   const endIndex = Math.min(
     totalCount,
     firstVisibleIndex + visibleCount + QUEUE_VIRTUALIZATION_OVERSCAN,
   );
+  const totalHeight = totalVirtualHeight(totalCount, rowHeight, normalizedExtraHeights);
 
   return {
     enabled: true,
     startIndex,
     endIndex,
-    topPadding: startIndex * rowHeight,
-    bottomPadding: Math.max(0, totalCount - endIndex) * rowHeight,
+    topPadding: virtualOffsetForIndex(startIndex, rowHeight, normalizedExtraHeights),
+    bottomPadding: Math.max(0, totalHeight - virtualOffsetForIndex(endIndex, rowHeight, normalizedExtraHeights)),
     rowHeight,
   };
+}
+
+function normalizeExtraHeights(
+  extraHeights: readonly VirtualQueueExtraHeight[],
+  totalCount: number,
+): VirtualQueueExtraHeight[] {
+  return extraHeights
+    .filter((item) => Number.isInteger(item.index) && item.index >= 0 && item.index < totalCount && item.height > 0)
+    .sort((left, right) => left.index - right.index);
+}
+
+function firstVisibleItemIndex({
+  totalCount,
+  rowHeight,
+  scrollTop,
+  extraHeights,
+}: {
+  totalCount: number;
+  rowHeight: number;
+  scrollTop: number;
+  extraHeights: readonly VirtualQueueExtraHeight[];
+}): number {
+  let low = 0;
+  let high = Math.max(0, totalCount - 1);
+
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    const itemEnd = virtualOffsetForIndex(mid + 1, rowHeight, extraHeights);
+    if (itemEnd > scrollTop) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  return low;
+}
+
+function totalVirtualHeight(
+  totalCount: number,
+  rowHeight: number,
+  extraHeights: readonly VirtualQueueExtraHeight[],
+): number {
+  return virtualOffsetForIndex(totalCount, rowHeight, extraHeights);
+}
+
+function virtualOffsetForIndex(
+  index: number,
+  rowHeight: number,
+  extraHeights: readonly VirtualQueueExtraHeight[],
+): number {
+  const baseOffset = Math.max(0, index) * rowHeight;
+  const extraOffset = extraHeights
+    .filter((item) => item.index < index)
+    .reduce((total, item) => total + item.height, 0);
+  return baseOffset + extraOffset;
 }

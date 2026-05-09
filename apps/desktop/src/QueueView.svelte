@@ -60,7 +60,7 @@
     shouldBlurJobIdentity,
     shouldOpenJobFileOnDoubleClick,
   } from './queueInteractions';
-  import { getVirtualQueueWindow } from './queueVirtualization';
+  import { getVirtualQueueWindow, type VirtualQueueExtraHeight } from './queueVirtualization';
   import {
     BULK_QUEUE_TABLE_GRID_CLASS,
     DETAILS_CLOSE_THRESHOLD,
@@ -84,9 +84,12 @@
   import { formatBytes, formatTime, getHost } from './popupShared';
   import type { DownloadJob, QueueRowSize } from './types';
   import { JobState } from './types';
-  import { isBulkAggregateJob, type BulkAggregateDownloadJob, type QueueDisplayJob } from './bulkQueueRows';
+  import { isBulkAggregateJob, type BulkAggregateDownloadJob, type BulkMembersByArchiveId, type QueueDisplayJob } from './bulkQueueRows';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
+  const BULK_MEMBER_ROW_HEIGHT = 32;
+  const BULK_MEMBER_PANEL_MAX_HEIGHT = 256;
+  const BULK_MEMBER_PANEL_VERTICAL_CHROME = 8;
 
   interface Props {
     jobs: QueueDisplayJob[];
@@ -97,6 +100,7 @@
     queueRowSize: QueueRowSize;
     sortMode: SortMode;
     progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
+    bulkMembersByArchiveId: BulkMembersByArchiveId;
     pendingActionIds: Set<string>;
     onSortChange: (sortMode: SortMode) => void;
     onSelectJob: (id: string | null) => void;
@@ -125,6 +129,7 @@
     queueRowSize,
     sortMode,
     progressMetricsByJobId,
+    bulkMembersByArchiveId = {},
     pendingActionIds = new Set(),
     onSortChange,
     onSelectJob,
@@ -159,6 +164,8 @@
   let scrollContainer: HTMLDivElement | null = $state(null);
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
+  let bulkMemberScrollTops = $state<Record<string, number>>({});
+  let bulkMemberViewportHeights = $state<Record<string, number>>({});
   let resizeStart: { y: number; height: number; containerHeight: number; proposedHeight: number } | null = null;
   let selectionDrag: { anchorId: string; selected: boolean; baseSelection: Set<string> } | null = null;
 
@@ -173,11 +180,20 @@
   const visibleJobIds = $derived(jobs.map((job) => job.id));
   const allVisibleSelected = $derived(jobs.length > 0 && jobs.every((job) => selectedJobIds.has(job.id)));
   const hasVisibleSelection = $derived(jobs.some((job) => selectedJobIds.has(job.id)));
+  const expandedRowExtraHeights = $derived.by(() => {
+    const extraHeights: VirtualQueueExtraHeight[] = [];
+    jobs.forEach((job, index) => {
+      const height = bulkExpansionHeightForJob(job);
+      if (height > 0) extraHeights.push({ index, height });
+    });
+    return extraHeights;
+  });
   const virtualQueue = $derived(getVirtualQueueWindow({
     totalCount: jobs.length,
     rowSize: queueRowSize,
     scrollTop,
     viewportHeight,
+    extraHeights: expandedRowExtraHeights,
   }));
   const renderedJobs = $derived(virtualQueue.enabled ? jobs.slice(virtualQueue.startIndex, virtualQueue.endIndex) : jobs);
 
@@ -196,6 +212,8 @@
     for (const id of [...expandedBulkRowIds]) {
       if (!visibleBulkIds.has(id)) expandedBulkRowIds.delete(id);
     }
+    bulkMemberScrollTops = pruneRecordKeys(bulkMemberScrollTops, visibleBulkIds);
+    bulkMemberViewportHeights = pruneRecordKeys(bulkMemberViewportHeights, visibleBulkIds);
 
     const visibleMemberIds = new Set(jobs.flatMap((job) => isBulkAggregateJob(job) ? job.bulkMemberIds : []));
     for (const id of [...excludedBulkMemberIds]) {
@@ -359,6 +377,58 @@
     expandedBulkRowIds.add(jobId);
   }
 
+  function bulkMembersForJob(job: QueueDisplayJob): DownloadJob[] {
+    return isBulkAggregateJob(job) ? bulkMembersByArchiveId[job.bulkArchiveId] ?? [] : [];
+  }
+
+  function bulkMemberPanelHeight(memberCount: number): number {
+    return Math.min(BULK_MEMBER_PANEL_MAX_HEIGHT, Math.max(1, memberCount) * BULK_MEMBER_ROW_HEIGHT);
+  }
+
+  function bulkExpansionHeight(memberCount: number): number {
+    if (memberCount <= 0) return 0;
+    return bulkMemberPanelHeight(memberCount) + BULK_MEMBER_PANEL_VERTICAL_CHROME;
+  }
+
+  function bulkExpansionHeightForJob(job: QueueDisplayJob): number {
+    if (!isBulkTable || !canExpandBulkAggregate(job) || !expandedBulkRowIds.has(job.id)) return 0;
+    return bulkExpansionHeight(bulkMembersForJob(job).length);
+  }
+
+  function bulkMemberVirtualQueue(job: QueueDisplayJob, memberCount: number) {
+    return getVirtualQueueWindow({
+      totalCount: memberCount,
+      rowSize: 'compact',
+      rowHeightOverride: BULK_MEMBER_ROW_HEIGHT,
+      scrollTop: bulkMemberScrollTops[job.id] ?? 0,
+      viewportHeight: bulkMemberViewportHeights[job.id] ?? bulkMemberPanelHeight(memberCount),
+    });
+  }
+
+  function updateBulkMemberPanelMetrics(jobId: string, element: HTMLElement) {
+    const nextScrollTop = element.scrollTop;
+    const nextViewportHeight = element.clientHeight;
+    if (bulkMemberScrollTops[jobId] !== nextScrollTop) {
+      bulkMemberScrollTops = { ...bulkMemberScrollTops, [jobId]: nextScrollTop };
+    }
+    if (bulkMemberViewportHeights[jobId] !== nextViewportHeight) {
+      bulkMemberViewportHeights = { ...bulkMemberViewportHeights, [jobId]: nextViewportHeight };
+    }
+  }
+
+  function pruneRecordKeys<T>(record: Record<string, T>, allowedKeys: Set<string>): Record<string, T> {
+    let changed = false;
+    const next: Record<string, T> = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (allowedKeys.has(key)) {
+        next[key] = value;
+      } else {
+        changed = true;
+      }
+    }
+    return changed ? next : record;
+  }
+
   function canExcludeBulkReviewMember(member: DownloadJob): boolean {
     return [JobState.Queued, JobState.Paused].includes(member.state);
   }
@@ -366,7 +436,7 @@
   function isBulkReviewGroup(job: QueueDisplayJob): boolean {
     return isBulkAggregateJob(job)
       && job.bulkArchive?.archiveStatus === 'pending'
-      && job.bulkMembers.some(canExcludeBulkReviewMember);
+      && bulkMembersForJob(job).some(canExcludeBulkReviewMember);
   }
 
   function setBulkMemberIncluded(memberId: string, included: boolean) {
@@ -375,7 +445,7 @@
   }
 
   function includedBulkMemberCount(job: BulkAggregateDownloadJob): number {
-    return job.bulkMembers.filter((member) => !excludedBulkMemberIds.has(member.id)).length;
+    return bulkMembersForJob(job).filter((member) => !excludedBulkMemberIds.has(member.id)).length;
   }
 
   function canShowBulkPrimaryAction(job: BulkAggregateDownloadJob): boolean {
@@ -399,10 +469,11 @@
   }
 
   function startBulkReview(job: BulkAggregateDownloadJob) {
-    const excludedIds = job.bulkMembers
+    const members = bulkMembersForJob(job);
+    const excludedIds = members
       .filter((member) => excludedBulkMemberIds.has(member.id) && canExcludeBulkReviewMember(member))
       .map((member) => member.id);
-    const includedPausedIds = job.bulkMembers
+    const includedPausedIds = members
       .filter((member) => !excludedBulkMemberIds.has(member.id) && [JobState.Paused, JobState.Failed, JobState.Canceled].includes(member.state))
       .map((member) => member.id);
 
@@ -978,14 +1049,24 @@
               </div>
             </div>
             {#if isBulkTable && canExpandBulkAggregate(job) && expandedBulkRowIds.has(job.id)}
-              <div class="border-t border-border/45 bg-background/55 px-2 py-1">
-                <div class="ml-8 overflow-hidden border-y border-border/50 bg-card/70">
-                  {#each job.bulkMembers as bulkMember (bulkMember.id)}
+              {@const bulkMembers = bulkMembersForJob(job)}
+              {@const memberWindow = bulkMemberVirtualQueue(job, bulkMembers.length)}
+              {@const renderedBulkMembers = memberWindow.enabled ? bulkMembers.slice(memberWindow.startIndex, memberWindow.endIndex) : bulkMembers}
+              <div class="overflow-hidden border-t border-border/45 bg-background/55 px-2 py-1" style={`height: ${bulkExpansionHeight(bulkMembers.length)}px;`}>
+                <div
+                  class="ml-8 h-full overflow-y-auto overscroll-contain border-y border-border/50 bg-card/70"
+                  style={`max-height: ${bulkMemberPanelHeight(bulkMembers.length)}px;`}
+                  onscroll={(event) => updateBulkMemberPanelMetrics(job.id, event.currentTarget)}
+                >
+                  {#if memberWindow.enabled}
+                    <div style={`height: ${memberWindow.topPadding}px;`}></div>
+                  {/if}
+                  {#each renderedBulkMembers as bulkMember (bulkMember.id)}
                     {@const memberMetrics = progressMetricsByJobId[bulkMember.id]}
                     {@const memberAverageSpeed = memberMetrics?.averageSpeed ?? bulkMember.speed}
                     {@const memberPresentation = queueStatusPresentation(bulkMember)}
                     {@const memberIncluded = !excludedBulkMemberIds.has(bulkMember.id)}
-                    <div class={`grid ${BULK_QUEUE_TABLE_GRID_CLASS} items-center gap-0 border-t border-border/40 px-2 py-1 text-[11px] leading-4 first:border-t-0 ${memberIncluded ? '' : 'opacity-55'}`}>
+                    <div class={`grid ${BULK_QUEUE_TABLE_GRID_CLASS} items-center gap-0 border-t border-border/40 px-2 py-1 text-[11px] leading-4 first:border-t-0 ${memberIncluded ? '' : 'opacity-55'}`} style={`height: ${BULK_MEMBER_ROW_HEIGHT}px;`}>
                       <div class="flex min-w-0 items-center gap-1.5 pr-3">
                         {#if isBulkReviewGroup(job)}
                           <input
@@ -1021,6 +1102,9 @@
                       </div>
                     </div>
                   {/each}
+                  {#if memberWindow.enabled}
+                    <div style={`height: ${memberWindow.bottomPadding}px;`}></div>
+                  {/if}
                 </div>
               </div>
             {/if}
@@ -1134,7 +1218,7 @@
     </div>
     <div class={`relative z-10 min-w-0 text-muted-foreground ${density.metaText} ${blurIdentity ? 'opacity-70 blur-[0.7px]' : ''}`}>
       {#if isBulkAggregateJob(job)}
-        <div class="truncate" title={job.bulkArchiveMemberSearchText}>{job.bulkMemberIds.length} files</div>
+        <div class="truncate">{job.bulkMemberIds.length} files</div>
       {:else if job.transferKind === 'torrent'}
         {@render TorrentDetailLine(job)}
       {:else}

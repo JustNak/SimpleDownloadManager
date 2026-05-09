@@ -1,5 +1,6 @@
 import type { DownloadCategory } from './downloadCategories';
 import type { DownloadJob } from './types';
+import type { BulkMembersByArchiveId } from './bulkQueueRows';
 
 export type CategoryViewState = `category:${DownloadCategory}`;
 export type TorrentViewState =
@@ -92,7 +93,12 @@ export function getQueueCounts(jobs: readonly DownloadJob[]): QueueCounts {
   };
 }
 
-export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState, query = ''): DownloadJob[] {
+export function filterJobsForView(
+  jobs: readonly DownloadJob[],
+  view: ViewState,
+  query = '',
+  bulkMembersByArchiveId: BulkMembersByArchiveId = {},
+): DownloadJob[] {
   const normalizedQuery = query.trim().toLowerCase();
   const category = categoryFromView(view);
 
@@ -101,7 +107,7 @@ export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState,
     if (category) {
       return isRegularDownload(job)
         && filterJobsByCategory([job], category).length > 0
-        && matchesSearchQuery(job, normalizedQuery);
+        && matchesSearchQuery(job, normalizedQuery, bulkMembersByArchiveId);
     }
 
     if (isTorrentView(view)) {
@@ -111,14 +117,14 @@ export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState,
       if (view === 'torrent-attention' && !jobNeedsAttention(job)) return false;
       if (view === 'torrent-queued' && job.state !== 'queued') return false;
       if (view === 'torrent-completed' && !stateIn(job.state, finishedStates)) return false;
-      return matchesSearchQuery(job, normalizedQuery);
+      return matchesSearchQuery(job, normalizedQuery, bulkMembersByArchiveId);
     }
 
     if (isBulkView(view)) {
       if (!isBulkDownload(job)) return false;
       if (view === 'bulk-active' && !stateIn(job.state, activeDownloadStates)) return false;
       if (view === 'bulk-completed' && !stateIn(job.state, finishedStates)) return false;
-      return matchesSearchQuery(job, normalizedQuery);
+      return matchesSearchQuery(job, normalizedQuery, bulkMembersByArchiveId);
     }
 
     if (!isRegularDownload(job)) return false;
@@ -126,7 +132,7 @@ export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState,
     if (view === 'active' && !stateIn(job.state, activeDownloadStates)) return false;
     if (view === 'queued' && job.state !== 'queued') return false;
     if (view === 'completed' && !stateIn(job.state, finishedStates)) return false;
-    return matchesSearchQuery(job, normalizedQuery);
+    return matchesSearchQuery(job, normalizedQuery, bulkMembersByArchiveId);
   });
 }
 
@@ -216,11 +222,20 @@ function categoryForFilename(filename: string): DownloadCategory {
   return CATEGORY_BY_EXTENSION.get(extension) ?? 'other';
 }
 
-function matchesSearchQuery(job: DownloadJob, normalizedQuery: string): boolean {
+function matchesSearchQuery(
+  job: DownloadJob,
+  normalizedQuery: string,
+  bulkMembersByArchiveId: BulkMembersByArchiveId,
+): boolean {
   if (!normalizedQuery) return true;
-  const bulkSearchText = 'bulkArchiveMemberSearchText' in job
-    && typeof job.bulkArchiveMemberSearchText === 'string'
-    ? job.bulkArchiveMemberSearchText
-    : '';
-  return `${job.filename} ${job.url} ${job.targetPath ?? ''} ${bulkSearchText}`.toLowerCase().includes(normalizedQuery);
+  if (`${job.filename} ${job.url} ${job.targetPath ?? ''}`.toLowerCase().includes(normalizedQuery)) return true;
+
+  const archiveId = (job as DownloadJob & { bulkAggregate?: boolean; bulkArchiveId?: string }).bulkAggregate
+    ? (job as DownloadJob & { bulkArchiveId?: string }).bulkArchiveId
+    : undefined;
+  if (!archiveId) return false;
+
+  return (bulkMembersByArchiveId[archiveId] ?? []).some((member) => (
+    `${member.filename} ${member.url} ${member.targetPath ?? ''}`.toLowerCase().includes(normalizedQuery)
+  ));
 }
