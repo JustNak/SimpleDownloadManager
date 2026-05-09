@@ -61,6 +61,7 @@
   import {
     browseDirectory,
     cancelJob,
+    cancelJobs,
     checkForUpdate,
     clearTorrentSessionCache,
     deleteJob,
@@ -78,11 +79,13 @@
     openProgressWindow,
     pauseAllJobs,
     pauseJob,
+    pauseJobs,
     revealBulkArchive,
     revealJobInFolder,
     renameJob,
     resumeAllJobs,
     resumeJob,
+    resumeJobs,
     restartJob,
     retryBulkArchive,
     retryBulkMembers,
@@ -147,6 +150,7 @@
   let isBulkSectionExpanded = $state(true);
   let isTorrentSectionExpanded = $state(true);
   let selectedJobId = $state<string | null>(initialSelectedJobIdFromSearch(window.location.search));
+  let pendingQueueActionIds = $state<Set<string>>(new Set());
   let isAddModalOpen = $state(false);
   let diagnostics = $state<DiagnosticsSnapshot | null>(null);
   let settingsDraft = $state<Settings | null>(null);
@@ -684,7 +688,12 @@
 
   async function handlePause(id: string) {
     try {
-      await runJobOrBulkAction(id, pauseJob, (job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state));
+      await runJobOrBulkAction(
+        id,
+        pauseJob,
+        pauseJobs,
+        (job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state),
+      );
     } catch (error) {
       addToast({ type: 'error', title: 'Pause Failed', message: getErrorMessage(error) });
     }
@@ -692,7 +701,12 @@
 
   async function handleResume(id: string) {
     try {
-      await runJobOrBulkAction(id, resumeJob, (job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state));
+      await runJobOrBulkAction(
+        id,
+        resumeJob,
+        resumeJobs,
+        (job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state),
+      );
     } catch (error) {
       addToast({ type: 'error', title: 'Resume Failed', message: getErrorMessage(error) });
     }
@@ -718,7 +732,12 @@
 
   async function handleCancel(id: string) {
     try {
-      await runJobOrBulkAction(id, cancelJob, (job) => ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state));
+      await runJobOrBulkAction(
+        id,
+        cancelJob,
+        cancelJobs,
+        (job) => ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state),
+      );
     } catch (error) {
       addToast({ type: 'error', title: 'Cancel Failed', message: getErrorMessage(error) });
     }
@@ -906,12 +925,13 @@
 
   async function runJobOrBulkAction(
     id: string,
-    action: (jobId: string) => Promise<unknown>,
+    singleAction: (jobId: string) => Promise<unknown>,
+    bulkAction: (jobIds: string[]) => Promise<unknown>,
     includeMember: (job: DownloadJob) => boolean,
   ) {
     const row = queueRowById(id);
     if (!row || !isBulkAggregateJob(row)) {
-      await action(id);
+      await runPendingQueueAction([id], () => singleAction(id));
       return;
     }
 
@@ -919,7 +939,25 @@
     const actionableIds = jobs
       .filter((job) => memberIds.has(job.id) && includeMember(job))
       .map((job) => job.id);
-    await Promise.all(actionableIds.map((jobId) => action(jobId)));
+    if (actionableIds.length === 0) return;
+
+    await runPendingQueueAction([id, ...actionableIds], () => bulkAction(actionableIds));
+  }
+
+  async function runPendingQueueAction(ids: string[], action: () => Promise<unknown>) {
+    const uniqueIds = [...new Set(ids)].filter(Boolean);
+    if (uniqueIds.length === 0 || uniqueIds.some((id) => pendingQueueActionIds.has(id))) {
+      return;
+    }
+
+    pendingQueueActionIds = new Set([...pendingQueueActionIds, ...uniqueIds]);
+    try {
+      await action();
+    } finally {
+      const nextIds = new Set(pendingQueueActionIds);
+      for (const id of uniqueIds) nextIds.delete(id);
+      pendingQueueActionIds = nextIds;
+    }
   }
 
   async function handleOpenInstallDocs() {
@@ -1416,6 +1454,7 @@
           {view}
           {sortMode}
           {progressMetricsByJobId}
+          pendingActionIds={pendingQueueActionIds}
           showDetailsOnClick={liveSettings.showDetailsOnClick}
           queueRowSize={liveSettings.queueRowSize}
           expandActiveBulkRowsByDefault={liveSettings.bulk.expandActiveRowsByDefault}

@@ -1831,6 +1831,90 @@ async fn update_job_progress_coalesces_persistence() {
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn mark_job_downloading_preserves_pause_requested_during_startup() {
+    let download_dir = test_runtime_dir("mark-downloading-preserves-paused");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job("job_pause", JobState::Paused, ResumeSupport::Unknown, 0);
+    job.total_bytes = 0;
+    job.speed = 512;
+    job.eta = 60;
+    let state = shared_state_with_jobs(storage_path, vec![job]);
+
+    let snapshot = state
+        .mark_job_downloading(
+            "job_pause",
+            256,
+            Some(1024),
+            ResumeSupport::Supported,
+            Some("renamed.zip".into()),
+        )
+        .await
+        .expect("late startup metadata should be accepted");
+    let paused = &snapshot.jobs[0];
+
+    assert_eq!(paused.state, JobState::Paused);
+    assert_eq!(paused.downloaded_bytes, 256);
+    assert_eq!(paused.total_bytes, 1024);
+    assert_eq!(paused.progress, 25.0);
+    assert_eq!(paused.resume_support, ResumeSupport::Supported);
+    assert_eq!(paused.filename, "renamed.zip");
+    assert_eq!(paused.speed, 0);
+    assert_eq!(paused.eta, 0);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn update_job_progress_preserves_paused_state_after_pause() {
+    let download_dir = test_runtime_dir("progress-preserves-paused");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job("job_pause", JobState::Paused, ResumeSupport::Supported, 100);
+    job.total_bytes = 1000;
+    job.speed = 512;
+    job.eta = 60;
+    let state = shared_state_with_jobs(storage_path, vec![job]);
+
+    let snapshot = state
+        .update_job_progress("job_pause", 400, Some(1000), 128, true)
+        .await
+        .expect("late progress should be accepted");
+    let paused = &snapshot.jobs[0];
+
+    assert_eq!(paused.state, JobState::Paused);
+    assert_eq!(paused.downloaded_bytes, 400);
+    assert_eq!(paused.progress, 40.0);
+    assert_eq!(paused.speed, 0);
+    assert_eq!(paused.eta, 0);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn update_job_progress_does_not_revive_canceled_jobs() {
+    let download_dir = test_runtime_dir("progress-preserves-canceled");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job("job_cancel", JobState::Canceled, ResumeSupport::Supported, 100);
+    job.total_bytes = 1000;
+    job.speed = 512;
+    job.eta = 60;
+    let state = shared_state_with_jobs(storage_path, vec![job]);
+
+    let snapshot = state
+        .update_job_progress("job_cancel", 400, Some(1000), 128, true)
+        .await
+        .expect("late progress should be accepted");
+    let canceled = &snapshot.jobs[0];
+
+    assert_eq!(canceled.state, JobState::Canceled);
+    assert_eq!(canceled.downloaded_bytes, 400);
+    assert_eq!(canceled.progress, 40.0);
+    assert_eq!(canceled.speed, 0);
+    assert_eq!(canceled.eta, 0);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn runtime_state_tracks_job_indexes_after_insert_and_remove() {
     let mut state = runtime_state_with_jobs(vec![

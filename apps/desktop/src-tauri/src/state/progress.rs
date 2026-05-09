@@ -40,21 +40,19 @@ impl SharedState {
                 return Err("Job not found.".into());
             };
 
-            job.state = JobState::Downloading;
+            let preserve_interrupted_state = should_preserve_worker_interrupted_state(job.state);
+            if preserve_interrupted_state {
+                job.speed = 0;
+                job.eta = 0;
+            } else {
+                job.state = JobState::Downloading;
+                job.error = None;
+                job.failure_category = None;
+            }
             if let Some(filename) = filename {
                 apply_download_filename(job, &filename);
             }
-            job.downloaded_bytes = downloaded_bytes;
-            if let Some(total_bytes) = total_bytes {
-                job.total_bytes = total_bytes.max(downloaded_bytes);
-            }
-            job.progress = if job.total_bytes == 0 {
-                0.0
-            } else {
-                (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
-            };
-            job.error = None;
-            job.failure_category = None;
+            apply_download_progress(job, downloaded_bytes, total_bytes);
             job.resume_support = resume_support;
             (state.snapshot(), state.persisted())
         };
@@ -128,25 +126,23 @@ impl SharedState {
                 return Err("Job not found.".into());
             };
 
-            job.state = JobState::Downloading;
-            job.downloaded_bytes = downloaded_bytes;
-            if let Some(total_bytes) = total_bytes {
-                job.total_bytes = total_bytes.max(downloaded_bytes);
+            let preserve_interrupted_state = should_preserve_worker_interrupted_state(job.state);
+            if !preserve_interrupted_state {
+                job.state = JobState::Downloading;
             }
-            job.speed = speed;
+            apply_download_progress(job, downloaded_bytes, total_bytes);
 
-            if job.total_bytes > 0 {
-                job.progress = (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0)
-                    .clamp(0.0, 100.0);
+            if preserve_interrupted_state {
+                job.speed = 0;
+                job.eta = 0;
+            } else {
+                job.speed = speed;
                 let remaining = job.total_bytes.saturating_sub(job.downloaded_bytes);
                 job.eta = if speed == 0 {
                     0
                 } else {
                     ((remaining as f64) / (speed as f64)).ceil() as u64
                 };
-            } else {
-                job.progress = 0.0;
-                job.eta = 0;
             }
 
             let persisted = persist
@@ -729,6 +725,29 @@ pub(super) fn apply_download_filename(job: &mut DownloadJob, filename: &str) {
     if !filename.is_empty() {
         job.filename = filename.to_string();
     }
+}
+
+fn should_preserve_worker_interrupted_state(state: JobState) -> bool {
+    matches!(
+        state,
+        JobState::Paused | JobState::Canceled | JobState::Failed | JobState::Completed
+    )
+}
+
+fn apply_download_progress(
+    job: &mut DownloadJob,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) {
+    job.downloaded_bytes = downloaded_bytes;
+    if let Some(total_bytes) = total_bytes {
+        job.total_bytes = total_bytes.max(downloaded_bytes);
+    }
+    job.progress = if job.total_bytes == 0 {
+        0.0
+    } else {
+        (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+    };
 }
 
 pub(super) fn apply_preflight_metadata_to_job(
