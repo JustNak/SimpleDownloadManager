@@ -20,6 +20,14 @@ export interface BulkReviewStartSelection {
   resumableJobs: DownloadJob[];
 }
 
+export interface BulkFailedRetrySelection {
+  selectedJobs: DownloadJob[];
+  excludedJobs: DownloadJob[];
+  selectedJobIds: string[];
+  excludedJobIds: string[];
+  canRetry: boolean;
+}
+
 export interface BulkCancelConfirmPlan {
   cancelJobIds: string[];
   deleteJobIds: string[];
@@ -154,6 +162,21 @@ export function bulkReviewStartSelection(
     includedJobs,
     excludedJobs,
     resumableJobs: includedJobs.filter(isResumableReviewJob),
+  };
+}
+
+export function bulkFailedRetrySelection(
+  jobs: DownloadJob[],
+  selectedJobIds: ReadonlySet<string>,
+): BulkFailedRetrySelection {
+  const selectedJobs = jobs.filter((job) => selectedJobIds.has(job.id));
+  const excludedJobs = jobs.filter((job) => !selectedJobIds.has(job.id));
+  return {
+    selectedJobs,
+    excludedJobs,
+    selectedJobIds: selectedJobs.map((job) => job.id),
+    excludedJobIds: excludedJobs.map((job) => job.id),
+    canRetry: selectedJobs.length >= 2,
   };
 }
 

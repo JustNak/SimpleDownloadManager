@@ -35,9 +35,15 @@ impl SharedState {
             &mut persisted.settings.torrent,
             &persisted.settings.download_directory,
         );
+        normalize_bulk_settings_for_download_directory(
+            &mut persisted.settings.bulk,
+            &persisted.settings.download_directory,
+        );
         ensure_download_category_directories(Path::new(&persisted.settings.download_directory))?;
         std::fs::create_dir_all(&persisted.settings.torrent.download_directory)
             .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
+        std::fs::create_dir_all(&persisted.settings.bulk.output_directory)
+            .map_err(|error| format!("Could not create bulk download directory: {error}"))?;
 
         let jobs = persisted
             .jobs
@@ -143,6 +149,14 @@ impl SharedState {
     pub async fn auto_retry_attempts(&self) -> u32 {
         let state = self.inner.read().await;
         state.settings.auto_retry_attempts.min(10)
+    }
+
+    pub async fn auto_retry_attempts_for_job(&self, id: &str) -> u32 {
+        let state = self.inner.read().await;
+        state
+            .job(id)
+            .map(|job| max_auto_retry_attempts_for_job(&state.settings, job))
+            .unwrap_or_else(|| state.settings.auto_retry_attempts.min(10))
     }
 
     pub async fn speed_limit_bytes_per_second(&self) -> Option<u64> {

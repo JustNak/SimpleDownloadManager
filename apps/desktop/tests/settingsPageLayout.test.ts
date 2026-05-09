@@ -12,6 +12,7 @@ assert.match(sectionsSource, /export const SETTINGS_SECTIONS = \[/, 'settings se
 for (const [sectionId, label] of [
   ['settings-general', 'General'],
   ['settings-updates', 'App Updates'],
+  ['settings-bulk-downloads', 'Bulk Downloads'],
   ['settings-torrenting', 'Torrenting'],
   ['settings-appearance', 'Appearance'],
   ['settings-extension', 'Web Extension'],
@@ -27,6 +28,13 @@ assert.doesNotMatch(appSource, /Configure downloads, appearance, notifications, 
 assert.match(source, /Cancel[\s\S]*Save Changes/, 'settings header should keep Svelte cancel and save actions');
 assert.match(source, /CategorySettingsCard\('General'/, 'general settings should render through the category card helper');
 assert.match(source, /Beta channel updates/, 'app update card should be present');
+assert.match(source, /CategorySettingsCard\('Bulk Downloads'/, 'bulk download settings should render through the category card helper');
+assert.match(source, /bind:value=\{formData\.bulk\.outputDirectory\}/, 'bulk settings should expose the bulk output directory field');
+assert.match(source, /bind:value=\{formData\.bulk\.maxConcurrentDownloads\}/, 'bulk settings should expose the max active bulk files field');
+assert.match(source, /formData\.bulk\.autoRetryOverrideEnabled[\s\S]*formData\.bulk\.autoRetryOverrideEnabled = checked/, 'bulk retry override setting should be wired to the settings draft');
+assert.match(source, /bind:value=\{formData\.bulk\.autoRetryAttempts\}/, 'bulk retry override attempts should be wired to the settings draft');
+assert.match(source, /bind:value=\{formData\.bulk\.startBehavior\}/, 'bulk start behavior setting should be wired to the settings draft');
+assert.match(source, /formData\.bulk\.expandActiveRowsByDefault[\s\S]*formData\.bulk\.expandActiveRowsByDefault = checked/, 'bulk row expansion setting should be wired to the settings draft');
 assert.doesNotMatch(source, /0\.5\.1-beta/, 'app update current version should not use the stale hardcoded 0.5.1-beta fallback');
 assert.match(source, /installedVersion:\s*string/, 'settings page should receive the installed app version from the app shell');
 assert.match(source, /updateVersionIndicator\(updateState,\s*installedVersion\)/, 'app update version rows should use the shared installed-version indicator helper');

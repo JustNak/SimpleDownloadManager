@@ -38,6 +38,7 @@ export type StartupLaunchMode = 'open' | 'tray';
 export type BulkOutputKind = 'archive' | 'folder';
 export type BulkFinalizeMode = 'move' | 'extract' | 'zip';
 export type BulkArchiveStatus = 'pending' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
+export type BulkStartBehavior = 'review_then_start' | 'start_immediately';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
 export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'experimental';
@@ -151,6 +152,15 @@ export interface TorrentSettings {
   peerConnectionWatchdogMode: TorrentPeerConnectionWatchdogMode;
 }
 
+export interface BulkDownloadSettings {
+  outputDirectory: string;
+  maxConcurrentDownloads: number;
+  autoRetryOverrideEnabled: boolean;
+  autoRetryAttempts: number;
+  startBehavior: BulkStartBehavior;
+  expandActiveRowsByDefault: boolean;
+}
+
 export interface TorrentSessionCacheClearResult {
   cleared: boolean;
   pendingRestart: boolean;
@@ -164,6 +174,7 @@ export interface Settings {
   speedLimitKibPerSecond: number;
   downloadPerformanceMode: DownloadPerformanceMode;
   torrent: TorrentSettings;
+  bulk: BulkDownloadSettings;
   notificationsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;

@@ -223,7 +223,7 @@ impl SharedState {
         let Some(job) = state.job(id) else {
             return Ok(None);
         };
-        let max_attempts = state.settings.auto_retry_attempts.min(10);
+        let max_attempts = max_auto_retry_attempts_for_job(&state.settings, job);
 
         if max_attempts == 0
             || job.auto_restart_attempts >= max_attempts
@@ -255,7 +255,7 @@ impl SharedState {
 
         Ok(Some(BulkMemberSlowRecoveryState {
             retry_attempts: job.retry_attempts,
-            max_retry_attempts: state.settings.auto_retry_attempts.min(10),
+            max_retry_attempts: max_auto_retry_attempts_for_job(&state.settings, job),
         }))
     }
 
@@ -724,6 +724,14 @@ impl SharedState {
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
         Ok(snapshot)
+    }
+}
+
+pub(super) fn max_auto_retry_attempts_for_job(settings: &Settings, job: &DownloadJob) -> u32 {
+    if job.bulk_archive.is_some() && settings.bulk.auto_retry_override_enabled {
+        settings.bulk.auto_retry_attempts.min(10)
+    } else {
+        settings.auto_retry_attempts.min(10)
     }
 }
 

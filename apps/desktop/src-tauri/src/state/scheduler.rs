@@ -17,23 +17,41 @@ impl SharedState {
                         .unwrap_or(false)
                 })
                 .count() as u32;
+            let active_bulk_workers = state
+                .active_workers
+                .iter()
+                .filter(|id| {
+                    state
+                        .job(id)
+                        .map(|job| job.state != JobState::Seeding && is_bulk_member_job(job))
+                        .unwrap_or(false)
+                })
+                .count() as u32;
             let available_slots = state
                 .settings
                 .max_concurrent_downloads
                 .max(1)
                 .saturating_sub(active_download_workers) as usize;
+            let bulk_slot_limit = state.settings.bulk.max_concurrent_downloads.max(1);
 
             if available_slots == 0 {
                 return Ok((state.snapshot(), Vec::new()));
             }
 
             let mut scheduled_ids = Vec::new();
+            let mut scheduled_bulk_workers = 0_u32;
             for job in &state.jobs {
                 if scheduled_ids.len() >= available_slots {
                     break;
                 }
 
                 if job.state == JobState::Queued && !state.active_workers.contains(&job.id) {
+                    if is_bulk_member_job(job) {
+                        if active_bulk_workers + scheduled_bulk_workers >= bulk_slot_limit {
+                            continue;
+                        }
+                        scheduled_bulk_workers += 1;
+                    }
                     scheduled_ids.push(job.id.clone());
                 }
             }
@@ -101,4 +119,8 @@ impl SharedState {
             _ => WorkerControl::Continue,
         }
     }
+}
+
+fn is_bulk_member_job(job: &DownloadJob) -> bool {
+    job.transfer_kind == TransferKind::Http && job.bulk_archive.is_some()
 }

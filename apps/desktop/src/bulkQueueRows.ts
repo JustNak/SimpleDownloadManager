@@ -3,6 +3,7 @@ import type { BulkArchiveStatus, DownloadJob } from './types';
 export interface BulkAggregateDownloadJob extends DownloadJob {
   bulkAggregate: true;
   bulkMemberIds: string[];
+  bulkMembers: DownloadJob[];
   bulkArchiveId: string;
   bulkArchiveOutputPath?: string;
   bulkArchiveMemberSearchText: string;
@@ -97,6 +98,7 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     bulkArchive: archive,
     bulkAggregate: true,
     bulkMemberIds: members.map((job) => job.id),
+    bulkMembers: members.map((job) => ({ ...job })),
     bulkArchiveId: archive?.id ?? first.id,
     bulkArchiveOutputPath: archive?.outputPath,
     bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,

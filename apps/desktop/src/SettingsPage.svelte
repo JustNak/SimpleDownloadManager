@@ -7,6 +7,7 @@
     Clock3,
     Download,
     ExternalLink,
+    FileArchive,
     FolderOpen,
     Gauge,
     Globe,
@@ -38,7 +39,7 @@
     parseExcludedHostInput,
     removeExcludedHost,
   } from './settingsExcludedSites';
-  import { DEFAULT_EXTENSION_LISTEN_PORT } from './defaultSettings';
+  import { DEFAULT_EXTENSION_LISTEN_PORT, defaultBulkDownloadDirectory } from './defaultSettings';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
@@ -163,6 +164,7 @@
     onSave({
       ...draft,
       torrent: normalizeTorrentSettings(draft.torrent, draft.downloadDirectory),
+      bulk: normalizeBulkSettings(draft.bulk, draft.downloadDirectory),
       extensionIntegration: {
         ...draft.extensionIntegration,
         listenPort: normalizeListenPort(String(draft.extensionIntegration.listenPort)),
@@ -177,16 +179,27 @@
     const previousTorrentDirectory = defaultTorrentDownloadDirectory(formData.downloadDirectory);
     const shouldUpdateTorrentDirectory = !formData.torrent.downloadDirectory
       || formData.torrent.downloadDirectory === previousTorrentDirectory;
+    const previousBulkDirectory = defaultBulkDownloadDirectory(formData.downloadDirectory);
+    const shouldUpdateBulkDirectory = !formData.bulk.outputDirectory
+      || formData.bulk.outputDirectory === previousBulkDirectory;
 
     formData.downloadDirectory = selected;
     if (shouldUpdateTorrentDirectory) {
       updateTorrentSettings({ downloadDirectory: defaultTorrentDownloadDirectory(selected) });
+    }
+    if (shouldUpdateBulkDirectory) {
+      updateBulkSettings({ outputDirectory: defaultBulkDownloadDirectory(selected) });
     }
   }
 
   async function browseTorrentDirectory() {
     const selected = await onBrowseDirectory();
     if (selected) updateTorrentSettings({ downloadDirectory: selected });
+  }
+
+  async function browseBulkDirectory() {
+    const selected = await onBrowseDirectory();
+    if (selected) updateBulkSettings({ outputDirectory: selected });
   }
 
   async function clearTorrentSessionCache() {
@@ -200,6 +213,10 @@
 
   function updateTorrentSettings(update: Partial<Settings['torrent']>) {
     formData.torrent = normalizeTorrentSettings({ ...formData.torrent, ...update }, formData.downloadDirectory);
+  }
+
+  function updateBulkSettings(update: Partial<Settings['bulk']>) {
+    formData.bulk = normalizeBulkSettings({ ...formData.bulk, ...update }, formData.downloadDirectory);
   }
 
   function updateExtensionIntegration(update: Partial<Settings['extensionIntegration']>) {
@@ -232,6 +249,15 @@
   function normalizeListenPort(value: string): number {
     const port = Number.parseInt(value, 10);
     return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_EXTENSION_LISTEN_PORT;
+  }
+
+  function normalizeBulkSettings(settings: Settings['bulk'], downloadDirectory: string): Settings['bulk'] {
+    return {
+      ...settings,
+      outputDirectory: settings.outputDirectory.trim() || defaultBulkDownloadDirectory(downloadDirectory),
+      maxConcurrentDownloads: Math.max(1, Math.min(10, Math.trunc(settings.maxConcurrentDownloads) || 2)),
+      autoRetryAttempts: Math.max(0, Math.min(10, Math.trunc(settings.autoRetryAttempts) || 0)),
+    };
   }
 
   function normalizeTorrentPort(value: string): number {
@@ -474,6 +500,19 @@
   </div>
 {/snippet}
 
+{#snippet bulkContent()}
+  <div>
+    {@render FieldRow('Output Folder', 'Grouped Bulk output path.', bulkDirectoryControl)}
+    {@render FieldRow('Max Active Bulk Files', 'Concurrent member file limit.', bulkMaxConcurrentControl)}
+    {@render SwitchFieldRow(RotateCw, 'Retry override', 'Use Bulk-specific retry attempts.', bulkRetryOverrideControl)}
+    {#if formData.bulk.autoRetryOverrideEnabled}
+      {@render FieldRow('Bulk Retry Attempts', 'Failure retries for Bulk members.', bulkRetryAttemptsControl)}
+    {/if}
+    {@render FieldRow('Start Behavior', 'Bulk submission workflow.', bulkStartBehaviorControl)}
+    {@render SwitchFieldRow(FileArchive, 'Expand active rows', 'Open active Bulk groups by default.', bulkExpandRowsControl)}
+  </div>
+{/snippet}
+
 {#snippet torrentingContent()}
   <div>
     {@render SwitchFieldRow(Gauge, 'Enable torrent downloads', 'Allow magnet and .torrent transfers.', torrentEnabledControl)}
@@ -648,6 +687,10 @@
       {@render CategorySettingsCard('App Updates', Download, updateContent)}
     </section>
 
+    <section id="settings-bulk-downloads" class="scroll-mt-4">
+      {@render CategorySettingsCard('Bulk Downloads', FileArchive, bulkContent)}
+    </section>
+
     <section id="settings-torrenting" class="scroll-mt-4">
       {@render CategorySettingsCard('Torrenting', Gauge, torrentingContent)}
     </section>
@@ -715,6 +758,39 @@
       Browse
     </button>
   </div>
+{/snippet}
+
+{#snippet bulkDirectoryControl()}
+  <div class="flex min-w-0 gap-2">
+    <input type="text" bind:value={formData.bulk.outputDirectory} class="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm text-muted-foreground outline-none" />
+    <button type="button" onclick={() => void browseBulkDirectory()} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+      <FolderOpen size={16} />
+      Browse
+    </button>
+  </div>
+{/snippet}
+
+{#snippet bulkMaxConcurrentControl()}
+  <input type="number" min="1" max="10" bind:value={formData.bulk.maxConcurrentDownloads} onchange={() => updateBulkSettings({ maxConcurrentDownloads: formData.bulk.maxConcurrentDownloads })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet bulkRetryOverrideControl()}
+  {@render ToggleSwitch('bulkRetryOverrideEnabled', formData.bulk.autoRetryOverrideEnabled, (checked) => formData.bulk.autoRetryOverrideEnabled = checked)}
+{/snippet}
+
+{#snippet bulkRetryAttemptsControl()}
+  <input type="number" min="0" max="10" bind:value={formData.bulk.autoRetryAttempts} onchange={() => updateBulkSettings({ autoRetryAttempts: formData.bulk.autoRetryAttempts })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet bulkStartBehaviorControl()}
+  <select bind:value={formData.bulk.startBehavior} class="h-9 w-48 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="review_then_start">Review then start</option>
+    <option value="start_immediately">Start immediately</option>
+  </select>
+{/snippet}
+
+{#snippet bulkExpandRowsControl()}
+  {@render ToggleSwitch('bulkExpandActiveRowsByDefault', formData.bulk.expandActiveRowsByDefault, (checked) => formData.bulk.expandActiveRowsByDefault = checked)}
 {/snippet}
 
 {#snippet seedModeControl()}

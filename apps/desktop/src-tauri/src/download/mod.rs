@@ -591,7 +591,7 @@ async fn run_download(
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
-    let max_retry_attempts = state.auto_retry_attempts().await;
+    let max_retry_attempts = state.auto_retry_attempts_for_job(&task.id).await;
     let mut retry_attempts = 0;
 
     loop {

@@ -9,6 +9,7 @@ import {
   formatTorrentVerifiedSize,
   isTorrentCheckingFiles,
   isTorrentSeedingRestore,
+  BULK_QUEUE_TABLE_COLUMNS,
   QUEUE_TABLE_COLUMNS,
   queueTableColumnsForView,
   queueStatusPresentation,
@@ -40,6 +41,12 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  BULK_QUEUE_TABLE_COLUMNS,
+  ['Name', 'Date', 'Speed', 'Size', 'Actions'],
+  'bulk queue table should omit the normal time/ETA column',
+);
+
+assert.deepEqual(
   queueTableColumnsForView('all'),
   ['Name', 'Date', 'Speed', 'Time', 'Size', 'Actions'],
   'regular download views should keep the normal speed and time columns',
@@ -55,6 +62,18 @@ assert.deepEqual(
   queueTableColumnsForView('torrent-seeding'),
   ['Name', 'Date', 'Seed', 'Ratio', 'Size', 'Actions'],
   'torrent status filters should keep the torrent-specific table header',
+);
+
+assert.deepEqual(
+  queueTableColumnsForView('bulk'),
+  ['Name', 'Date', 'Speed', 'Size', 'Actions'],
+  'bulk overview should use the bulk table without time estimates',
+);
+
+assert.deepEqual(
+  queueTableColumnsForView('bulk-active'),
+  ['Name', 'Date', 'Speed', 'Size', 'Actions'],
+  'bulk status filters should keep the bulk-specific table header',
 );
 
 assert.equal(

@@ -89,8 +89,8 @@ pub(super) fn prepare_bulk_archive_sources_without_extraction(
         return Err("Archive extraction requires the bundled 7-Zip sidecar.".into());
     }
     let output_path = archive.output_path;
-    let cleanup_paths = Vec::new();
     let entries = prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
+    let cleanup_paths = cleanup_paths_for_output(&entries, archive.output_kind);
 
     Ok(PreparedBulkArchive {
         output_kind: archive.output_kind,
@@ -118,9 +118,9 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
     let plan = build_bulk_archive_source_plan(&archive.entries)?;
     if plan.archive_sets.is_empty() {
         let output_path = archive.output_path;
-        let cleanup_paths = Vec::new();
         let entries =
             prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
+        let cleanup_paths = cleanup_paths_for_output(&entries, archive.output_kind);
         return Ok(PreparedBulkArchive {
             output_kind: archive.output_kind,
             output_path,
@@ -138,12 +138,29 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
         .map_err(|error| format!("Could not create archive extraction directory: {error}"))?;
 
     let result: Result<PreparedBulkArchive, String> = (|| {
-        for archive_set in &plan.archive_sets {
-            extract_with_lock_retry(extractor, &archive_set.first_part.source_path, &extract_dir)?;
+        let mut entries = Vec::new();
+        for (index, archive_set) in plan.archive_sets.iter().enumerate() {
+            let set_extract_dir = extract_dir.join(format!("set-{index}"));
+            std::fs::create_dir_all(&set_extract_dir).map_err(|error| {
+                format!("Could not create archive extraction directory: {error}")
+            })?;
+            extract_with_lock_retry(
+                extractor,
+                &archive_set.first_part.source_path,
+                &set_extract_dir,
+            )?;
+
+            let mut set_entries = collect_zip_entries_from_directory(&set_extract_dir)?;
+            if set_entries.is_empty() {
+                return Err(format!(
+                    "Archive extraction for {} did not produce any files.",
+                    archive_part_display_name(&archive_set.first_part.source_path)
+                ));
+            }
+            entries.append(&mut set_entries);
         }
 
-        let raw_cleanup_paths = Vec::new();
-        let mut entries = collect_zip_entries_from_directory(&extract_dir)?;
+        let raw_cleanup_paths = cleanup_paths_for_output(&plan.raw_entries, output_kind);
         entries.extend(plan.raw_entries);
         if entries.is_empty() {
             return Err("Archive extraction did not produce any files to compress.".into());
@@ -615,15 +632,24 @@ fn collect_zip_entries_from_directory_inner(
 
     for child in children {
         let path = child.path();
-        let metadata = child
-            .metadata()
+        let file_type = child
+            .file_type()
             .map_err(|error| format!("Could not inspect extracted archive file: {error}"))?;
-        if metadata.is_dir() {
+        if file_type.is_symlink() {
+            return Err(format!(
+                "Unsupported extracted archive entry: {}",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
             collect_zip_entries_from_directory_inner(root, &path, entries)?;
             continue;
         }
-        if !metadata.is_file() {
-            continue;
+        if !file_type.is_file() {
+            return Err(format!(
+                "Unsupported extracted archive entry: {}",
+                path.display()
+            ));
         }
         let relative = path.strip_prefix(root).map_err(|error| {
             format!(
@@ -651,7 +677,7 @@ fn prepare_entries_for_output(
     output_path: &Path,
     output_kind: BulkArchiveOutputKind,
 ) -> Result<Vec<BulkArchiveEntry>, String> {
-    match output_kind {
+    let entries = match output_kind {
         BulkArchiveOutputKind::Archive => wrap_entries_in_archive_folder(entries, output_path),
         BulkArchiveOutputKind::Folder => entries
             .into_iter()
@@ -659,6 +685,35 @@ fn prepare_entries_for_output(
                 entry.archive_name = validate_zip_entry_name(&entry.archive_name)?;
                 Ok(entry)
             })
+            .collect(),
+    }?;
+    reject_duplicate_output_paths(&entries)?;
+    Ok(entries)
+}
+
+fn reject_duplicate_output_paths(entries: &[BulkArchiveEntry]) -> Result<(), String> {
+    let mut seen = HashMap::new();
+    for entry in entries {
+        let normalized = validate_zip_entry_name(&entry.archive_name)?;
+        let key = normalized.to_lowercase();
+        if let Some(existing) = seen.insert(key, normalized.clone()) {
+            return Err(format!(
+                "Duplicate bulk output path {normalized} conflicts with {existing}."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_paths_for_output(
+    entries: &[BulkArchiveEntry],
+    output_kind: BulkArchiveOutputKind,
+) -> Vec<PathBuf> {
+    match output_kind {
+        BulkArchiveOutputKind::Archive => Vec::new(),
+        BulkArchiveOutputKind::Folder => entries
+            .iter()
+            .map(|entry| entry.source_path.clone())
             .collect(),
     }
 }
@@ -751,13 +806,16 @@ fn finish_prepared_folder_output(
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(temp_path)
         .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
-    move_entries_to_folder(&prepared.entries, temp_path)?;
+    copy_entries_to_folder_verified(&prepared.entries, temp_path)?;
     std::fs::rename(temp_path, &prepared.output_path)
         .map_err(|error| format!("Could not finalize bulk output folder: {error}"))?;
     Ok(prepared.output_path.clone())
 }
 
-fn move_entries_to_folder(entries: &[BulkArchiveEntry], output_root: &Path) -> Result<(), String> {
+fn copy_entries_to_folder_verified(
+    entries: &[BulkArchiveEntry],
+    output_root: &Path,
+) -> Result<(), String> {
     for entry in entries {
         let archive_name = validate_zip_entry_name(&entry.archive_name)?;
         let mut destination = output_root.to_path_buf();
@@ -768,24 +826,101 @@ fn move_entries_to_folder(entries: &[BulkArchiveEntry], output_root: &Path) -> R
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
         }
-        if std::fs::rename(&entry.source_path, &destination).is_ok() {
-            continue;
+        if destination.exists() {
+            return Err(format!(
+                "Bulk output file already exists while finalizing: {}",
+                destination.display()
+            ));
         }
 
-        std::fs::copy(&entry.source_path, &destination).map_err(|error| {
-            format!(
-                "Could not copy {} into bulk output folder: {error}",
-                entry.source_path.display()
-            )
-        })?;
-        std::fs::remove_file(&entry.source_path).map_err(|error| {
-            format!(
-                "Could not delete {} after moving into bulk output folder: {error}",
-                entry.source_path.display()
-            )
-        })?;
+        copy_file_verified(&entry.source_path, &destination)?;
     }
     Ok(())
+}
+
+fn copy_file_verified(source: &Path, destination: &Path) -> Result<(), String> {
+    let source_metadata = std::fs::metadata(source).map_err(|error| {
+        format!(
+            "Could not inspect {} before copying into bulk output folder: {error}",
+            source.display()
+        )
+    })?;
+    if !source_metadata.is_file() {
+        return Err(format!(
+            "Could not copy {} into bulk output folder because it is not a file.",
+            source.display()
+        ));
+    }
+
+    let copied = std::fs::copy(source, destination).map_err(|error| {
+        format!(
+            "Could not copy {} into bulk output folder: {error}",
+            source.display()
+        )
+    })?;
+    if copied != source_metadata.len() {
+        return Err(format!(
+            "Could not verify copied bulk output file {}: copied {copied} bytes but expected {} bytes.",
+            destination.display(),
+            source_metadata.len()
+        ));
+    }
+
+    let destination_metadata = std::fs::metadata(destination).map_err(|error| {
+        format!(
+            "Could not inspect copied bulk output file {}: {error}",
+            destination.display()
+        )
+    })?;
+    if !destination_metadata.is_file() || destination_metadata.len() != source_metadata.len() {
+        return Err(format!(
+            "Could not verify copied bulk output file {}: destination size does not match source.",
+            destination.display()
+        ));
+    }
+
+    let source_crc = crc32_for_file(source)?;
+    let destination_crc = crc32_for_file(destination)?;
+    if source_crc != destination_crc {
+        return Err(format!(
+            "Could not verify copied bulk output file {}: checksum does not match source.",
+            destination.display()
+        ));
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination)
+        .map_err(|error| {
+            format!(
+                "Could not reopen copied bulk output file {}: {error}",
+                destination.display()
+            )
+        })?;
+    file.sync_all().map_err(|error| {
+        format!(
+            "Could not flush copied bulk output file {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+fn crc32_for_file(path: &Path) -> Result<u32, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("Could not open {} for checksum: {error}", path.display()))?;
+    let mut crc = 0xffff_ffff;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Could not read {} for checksum: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        crc = update_crc32(crc, &buffer[..read]);
+    }
+    Ok(!crc)
 }
 
 fn remove_incomplete_output(path: &Path) -> Result<(), String> {

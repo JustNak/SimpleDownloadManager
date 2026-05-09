@@ -10,5 +10,5 @@ assert.match(batchSource, /ActionButton\('Show'[\s\S]*revealBulkArchive\(complet
 assert.doesNotMatch(batchSource, /ActionButton\(bulkOpenLabel\(completedArchive\)[\s\S]*openBulkArchive\(completedArchive\.id\)/, 'completed bulk popup should no longer show a second Open action');
 assert.match(batchSource, /FailedBatchItemRow/, 'batch progress should render hoster resolver failures as explicit rows');
 assert.match(batchSource, /Not queued/, 'resolver failure rows should be labeled as not queued instead of pretending to be failed jobs');
-assert.match(batchSource, /retryBulkArchive\(failedArchive\.id\)/, 'folder finalization failures should expose retry from the popup');
+assert.match(batchSource, /retryFailedBulkArchive\(failedArchive\.id\)/, 'folder finalization failures should expose retry from the popup');
 assert.match(batchSource, /bulkUiState === 'failed'[\s\S]*failedArchive/, 'folder-failed controls should be tied to actual failed bulk metadata');

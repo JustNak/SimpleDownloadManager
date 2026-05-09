@@ -373,6 +373,77 @@ fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
 }
 
 #[test]
+fn folder_combine_failure_keeps_original_sources_and_removes_incomplete_output() {
+    let root = test_download_runtime_dir("bulk-folder-finish-failure-keeps-sources");
+    let source = root.join("source.txt");
+    let missing = root.join("missing.txt");
+    std::fs::write(&source, b"source").unwrap();
+    let prepared = PreparedBulkArchive {
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Bundle"),
+        entries: vec![
+            crate::state::BulkArchiveEntry {
+                source_path: source.clone(),
+                archive_name: "source.txt".into(),
+            },
+            crate::state::BulkArchiveEntry {
+                source_path: missing,
+                archive_name: "missing.txt".into(),
+            },
+        ],
+        cleanup_paths: vec![source.clone()],
+        staging_root: None,
+    };
+
+    let error = finish_prepared_bulk_archive_sync(prepared)
+        .expect_err("missing second source should fail folder finalization");
+
+    assert!(error.contains("missing.txt"));
+    assert_eq!(std::fs::read(&source).unwrap(), b"source");
+    assert!(!root.join("Bundle").exists());
+    assert!(
+        extracting_staging_dirs(&root).is_empty(),
+        "failed folder finalization should remove incomplete temp output folders"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn duplicate_raw_output_paths_fail_before_sources_are_deleted() {
+    let root = test_download_runtime_dir("bulk-folder-duplicate-raw-paths");
+    let source_a = root.join("source-a.txt");
+    let source_b = root.join("source-b.txt");
+    std::fs::write(&source_a, b"alpha").unwrap();
+    std::fs::write(&source_b, b"bravo").unwrap();
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_duplicate_raw".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Bundle"),
+        entries: vec![
+            crate::state::BulkArchiveEntry {
+                source_path: source_a.clone(),
+                archive_name: "same.txt".into(),
+            },
+            crate::state::BulkArchiveEntry {
+                source_path: source_b.clone(),
+                archive_name: "same.txt".into(),
+            },
+        ],
+    };
+
+    let error = prepare_bulk_archive_sources_without_extraction(archive)
+        .expect_err("duplicate output paths should be rejected before writing");
+
+    assert!(error.contains("Duplicate bulk output path"));
+    assert_eq!(std::fs::read(&source_a).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(&source_b).unwrap(), b"bravo");
+    assert!(!root.join("Bundle").exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn bulk_finalization_plan_counts_bytes_and_uses_move_for_folder_output() {
     let root = test_download_runtime_dir("bulk-finalization-plan-folder");
     let readme = root.join("readme.txt");
@@ -534,6 +605,106 @@ fn archive_extraction_retries_transient_file_locks() {
 
     assert_eq!(*extractor.calls.borrow(), 2);
     assert_eq!(prepared.entries.len(), 1);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn extraction_uses_isolated_staging_directory_per_archive_set() {
+    let root = test_download_runtime_dir("bulk-archive-isolated-extract-sets");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_isolated_extract".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("bulk-download"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+            archive_test_entry(&root, "Patch.001", b"patch-one"),
+            archive_test_entry(&root, "Patch.002", b"patch-two"),
+        ],
+    };
+    let extractor = RecordingArchiveExtractor::default();
+
+    let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect("archive sets should extract into isolated staging directories");
+
+    let output_dirs = extractor.output_dirs.borrow();
+    assert_eq!(output_dirs.len(), 2);
+    assert_ne!(output_dirs[0], output_dirs[1]);
+    assert!(output_dirs[0].ends_with("set-0"));
+    assert!(output_dirs[1].ends_with("set-1"));
+    assert_eq!(
+        prepared
+            .entries
+            .iter()
+            .map(|entry| entry.archive_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Game/content.bin", "Patch/content.bin"]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn duplicate_extracted_output_paths_fail_cleanly() {
+    let root = test_download_runtime_dir("bulk-archive-duplicate-extracted-paths");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_duplicate_extracted".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("bulk-download"),
+        entries: vec![
+            archive_test_entry(&root, "Game.part01.rar", b"first"),
+            archive_test_entry(&root, "Game.part02.rar", b"second"),
+            archive_test_entry(&root, "Patch.001", b"patch-one"),
+            archive_test_entry(&root, "Patch.002", b"patch-two"),
+        ],
+    };
+    let original_parts = archive
+        .entries
+        .iter()
+        .map(|entry| entry.source_path.clone())
+        .collect::<Vec<_>>();
+    let extractor = FlatContentArchiveExtractor;
+
+    let error = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
+        .expect_err("duplicate extracted output paths should fail");
+
+    assert!(error.contains("Duplicate bulk output path"));
+    for path in original_parts {
+        assert!(
+            path.exists(),
+            "source part should remain after failed extraction planning"
+        );
+    }
+    assert!(
+        extracting_staging_dirs(&root).is_empty(),
+        "failed extraction planning should remove staging directories"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn extracted_symlink_entries_are_rejected() {
+    let root = test_download_runtime_dir("bulk-archive-reject-extracted-symlink");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_symlink_extract".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("bulk-download"),
+        entries: vec![archive_test_entry(&root, "Game.rar", b"archive")],
+    };
+    let extractor = SymlinkArchiveExtractor;
+
+    let error = match prepare_bulk_archive_sources_with_extractor(archive, &extractor) {
+        Ok(_) => panic!("extracted symlink should be rejected"),
+        Err(error) if error == "symlink creation is not available in this test environment" => {
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+        Err(error) => error,
+    };
+
+    assert!(error.contains("Unsupported extracted archive entry"));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -2680,11 +2851,13 @@ fn archive_test_entry(root: &Path, name: &str, contents: &[u8]) -> crate::state:
 #[derive(Default)]
 struct RecordingArchiveExtractor {
     calls: std::cell::RefCell<Vec<PathBuf>>,
+    output_dirs: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl ArchiveExtractor for RecordingArchiveExtractor {
     fn extract(&self, first_part: &Path, output_dir: &Path) -> Result<(), String> {
         self.calls.borrow_mut().push(first_part.to_path_buf());
+        self.output_dirs.borrow_mut().push(output_dir.to_path_buf());
         let stem = first_part
             .file_name()
             .and_then(|value| value.to_str())
@@ -2695,6 +2868,39 @@ impl ArchiveExtractor for RecordingArchiveExtractor {
         std::fs::write(output_path, stem.as_bytes()).unwrap();
         Ok(())
     }
+}
+
+struct FlatContentArchiveExtractor;
+
+impl ArchiveExtractor for FlatContentArchiveExtractor {
+    fn extract(&self, _first_part: &Path, output_dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(output_dir).unwrap();
+        std::fs::write(output_dir.join("content.bin"), b"duplicate").unwrap();
+        Ok(())
+    }
+}
+
+struct SymlinkArchiveExtractor;
+
+impl ArchiveExtractor for SymlinkArchiveExtractor {
+    fn extract(&self, _first_part: &Path, output_dir: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(output_dir).unwrap();
+        let target = output_dir.join("target.bin");
+        let link = output_dir.join("linked.bin");
+        std::fs::write(&target, b"target").unwrap();
+        create_file_symlink_for_test(&target, &link)
+    }
+}
+
+#[cfg(unix)]
+fn create_file_symlink_for_test(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(target, link).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn create_file_symlink_for_test(target: &Path, link: &Path) -> Result<(), String> {
+    std::os::windows::fs::symlink_file(target, link)
+        .map_err(|_| "symlink creation is not available in this test environment".to_string())
 }
 
 #[derive(Default)]
@@ -2719,6 +2925,19 @@ impl ArchiveExtractor for LockOnceArchiveExtractor {
         std::fs::write(output_path, b"Game").unwrap();
         Ok(())
     }
+}
+
+fn extracting_staging_dirs(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.contains(".extracting-"))
+        })
+        .collect()
 }
 
 fn zip_central_directory_names(path: &Path) -> Vec<String> {

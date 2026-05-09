@@ -9,6 +9,7 @@ export type TorrentViewState =
   | 'torrent-attention'
   | 'torrent-queued'
   | 'torrent-completed';
+export type BulkViewState = 'bulk' | 'bulk-active' | 'bulk-completed';
 export type ViewState =
   | 'all'
   | 'attention'
@@ -17,6 +18,7 @@ export type ViewState =
   | 'completed'
   | 'settings'
   | CategoryViewState
+  | BulkViewState
   | TorrentViewState;
 
 export interface QueueCounts {
@@ -32,6 +34,11 @@ export interface QueueCounts {
     seeding: number;
     attention: number;
     queued: number;
+    completed: number;
+  };
+  bulk: {
+    all: number;
+    active: number;
     completed: number;
   };
 }
@@ -60,6 +67,7 @@ const finishedStates = ['completed', 'canceled'] as const;
 export function getQueueCounts(jobs: readonly DownloadJob[]): QueueCounts {
   const regularJobs = jobs.filter(isRegularDownload);
   const torrentJobs = jobs.filter(isTorrentDownload);
+  const bulkJobs = jobs.filter(isBulkDownload);
 
   return {
     all: regularJobs.length,
@@ -75,6 +83,11 @@ export function getQueueCounts(jobs: readonly DownloadJob[]): QueueCounts {
       attention: torrentJobs.filter(jobNeedsAttention).length,
       queued: torrentJobs.filter((job) => job.state === 'queued').length,
       completed: torrentJobs.filter((job) => stateIn(job.state, finishedStates)).length,
+    },
+    bulk: {
+      all: bulkJobs.length,
+      active: bulkJobs.filter((job) => stateIn(job.state, activeDownloadStates)).length,
+      completed: bulkJobs.filter((job) => stateIn(job.state, finishedStates)).length,
     },
   };
 }
@@ -101,6 +114,13 @@ export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState,
       return matchesSearchQuery(job, normalizedQuery);
     }
 
+    if (isBulkView(view)) {
+      if (!isBulkDownload(job)) return false;
+      if (view === 'bulk-active' && !stateIn(job.state, activeDownloadStates)) return false;
+      if (view === 'bulk-completed' && !stateIn(job.state, finishedStates)) return false;
+      return matchesSearchQuery(job, normalizedQuery);
+    }
+
     if (!isRegularDownload(job)) return false;
     if (view === 'attention' && !jobNeedsAttention(job)) return false;
     if (view === 'active' && !stateIn(job.state, activeDownloadStates)) return false;
@@ -112,6 +132,10 @@ export function filterJobsForView(jobs: readonly DownloadJob[], view: ViewState,
 
 export function isTorrentView(view: ViewState): view is TorrentViewState {
   return view === 'torrents' || view.startsWith('torrent-');
+}
+
+export function isBulkView(view: ViewState): view is BulkViewState {
+  return view === 'bulk' || view.startsWith('bulk-');
 }
 
 export function getTorrentFooterStats(jobs: readonly DownloadJob[]): TorrentFooterStats {
@@ -165,11 +189,19 @@ export function jobNeedsAttention(job: DownloadJob): boolean {
 }
 
 function isRegularDownload(job: DownloadJob): boolean {
-  return !isTorrentDownload(job);
+  return !isTorrentDownload(job) && !isBulkDownload(job);
 }
 
 function isTorrentDownload(job: DownloadJob): boolean {
   return job.transferKind === 'torrent';
+}
+
+function isBulkDownload(job: DownloadJob): boolean {
+  return job.transferKind === 'http'
+    && (
+      Boolean(job.bulkArchive)
+      || (job as DownloadJob & { bulkAggregate?: boolean }).bulkAggregate === true
+    );
 }
 
 function stateIn(state: DownloadJob['state'], states: readonly string[]): boolean {

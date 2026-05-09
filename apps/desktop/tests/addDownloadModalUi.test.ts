@@ -42,7 +42,8 @@ assert.match(source, /<\/div>\s*<input class="h-10 w-full rounded-md border bord
 assert.doesNotMatch(source, /md:grid-cols-\[minmax\(0,140px\)_minmax\(0,1fr\)\]/, 'bulk combine panel should not keep the old two-column grid layout');
 assert.doesNotMatch(source, /md:grid-cols-\[170px_minmax\(0,1fr\)\]/, 'bulk output controls should not reserve a fixed grid column before the name input');
 assert.match(source, /archiveNameTouched/, 'manual bulk archive names should not be overwritten by later pasted links');
-assert.match(source, /addJobs\(urls, trimmedArchiveName, \{ resolveHosterLinks: true, startPaused: true \}\)/, 'bulk submissions should resolve hoster links and wait for explicit popup Start without an archive option');
+assert.match(source, /bulkStartBehavior/, 'bulk submissions should read the configured start behavior');
+assert.match(source, /addJobs\(urls, trimmedArchiveName, \{ resolveHosterLinks: true, startPaused: bulkStartBehavior !== 'start_immediately' \}\)/, 'bulk submissions should resolve hoster links and use the configured review/start behavior without an archive option');
 assert.match(source, /Resolving links\.\.\./, 'bulk submissions should show resolver-specific wait feedback while hoster links are being prepared');
 assert.match(source, /isSubmitting = true;[\s\S]*submitStatusLabel = mode === 'bulk' \? 'Resolving links\.\.\.' : 'Adding\.\.\.';[\s\S]*await tick\(\);[\s\S]*try \{/, 'submit should yield after setting the loading state so the buffer can paint before backend work starts');
 assert.doesNotMatch(source, /rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground[\s\S]*<span>\{readyLabel\}<\/span>/, 'the standalone ready summary box should be removed');

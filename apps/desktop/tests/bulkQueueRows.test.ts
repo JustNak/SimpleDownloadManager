@@ -76,12 +76,17 @@ if (!isBulkAggregateJob(aggregate)) {
 }
 assert.deepEqual(aggregate.bulkMemberIds, ['part_1', 'part_2']);
 assert.equal(aggregate.bulkArchiveId, 'bulk_1');
+assert.deepEqual(
+  aggregate.bulkMembers.map((member) => member.id),
+  ['part_1', 'part_2'],
+  'aggregate rows should expose member data for inline expansion',
+);
 
 assert.deepEqual(
   getQueueCounts(rows),
   {
-    all: 2,
-    active: 1,
+    all: 1,
+    active: 0,
     attention: 0,
     queued: 0,
     completed: 1,
@@ -90,7 +95,7 @@ assert.deepEqual(
       program: 0,
       picture: 0,
       video: 0,
-      compressed: 1,
+      compressed: 0,
       music: 0,
       other: 0,
     },
@@ -102,14 +107,25 @@ assert.deepEqual(
       queued: 0,
       completed: 0,
     },
+    bulk: {
+      all: 1,
+      active: 1,
+      completed: 0,
+    },
   },
-  'counts should treat the bulk archive as one regular compressed download',
+  'counts should isolate the bulk archive from regular downloads',
 );
 
 assert.deepEqual(
   filterJobsForView(rows, 'all', 'part02').map((row) => row.id),
+  [],
+  'normal all-download search should not surface bulk archive members',
+);
+
+assert.deepEqual(
+  filterJobsForView(rows, 'bulk', 'part02').map((row) => row.id),
   [aggregate.id],
-  'search should match filenames from collapsed bulk members',
+  'bulk search should match filenames from collapsed bulk members',
 );
 
 const completedRows = groupBulkQueueRows([

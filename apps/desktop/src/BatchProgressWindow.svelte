@@ -17,6 +17,7 @@
   import {
     activeBulkFinalizingStepId,
     bulkCancelConfirmPlan,
+    bulkFailedRetrySelection,
     bulkFinalizingSteps,
     bulkReviewStartSelection,
     calculateBatchProgress,
@@ -68,6 +69,7 @@
   const bulkUiState = $derived(context?.kind === 'bulk' ? rawBulkUiState : null);
   const isBulkReviewPhase = $derived(bulkUiState === 'review');
   const selectedBulkCount = $derived(jobs.filter((job) => selectedBulkJobIds.has(job.id)).length);
+  const failedRetrySelection = $derived(bulkFailedRetrySelection(jobs, selectedBulkJobIds));
   const completedArchive = $derived(jobs.find((job) => (
     job.bulkArchive?.archiveStatus === 'completed'
     && Boolean(job.bulkArchive.outputPath)
@@ -153,12 +155,12 @@
   });
 
   $effect(() => {
-    if (context?.kind !== 'bulk' || bulkUiState !== 'review') {
+    if (context?.kind !== 'bulk' || (bulkUiState !== 'review' && bulkUiState !== 'failed')) {
       reviewSelectionSignature = '';
       return;
     }
 
-    const nextSignature = jobs.map((job) => job.id).join('|');
+    const nextSignature = `${bulkUiState}:${jobs.map((job) => job.id).join('|')}`;
     if (nextSignature !== reviewSelectionSignature) {
       selectedBulkJobIds = new Set(jobs.map((job) => job.id));
       reviewSelectionSignature = nextSignature;
@@ -288,6 +290,21 @@
         await deleteJobs(selection.excludedJobs.map((job) => job.id), false);
       }
       await resumeJobs(selection.resumableJobs.map((job) => job.id));
+    });
+  }
+
+  function retryFailedBulkArchive(archiveId: string) {
+    const selection = failedRetrySelection;
+    if (!selection.canRetry) {
+      errorMessage = 'Select at least two files to retry the folder.';
+      return;
+    }
+
+    void runAction(async () => {
+      if (selection.excludedJobIds.length > 0) {
+        await deleteJobs(selection.excludedJobIds, true);
+      }
+      await retryBulkArchive(archiveId);
     });
   }
 
@@ -473,6 +490,8 @@
 
       {#if context.kind === 'bulk' && bulkUiState === 'review' && isUntouchedBulkReviewGate(jobs)}
         {@render BulkReviewList(jobs, failedItems)}
+      {:else if context.kind === 'bulk' && bulkUiState === 'failed'}
+        {@render BulkFailedRetryList(jobs, failedItems)}
       {:else}
         {@render BatchJobList(jobs, failedItems)}
       {/if}
@@ -507,6 +526,56 @@
         {/if}
         {#each renderedBatchJobs as job (job.id)}
           {@render BatchJobRow(job)}
+        {/each}
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.bottomPadding}px;`}></div>
+        {/if}
+        {#each failedItems as item, index (`${item.url}-${index}`)}
+          {@render FailedBatchItemRow(item)}
+        {/each}
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
+{#snippet BulkFailedRetryList(jobs: DownloadJob[], failedItems: FailedBatchItem[])}
+  <section bind:this={batchListScrollRoot} class="mt-3 min-h-0 flex-1 overflow-y-auto rounded border border-border/60 bg-background/40">
+    {#if jobs.length === 0 && failedItems.length === 0}
+      <div class="flex h-full min-h-[120px] items-center justify-center px-4 text-center text-sm text-muted-foreground">
+        Waiting for queued files to appear.
+      </div>
+    {:else}
+      <div class="divide-y divide-border/60">
+        {#if virtualBatchQueue.enabled}
+          <div style={`height: ${virtualBatchQueue.topPadding}px;`}></div>
+        {/if}
+        {#each renderedBatchJobs as job (job.id)}
+          {@const selected = selectedBulkJobIds.has(job.id)}
+          {@const rowProgress = Math.max(0, Math.min(100, job.progress))}
+          <label class={`grid cursor-pointer grid-cols-[28px_40px_minmax(0,1fr)_86px] items-center gap-2 px-3 py-2 transition hover:bg-row-hover ${selected ? '' : 'opacity-55'}`}>
+            <input
+              type="checkbox"
+              checked={selected}
+              onchange={() => toggleBulkJobSelection(job.id)}
+              class="h-4 w-4 accent-primary"
+              aria-label={`${selected ? 'Exclude' : 'Include'} ${job.filename}`}
+            />
+            <FileBadge filename={job.filename} transferKind={job.transferKind} />
+            <div class="min-w-0">
+              <div class={`truncate text-sm font-semibold leading-5 ${selected ? 'text-foreground' : 'text-muted-foreground'}`} title={job.filename}>{job.filename}</div>
+              <div class="truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
+              <div class="mt-1 h-1 overflow-hidden rounded-full bg-progress-track">
+                <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${selected ? progressColor(job.state) : 'bg-muted-foreground/35'}`} style={`width: ${rowProgress}%`}></div>
+              </div>
+            </div>
+            <div class="min-w-0 text-right text-xs">
+              <div class={selected ? `font-semibold ${statusTextClass(job.state)}` : 'font-semibold text-muted-foreground'}>{selected ? statusText(job) : 'Excluded'}</div>
+              <div class="mt-0.5 tabular-nums text-muted-foreground">{rowProgress.toFixed(0)}%</div>
+              <div class="truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
+                {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
+              </div>
+            </div>
+          </label>
         {/each}
         {#if virtualBatchQueue.enabled}
           <div style={`height: ${virtualBatchQueue.bottomPadding}px;`}></div>
@@ -680,7 +749,7 @@
         {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
       {:else if bulkUiState === 'failed'}
         {#if failedArchive}
-          {@render ActionButton('Retry folder', RotateCcw, () => void runAction(() => retryBulkArchive(failedArchive.id)), isBusy, 'primary')}
+          {@render ActionButton('Retry folder', RotateCcw, () => retryFailedBulkArchive(failedArchive.id), isBusy || !failedRetrySelection.canRetry, 'primary')}
         {/if}
         {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
       {/if}

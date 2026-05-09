@@ -135,12 +135,11 @@ impl SharedState {
         let bulk_archive =
             if let Some(name) = bulk_archive_name.filter(|_| normalized_entries.len() > 1) {
                 let name = normalize_bulk_output_name(&name, bulk_output_kind);
-                let download_dir = {
+                let bulk_output_dir = {
                     let state = self.inner.read().await;
-                    PathBuf::from(&state.settings.download_directory)
+                    bulk_output_directory_from_settings(&state.settings)
                 };
-                let output_path =
-                    prepare_bulk_output_directory(&download_dir, bulk_output_kind)?.join(&name);
+                let output_path = prepare_bulk_output_directory(&bulk_output_dir)?.join(&name);
                 if output_path.exists() {
                     return Err(BackendError {
                         code: "DESTINATION_EXISTS",

@@ -5,6 +5,13 @@ export const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
+export function defaultBulkDownloadDirectory(downloadDirectory: string): string {
+  const trimmed = downloadDirectory.trim();
+  if (!trimmed) return 'Bulk';
+  const separator = trimmed.includes('/') && !trimmed.includes('\\') ? '/' : '\\';
+  return `${trimmed.replace(/[\\/]+$/, '')}${separator}Bulk`;
+}
+
 export function createDefaultExtensionIntegrationSettings(): ExtensionIntegrationSettings {
   return {
     enabled: true,
@@ -38,6 +45,14 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       portForwardingEnabled: false,
       portForwardingPort: 42000,
       peerConnectionWatchdogMode: 'diagnose',
+    },
+    bulk: {
+      outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),
+      maxConcurrentDownloads: 2,
+      autoRetryOverrideEnabled: false,
+      autoRetryAttempts: 3,
+      startBehavior: 'review_then_start',
+      expandActiveRowsByDefault: false,
     },
     notificationsEnabled: true,
     theme: 'system',

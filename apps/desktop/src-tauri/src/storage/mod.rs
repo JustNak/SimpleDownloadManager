@@ -423,6 +423,30 @@ pub struct TorrentSettings {
     pub peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkStartBehavior {
+    ReviewThenStart,
+    StartImmediately,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkDownloadSettings {
+    #[serde(default)]
+    pub output_directory: String,
+    #[serde(default = "default_bulk_max_concurrent_downloads")]
+    pub max_concurrent_downloads: u32,
+    #[serde(default)]
+    pub auto_retry_override_enabled: bool,
+    #[serde(default = "default_auto_retry_attempts")]
+    pub auto_retry_attempts: u32,
+    #[serde(default)]
+    pub start_behavior: BulkStartBehavior,
+    #[serde(default)]
+    pub expand_active_rows_by_default: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionIntegrationSettings {
@@ -446,33 +470,96 @@ pub struct ExtensionIntegrationSettings {
 
 const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub download_directory: String,
     pub max_concurrent_downloads: u32,
-    #[serde(default = "default_auto_retry_attempts")]
     pub auto_retry_attempts: u32,
-    #[serde(default)]
     pub speed_limit_kib_per_second: u32,
-    #[serde(default)]
     pub download_performance_mode: DownloadPerformanceMode,
-    #[serde(default)]
     pub torrent: TorrentSettings,
+    pub bulk: BulkDownloadSettings,
     pub notifications_enabled: bool,
     pub theme: Theme,
-    #[serde(default = "default_accent_color")]
     pub accent_color: String,
-    #[serde(default = "default_show_details_on_click")]
     pub show_details_on_click: bool,
-    #[serde(default)]
     pub queue_row_size: QueueRowSize,
-    #[serde(default)]
     pub start_on_startup: bool,
-    #[serde(default)]
     pub startup_launch_mode: StartupLaunchMode,
-    #[serde(default)]
     pub extension_integration: ExtensionIntegrationSettings,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SettingsWire {
+    download_directory: String,
+    max_concurrent_downloads: u32,
+    auto_retry_attempts: u32,
+    speed_limit_kib_per_second: u32,
+    download_performance_mode: DownloadPerformanceMode,
+    torrent: TorrentSettings,
+    bulk: BulkDownloadSettings,
+    notifications_enabled: bool,
+    theme: Theme,
+    accent_color: String,
+    show_details_on_click: bool,
+    queue_row_size: QueueRowSize,
+    start_on_startup: bool,
+    startup_launch_mode: StartupLaunchMode,
+    extension_integration: ExtensionIntegrationSettings,
+}
+
+impl Default for SettingsWire {
+    fn default() -> Self {
+        let settings = Settings::default();
+        Self {
+            download_directory: settings.download_directory,
+            max_concurrent_downloads: settings.max_concurrent_downloads,
+            auto_retry_attempts: settings.auto_retry_attempts,
+            speed_limit_kib_per_second: settings.speed_limit_kib_per_second,
+            download_performance_mode: settings.download_performance_mode,
+            torrent: settings.torrent,
+            bulk: settings.bulk,
+            notifications_enabled: settings.notifications_enabled,
+            theme: settings.theme,
+            accent_color: settings.accent_color,
+            show_details_on_click: settings.show_details_on_click,
+            queue_row_size: settings.queue_row_size,
+            start_on_startup: settings.start_on_startup,
+            startup_launch_mode: settings.startup_launch_mode,
+            extension_integration: settings.extension_integration,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SettingsWire::deserialize(deserializer)?;
+        let mut bulk = wire.bulk;
+        normalize_bulk_settings_for_download_directory(&mut bulk, &wire.download_directory);
+
+        Ok(Self {
+            download_directory: wire.download_directory,
+            max_concurrent_downloads: wire.max_concurrent_downloads,
+            auto_retry_attempts: wire.auto_retry_attempts,
+            speed_limit_kib_per_second: wire.speed_limit_kib_per_second,
+            download_performance_mode: wire.download_performance_mode,
+            torrent: wire.torrent,
+            bulk,
+            notifications_enabled: wire.notifications_enabled,
+            theme: wire.theme,
+            accent_color: wire.accent_color,
+            show_details_on_click: wire.show_details_on_click,
+            queue_row_size: wire.queue_row_size,
+            start_on_startup: wire.start_on_startup,
+            startup_launch_mode: wire.startup_launch_mode,
+            extension_integration: wire.extension_integration,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -583,8 +670,10 @@ pub struct PersistedState {
 
 impl Default for Settings {
     fn default() -> Self {
+        let download_directory = default_download_directory();
         Self {
-            download_directory: default_download_directory(),
+            bulk: BulkDownloadSettings::for_download_directory(&download_directory),
+            download_directory,
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
@@ -599,6 +688,34 @@ impl Default for Settings {
             startup_launch_mode: StartupLaunchMode::Open,
             extension_integration: ExtensionIntegrationSettings::default(),
         }
+    }
+}
+
+impl BulkDownloadSettings {
+    pub fn for_download_directory(download_directory: &str) -> Self {
+        Self {
+            output_directory: default_bulk_download_directory_for(download_directory),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for BulkDownloadSettings {
+    fn default() -> Self {
+        Self {
+            output_directory: String::new(),
+            max_concurrent_downloads: default_bulk_max_concurrent_downloads(),
+            auto_retry_override_enabled: false,
+            auto_retry_attempts: default_auto_retry_attempts(),
+            start_behavior: BulkStartBehavior::ReviewThenStart,
+            expand_active_rows_by_default: false,
+        }
+    }
+}
+
+impl Default for BulkStartBehavior {
+    fn default() -> Self {
+        Self::ReviewThenStart
     }
 }
 
@@ -643,6 +760,10 @@ fn default_auto_retry_attempts() -> u32 {
     3
 }
 
+fn default_bulk_max_concurrent_downloads() -> u32 {
+    2
+}
+
 fn default_torrent_enabled() -> bool {
     true
 }
@@ -680,6 +801,60 @@ pub fn default_torrent_download_directory_for(download_directory: &str) -> Strin
         .join("Torrent")
         .display()
         .to_string()
+}
+
+pub fn default_bulk_download_directory_for(download_directory: &str) -> String {
+    let trimmed = download_directory.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return "Bulk".into();
+    }
+
+    let separator = if trimmed.contains('/') && !trimmed.contains('\\') {
+        "/"
+    } else if trimmed.contains('\\') {
+        "\\"
+    } else {
+        std::path::MAIN_SEPARATOR_STR
+    };
+
+    format!("{trimmed}{separator}Bulk")
+}
+
+pub fn normalize_bulk_settings_for_download_directory(
+    settings: &mut BulkDownloadSettings,
+    download_directory: &str,
+) {
+    let output_directory = settings.output_directory.trim();
+    let default_output_directory = default_bulk_download_directory_for(download_directory);
+    let profile_default_output_directory =
+        default_bulk_download_directory_for(&default_download_directory());
+    settings.output_directory = if output_directory.is_empty()
+        || equivalent_settings_path(output_directory, &profile_default_output_directory)
+    {
+        default_output_directory
+    } else {
+        output_directory.to_string()
+    };
+    settings.max_concurrent_downloads = settings.max_concurrent_downloads.max(1);
+    settings.auto_retry_attempts = settings.auto_retry_attempts.min(10);
+}
+
+fn equivalent_settings_path(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        let normalized = value
+            .trim()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+
+        if cfg!(windows) {
+            normalized.to_ascii_lowercase()
+        } else {
+            normalized
+        }
+    }
+
+    normalize(left) == normalize(right)
 }
 
 fn default_download_directory_path() -> PathBuf {
@@ -1122,6 +1297,19 @@ mod tests {
 
         assert!(settings.download_directory.ends_with("Downloads"));
         assert_eq!(settings.auto_retry_attempts, 3);
+        assert_eq!(settings.bulk.max_concurrent_downloads, 2);
+        assert_eq!(settings.bulk.auto_retry_attempts, 3);
+        assert!(!settings.bulk.auto_retry_override_enabled);
+        assert_eq!(
+            settings.bulk.start_behavior,
+            BulkStartBehavior::ReviewThenStart
+        );
+        assert!(!settings.bulk.expand_active_rows_by_default);
+        assert!(
+            settings.bulk.output_directory.ends_with("Downloads/Bulk")
+                || settings.bulk.output_directory.ends_with(r"Downloads\Bulk"),
+            "bulk output directory should default below the main download directory"
+        );
         assert_eq!(settings.speed_limit_kib_per_second, 0);
         assert_eq!(
             settings.download_performance_mode,
@@ -1165,6 +1353,12 @@ mod tests {
 
         assert!(settings.show_details_on_click);
         assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
+        assert_eq!(settings.bulk.max_concurrent_downloads, 2);
+        assert_eq!(
+            settings.bulk.start_behavior,
+            BulkStartBehavior::ReviewThenStart
+        );
+        assert_eq!(settings.bulk.output_directory, "C:/Downloads/Bulk");
     }
 
     #[test]

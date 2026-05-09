@@ -10,6 +10,7 @@ export const DETAILS_EXPANDED_HEIGHT = 220;
 export const DETAILS_MAX_HEIGHT = 300;
 export const TABLE_MIN_HEIGHT = 180;
 export const QUEUE_TABLE_GRID_CLASS = 'grid-cols-[minmax(420px,2.8fr)_150px_110px_100px_150px_72px]';
+export const BULK_QUEUE_TABLE_GRID_CLASS = 'grid-cols-[minmax(420px,2.8fr)_150px_120px_150px_72px]';
 
 export function queueRowSizeClass(size: QueueRowSize): string {
   switch (size) {

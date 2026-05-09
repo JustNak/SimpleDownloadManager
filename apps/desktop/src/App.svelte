@@ -46,6 +46,7 @@
     filterJobsForView,
     getQueueCounts,
     getTorrentFooterStats,
+    isBulkView,
     isTorrentView,
     type TorrentFooterStats,
     type ViewState,
@@ -143,6 +144,7 @@
   let searchQuery = $state('');
   let sortMode = $state<SortMode>(readStoredSortMode());
   let isDownloadSectionExpanded = $state(true);
+  let isBulkSectionExpanded = $state(true);
   let isTorrentSectionExpanded = $state(true);
   let selectedJobId = $state<string | null>(initialSelectedJobIdFromSearch(window.location.search));
   let isAddModalOpen = $state(false);
@@ -185,6 +187,7 @@
   const canPauseAny = $derived(jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state)));
   const canResumeAny = $derived(jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state)));
   const canRetryFailed = $derived(canRetryFailedDownloads(jobs));
+  const isBulkStatusView = $derived(isBulkView(view));
   const isTorrentStatusView = $derived(isTorrentView(view));
   const hasActiveTorrentJobs = $derived(jobs.some(
     (job) =>
@@ -192,7 +195,10 @@
       && [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state),
   ));
   const totalDownloadSpeed = $derived(jobs
-    .filter((job) => job.state === JobState.Downloading)
+    .filter((job) => job.state === JobState.Downloading && job.transferKind === 'http' && !job.bulkArchive)
+    .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0));
+  const totalBulkDownloadSpeed = $derived(jobs
+    .filter((job) => job.state === JobState.Downloading && job.bulkArchive)
     .reduce((total, job) => total + (progressMetricsByJobId[job.id]?.averageSpeed ?? job.speed), 0));
 
   $effect(() => {
@@ -1048,10 +1054,11 @@
     }
 
     const batchResult = outcome.result as AddJobsResult;
+    const targetView = outcome.mode === 'bulk' ? 'bulk' : 'all';
     if (batchResult.queuedCount === 0) {
       const failedCount = batchResult.failedItems?.length ?? 0;
       if (failedCount > 0) {
-        view = 'all';
+        view = targetView;
         addToast({
           type: 'warning',
           title: 'Some Links Were Not Queued',
@@ -1060,7 +1067,7 @@
         return;
       }
 
-      view = 'all';
+      view = targetView;
       addToast({
         type: 'info',
         title: 'Already in Queue',
@@ -1069,7 +1076,7 @@
       return;
     }
 
-    view = 'all';
+    view = targetView;
     const failedCount = batchResult.failedItems?.length ?? 0;
     if (failedCount > 0) {
       addToast({
@@ -1171,6 +1178,8 @@
         return Download;
       case 'torrenting':
         return Gauge;
+      case 'bulk':
+        return FileArchive;
       case 'appearance':
         return Palette;
       case 'extension':
@@ -1324,6 +1333,26 @@
           {@render NavItem(Gauge, 'Active', view === 'active', () => requestViewChange('active'), counts.active)}
           {@render NavItem(CheckCircle2, 'Completed', view === 'completed', () => requestViewChange('completed'), counts.completed)}
           <div class="mt-2 border-t border-border/70 pt-2">
+            <div class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Bulk Downloads</div>
+            <div class="flex items-center gap-1">
+              {@render SectionCollapseButton(
+                isBulkSectionExpanded,
+                'Collapse bulk downloads section',
+                'Expand bulk downloads section',
+                () => isBulkSectionExpanded = !isBulkSectionExpanded,
+              )}
+              <div class="min-w-0 flex-1">
+                {@render NavItem(FileArchive, 'Bulk Downloads', view === 'bulk', () => requestViewChange('bulk'), counts.bulk.all)}
+              </div>
+            </div>
+            {#if isBulkSectionExpanded}
+              <div class="mb-1 ml-3 mt-0.5 border-l border-border/80 pl-2">
+                {@render NavItem(Gauge, 'Active', view === 'bulk-active', () => requestViewChange('bulk-active'), counts.bulk.active, true, 15)}
+                {@render NavItem(CheckCircle2, 'Completed', view === 'bulk-completed', () => requestViewChange('bulk-completed'), counts.bulk.completed, true, 15)}
+              </div>
+            {/if}
+          </div>
+          <div class="mt-2 border-t border-border/70 pt-2">
             <div class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Torrents</div>
             <div class="flex items-center gap-1">
               {@render SectionCollapseButton(
@@ -1389,6 +1418,7 @@
           {progressMetricsByJobId}
           showDetailsOnClick={liveSettings.showDetailsOnClick}
           queueRowSize={liveSettings.queueRowSize}
+          expandActiveBulkRowsByDefault={liveSettings.bulk.expandActiveRowsByDefault}
           onSortChange={handleSortModeChange}
           {selectedJobId}
           onSelectJob={(id) => selectedJobId = id}
@@ -1409,12 +1439,12 @@
         />
 
         {@render StatusBar(
-          isTorrentStatusView ? 'torrents' : 'downloads',
-          counts.active,
-          totalDownloadSpeed,
+          isBulkStatusView ? 'bulk' : isTorrentStatusView ? 'torrents' : 'downloads',
+          isBulkStatusView ? counts.bulk.active : isTorrentStatusView ? counts.torrents.active : counts.active,
+          isBulkStatusView ? totalBulkDownloadSpeed : totalDownloadSpeed,
           torrentFooterStats,
           connectionState,
-          settings.maxConcurrentDownloads,
+          isBulkStatusView ? liveSettings.bulk.maxConcurrentDownloads : liveSettings.maxConcurrentDownloads,
         )}
       {/if}
     </main>
@@ -1427,6 +1457,7 @@
       <AddDownloadModalComponent
         onClose={() => isAddModalOpen = false}
         onAdded={handleAddDownloadResult}
+        bulkStartBehavior={liveSettings.bulk.startBehavior}
       />
     {/if}
   {/if}
@@ -1554,7 +1585,7 @@
   </button>
 {/snippet}
 
-{#snippet StatusBar(mode: 'downloads' | 'torrents', activeCount: number, downloadSpeed: number, torrentStats: TorrentFooterStats, connectionState: ConnectionState, connectionSlots: number)}
+{#snippet StatusBar(mode: 'downloads' | 'bulk' | 'torrents', activeCount: number, downloadSpeed: number, torrentStats: TorrentFooterStats, connectionState: ConnectionState, connectionSlots: number)}
   {@const connectionPresentation = connectionStatusPresentation(connectionState)}
   {@const ConnectionIcon = connectionPresentation.icon}
   <footer class="status-bar flex h-10 shrink-0 items-center justify-between border-t border-border bg-command px-6 text-xs text-muted-foreground">
@@ -1577,6 +1608,16 @@
         <span class="h-4 w-px bg-border"></span>
         <span class="flex items-center gap-2 text-muted-foreground">
           Total Ratio {formatTorrentStatusRatio(torrentStats.totalRatio)}
+        </span>
+      {:else if mode === 'bulk'}
+        <span class="flex items-center gap-2">
+          <FileArchive size={16} class="text-primary" />
+          {activeCount} active bulk downloads
+        </span>
+        <span class="h-4 w-px bg-border"></span>
+        <span class="flex items-center gap-2 text-foreground">
+          <Download size={16} class="text-primary" />
+          {formatBytes(downloadSpeed)}/s
         </span>
       {:else}
         <span class="flex items-center gap-2">
