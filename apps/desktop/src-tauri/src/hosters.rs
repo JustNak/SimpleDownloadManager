@@ -3,8 +3,9 @@ use futures_util::{stream, StreamExt};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{COOKIE, REFERER};
 use reqwest::redirect::Policy;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 use url::Url;
@@ -21,6 +22,14 @@ const HOSTER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const DATANODES_MAX_WAIT_SECONDS: u64 = 60;
 const DATANODES_MAX_PRELIMINARY_STEPS: usize = 2;
 const HOSTER_RESOLUTION_CONCURRENCY: usize = 6;
+const HOSTER_RESOLUTION_RETRY_ATTEMPTS: usize = 3;
+
+#[cfg(test)]
+const HOSTER_RESOLUTION_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(0), Duration::from_millis(0)];
+#[cfg(not(test))]
+const HOSTER_RESOLUTION_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(500), Duration::from_secs(2)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHosterLink {
@@ -33,6 +42,7 @@ pub struct ResolvedHosterLink {
 pub struct HosterResolutionError {
     pub code: &'static str,
     pub message: String,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +153,7 @@ pub async fn resolve_hoster_links_partial(
         let client = client.clone();
         async move {
             let failed_url = url.trim().to_string();
-            resolve_hoster_link(&client, url)
+            resolve_hoster_link_with_retry(&client, url)
                 .await
                 .map(|link| (index, link))
                 .map_err(|error| {
@@ -162,6 +172,43 @@ pub async fn resolve_hoster_links_partial(
     .await;
 
     ordered_resolved_hoster_batch(indexed, expected_len)
+}
+
+async fn resolve_hoster_link_with_retry(
+    client: &Client,
+    url: String,
+) -> Result<ResolvedHosterLink, HosterResolutionError> {
+    retry_hoster_resolution("hoster resolver", || {
+        let client = client.clone();
+        let url = url.clone();
+        async move { resolve_hoster_link(&client, url).await }
+    })
+    .await
+}
+
+async fn retry_hoster_resolution<T, F, Fut>(
+    _operation_name: &str,
+    mut operation: F,
+) -> Result<T, HosterResolutionError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, HosterResolutionError>>,
+{
+    let mut attempt = 0;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if error.retryable && attempt + 1 < HOSTER_RESOLUTION_RETRY_ATTEMPTS => {
+                let delay = HOSTER_RESOLUTION_RETRY_DELAYS
+                    .get(attempt)
+                    .copied()
+                    .unwrap_or_else(|| *HOSTER_RESOLUTION_RETRY_DELAYS.last().unwrap());
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn resolve_hoster_link(
@@ -184,22 +231,23 @@ async fn resolve_fuckingfast_link(
     client: &Client,
     url: &str,
 ) -> Result<ResolvedHosterLink, HosterResolutionError> {
-    let response =
-        client.get(url).send().await.map_err(|error| {
-            resolution_error(format!("Could not load FuckingFast page: {error}"))
-        })?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| reqwest_resolution_error("Could not load FuckingFast page", error))?;
 
     if !response.status().is_success() {
-        return Err(resolution_error(format!(
-            "Could not load FuckingFast page: HTTP {}.",
-            response.status()
-        )));
+        return Err(http_status_resolution_error(
+            "Could not load FuckingFast page",
+            response.status(),
+        ));
     }
 
     let html = response
         .text()
         .await
-        .map_err(|error| resolution_error(format!("Could not read FuckingFast page: {error}")))?;
+        .map_err(|error| reqwest_resolution_error("Could not read FuckingFast page", error))?;
     resolve_hoster_link_from_html(url, &html)
 }
 
@@ -216,19 +264,19 @@ async fn resolve_datanodes_link(
         .header(COOKIE, cookie.clone())
         .send()
         .await
-        .map_err(|error| resolution_error(format!("Could not load DataNodes page: {error}")))?;
+        .map_err(|error| reqwest_resolution_error("Could not load DataNodes page", error))?;
 
     if !response.status().is_success() {
-        return Err(resolution_error(format!(
-            "Could not load DataNodes page: HTTP {}.",
-            response.status()
-        )));
+        return Err(http_status_resolution_error(
+            "Could not load DataNodes page",
+            response.status(),
+        ));
     }
 
     let html = response
         .text()
         .await
-        .map_err(|error| resolution_error(format!("Could not read DataNodes page: {error}")))?;
+        .map_err(|error| reqwest_resolution_error("Could not read DataNodes page", error))?;
     let page =
         resolve_datanodes_download_page_from_html(html, &file_code, {
             let client = client.clone();
@@ -265,22 +313,18 @@ async fn resolve_datanodes_link(
         .send()
         .await
         .map_err(|error| {
-            resolution_error(format!(
-                "Could not request DataNodes standard download: {error}"
-            ))
+            reqwest_resolution_error("Could not request DataNodes standard download", error)
         })?;
 
     if !response.status().is_success() {
-        return Err(resolution_error(format!(
-            "Could not request DataNodes standard download: HTTP {}.",
-            response.status()
-        )));
+        return Err(http_status_resolution_error(
+            "Could not request DataNodes standard download",
+            response.status(),
+        ));
     }
 
     let json = response.text().await.map_err(|error| {
-        resolution_error(format!(
-            "Could not read DataNodes standard download response: {error}"
-        ))
+        reqwest_resolution_error("Could not read DataNodes standard download response", error)
     })?;
     let direct_url = extract_datanodes_direct_url_from_json(&json)?;
 
@@ -301,6 +345,7 @@ where
     Fut: Future<Output = Result<String, HosterResolutionError>>,
 {
     let mut preliminary_steps = 0;
+    let mut seen_preliminary_pages = HashSet::new();
     loop {
         if extract_html_tag(&html, "download-countdown").is_some() {
             let page = parse_datanodes_standard_download_page(&html)?;
@@ -316,9 +361,22 @@ where
         }
 
         let preliminary = parse_datanodes_preliminary_download_page(&html, file_code)?;
+        let signature = datanodes_preliminary_signature(&preliminary);
+        if !seen_preliminary_pages.insert(signature) {
+            return Err(resolution_error(
+                "DataNodes returned a repeated preliminary download page before exposing the standard download form.".into(),
+            ));
+        }
         html = request_preliminary(preliminary).await?;
         preliminary_steps += 1;
     }
+}
+
+fn datanodes_preliminary_signature(page: &DatanodesPreliminaryDownloadPage) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        page.action_url, page.op, page.id, page.fname, page.method_free
+    )
 }
 
 async fn request_datanodes_preliminary_download(
@@ -342,22 +400,21 @@ async fn request_datanodes_preliminary_download(
         .send()
         .await
         .map_err(|error| {
-            resolution_error(format!(
-                "Could not request DataNodes preliminary download: {error}"
-            ))
+            reqwest_resolution_error("Could not request DataNodes preliminary download", error)
         })?;
 
     if !response.status().is_success() {
-        return Err(resolution_error(format!(
-            "Could not request DataNodes preliminary download: HTTP {}.",
-            response.status()
-        )));
+        return Err(http_status_resolution_error(
+            "Could not request DataNodes preliminary download",
+            response.status(),
+        ));
     }
 
     response.text().await.map_err(|error| {
-        resolution_error(format!(
-            "Could not read DataNodes preliminary download response: {error}"
-        ))
+        reqwest_resolution_error(
+            "Could not read DataNodes preliminary download response",
+            error,
+        )
     })
 }
 
@@ -885,7 +942,7 @@ fn datanodes_element_is_actionable_free_method(
 }
 
 fn datanodes_signal_mentions_free_download(signal: &str) -> bool {
-    let normalized = signal.replace('_', " ").replace('-', " ");
+    let normalized = signal.replace(['_', '-'], " ");
     signal.contains("method_free")
         || signal.contains("method-free")
         || signal.contains("free_download")
@@ -1226,6 +1283,40 @@ fn resolution_error(message: String) -> HosterResolutionError {
     HosterResolutionError {
         code: "HOSTER_RESOLUTION_FAILED",
         message,
+        retryable: false,
+    }
+}
+
+fn transient_resolution_error(message: String) -> HosterResolutionError {
+    HosterResolutionError {
+        code: "HOSTER_RESOLUTION_FAILED",
+        message,
+        retryable: true,
+    }
+}
+
+fn reqwest_resolution_error(context: &str, error: reqwest::Error) -> HosterResolutionError {
+    if is_retryable_reqwest_error(&error) {
+        transient_resolution_error(format!("{context}: {error}"))
+    } else {
+        resolution_error(format!("{context}: {error}"))
+    }
+}
+
+fn is_retryable_reqwest_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_request()
+        || error.is_body()
+        || error.is_decode()
+}
+
+fn http_status_resolution_error(context: &str, status: StatusCode) -> HosterResolutionError {
+    let message = format!("{context}: HTTP {status}.");
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        transient_resolution_error(message)
+    } else {
+        resolution_error(message)
     }
 }
 
@@ -1498,6 +1589,75 @@ mod tests {
                 "Free Download >>".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn datanodes_resolver_stops_repeated_preliminary_pages() {
+        let html = r#"
+            <form method="POST" action="/download" id="downloadForm">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="id" value="wrpbp7ne3rby">
+                <input type="hidden" name="fname" value="file.rar">
+                <input type="hidden" name="referer" value="">
+                <button type="submit" name="method_free" value="Continue to Download">
+                    Continue to Download
+                </button>
+            </form>
+        "#;
+        let requests = std::cell::Cell::new(0);
+
+        let error =
+            resolve_datanodes_download_page_from_html(html.to_string(), "wrpbp7ne3rby", |_| {
+                requests.set(requests.get() + 1);
+                futures_util::future::ready(Ok(html.to_string()))
+            })
+            .await
+            .expect_err("repeated preliminary pages should stop without looping");
+
+        assert_eq!(requests.get(), 1);
+        assert!(
+            error.message.contains("repeated preliminary"),
+            "unexpected error: {}",
+            error.message
+        );
+    }
+
+    #[tokio::test]
+    async fn hoster_resolution_retries_transient_errors_before_success() {
+        let attempts = std::cell::Cell::new(0);
+
+        let resolved = retry_hoster_resolution("test resolver", || {
+            attempts.set(attempts.get() + 1);
+            futures_util::future::ready(if attempts.get() < 3 {
+                Err(transient_resolution_error(
+                    "temporary resolver outage".into(),
+                ))
+            } else {
+                Ok("resolved")
+            })
+        })
+        .await
+        .expect("transient resolver failures should retry");
+
+        assert_eq!(resolved, "resolved");
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn hoster_resolution_does_not_retry_terminal_errors() {
+        let attempts = std::cell::Cell::new(0);
+
+        let error = retry_hoster_resolution("test resolver", || {
+            attempts.set(attempts.get() + 1);
+            futures_util::future::ready(Err::<(), _>(resolution_error(
+                "DataNodes captcha-protected downloads are not supported.".into(),
+            )))
+        })
+        .await
+        .expect_err("terminal resolver failures should not retry");
+
+        assert_eq!(attempts.get(), 1);
+        assert!(!error.retryable);
     }
 
     #[test]

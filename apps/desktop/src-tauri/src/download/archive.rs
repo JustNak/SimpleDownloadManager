@@ -10,12 +10,17 @@ use std::os::windows::process::CommandExt;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 const ARCHIVE_EXTRACT_LOCK_RETRY_ATTEMPTS: usize = 8;
+const BULK_FILE_OPERATION_RETRY_ATTEMPTS: usize = 8;
 pub(super) const HUGE_BULK_ARCHIVE_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024 * 1024;
 
 #[cfg(test)]
 const ARCHIVE_EXTRACT_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 #[cfg(not(test))]
 const ARCHIVE_EXTRACT_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+#[cfg(test)]
+const BULK_FILE_OPERATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
+#[cfg(not(test))]
+const BULK_FILE_OPERATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(test)]
 pub(super) fn create_bulk_archive_sync(archive: BulkArchiveReady) -> Result<PathBuf, String> {
@@ -202,10 +207,12 @@ pub(super) fn finish_prepared_bulk_archive_sync(
             prepared.output_path.display()
         ));
     }
+    cleanup_stale_archive_staging_roots(&prepared.output_path, prepared.staging_root.as_deref())?;
 
     if let Some(parent) = prepared.output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create archive output directory: {error}"))?;
+        retry_bulk_file_operation("Could not create archive output directory", || {
+            std::fs::create_dir_all(parent)
+        })?;
     }
 
     let temp_path = temporary_output_path(&prepared.output_path, prepared.output_kind)?;
@@ -222,6 +229,7 @@ pub(super) fn finish_prepared_bulk_archive_sync(
     }
 
     let output_path = result?;
+    verify_finished_output(&output_path, prepared.output_kind)?;
     let cleanup_warnings = cleanup_original_archive_parts(&prepared.cleanup_paths);
     if let Some(staging_root) = &prepared.staging_root {
         let _ = std::fs::remove_dir_all(staging_root);
@@ -501,7 +509,13 @@ impl ArchiveGroupBuilder {
                     width = self.number_width.max(3)
                 )
             }
-            ArchivePartSuffix::SingleRar => format!("{}.rar", self.display_prefix),
+            ArchivePartSuffix::LegacyRar => {
+                if number == 1 {
+                    format!("{}.rar", self.display_prefix)
+                } else {
+                    format!("{}.r{:02}", self.display_prefix, number.saturating_sub(2))
+                }
+            }
         }
     }
 }
@@ -516,7 +530,7 @@ struct ArchiveGroupPart {
 enum ArchivePartSuffix {
     PartRar,
     Numbered,
-    SingleRar,
+    LegacyRar,
 }
 
 struct DetectedArchivePart {
@@ -556,9 +570,9 @@ fn detect_archive_part(name: &str) -> Option<DetectedArchivePart> {
         }
 
         return Some(DetectedArchivePart {
-            key: format!("rar:{}", without_rar.to_ascii_lowercase()),
+            key: format!("legacy-rar:{}", without_rar.to_ascii_lowercase()),
             display_prefix: without_rar.to_string(),
-            suffix: ArchivePartSuffix::SingleRar,
+            suffix: ArchivePartSuffix::LegacyRar,
             part_number: 1,
             number_width: 1,
         });
@@ -566,6 +580,26 @@ fn detect_archive_part(name: &str) -> Option<DetectedArchivePart> {
 
     let dot_index = file_name.rfind('.')?;
     let extension = &file_name[dot_index + 1..];
+    let lower_extension = extension.to_ascii_lowercase();
+    if lower_extension.len() == 3
+        && lower_extension.starts_with('r')
+        && lower_extension[1..]
+            .chars()
+            .all(|value| value.is_ascii_digit())
+    {
+        let Ok(part_index) = lower_extension[1..].parse::<u32>() else {
+            return None;
+        };
+        let display_prefix = file_name[..dot_index].to_string();
+        return Some(DetectedArchivePart {
+            key: format!("legacy-rar:{}", display_prefix.to_ascii_lowercase()),
+            display_prefix,
+            suffix: ArchivePartSuffix::LegacyRar,
+            part_number: part_index.saturating_add(2),
+            number_width: 2,
+        });
+    }
+
     if extension.len() == 3 && extension.chars().all(|value| value.is_ascii_digit()) {
         let Ok(part_number) = extension.parse::<u32>() else {
             return None;
@@ -587,10 +621,6 @@ fn detect_archive_part(name: &str) -> Option<DetectedArchivePart> {
 }
 
 fn validate_archive_group_sequence(builder: &ArchiveGroupBuilder) -> Result<(), String> {
-    if matches!(builder.suffix, ArchivePartSuffix::SingleRar) {
-        return Ok(());
-    }
-
     let Some(max_part_number) = builder.parts.iter().map(|part| part.part_number).max() else {
         return Ok(());
     };
@@ -790,13 +820,14 @@ fn finish_prepared_zip_output(
     prepared: &PreparedBulkArchive,
     temp_path: &Path,
 ) -> Result<PathBuf, String> {
-    let mut file = std::fs::File::create(temp_path)
-        .map_err(|error| format!("Could not create archive file: {error}"))?;
+    let mut file = retry_bulk_file_operation("Could not create archive file", || {
+        std::fs::File::create(temp_path)
+    })?;
     write_zip_archive(&mut file, &prepared.entries)?;
-    file.sync_all()
-        .map_err(|error| format!("Could not flush archive file: {error}"))?;
-    std::fs::rename(temp_path, &prepared.output_path)
-        .map_err(|error| format!("Could not finalize archive file: {error}"))?;
+    retry_bulk_file_operation("Could not flush archive file", || file.sync_all())?;
+    retry_bulk_file_operation("Could not finalize archive file", || {
+        std::fs::rename(temp_path, &prepared.output_path)
+    })?;
     Ok(prepared.output_path.clone())
 }
 
@@ -804,11 +835,13 @@ fn finish_prepared_folder_output(
     prepared: &PreparedBulkArchive,
     temp_path: &Path,
 ) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(temp_path)
-        .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
+    retry_bulk_file_operation("Could not create bulk output folder", || {
+        std::fs::create_dir_all(temp_path)
+    })?;
     copy_entries_to_folder_verified(&prepared.entries, temp_path)?;
-    std::fs::rename(temp_path, &prepared.output_path)
-        .map_err(|error| format!("Could not finalize bulk output folder: {error}"))?;
+    retry_bulk_file_operation("Could not finalize bulk output folder", || {
+        std::fs::rename(temp_path, &prepared.output_path)
+    })?;
     Ok(prepared.output_path.clone())
 }
 
@@ -823,8 +856,9 @@ fn copy_entries_to_folder_verified(
             destination.push(part);
         }
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create bulk output folder: {error}"))?;
+            retry_bulk_file_operation("Could not create bulk output folder", || {
+                std::fs::create_dir_all(parent)
+            })?;
         }
         if destination.exists() {
             return Err(format!(
@@ -852,12 +886,13 @@ fn copy_file_verified(source: &Path, destination: &Path) -> Result<(), String> {
         ));
     }
 
-    let copied = std::fs::copy(source, destination).map_err(|error| {
-        format!(
-            "Could not copy {} into bulk output folder: {error}",
+    let copied = retry_bulk_file_operation(
+        &format!(
+            "Could not copy {} into bulk output folder",
             source.display()
-        )
-    })?;
+        ),
+        || std::fs::copy(source, destination),
+    )?;
     if copied != source_metadata.len() {
         return Err(format!(
             "Could not verify copied bulk output file {}: copied {copied} bytes but expected {} bytes.",
@@ -888,22 +923,25 @@ fn copy_file_verified(source: &Path, destination: &Path) -> Result<(), String> {
         ));
     }
 
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(destination)
-        .map_err(|error| {
-            format!(
-                "Could not reopen copied bulk output file {}: {error}",
-                destination.display()
-            )
-        })?;
-    file.sync_all().map_err(|error| {
-        format!(
-            "Could not flush copied bulk output file {}: {error}",
+    let file = retry_bulk_file_operation(
+        &format!(
+            "Could not reopen copied bulk output file {}",
             destination.display()
-        )
-    })
+        ),
+        || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(destination)
+        },
+    )?;
+    retry_bulk_file_operation(
+        &format!(
+            "Could not flush copied bulk output file {}",
+            destination.display()
+        ),
+        || file.sync_all(),
+    )
 }
 
 fn crc32_for_file(path: &Path) -> Result<u32, String> {
@@ -960,6 +998,99 @@ fn archive_staging_root(output_path: &Path) -> Result<PathBuf, String> {
         ".{file_name}.extracting-{}-{timestamp}",
         std::process::id()
     )))
+}
+
+pub(super) fn retry_bulk_file_operation<T>(
+    context: &str,
+    mut operation: impl FnMut() -> Result<T, std::io::Error>,
+) -> Result<T, String> {
+    let mut last_error = None;
+    for attempt in 0..BULK_FILE_OPERATION_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if is_retryable_file_operation_error(&error)
+                    && attempt + 1 < BULK_FILE_OPERATION_RETRY_ATTEMPTS =>
+            {
+                last_error = Some(error);
+                std::thread::sleep(BULK_FILE_OPERATION_RETRY_DELAY);
+            }
+            Err(error) => return Err(format!("{context}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "{context}: {}",
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "operation did not complete".into())
+    ))
+}
+
+fn is_retryable_file_operation_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+    ) || is_archive_file_lock_error(&error.to_string())
+}
+
+fn cleanup_stale_archive_staging_roots(
+    output_path: &Path,
+    keep_staging_root: Option<&Path>,
+) -> Result<(), String> {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bulk-download.zip");
+    let prefix = format!(".{file_name}.extracting-");
+    let children = match std::fs::read_dir(parent) {
+        Ok(children) => children,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Could not inspect bulk staging folders: {error}")),
+    };
+
+    for child in children {
+        let child =
+            child.map_err(|error| format!("Could not inspect bulk staging folder: {error}"))?;
+        let path = child.path();
+        if keep_staging_root.is_some_and(|keep| keep == path) {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.starts_with(&prefix))
+            && path.is_dir()
+        {
+            retry_bulk_file_operation("Could not remove stale bulk staging folder", || {
+                std::fs::remove_dir_all(&path)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_finished_output(
+    output_path: &Path,
+    output_kind: BulkArchiveOutputKind,
+) -> Result<(), String> {
+    match output_kind {
+        BulkArchiveOutputKind::Archive if output_path.is_file() => Ok(()),
+        BulkArchiveOutputKind::Folder if output_path.is_dir() => Ok(()),
+        BulkArchiveOutputKind::Archive => Err(format!(
+            "Could not verify finalized archive file: {}",
+            output_path.display()
+        )),
+        BulkArchiveOutputKind::Folder => Err(format!(
+            "Could not verify finalized bulk output folder: {}",
+            output_path.display()
+        )),
+    }
 }
 
 fn archive_part_display_name(path: &Path) -> String {
