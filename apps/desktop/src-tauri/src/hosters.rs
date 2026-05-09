@@ -14,6 +14,7 @@ const FUCKINGFAST_DIRECT_HOST: &str = "dl.fuckingfast.co";
 const DATANODES_HOST: &str = "datanodes.to";
 const DATANODES_DOWNLOAD_URL: &str = "https://datanodes.to/download";
 const DATANODES_DIRECT_SUFFIX: &str = ".datanodes.to";
+const DATANODES_PROXY_SUFFIX: &str = ".dlproxy.uk";
 const DATANODES_FREE_METHOD: &str = "Free Download >>";
 const HOSTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HOSTER_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,6 +61,12 @@ pub struct HosterLinkRefreshOutcome {
 enum HosterKind {
     FuckingFast,
     Datanodes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatanodesDirectUrlKind {
+    Native,
+    Proxy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -450,7 +457,10 @@ pub fn hoster_download_context_for_resolved_url(
     resolved_url: &str,
     source_url: Option<&str>,
 ) -> Option<HosterDownloadContext> {
-    if datanodes_direct_url_rejection_reason(resolved_url).is_none() {
+    if matches!(
+        datanodes_direct_url_kind(resolved_url),
+        Ok(DatanodesDirectUrlKind::Native)
+    ) {
         return datanodes_download_context_for_source_url(source_url?);
     }
 
@@ -1009,35 +1019,55 @@ fn validate_datanodes_direct_url(raw_url: &str) -> bool {
 }
 
 fn datanodes_direct_url_rejection_reason(raw_url: &str) -> Option<String> {
+    datanodes_direct_url_kind(raw_url).err()
+}
+
+fn datanodes_direct_url_kind(raw_url: &str) -> Result<DatanodesDirectUrlKind, String> {
     let Ok(parsed) = Url::parse(raw_url) else {
-        return Some("URL could not be parsed".into());
+        return Err("URL could not be parsed".into());
     };
     if parsed.scheme() != "https" {
-        return Some(format!("scheme `{}` is not https", parsed.scheme()));
+        return Err(format!("scheme `{}` is not https", parsed.scheme()));
     }
 
     let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
-        return Some("URL did not include a host".into());
+        return Err("URL did not include a host".into());
     };
 
-    if !is_datanodes_direct_file_host(&host) {
-        return Some(format!(
+    let kind = if is_datanodes_direct_file_host(&host) {
+        DatanodesDirectUrlKind::Native
+    } else if is_datanodes_proxy_file_host(&host) {
+        DatanodesDirectUrlKind::Proxy
+    } else {
+        return Err(format!(
             "host `{host}` is not a supported DataNodes file server"
         ));
-    }
+    };
 
     let path = parsed.path();
-    if !path.starts_with("/d/") || path.len() <= "/d/".len() {
-        return Some(format!(
+    let required_path_prefix = match kind {
+        DatanodesDirectUrlKind::Native => "/d/",
+        DatanodesDirectUrlKind::Proxy => "/download/",
+    };
+    if !path.starts_with(required_path_prefix) || path.len() <= required_path_prefix.len() {
+        return Err(format!(
             "path `{path}` is not a DataNodes file download path"
         ));
     }
 
-    None
+    Ok(kind)
 }
 
 fn is_datanodes_direct_file_host(host: &str) -> bool {
-    let Some(subdomain) = host.strip_suffix(DATANODES_DIRECT_SUFFIX) else {
+    is_valid_datanodes_file_subdomain(host, DATANODES_DIRECT_SUFFIX)
+}
+
+fn is_datanodes_proxy_file_host(host: &str) -> bool {
+    is_valid_datanodes_file_subdomain(host, DATANODES_PROXY_SUFFIX)
+}
+
+fn is_valid_datanodes_file_subdomain(host: &str, suffix: &str) -> bool {
+    let Some(subdomain) = host.strip_suffix(suffix) else {
         return false;
     };
     if subdomain.is_empty() || subdomain == "www" {
@@ -1534,6 +1564,20 @@ mod tests {
     }
 
     #[test]
+    fn datanodes_resolver_accepts_proxy_direct_link_json() {
+        let json = r#"{"url":"https%3A%2F%2Ftunnel5.dlproxy.uk%2Fdownload%2Fproxy-token_123"}"#;
+
+        let direct = extract_datanodes_direct_url_from_json(json)
+            .expect("DataNodes proxy direct URL JSON should parse");
+
+        assert_eq!(
+            direct,
+            "https://tunnel5.dlproxy.uk/download/proxy-token_123"
+        );
+        assert!(validate_datanodes_direct_url(&direct));
+    }
+
+    #[test]
     fn datanodes_direct_download_context_includes_cookie_referer_and_user_agent() {
         let context = hoster_download_context_for_resolved_url(
             "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar",
@@ -1567,6 +1611,15 @@ mod tests {
         assert!(hoster_download_context_for_resolved_url(
             "https://node41.datanodes.to:8443/d/token_123/Neon-White.rar",
             Some("https://example.com/61nni6me5p0n/Neon-White.rar"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn datanodes_proxy_download_context_does_not_forward_source_cookie() {
+        assert!(hoster_download_context_for_resolved_url(
+            "https://tunnel5.dlproxy.uk/download/proxy-token_123",
+            Some("https://datanodes.to/61nni6me5p0n/Neon-White.rar"),
         )
         .is_none());
     }
@@ -1616,6 +1669,30 @@ mod tests {
             ),
             (
                 "https://node41.datanodes.to/not-download/file.rar",
+                "path `/not-download/file.rar` is not a DataNodes file download path",
+            ),
+            (
+                "http://tunnel5.dlproxy.uk/download/file.rar",
+                "scheme `http` is not https",
+            ),
+            (
+                "https://dlproxy.uk/download/file.rar",
+                "host `dlproxy.uk` is not a supported DataNodes file server",
+            ),
+            (
+                "https://www.dlproxy.uk/download/file.rar",
+                "host `www.dlproxy.uk` is not a supported DataNodes file server",
+            ),
+            (
+                "https://evil-dlproxy.uk/download/file.rar",
+                "host `evil-dlproxy.uk` is not a supported DataNodes file server",
+            ),
+            (
+                "https://tunnel5.dlproxy.uk.evil/download/file.rar",
+                "host `tunnel5.dlproxy.uk.evil` is not a supported DataNodes file server",
+            ),
+            (
+                "https://tunnel5.dlproxy.uk/not-download/file.rar",
                 "path `/not-download/file.rar` is not a DataNodes file download path",
             ),
         ] {
