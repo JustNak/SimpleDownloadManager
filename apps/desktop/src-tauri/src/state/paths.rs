@@ -278,15 +278,12 @@ pub(super) fn prepare_category_download_directory(
     Ok(category_download_directory(download_dir, filename))
 }
 
-pub(super) fn prepare_bulk_output_directory(
-    download_dir: &Path,
-    output_kind: BulkArchiveOutputKind,
-) -> Result<PathBuf, BackendError> {
-    ensure_download_category_directories(download_dir).map_err(|error| BackendError {
+pub(super) fn prepare_bulk_output_directory(output_dir: &Path) -> Result<PathBuf, BackendError> {
+    std::fs::create_dir_all(output_dir).map_err(|error| BackendError {
         code: "DESTINATION_INVALID",
-        message: error,
+        message: format!("Could not create bulk output directory: {error}"),
     })?;
-    Ok(bulk_output_directory(download_dir, output_kind))
+    Ok(output_dir.to_path_buf())
 }
 
 pub(super) fn ensure_download_category_directories(download_dir: &Path) -> Result<(), String> {
@@ -319,11 +316,24 @@ pub(super) fn bulk_output_directory(
     download_dir.join(category_folder_for_bulk_output_kind(output_kind))
 }
 
+pub(super) fn bulk_output_directory_from_settings(settings: &Settings) -> PathBuf {
+    let mut bulk_settings = settings.bulk.clone();
+    normalize_bulk_settings_for_download_directory(
+        &mut bulk_settings,
+        &settings.download_directory,
+    );
+    PathBuf::from(bulk_settings.output_directory)
+}
+
+pub(super) fn bulk_output_path_from_settings(settings: &Settings, output_name: &str) -> PathBuf {
+    bulk_output_directory_from_settings(settings).join(output_name)
+}
+
 pub(super) fn category_folder_for_bulk_output_kind(
     output_kind: BulkArchiveOutputKind,
 ) -> &'static str {
     let _ = output_kind;
-    "Other"
+    "Bulk"
 }
 
 pub(super) fn category_folder_for_filename(filename: &str) -> &'static str {

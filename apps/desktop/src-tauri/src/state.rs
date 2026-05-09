@@ -1,13 +1,14 @@
 use crate::storage::{
     default_download_directory, default_extension_listen_port,
     default_torrent_download_directory_for, default_torrent_port_forwarding_port,
-    load_persisted_state, persist_state, BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus,
-    BulkFinalizeMode, ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel,
-    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
-    ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
-    HostRegistrationDiagnostics, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
-    MainWindowState, PersistedState, ProtectedDownloadAuthScope, QueueSummary, ResumeSupport,
-    Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
+    load_persisted_state, normalize_bulk_settings_for_download_directory, persist_state,
+    BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus, BulkFinalizeMode, ConnectionState,
+    DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
+    DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
+    FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
+    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
+    ProtectedDownloadAuthScope, QueueSummary, ResumeSupport, Settings, TorrentInfo,
+    TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};

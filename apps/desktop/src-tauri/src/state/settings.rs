@@ -200,12 +200,18 @@ pub fn validate_settings(settings: &mut Settings) -> Result<(), String> {
         &mut settings.torrent,
         &settings.download_directory,
     );
+    normalize_bulk_settings_for_download_directory(
+        &mut settings.bulk,
+        &settings.download_directory,
+    );
 
     std::fs::create_dir_all(&settings.download_directory)
         .map_err(|error| format!("Could not create download directory: {error}"))?;
     ensure_download_category_directories(Path::new(&settings.download_directory))?;
     std::fs::create_dir_all(&settings.torrent.download_directory)
         .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
+    std::fs::create_dir_all(&settings.bulk.output_directory)
+        .map_err(|error| format!("Could not create bulk download directory: {error}"))?;
 
     Ok(())
 }

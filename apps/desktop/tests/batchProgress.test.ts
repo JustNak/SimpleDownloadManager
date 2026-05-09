@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   activeBulkFinalizingStepId,
+  bulkFailedRetrySelection,
   bulkFinalizingSteps,
   bulkCancelConfirmPlan,
   bulkReviewStartSelection,
@@ -257,6 +258,31 @@ assert.deepEqual(
     closeOnSuccess: true,
   },
   'mixed active and completed bulk batches should still delete the whole popup batch',
+);
+
+assert.deepEqual(
+  bulkFailedRetrySelection([
+    job({ id: 'job_1', state: 'completed' }),
+    job({ id: 'job_2', state: 'completed' }),
+    job({ id: 'job_3', state: 'completed' }),
+  ], new Set(['job_1', 'job_3'])),
+  {
+    selectedJobIds: ['job_1', 'job_3'],
+    excludedJobIds: ['job_2'],
+    selectedJobs: [job({ id: 'job_1', state: 'completed' }), job({ id: 'job_3', state: 'completed' })],
+    excludedJobs: [job({ id: 'job_2', state: 'completed' })],
+    canRetry: true,
+  },
+  'failed bulk retry should partition selected members from parts to delete before retry',
+);
+
+assert.equal(
+  bulkFailedRetrySelection([
+    job({ id: 'job_1', state: 'completed' }),
+    job({ id: 'job_2', state: 'completed' }),
+  ], new Set(['job_1'])).canRetry,
+  false,
+  'failed bulk retry should require at least two selected member jobs',
 );
 
 assert.deepEqual(

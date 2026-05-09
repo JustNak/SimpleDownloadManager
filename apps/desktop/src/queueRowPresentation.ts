@@ -2,6 +2,7 @@ import type { DownloadJob } from './types';
 
 export const QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Speed', 'Time', 'Size', 'Actions'] as const;
 export const TORRENT_QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Seed', 'Ratio', 'Size', 'Actions'] as const;
+export const BULK_QUEUE_TABLE_COLUMNS = ['Name', 'Date', 'Speed', 'Size', 'Actions'] as const;
 
 export type QueueStatusTone = 'primary' | 'success' | 'destructive' | 'warning' | 'muted';
 export type FileBadgeActivityState = 'none' | 'buffering' | 'completed';
@@ -20,11 +21,17 @@ export interface TorrentDetailMetric {
 }
 
 export function queueTableColumnsForView(view: string): readonly string[] {
-  return isTorrentQueueView(view) ? TORRENT_QUEUE_TABLE_COLUMNS : QUEUE_TABLE_COLUMNS;
+  if (isTorrentQueueView(view)) return TORRENT_QUEUE_TABLE_COLUMNS;
+  if (isBulkQueueView(view)) return BULK_QUEUE_TABLE_COLUMNS;
+  return QUEUE_TABLE_COLUMNS;
 }
 
 export function isTorrentQueueView(view: string): boolean {
   return view === 'torrents' || view.startsWith('torrent-');
+}
+
+export function isBulkQueueView(view: string): boolean {
+  return view === 'bulk' || view.startsWith('bulk-');
 }
 
 type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &

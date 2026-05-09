@@ -33,15 +33,17 @@
     defaultBulkOutputNameForUrls,
     normalizeBulkOutputName,
   } from './bulkArchiveNaming';
+  import type { BulkStartBehavior } from './types';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
   interface Props {
     onClose: () => void;
     onAdded: (outcome: AddDownloadOutcome) => void;
+    bulkStartBehavior?: BulkStartBehavior;
   }
 
-  let { onClose, onAdded }: Props = $props();
+  let { onClose, onAdded, bulkStartBehavior = 'review_then_start' }: Props = $props();
 
   let mode = $state<DownloadMode>('single');
   let singleUrl = $state('');
@@ -163,7 +165,7 @@
         emitAdded(mode, result);
       } else {
         const trimmedArchiveName = combineBulk ? normalizeBulkOutputName(archiveName) : undefined;
-        const result = await addJobs(urls, trimmedArchiveName, { resolveHosterLinks: true, startPaused: true });
+        const result = await addJobs(urls, trimmedArchiveName, { resolveHosterLinks: true, startPaused: bulkStartBehavior !== 'start_immediately' });
         emitAdded(mode, result, trimmedArchiveName);
       }
       onClose();

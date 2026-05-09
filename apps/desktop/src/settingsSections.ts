@@ -14,6 +14,13 @@ export const SETTINGS_SECTIONS = [
     iconName: 'updates',
   },
   {
+    id: 'settings-bulk-downloads',
+    href: '#settings-bulk-downloads',
+    label: 'Bulk Downloads',
+    description: 'Grouped file batches.',
+    iconName: 'bulk',
+  },
+  {
     id: 'settings-torrenting',
     href: '#settings-torrenting',
     label: 'Torrenting',

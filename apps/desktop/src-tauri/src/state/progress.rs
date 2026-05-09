@@ -284,154 +284,195 @@ impl SharedState {
         &self,
         id: &str,
     ) -> Result<Option<BulkArchiveReady>, String> {
-        let state = self.inner.read().await;
-        let Some(job) = state.job(id) else {
-            return Ok(None);
-        };
-        let Some(archive) = &job.bulk_archive else {
-            return Ok(None);
-        };
-        if archive.archive_status != BulkArchiveStatus::Pending {
-            return Ok(None);
-        }
-
-        let members = state
-            .jobs
-            .iter()
-            .filter(|candidate| {
-                candidate
-                    .bulk_archive
-                    .as_ref()
-                    .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
-            })
-            .collect::<Vec<_>>();
-
-        if members.len() < 2
-            || members
-                .iter()
-                .any(|member| member.state != JobState::Completed)
-        {
-            return Ok(None);
-        }
-
-        let download_dir = PathBuf::from(&state.settings.download_directory);
-        let output_kind = BulkArchiveOutputKind::Folder;
-        let output_path = bulk_output_path(&download_dir, &archive.name, output_kind);
-
-        let mut used_names = HashSet::new();
-        let mut entries = Vec::with_capacity(members.len());
-        for member in members {
-            let source_path = PathBuf::from(&member.target_path);
-            if !source_path.is_file() {
+        let Some((ready, persisted)) = ({
+            let mut state = self.inner.write().await;
+            let Some(job) = state.job(id) else {
+                return Ok(None);
+            };
+            let Some(archive) = job.bulk_archive.clone() else {
+                return Ok(None);
+            };
+            if archive.archive_status != BulkArchiveStatus::Pending {
                 return Ok(None);
             }
 
-            let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
-            entries.push(BulkArchiveEntry {
-                source_path,
-                archive_name,
-            });
-        }
+            let members = state
+                .jobs
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .bulk_archive
+                        .as_ref()
+                        .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
+                })
+                .collect::<Vec<_>>();
 
-        Ok(Some(BulkArchiveReady {
-            archive_id: archive.id.clone(),
-            output_kind,
-            output_path,
-            entries,
-        }))
+            if members.len() < 2
+                || members
+                    .iter()
+                    .any(|member| member.state != JobState::Completed)
+            {
+                return Ok(None);
+            }
+
+            let output_kind = BulkArchiveOutputKind::Folder;
+            let output_path = bulk_output_path_from_settings(&state.settings, &archive.name);
+
+            let mut used_names = HashSet::new();
+            let mut entries = Vec::with_capacity(members.len());
+            for member in members {
+                let source_path = PathBuf::from(&member.target_path);
+                if !source_path.is_file() {
+                    return Ok(None);
+                }
+
+                let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
+                entries.push(BulkArchiveEntry {
+                    source_path,
+                    archive_name,
+                });
+            }
+
+            let ready = BulkArchiveReady {
+                archive_id: archive.id.clone(),
+                output_kind,
+                output_path,
+                entries,
+            };
+            state.mark_bulk_archive_status_in_memory(
+                &archive.id,
+                BulkArchiveStatus::CreatingFolder,
+                None,
+                Some(ready.output_path.display().to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+            );
+            Some((ready, state.persisted()))
+        }) else {
+            return Ok(None);
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(Some(ready))
     }
 
     pub async fn bulk_archive_ready_for_retry(
         &self,
         archive_id: &str,
     ) -> Result<BulkArchiveReady, String> {
-        let state = self.inner.read().await;
-        let archive = state
-            .jobs
-            .iter()
-            .filter_map(|job| job.bulk_archive.as_ref())
-            .find(|archive| archive.id == archive_id)
-            .cloned()
-            .ok_or_else(|| "Bulk archive was not found.".to_string())?;
+        let (ready, persisted) = {
+            let mut state = self.inner.write().await;
+            let archive = state
+                .jobs
+                .iter()
+                .filter_map(|job| job.bulk_archive.as_ref())
+                .find(|archive| archive.id == archive_id)
+                .cloned()
+                .ok_or_else(|| "Bulk archive was not found.".to_string())?;
 
-        if archive.archive_status != BulkArchiveStatus::Failed {
-            return Err(match archive.archive_status {
-                BulkArchiveStatus::Completed => "Bulk archive is already completed.".into(),
-                BulkArchiveStatus::Pending => "Bulk archive is not ready to retry yet.".into(),
-                BulkArchiveStatus::Extracting
-                | BulkArchiveStatus::Combining
-                | BulkArchiveStatus::CreatingFolder
-                | BulkArchiveStatus::Compressing => {
-                    "Bulk archive creation is already running.".into()
-                }
-                BulkArchiveStatus::Failed => unreachable!(),
-            });
-        }
-
-        let members = state
-            .jobs
-            .iter()
-            .filter(|candidate| {
-                candidate
-                    .bulk_archive
-                    .as_ref()
-                    .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
-            })
-            .collect::<Vec<_>>();
-
-        if members.len() < 2 {
-            return Err("Bulk archive retry needs at least two completed downloads.".into());
-        }
-        if members
-            .iter()
-            .any(|member| member.state != JobState::Completed)
-        {
-            return Err(
-                "Bulk archive retry can only run after every member download is completed.".into(),
-            );
-        }
-
-        let download_dir = PathBuf::from(&state.settings.download_directory);
-        let output_kind = BulkArchiveOutputKind::Folder;
-        let categorized_output_path = bulk_output_path(&download_dir, &archive.name, output_kind);
-        let legacy_root_output_path = download_dir.join(&archive.name);
-        let output_path = archive
-            .output_path
-            .as_ref()
-            .map(PathBuf::from)
-            .map(|stored_path| {
-                if stored_path == legacy_root_output_path {
-                    categorized_output_path.clone()
-                } else {
-                    stored_path
-                }
-            })
-            .unwrap_or(categorized_output_path);
-        let mut used_names = HashSet::new();
-        let mut entries = Vec::with_capacity(members.len());
-        for member in members {
-            let source_path = PathBuf::from(&member.target_path);
-            if !source_path.is_file() {
-                return Err(format!(
-                    "Downloaded file is missing for {}: {}",
-                    member.filename,
-                    source_path.display()
-                ));
+            if archive.archive_status != BulkArchiveStatus::Failed {
+                return Err(match archive.archive_status {
+                    BulkArchiveStatus::Completed => "Bulk archive is already completed.".into(),
+                    BulkArchiveStatus::Pending => "Bulk archive is not ready to retry yet.".into(),
+                    BulkArchiveStatus::Extracting
+                    | BulkArchiveStatus::Combining
+                    | BulkArchiveStatus::CreatingFolder
+                    | BulkArchiveStatus::Compressing => {
+                        "Bulk archive creation is already running.".into()
+                    }
+                    BulkArchiveStatus::Failed => unreachable!(),
+                });
             }
 
-            let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
-            entries.push(BulkArchiveEntry {
-                source_path,
-                archive_name,
-            });
-        }
+            let members = state
+                .jobs
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .bulk_archive
+                        .as_ref()
+                        .is_some_and(|candidate_archive| candidate_archive.id == archive.id)
+                })
+                .collect::<Vec<_>>();
 
-        Ok(BulkArchiveReady {
-            archive_id: archive.id,
-            output_kind,
-            output_path,
-            entries,
-        })
+            if members.len() < 2 {
+                return Err("Bulk archive retry needs at least two completed downloads.".into());
+            }
+            if members
+                .iter()
+                .any(|member| member.state != JobState::Completed)
+            {
+                return Err(
+                    "Bulk archive retry can only run after every member download is completed."
+                        .into(),
+                );
+            }
+
+            let download_dir = PathBuf::from(&state.settings.download_directory);
+            let output_kind = BulkArchiveOutputKind::Folder;
+            let categorized_output_path =
+                bulk_output_path_from_settings(&state.settings, &archive.name);
+            let legacy_categorized_output_path =
+                bulk_output_path(&download_dir, &archive.name, output_kind);
+            let legacy_root_output_path = download_dir.join(&archive.name);
+            let output_path = archive
+                .output_path
+                .as_ref()
+                .map(PathBuf::from)
+                .map(|stored_path| {
+                    if stored_path == legacy_root_output_path
+                        || stored_path == legacy_categorized_output_path
+                    {
+                        categorized_output_path.clone()
+                    } else {
+                        stored_path
+                    }
+                })
+                .unwrap_or(categorized_output_path);
+            let mut used_names = HashSet::new();
+            let mut entries = Vec::with_capacity(members.len());
+            for member in members {
+                let source_path = PathBuf::from(&member.target_path);
+                if !source_path.is_file() {
+                    return Err(format!(
+                        "Downloaded file is missing for {}: {}",
+                        member.filename,
+                        source_path.display()
+                    ));
+                }
+
+                let archive_name = unique_archive_entry_name(&member.filename, &mut used_names);
+                entries.push(BulkArchiveEntry {
+                    source_path,
+                    archive_name,
+                });
+            }
+
+            let ready = BulkArchiveReady {
+                archive_id: archive.id.clone(),
+                output_kind,
+                output_path,
+                entries,
+            };
+            state.mark_bulk_archive_status_in_memory(
+                &archive.id,
+                BulkArchiveStatus::CreatingFolder,
+                None,
+                Some(ready.output_path.display().to_string()),
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+            );
+            (ready, state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(ready)
     }
 
     pub async fn fail_job(

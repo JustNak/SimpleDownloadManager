@@ -3,6 +3,7 @@ import {
   filterJobsForView,
   getQueueCounts,
   getTorrentFooterStats,
+  isBulkView,
   isTorrentView,
 } from '../src/downloadViews.ts';
 import type { DownloadJob } from '../src/types.ts';
@@ -55,6 +56,27 @@ const jobs: DownloadJob[] = [
     state: 'failed',
     failureCategory: 'torrent',
   },
+  {
+    ...baseJob,
+    id: 'bulk_active',
+    filename: 'bulk-download.zip',
+    state: 'downloading',
+    progress: 30,
+    downloadedBytes: 300,
+    totalBytes: 1000,
+    speed: 128,
+    bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip', archiveStatus: 'pending' },
+  },
+  {
+    ...baseJob,
+    id: 'bulk_done',
+    filename: 'completed-bulk.zip',
+    state: 'completed',
+    progress: 100,
+    downloadedBytes: 2000,
+    totalBytes: 2000,
+    bulkArchive: { id: 'bulk_2', name: 'completed-bulk.zip', archiveStatus: 'completed' },
+  },
 ];
 
 assert.deepEqual(
@@ -82,8 +104,13 @@ assert.deepEqual(
       queued: 0,
       completed: 0,
     },
+    bulk: {
+      all: 2,
+      active: 1,
+      completed: 1,
+    },
   },
-  'regular download counts should exclude torrents and torrent counts should be isolated',
+  'regular download counts should exclude torrents and bulk groups while torrent and bulk counts stay isolated',
 );
 
 assert.deepEqual(
@@ -102,7 +129,7 @@ assert.deepEqual(
 assert.deepEqual(
   filterJobsForView(jobs, 'all').map((job) => job.id),
   ['http_active', 'http_done', 'http_failed'],
-  'all downloads view should exclude torrent jobs',
+  'all downloads view should exclude torrent and bulk jobs',
 );
 
 assert.deepEqual(
@@ -129,5 +156,26 @@ assert.deepEqual(
   'torrent attention view should include only torrent failures',
 );
 
+assert.deepEqual(
+  filterJobsForView(jobs, 'bulk').map((job) => job.id),
+  ['bulk_active', 'bulk_done'],
+  'bulk view should include only bulk archive rows',
+);
+
+assert.deepEqual(
+  filterJobsForView(jobs, 'bulk-active').map((job) => job.id),
+  ['bulk_active'],
+  'bulk active view should include only active bulk rows',
+);
+
+assert.deepEqual(
+  filterJobsForView(jobs, 'bulk-completed').map((job) => job.id),
+  ['bulk_done'],
+  'bulk completed view should include only completed bulk rows',
+);
+
 assert.equal(isTorrentView('torrents'), true);
 assert.equal(isTorrentView('all'), false);
+assert.equal(isBulkView('bulk'), true);
+assert.equal(isBulkView('bulk-active'), true);
+assert.equal(isBulkView('all'), false);

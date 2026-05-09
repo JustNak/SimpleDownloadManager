@@ -6,6 +6,7 @@
     ArrowUpDown,
     Check,
     ChevronDown,
+    ChevronRight,
     Clock3,
     Download,
     ExternalLink,
@@ -44,6 +45,7 @@
     fileBadgeActivityState,
     formatQueueSize,
     formatQueueSizeTitle,
+    isBulkQueueView,
     queueStatusPresentation,
     queueTableColumnsForView,
     shouldShowNameProgress,
@@ -60,6 +62,7 @@
   } from './queueInteractions';
   import { getVirtualQueueWindow } from './queueVirtualization';
   import {
+    BULK_QUEUE_TABLE_GRID_CLASS,
     DETAILS_CLOSE_THRESHOLD,
     DETAILS_DEFAULT_HEIGHT,
     DETAILS_MIN_HEIGHT,
@@ -81,7 +84,7 @@
   import { formatBytes, formatTime, getHost } from './popupShared';
   import type { DownloadJob, QueueRowSize } from './types';
   import { JobState } from './types';
-  import { isBulkAggregateJob, type QueueDisplayJob } from './bulkQueueRows';
+  import { isBulkAggregateJob, type BulkAggregateDownloadJob, type QueueDisplayJob } from './bulkQueueRows';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
@@ -90,6 +93,7 @@
     view: string;
     selectedJobId: string | null;
     showDetailsOnClick: boolean;
+    expandActiveBulkRowsByDefault: boolean;
     queueRowSize: QueueRowSize;
     sortMode: SortMode;
     progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
@@ -116,6 +120,7 @@
     view,
     selectedJobId,
     showDetailsOnClick,
+    expandActiveBulkRowsByDefault = false,
     queueRowSize,
     sortMode,
     progressMetricsByJobId,
@@ -138,6 +143,8 @@
   }: Props = $props();
 
   let selectedJobIds = new SvelteSet<string>();
+  let expandedBulkRowIds = new SvelteSet<string>();
+  let excludedBulkMemberIds = new SvelteSet<string>();
   let contextMenu = $state<{ jobId: string; x: number; y: number } | null>(null);
   let renamePromptJob = $state<QueueDisplayJob | null>(null);
   let renameValue = $state('');
@@ -156,7 +163,9 @@
   const selectedJob = $derived(selectedJobId ? jobs.find((job) => job.id === selectedJobId) ?? null : null);
   const selectedJobs = $derived(jobs.filter((job) => selectedJobIds.has(job.id)));
   const tableColumns = $derived(queueTableColumnsForView(view));
+  const isBulkTable = $derived(isBulkQueueView(view));
   const isTorrentTable = $derived(tableColumns[2] === 'Seed');
+  const tableGridClass = $derived(isBulkTable ? BULK_QUEUE_TABLE_GRID_CLASS : QUEUE_TABLE_GRID_CLASS);
   const rowClass = $derived(queueRowSizeClass(queueRowSize));
   const detailsLevel = $derived(detailsLevelForHeight(detailsHeight));
   const visibleJobIds = $derived(jobs.map((job) => job.id));
@@ -177,6 +186,25 @@
     }
     if (selectedJobIds.size === 0 && jobs.some((job) => job.id === selectedJobId)) {
       selectedJobIds.add(selectedJobId);
+    }
+  });
+
+  $effect(() => {
+    const visibleBulkIds = new Set(jobs.filter(canExpandBulkAggregate).map((job) => job.id));
+    for (const id of [...expandedBulkRowIds]) {
+      if (!visibleBulkIds.has(id)) expandedBulkRowIds.delete(id);
+    }
+
+    const visibleMemberIds = new Set(jobs.flatMap((job) => isBulkAggregateJob(job) ? job.bulkMemberIds : []));
+    for (const id of [...excludedBulkMemberIds]) {
+      if (!visibleMemberIds.has(id)) excludedBulkMemberIds.delete(id);
+    }
+
+    if (!expandActiveBulkRowsByDefault) return;
+    for (const job of jobs) {
+      if (canExpandBulkAggregate(job) && [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Paused].includes(job.state)) {
+        expandedBulkRowIds.add(job.id);
+      }
     }
   });
 
@@ -319,6 +347,66 @@
     const firstSelected = Array.from(selectedJobIds)[0];
     if (firstSelected) onSelectJob(firstSelected);
     else onClearSelection();
+  }
+
+  function toggleBulkRow(jobId: string) {
+    if (expandedBulkRowIds.has(jobId)) {
+      expandedBulkRowIds.delete(jobId);
+      return;
+    }
+    expandedBulkRowIds.add(jobId);
+  }
+
+  function canExcludeBulkReviewMember(member: DownloadJob): boolean {
+    return [JobState.Queued, JobState.Paused].includes(member.state);
+  }
+
+  function isBulkReviewGroup(job: QueueDisplayJob): boolean {
+    return isBulkAggregateJob(job)
+      && job.bulkArchive?.archiveStatus === 'pending'
+      && job.bulkMembers.some(canExcludeBulkReviewMember);
+  }
+
+  function setBulkMemberIncluded(memberId: string, included: boolean) {
+    if (included) excludedBulkMemberIds.delete(memberId);
+    else excludedBulkMemberIds.add(memberId);
+  }
+
+  function includedBulkMemberCount(job: BulkAggregateDownloadJob): number {
+    return job.bulkMembers.filter((member) => !excludedBulkMemberIds.has(member.id)).length;
+  }
+
+  function canShowBulkPrimaryAction(job: BulkAggregateDownloadJob): boolean {
+    return isBulkReviewGroup(job) || job.state === JobState.Paused;
+  }
+
+  function bulkPrimaryActionLabel(job: BulkAggregateDownloadJob): string {
+    return isBulkReviewGroup(job) ? 'Start' : 'Resume';
+  }
+
+  function bulkPrimaryActionDisabled(job: BulkAggregateDownloadJob): boolean {
+    return isBulkReviewGroup(job) && includedBulkMemberCount(job) === 0;
+  }
+
+  function runBulkPrimaryAction(job: BulkAggregateDownloadJob) {
+    if (isBulkReviewGroup(job)) {
+      startBulkReview(job);
+      return;
+    }
+    onResume(job.id);
+  }
+
+  function startBulkReview(job: BulkAggregateDownloadJob) {
+    const excludedIds = job.bulkMembers
+      .filter((member) => excludedBulkMemberIds.has(member.id) && canExcludeBulkReviewMember(member))
+      .map((member) => member.id);
+    const includedPausedIds = job.bulkMembers
+      .filter((member) => !excludedBulkMemberIds.has(member.id) && [JobState.Paused, JobState.Failed, JobState.Canceled].includes(member.state))
+      .map((member) => member.id);
+
+    if (excludedIds.length > 0) onDelete(excludedIds, false);
+    for (const memberId of includedPausedIds) onResume(memberId);
+    for (const memberId of excludedIds) excludedBulkMemberIds.delete(memberId);
   }
 
   function applySelectionRange(anchorId: string, currentId: string, selected: boolean, baseSelection = new Set(selectedJobIds)) {
@@ -647,6 +735,10 @@
     return isBulkAggregateJob(job) && job.state === JobState.Completed && Boolean(job.bulkArchiveOutputPath);
   }
 
+  function canExpandBulkAggregate(job: QueueDisplayJob): job is BulkAggregateDownloadJob {
+    return isBulkAggregateJob(job) && !isCompletedBulkAggregate(job);
+  }
+
   function isCanceledBulkAggregate(job: DownloadJob): boolean {
     return isBulkAggregateJob(job) && job.state === JobState.Canceled;
   }
@@ -665,6 +757,10 @@
 
   function bulkOpenLabel(job: DownloadJob): string {
     return 'Open Folder';
+  }
+
+  function showsEtaMetrics(job: DownloadJob): boolean {
+    return !isBulkAggregateJob(job);
   }
 </script>
 
@@ -689,7 +785,7 @@
       }}
     >
       <div class="download-table min-w-[980px] overflow-visible border-b border-t border-border bg-card">
-        <div class={`grid ${QUEUE_TABLE_GRID_CLASS} border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground`}>
+        <div class={`grid ${tableGridClass} border-b border-border bg-header px-3 py-1.5 text-xs font-medium text-muted-foreground`}>
           <div class="flex items-center gap-3">
             <input
               type="checkbox"
@@ -716,15 +812,17 @@
             </button>
           {/each}
           <div class={queueHeaderCellClass('center')} title={isTorrentTable ? 'Seed upload speed' : undefined}>{tableColumns[2]}</div>
-          <div class={queueHeaderCellClass('center')} title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
-          {#each [tableColumns[4]] as column}
+          {#if !isBulkTable}
+            <div class={queueHeaderCellClass('center')} title={isTorrentTable ? 'Share ratio' : undefined}>{tableColumns[3]}</div>
+          {/if}
+          {#each [tableColumns[isBulkTable ? 3 : 4]] as column}
             {@const SortIcon = sortIcon(column)}
             <button type="button" aria-pressed={sortModeKey(sortMode) === 'size'} title={sortableHeaderTitle('size')} class={sortableHeaderClass('size', 'center')} onclick={() => setSort('size')}>
               {column}
               <SortIcon size={12} />
             </button>
           {/each}
-          <div class="text-right">{tableColumns[5]}</div>
+          <div class="text-right">{tableColumns[isBulkTable ? 4 : 5]}</div>
         </div>
 
         {#if hasVisibleSelection && selectedJobIds.size > 1}
@@ -755,7 +853,7 @@
             {@const timeRemaining = metrics?.timeRemaining ?? job.eta}
             {@const statusPresentation = queueStatusPresentation(job)}
             <div
-              class={`grid w-full ${QUEUE_TABLE_GRID_CLASS} items-center gap-0 px-3 text-left transition-colors ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
+              class={`grid w-full ${tableGridClass} items-center gap-0 px-3 text-left transition-colors ${rowClass} ${rowSelected ? 'bg-selected outline outline-1 outline-primary/30' : 'bg-card hover:bg-row-hover'} ${artifactMissing ? 'opacity-45 grayscale' : ''}`}
               role="button"
               tabindex="0"
               style={virtualQueue.enabled ? `height: ${virtualQueue.rowHeight}px;` : undefined}
@@ -780,6 +878,21 @@
               onpointerenter={() => continueSelectionDrag(job.id)}
             >
               <div class="flex min-w-0 items-center gap-3 pr-4">
+                {#if isBulkTable && canExpandBulkAggregate(job)}
+                  {@const BulkChevron = expandedBulkRowIds.has(job.id) ? ChevronDown : ChevronRight}
+                  <button
+                    type="button"
+                    class="-mr-2 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                    title={expandedBulkRowIds.has(job.id) ? 'Collapse files' : 'Show files'}
+                    aria-label={expandedBulkRowIds.has(job.id) ? 'Collapse files' : 'Show files'}
+                    onclick={(event) => {
+                      event.stopPropagation();
+                      toggleBulkRow(job.id);
+                    }}
+                  >
+                    <BulkChevron size={16} />
+                  </button>
+                {/if}
                 <FileBadge
                   filename={job.filename}
                   transferKind={job.transferKind}
@@ -805,9 +918,11 @@
               <div class={queueMetricCellClass()}>
                 {isTorrentTable ? formatTorrentSeedMetric(job) : formatQueueSpeed(job, averageSpeed)}
               </div>
-              <div class={queueTableCellClass('center')}>
-                {isTorrentTable ? formatTorrentRatio(job) : formatQueueTime(job, timeRemaining)}
-              </div>
+              {#if !isBulkTable}
+                <div class={queueTableCellClass('center')}>
+                  {isTorrentTable ? formatTorrentRatio(job) : formatQueueTime(job, timeRemaining)}
+                </div>
+              {/if}
               <div class={queueTableCellClass('center')} title={formatQueueSizeTitle(job, formatBytes)}>
                 {formatQueueSize(job, formatBytes)}
               </div>
@@ -822,6 +937,16 @@
                 {#if isCompletedBulkAggregate(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Show" aria-label="Show" onclick={() => onReveal(job.id)}><FolderOpen size={17} /></button>
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title={bulkOpenLabel(job)} aria-label={bulkOpenLabel(job)} onclick={() => onOpen(job.id)}><FileArchive size={17} /></button>
+                {:else if isBulkAggregateJob(job) && canShowBulkPrimaryAction(job)}
+                  <button
+                    class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                    title={bulkPrimaryActionLabel(job)}
+                    aria-label={bulkPrimaryActionLabel(job)}
+                    disabled={bulkPrimaryActionDisabled(job)}
+                    onclick={() => runBulkPrimaryAction(job)}
+                  >
+                    <Play size={17} />
+                  </button>
                 {:else if job.state === JobState.Paused}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Resume" aria-label="Resume" onclick={() => onResume(job.id)}><Play size={17} /></button>
                 {:else if isActive(job)}
@@ -845,6 +970,53 @@
                 {/if}
               </div>
             </div>
+            {#if isBulkTable && canExpandBulkAggregate(job) && expandedBulkRowIds.has(job.id)}
+              <div class="border-t border-border/45 bg-background/55 px-2 py-1">
+                <div class="ml-8 overflow-hidden border-y border-border/50 bg-card/70">
+                  {#each job.bulkMembers as bulkMember (bulkMember.id)}
+                    {@const memberMetrics = progressMetricsByJobId[bulkMember.id]}
+                    {@const memberAverageSpeed = memberMetrics?.averageSpeed ?? bulkMember.speed}
+                    {@const memberPresentation = queueStatusPresentation(bulkMember)}
+                    {@const memberIncluded = !excludedBulkMemberIds.has(bulkMember.id)}
+                    <div class={`grid ${BULK_QUEUE_TABLE_GRID_CLASS} items-center gap-0 border-t border-border/40 px-2 py-1 text-[11px] leading-4 first:border-t-0 ${memberIncluded ? '' : 'opacity-55'}`}>
+                      <div class="flex min-w-0 items-center gap-1.5 pr-3">
+                        {#if isBulkReviewGroup(job)}
+                          <input
+                            type="checkbox"
+                            class="h-3 w-3 shrink-0 accent-primary disabled:cursor-not-allowed disabled:opacity-45"
+                            checked={memberIncluded}
+                            disabled={!canExcludeBulkReviewMember(bulkMember)}
+                            title={memberIncluded ? 'Include file' : 'Exclude file'}
+                            aria-label={memberIncluded ? `Include ${bulkMember.filename}` : `Exclude ${bulkMember.filename}`}
+                            onclick={(event) => event.stopPropagation()}
+                            oninput={(event) => setBulkMemberIncluded(bulkMember.id, event.currentTarget.checked)}
+                          />
+                        {/if}
+                        <div class="flex min-w-0 flex-1 items-center gap-2">
+                          <span class="truncate font-medium text-foreground" title={bulkMember.filename}>{bulkMember.filename}</span>
+                          {@render QueueStatusBadge(memberPresentation, 'compact')}
+                          <span class="truncate text-muted-foreground" title={bulkMember.url}>{getHost(bulkMember.url)}</span>
+                        </div>
+                      </div>
+                      <div class={queueDateCellClass()} title={formatFullJobDate(bulkMember.createdAt)}>
+                        {formatJobDate(bulkMember.createdAt)}
+                      </div>
+                      <div class={queueMetricCellClass()}>
+                        {formatQueueSpeed(bulkMember, memberAverageSpeed)}
+                      </div>
+                      <div class={queueTableCellClass('center')} title={formatQueueSizeTitle(bulkMember, formatBytes)}>
+                        {formatQueueSize(bulkMember, formatBytes)}
+                      </div>
+                      <div class="flex items-center justify-end">
+                        {#if bulkMember.state === JobState.Paused && memberIncluded}
+                          <button type="button" class="h-6 rounded px-2 text-[11px] font-medium text-primary transition hover:bg-primary/10" title="Resume file" aria-label="Resume file" onclick={(event) => { event.stopPropagation(); onResume(bulkMember.id); }}>Resume</button>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
           {/each}
         </div>
 
@@ -1015,9 +1187,11 @@
       {@render MenuItem(Trash2, 'Delete', () => openDeletePrompt(job), true)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else}
-      {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
+      {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
-      {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id))}{/if}
+      {#if canShowBulkPrimaryAction(job)}
+        {@render MenuItem(Play, bulkPrimaryActionLabel(job), () => runBulkPrimaryAction(job), false, bulkPrimaryActionDisabled(job))}
+      {/if}
       {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
       {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
     {/if}
@@ -1057,7 +1231,9 @@
     <span>Status <span class="ml-1 text-foreground">{queueStatusPresentation(job).label}</span></span>
     <span>Size <span class="ml-1 text-foreground">{formatQueueSize(job, formatBytes)}</span></span>
     <span>Speed <span class="ml-1 text-foreground">{formatQueueSpeed(job, averageSpeed)}</span></span>
-    <span>ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+    {#if showsEtaMetrics(job)}
+      <span>ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+    {/if}
   </div>
 {/snippet}
 
@@ -1072,7 +1248,9 @@
     <span class="text-muted-foreground">State <span class="ml-1 text-foreground">{queueStatusPresentation(job).label}</span></span>
     <span class="text-muted-foreground">Size <span class="ml-1 text-foreground">{formatQueueSize(job, formatBytes)}</span></span>
     <span class="text-muted-foreground">Speed <span class="ml-1 text-foreground">{formatQueueSpeed(job, averageSpeed)}</span></span>
-    <span class="text-muted-foreground">ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+    {#if showsEtaMetrics(job)}
+      <span class="text-muted-foreground">ETA <span class="ml-1 text-foreground">{formatQueueTime(job, timeRemaining)}</span></span>
+    {/if}
     {#if job.transferKind === 'torrent'}
       <span class="text-muted-foreground">Ratio <span class="ml-1 text-primary">{formatTorrentRatio(job)}</span></span>
     {/if}
@@ -1096,7 +1274,9 @@
         {@render CompactDetailItem(Clock3, 'State', queueStatusPresentation(job).label)}
         {@render CompactDetailItem(Download, 'Size', formatQueueSize(job, formatBytes))}
         {@render CompactDetailItem(Upload, 'Speed', formatQueueSpeed(job, averageSpeed))}
-        {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+        {#if showsEtaMetrics(job)}
+          {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+        {/if}
       </div>
       <div class="min-w-0 lg:pl-5">
         {@render DetailSectionLabel(job.transferKind === 'torrent' ? 'Torrent' : 'Network')}
@@ -1118,7 +1298,9 @@
       {@render CompactDetailItem(Clock3, 'State', queueStatusPresentation(job).label)}
       {@render CompactDetailItem(Download, 'Size', formatQueueSize(job, formatBytes))}
       {@render CompactDetailItem(Upload, 'Speed', formatQueueSpeed(job, averageSpeed))}
-      {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+      {#if showsEtaMetrics(job)}
+        {@render CompactDetailItem(Clock3, 'ETA', formatQueueTime(job, timeRemaining), job.transferKind === 'torrent')}
+      {/if}
       {#if job.transferKind === 'torrent'}
         {@render CompactDetailItem(Users, 'Peers', job.torrent?.peers ? String(job.torrent.peers) : '--')}
         {@render CompactDetailItem(Upload, 'Ratio', formatTorrentRatio(job), true)}

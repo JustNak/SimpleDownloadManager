@@ -14,6 +14,36 @@ assert.match(appSource, /openBatchProgressWindow\(\{[\s\S]*kind: 'bulk'[\s\S]*bu
 assert.match(backendSource, /export async function openBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level open wrapper');
 assert.match(backendSource, /export async function revealBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level reveal wrapper');
 assert.match(queueSource, /function bulkOpenLabel[\s\S]*return 'Open Folder'/, 'completed bulk aggregate menus should always label folder outputs as Open Folder');
+assert.match(queueSource, /expandedBulkRowIds/, 'bulk aggregate rows should keep inline expansion state in the queue view');
+assert.match(queueSource, /bulkMembers/, 'bulk aggregate expansion should render member file data inline');
+assert.match(queueSource, /excludedBulkMemberIds/, 'bulk review rows should track excluded member files in the main bulk view');
+assert.match(queueSource, /startBulkReview/, 'the main bulk view should start included members and remove excluded queued members');
+assert.match(queueSource, /function bulkPrimaryActionLabel[\s\S]*\? 'Start' : 'Resume'/, 'bulk review groups should expose Start on the aggregate row');
+assert.match(queueSource, /function runBulkPrimaryAction[\s\S]*startBulkReview\(job\)/, 'bulk review Start should run the include/exclude review flow');
+assert.doesNotMatch(queueSource, /Bulk[\s\S]{0,220}ETA|ETA[\s\S]{0,220}Bulk/, 'bulk queue UI should not label ETA/time estimates');
+assert.match(
+  queueSource,
+  /function canExpandBulkAggregate\(job: QueueDisplayJob\): job is BulkAggregateDownloadJob \{[\s\S]*!isCompletedBulkAggregate\(job\)/,
+  'completed bulk aggregates should not keep the inline member dropdown after finalization finishes',
+);
+assert.match(
+  queueSource,
+  /jobs\.filter\(canExpandBulkAggregate\)[\s\S]*expandedBulkRowIds\.delete\(id\)/,
+  'completed bulk aggregates should be pruned from expanded row state',
+);
+assert.match(
+  queueSource,
+  /\{#if isBulkTable && canExpandBulkAggregate\(job\)\}[\s\S]*BulkChevron/,
+  'completed bulk aggregates should not render the inline dropdown trigger',
+);
+const bulkExpansionSource = queueSource.match(
+  /\{#if isBulkTable && canExpandBulkAggregate\(job\) && expandedBulkRowIds\.has\(job\.id\)\}([\s\S]*?)\n            \{\/if\}\n          \{\/each\}/,
+)?.[1] ?? '';
+assert.ok(bulkExpansionSource, 'bulk queue should render an inline expansion block');
+assert.doesNotMatch(bulkExpansionSource, /files included|includedBulkMemberCount/, 'bulk inline expansion should not render a separate review summary/start strip');
+assert.doesNotMatch(bulkExpansionSource, /<FileText|<Play/, 'bulk inline expansion should stay text-first without decorative SVG icons');
+assert.match(bulkExpansionSource, /text-\[11px\]/, 'bulk inline expansion should use a compact detail density');
+assert.match(bulkExpansionSource, /py-1/, 'bulk inline member rows should use compact vertical padding');
 assert.doesNotMatch(batchSource, /Reveal completed/, 'bulk progress popup should not expose the old Reveal completed action');
 assert.match(batchSource, /Uncompressing/, 'bulk progress popup should show uncompressing as a distinct finalizing phase');
 assert.match(batchSource, /Combining/, 'bulk progress popup should show combining as a distinct finalizing phase');
@@ -32,6 +62,9 @@ assert.match(batchSource, /archive\?\.warning/, 'bulk progress popup should surf
 assert.doesNotMatch(batchSource, /summary\.activeCount === 0[\s\S]{0,240}Pause all/, 'inactive batch popup footer should not keep disabled pause controls visible');
 assert.match(batchSource, /selectedBulkJobIds/, 'bulk review rows should track local checked include state');
 assert.match(batchSource, /type="checkbox"/, 'bulk review rows should expose per-file include checkboxes');
+assert.match(batchSource, /bulkUiState === 'failed'[\s\S]*BulkFailedRetryList/, 'failed bulk popup should render selectable retry member rows');
+assert.match(batchSource, /function retryFailedBulkArchive[\s\S]*deleteJobs\(selection\.excludedJobIds,\s*true\)[\s\S]*retryBulkArchive\(archiveId\)/, 'failed bulk retry should delete unchecked members from disk before retrying the archive');
+assert.match(batchSource, /Retry folder[\s\S]*!failedRetrySelection\.canRetry/, 'failed bulk retry should be disabled unless at least two members remain selected');
 assert.doesNotMatch(batchSource, /bulkHasStarted\s*&&\s*rawBulkUiState === 'review'[\s\S]*\?\s*'downloading'/, 'bulk popup should not locally force review into downloading after Start');
 assert.doesNotMatch(batchSource, /\bbulkHasStarted\b/, 'bulk popup should not keep local started override state');
 assert.match(batchSource, /isUntouchedBulkReviewGate/, 'bulk popup should derive the first review gate from untouched pending jobs');

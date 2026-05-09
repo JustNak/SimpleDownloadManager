@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::{
-    HostRegistrationStatus, TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
+    BulkDownloadSettings, HostRegistrationStatus, TorrentPeerConnectionWatchdogMode,
+    TorrentRuntimeDiagnostics,
 };
 
 #[test]
@@ -389,6 +390,39 @@ fn validate_settings_creates_download_category_directories() {
     }
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn validate_settings_creates_default_bulk_output_directory_and_preserves_custom_bulk_path() {
+    let download_dir = test_runtime_dir("bulk-settings-default-output");
+    let mut settings = Settings {
+        download_directory: download_dir.display().to_string(),
+        ..Settings::default()
+    };
+    settings.bulk.output_directory.clear();
+
+    validate_settings(&mut settings).expect("settings should validate");
+
+    assert_eq!(
+        PathBuf::from(&settings.bulk.output_directory),
+        download_dir.join("Bulk")
+    );
+    assert!(
+        download_dir.join("Bulk").is_dir(),
+        "default bulk output directory should be created during validation"
+    );
+
+    let custom_dir = test_runtime_dir("bulk-settings-custom-output").join("My Bulk");
+    settings.bulk.output_directory = custom_dir.display().to_string();
+    validate_settings(&mut settings).expect("settings with custom bulk output should validate");
+    assert_eq!(PathBuf::from(&settings.bulk.output_directory), custom_dir);
+    assert!(
+        custom_dir.is_dir(),
+        "custom bulk output directory should be created"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+    let _ = std::fs::remove_dir_all(custom_dir.parent().unwrap());
 }
 
 #[test]
@@ -2240,8 +2274,8 @@ async fn enqueue_download_entries_stores_folder_bulk_output_kind() {
 }
 
 #[tokio::test]
-async fn bulk_archive_ready_uses_other_category_for_default_folder_output() {
-    let download_dir = test_runtime_dir("bulk-archive-ready-default-folder-category");
+async fn bulk_archive_ready_uses_bulk_directory_for_default_folder_output() {
+    let download_dir = test_runtime_dir("bulk-archive-ready-default-output");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
     state
         .save_settings(Settings {
@@ -2272,7 +2306,7 @@ async fn bulk_archive_ready_uses_other_category_for_default_folder_output() {
     assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
     assert_eq!(
         ready.output_path,
-        download_dir.join("Other").join("Game.zip")
+        download_dir.join("Bulk").join("Game.zip")
     );
     assert_ne!(ready.output_path, download_dir.join("Game.zip"));
 
@@ -2280,8 +2314,8 @@ async fn bulk_archive_ready_uses_other_category_for_default_folder_output() {
 }
 
 #[tokio::test]
-async fn bulk_archive_ready_uses_other_category_for_folder_output() {
-    let download_dir = test_runtime_dir("bulk-folder-ready-other-category");
+async fn bulk_archive_ready_uses_bulk_directory_for_folder_output() {
+    let download_dir = test_runtime_dir("bulk-folder-ready-output");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
     state
         .save_settings(Settings {
@@ -2310,15 +2344,15 @@ async fn bulk_archive_ready_uses_other_category_for_folder_output() {
         .expect("bulk ready lookup should succeed")
         .expect("completed members should be ready");
 
-    assert_eq!(ready.output_path, download_dir.join("Other").join("Game"));
+    assert_eq!(ready.output_path, download_dir.join("Bulk").join("Game"));
     assert_ne!(ready.output_path, download_dir.join("Game"));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
 #[tokio::test]
-async fn bulk_folder_output_named_like_zip_stays_in_other_category() {
-    let download_dir = test_runtime_dir("bulk-folder-zip-name-other-category");
+async fn bulk_folder_output_named_like_zip_stays_in_bulk_directory() {
+    let download_dir = test_runtime_dir("bulk-folder-zip-name-output");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
     state
         .save_settings(Settings {
@@ -2349,7 +2383,7 @@ async fn bulk_folder_output_named_like_zip_stays_in_other_category() {
 
     assert_eq!(
         ready.output_path,
-        download_dir.join("Other").join("Game.zip")
+        download_dir.join("Bulk").join("Game.zip")
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -2366,7 +2400,7 @@ async fn bulk_enqueue_rejects_existing_categorized_output_path() {
         })
         .await
         .unwrap();
-    std::fs::write(download_dir.join("Other").join("Game.zip"), b"existing").unwrap();
+    std::fs::write(download_dir.join("Bulk").join("Game.zip"), b"existing").unwrap();
 
     let error = state
         .enqueue_download_entries_with_options(
@@ -2379,7 +2413,7 @@ async fn bulk_enqueue_rejects_existing_categorized_output_path() {
         .unwrap_err();
 
     assert_eq!(error.code, "DESTINATION_EXISTS");
-    assert!(error.message.contains("Other"));
+    assert!(error.message.contains("Bulk"));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -3042,7 +3076,7 @@ async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
     assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
     assert_eq!(
         ready.output_path,
-        download_dir.join("Other").join("Game.zip")
+        download_dir.join("Bulk").join("Game.zip")
     );
     assert_eq!(ready.entries.len(), 2);
     assert_eq!(ready.entries[0].source_path, part_1);
@@ -3052,7 +3086,129 @@ async fn bulk_archive_ready_for_retry_reuses_failed_completed_members() {
 }
 
 #[tokio::test]
-async fn bulk_archive_ready_for_retry_without_output_path_uses_categorized_path() {
+async fn bulk_archive_ready_for_job_claims_pending_archive_once() {
+    let download_dir = test_runtime_dir("bulk-archive-ready-claim-once");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+    std::fs::write(&part_2, b"second").unwrap();
+
+    let bulk_archive = BulkArchiveInfo {
+        id: "bulk_claim".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
+        output_path: None,
+        error: None,
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
+    };
+    let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job_1.filename = "Game.part01.rar".into();
+    job_1.target_path = part_1.display().to_string();
+    job_1.bulk_archive = Some(bulk_archive.clone());
+    let mut job_2 = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    job_2.filename = "Game.part02.rar".into();
+    job_2.target_path = part_2.display().to_string();
+    job_2.bulk_archive = Some(bulk_archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job_1, job_2]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.download_directory = download_dir.display().to_string();
+    }
+
+    let ready = state
+        .bulk_archive_ready_for_job("job_1")
+        .await
+        .expect("pending archive readiness should be checked")
+        .expect("completed pending members should be claimed for finalization");
+    let second = state
+        .bulk_archive_ready_for_job("job_2")
+        .await
+        .expect("second readiness check should not fail");
+    let claimed_status = {
+        let runtime = state.inner.read().await;
+        runtime.jobs[0]
+            .bulk_archive
+            .as_ref()
+            .expect("job should keep bulk archive metadata")
+            .archive_status
+    };
+
+    assert_eq!(ready.archive_id, "bulk_claim");
+    assert!(
+        second.is_none(),
+        "a claimed archive must not be claimed twice"
+    );
+    assert_eq!(claimed_status, BulkArchiveStatus::CreatingFolder);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_for_retry_claims_failed_archive_once() {
+    let download_dir = test_runtime_dir("bulk-archive-retry-claim-once");
+    let part_1 = download_dir.join("Game.part01.rar");
+    let part_2 = download_dir.join("Game.part02.rar");
+    std::fs::write(&part_1, b"first").unwrap();
+    std::fs::write(&part_2, b"second").unwrap();
+
+    let bulk_archive = BulkArchiveInfo {
+        id: "bulk_retry_claim".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        archive_status: BulkArchiveStatus::Failed,
+        requires_extraction: None,
+        output_path: Some(download_dir.join("Game.zip").display().to_string()),
+        error: Some("missing".into()),
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
+    };
+    let mut job_1 = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job_1.filename = "Game.part01.rar".into();
+    job_1.target_path = part_1.display().to_string();
+    job_1.bulk_archive = Some(bulk_archive.clone());
+    let mut job_2 = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    job_2.filename = "Game.part02.rar".into();
+    job_2.target_path = part_2.display().to_string();
+    job_2.bulk_archive = Some(bulk_archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job_1, job_2]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.download_directory = download_dir.display().to_string();
+    }
+
+    let ready = state
+        .bulk_archive_ready_for_retry("bulk_retry_claim")
+        .await
+        .expect("failed archive should be claimed for retry");
+    let error = state
+        .bulk_archive_ready_for_retry("bulk_retry_claim")
+        .await
+        .expect_err("second retry claim should reject a running finalization");
+    let claimed_status = {
+        let runtime = state.inner.read().await;
+        runtime.jobs[0]
+            .bulk_archive
+            .as_ref()
+            .expect("job should keep bulk archive metadata")
+            .archive_status
+    };
+
+    assert_eq!(ready.archive_id, "bulk_retry_claim");
+    assert!(error.contains("already running"));
+    assert_eq!(claimed_status, BulkArchiveStatus::CreatingFolder);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_for_retry_without_output_path_uses_bulk_directory() {
     let download_dir = test_runtime_dir("retry-failed-bulk-archive-category-fallback");
     let part_1 = download_dir.join("Game.part01.rar");
     let part_2 = download_dir.join("Game.part02.rar");
@@ -3096,7 +3252,7 @@ async fn bulk_archive_ready_for_retry_without_output_path_uses_categorized_path(
     assert_eq!(ready.output_kind, BulkArchiveOutputKind::Folder);
     assert_eq!(
         ready.output_path,
-        download_dir.join("Other").join("Game.zip")
+        download_dir.join("Bulk").join("Game.zip")
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -3333,6 +3489,11 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
         .save_settings(Settings {
             download_directory: download_dir.display().to_string(),
             auto_retry_attempts: 2,
+            bulk: BulkDownloadSettings {
+                auto_retry_override_enabled: true,
+                auto_retry_attempts: 5,
+                ..BulkDownloadSettings::default()
+            },
             ..Settings::default()
         })
         .await
@@ -3350,7 +3511,7 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
             .expect("candidate lookup should succeed")
             .expect("transient pending HTTP bulk member should be eligible");
         assert_eq!(candidate.attempt, 2);
-        assert_eq!(candidate.max_attempts, 2);
+        assert_eq!(candidate.max_attempts, 5);
         assert_eq!(
             candidate.resolved_from_url.as_deref(),
             Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar")
@@ -4073,6 +4234,65 @@ async fn seeding_jobs_release_download_scheduler_slots() {
 
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "job_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_scheduler_cap_skips_bulk_members_but_keeps_normal_downloads_flowing() {
+    let download_dir = test_runtime_dir("bulk-scheduler-cap");
+    let archive = BulkArchiveInfo {
+        id: "bulk_scheduler".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
+        output_path: Some(download_dir.join("Bulk").join("Game").display().to_string()),
+        error: None,
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
+    };
+    let mut active_bulk = download_job(
+        "job_bulk_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        25,
+    );
+    active_bulk.bulk_archive = Some(archive.clone());
+    let mut queued_bulk = download_job(
+        "job_bulk_queued",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    queued_bulk.bulk_archive = Some(archive);
+    let normal_queued = download_job(
+        "job_normal_queued",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active_bulk, queued_bulk, normal_queued],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 2;
+        runtime.settings.bulk.max_concurrent_downloads = 1;
+        runtime.active_workers.insert("job_bulk_active".into());
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_normal_queued");
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
