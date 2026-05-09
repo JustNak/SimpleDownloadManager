@@ -97,6 +97,7 @@
     queueRowSize: QueueRowSize;
     sortMode: SortMode;
     progressMetricsByJobId: Record<string, DownloadProgressMetrics>;
+    pendingActionIds: Set<string>;
     onSortChange: (sortMode: SortMode) => void;
     onSelectJob: (id: string | null) => void;
     onClearSelection: () => void;
@@ -124,6 +125,7 @@
     queueRowSize,
     sortMode,
     progressMetricsByJobId,
+    pendingActionIds = new Set(),
     onSortChange,
     onSelectJob,
     onClearSelection,
@@ -731,6 +733,11 @@
     return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   }
 
+  function isActionPending(job: QueueDisplayJob): boolean {
+    if (pendingActionIds.has(job.id)) return true;
+    return isBulkAggregateJob(job) && job.bulkMemberIds.some((memberId) => pendingActionIds.has(memberId));
+  }
+
   function isCompletedBulkAggregate(job: DownloadJob): boolean {
     return isBulkAggregateJob(job) && job.state === JobState.Completed && Boolean(job.bulkArchiveOutputPath);
   }
@@ -942,15 +949,15 @@
                     class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
                     title={bulkPrimaryActionLabel(job)}
                     aria-label={bulkPrimaryActionLabel(job)}
-                    disabled={bulkPrimaryActionDisabled(job)}
+                    disabled={bulkPrimaryActionDisabled(job) || isActionPending(job)}
                     onclick={() => runBulkPrimaryAction(job)}
                   >
                     <Play size={17} />
                   </button>
                 {:else if job.state === JobState.Paused}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Resume" aria-label="Resume" onclick={() => onResume(job.id)}><Play size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45" title="Resume" aria-label="Resume" disabled={isActionPending(job)} onclick={() => onResume(job.id)}><Play size={17} /></button>
                 {:else if isActive(job)}
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Pause" aria-label="Pause" onclick={() => onPause(job.id)}><Pause size={17} /></button>
+                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45" title="Pause" aria-label="Pause" disabled={isActionPending(job)} onclick={() => onPause(job.id)}><Pause size={17} /></button>
                 {/if}
                 {#if !isBulkAggregateJob(job) && [JobState.Failed, JobState.Canceled].includes(job.state)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Retry" aria-label="Retry" onclick={() => onRetry(job.id)}><RotateCw size={17} /></button>
@@ -1009,7 +1016,7 @@
                       </div>
                       <div class="flex items-center justify-end">
                         {#if bulkMember.state === JobState.Paused && memberIncluded}
-                          <button type="button" class="h-6 rounded px-2 text-[11px] font-medium text-primary transition hover:bg-primary/10" title="Resume file" aria-label="Resume file" onclick={(event) => { event.stopPropagation(); onResume(bulkMember.id); }}>Resume</button>
+                          <button type="button" class="h-6 rounded px-2 text-[11px] font-medium text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-45" title="Resume file" aria-label="Resume file" disabled={pendingActionIds.has(bulkMember.id)} onclick={(event) => { event.stopPropagation(); onResume(bulkMember.id); }}>Resume</button>
                         {/if}
                       </div>
                     </div>
@@ -1190,20 +1197,20 @@
       {@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
       {#if canShowBulkPrimaryAction(job)}
-        {@render MenuItem(Play, bulkPrimaryActionLabel(job), () => runBulkPrimaryAction(job), false, bulkPrimaryActionDisabled(job))}
+        {@render MenuItem(Play, bulkPrimaryActionLabel(job), () => runBulkPrimaryAction(job), false, bulkPrimaryActionDisabled(job) || isActionPending(job))}
       {/if}
-      {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
-      {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
+      {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id), false, isActionPending(job))}{/if}
+      {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id), false, isActionPending(job))}{/if}
     {/if}
   {:else}
     {@render MenuItem(FileText, 'Open File', () => onOpen(job.id))}
     {@render MenuItem(FolderOpen, 'Open Folder', () => onReveal(job.id))}
     {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
     {#if canRetry}{@render MenuItem(RotateCcw, 'Restart', () => onRestart(job.id))}{/if}
-    {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id))}{/if}
-    {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id))}{/if}
+    {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id), false, isActionPending(job))}{/if}
+    {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id), false, isActionPending(job))}{/if}
     {#if canSwapFailedDownloadToBrowser(job)}{@render MenuItem(ExternalLink, 'Open in browser', () => onSwapFailedToBrowser(job.id))}{/if}
-    {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id))}{/if}
+    {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id), false, isActionPending(job))}{/if}
     {#if removableJobs.length > 0}
       {@render MenuItem(Pencil, 'Rename', () => openRename(job))}
       {@render MenuItem(Trash2, menuJobs.length === 1 ? deleteActionLabelForJob(job) : getDeleteContextMenuLabel(menuJobs.length), () => openDeletePrompt(job), true)}
