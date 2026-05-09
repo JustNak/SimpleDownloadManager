@@ -146,6 +146,19 @@ impl SharedState {
                         message: format!("Bulk output already exists: {}", output_path.display()),
                     });
                 }
+                if let Some(existing_name) = reserved_bulk_output_path_conflict(
+                    &self.inner.read().await.jobs,
+                    &output_path,
+                    None,
+                ) {
+                    return Err(BackendError {
+                        code: "DESTINATION_EXISTS",
+                        message: format!(
+                            "Bulk output is already reserved by {existing_name}: {}",
+                            output_path.display()
+                        ),
+                    });
+                }
                 Some(BulkArchiveInfo {
                     id: format!(
                         "bulk_{}_{}",
@@ -159,7 +172,7 @@ impl SharedState {
                     output_kind: bulk_output_kind,
                     archive_status: BulkArchiveStatus::Pending,
                     requires_extraction: None,
-                    output_path: None,
+                    output_path: Some(output_path.display().to_string()),
                     error: None,
                     warning: None,
                     finalize_total_bytes: None,
@@ -412,6 +425,28 @@ impl RuntimeState {
             actual: None,
             status: IntegrityStatus::Pending,
         });
+        if let Some(archive) = options.bulk_archive.as_ref() {
+            if let Some(output_path) = archive
+                .output_path
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+                .map(Path::new)
+            {
+                if let Some(existing_name) = reserved_bulk_output_path_conflict(
+                    &self.jobs,
+                    output_path,
+                    Some(archive.id.as_str()),
+                ) {
+                    return Err(BackendError {
+                        code: "DESTINATION_EXISTS",
+                        message: format!(
+                            "Bulk output is already reserved by {existing_name}: {}",
+                            output_path.display()
+                        ),
+                    });
+                }
+            }
+        }
 
         let initial_state = if options.start_paused {
             JobState::Paused
@@ -656,6 +691,29 @@ fn path_matches(existing_path: &str, candidate: &Path) -> bool {
 
 fn path_key(path: &str) -> String {
     path.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn reserved_bulk_output_path_conflict(
+    jobs: &[DownloadJob],
+    output_path: &Path,
+    ignore_archive_id: Option<&str>,
+) -> Option<String> {
+    let candidate_key = path_key(&output_path.display().to_string());
+    jobs.iter()
+        .filter_map(|job| job.bulk_archive.as_ref())
+        .filter(|archive| ignore_archive_id != Some(archive.id.as_str()))
+        .find(|archive| {
+            bulk_archive_reserves_output(archive.archive_status)
+                && archive
+                    .output_path
+                    .as_ref()
+                    .is_some_and(|path| path_key(path) == candidate_key)
+        })
+        .map(|archive| archive.name.clone())
+}
+
+fn bulk_archive_reserves_output(status: BulkArchiveStatus) -> bool {
+    status == BulkArchiveStatus::Pending || status.is_finalizing()
 }
 
 fn non_empty_string(value: String) -> Option<String> {

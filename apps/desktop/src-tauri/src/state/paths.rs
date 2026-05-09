@@ -482,7 +482,7 @@ pub(super) fn unique_archive_entry_name(
     used_names: &mut HashSet<String>,
 ) -> String {
     let sanitized = sanitize_filename(filename);
-    if used_names.insert(sanitized.clone()) {
+    if used_names.insert(sanitized.to_ascii_lowercase()) {
         return sanitized;
     }
 
@@ -498,7 +498,7 @@ pub(super) fn unique_archive_entry_name(
 
     for index in 1..10_000 {
         let candidate = format!("{stem} ({index}){extension}");
-        if used_names.insert(candidate.clone()) {
+        if used_names.insert(candidate.to_ascii_lowercase()) {
             return candidate;
         }
     }

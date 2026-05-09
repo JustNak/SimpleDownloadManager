@@ -121,6 +121,26 @@ async fn authenticated_handoff_auth_is_memory_only_and_claimed_with_task() {
 }
 
 #[tokio::test]
+async fn claim_schedulable_jobs_preserves_persisted_retry_attempts() {
+    let download_dir = test_runtime_dir("claim-preserves-retry-attempts");
+    let mut job = download_job(
+        "job_retry_budget",
+        JobState::Queued,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.retry_attempts = 2;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let (_snapshot, tasks) = state.claim_schedulable_jobs().await.unwrap();
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].retry_attempts, 2);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn authenticated_handoff_auth_requires_allowed_host() {
     let download_dir = test_runtime_dir("auth-handoff-allowlist");
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
@@ -1894,7 +1914,12 @@ async fn update_job_progress_preserves_paused_state_after_pause() {
 async fn update_job_progress_does_not_revive_canceled_jobs() {
     let download_dir = test_runtime_dir("progress-preserves-canceled");
     let storage_path = download_dir.join("state.json");
-    let mut job = download_job("job_cancel", JobState::Canceled, ResumeSupport::Supported, 100);
+    let mut job = download_job(
+        "job_cancel",
+        JobState::Canceled,
+        ResumeSupport::Supported,
+        100,
+    );
     job.total_bytes = 1000;
     job.speed = 512;
     job.eta = 60;
@@ -2432,6 +2457,174 @@ async fn bulk_archive_ready_uses_bulk_directory_for_folder_output() {
     assert_ne!(ready.output_path, download_dir.join("Game"));
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn enqueue_bulk_archive_freezes_output_path_and_rejects_reserved_duplicate() {
+    let download_dir = test_runtime_dir("bulk-output-reservation");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+    let mut settings = state.settings().await;
+    settings.download_directory = download_dir.display().to_string();
+    settings.bulk.output_directory = download_dir.join("Bulk").display().to_string();
+    state.save_settings(settings).await.unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_bulk_options(
+            bulk_test_entries(),
+            None,
+            Some("Bundle".into()),
+            true,
+            BulkArchiveOutputKind::Folder,
+        )
+        .await
+        .expect("initial bulk enqueue should reserve output");
+    let reserved_output = download_dir.join("Bulk").join("Bundle");
+    let archive = results
+        .last()
+        .unwrap()
+        .snapshot
+        .jobs
+        .iter()
+        .find_map(|job| job.bulk_archive.as_ref())
+        .expect("bulk archive should be attached to members");
+
+    assert_eq!(
+        archive.output_path,
+        Some(reserved_output.display().to_string())
+    );
+    assert_eq!(archive.archive_status, BulkArchiveStatus::Pending);
+
+    let error = state
+        .enqueue_download_entries_with_bulk_options(
+            bulk_test_entries(),
+            None,
+            Some("Bundle".into()),
+            true,
+            BulkArchiveOutputKind::Folder,
+        )
+        .await
+        .expect_err("pending bulk output path should be reserved");
+
+    assert_eq!(error.code, "DESTINATION_EXISTS");
+    assert!(error.message.contains("already reserved"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn enqueue_download_in_memory_rechecks_bulk_output_reservation_under_write_lock() {
+    let download_dir = test_runtime_dir("bulk-output-write-lock-reservation");
+    let mut state = runtime_state_with_jobs(vec![]);
+    state.settings.download_directory = download_dir.display().to_string();
+    let output_path = download_dir.join("Bulk").join("Bundle");
+    std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+
+    let archive = |id: &str| BulkArchiveInfo {
+        id: id.into(),
+        name: "Bundle".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
+        output_path: Some(output_path.display().to_string()),
+        error: None,
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
+    };
+
+    let shared_archive = archive("bulk_a");
+    state
+        .enqueue_download_in_memory(
+            "https://example.com/a.bin",
+            EnqueueOptions {
+                transfer_kind: Some(TransferKind::Http),
+                start_paused: true,
+                bulk_archive: Some(shared_archive.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("first archive member should enqueue");
+    state
+        .enqueue_download_in_memory(
+            "https://example.com/b.bin",
+            EnqueueOptions {
+                transfer_kind: Some(TransferKind::Http),
+                start_paused: true,
+                bulk_archive: Some(shared_archive),
+                ..Default::default()
+            },
+        )
+        .expect("same archive id should share the reservation");
+
+    let error = state
+        .enqueue_download_in_memory(
+            "https://example.com/c.bin",
+            EnqueueOptions {
+                transfer_kind: Some(TransferKind::Http),
+                start_paused: true,
+                bulk_archive: Some(archive("bulk_b")),
+                ..Default::default()
+            },
+        )
+        .expect_err("different archive id should not reuse reserved output");
+
+    assert_eq!(error.code, "DESTINATION_EXISTS");
+    assert!(error.message.contains("already reserved"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_archive_ready_uses_reserved_output_path_after_settings_change() {
+    let download_dir = test_runtime_dir("bulk-ready-reserved-output");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+    let mut settings = state.settings().await;
+    settings.download_directory = download_dir.display().to_string();
+    settings.bulk.output_directory = download_dir.join("Bulk").display().to_string();
+    state.save_settings(settings).await.unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_bulk_options(
+            bulk_test_entries(),
+            None,
+            Some("Bundle".into()),
+            true,
+            BulkArchiveOutputKind::Folder,
+        )
+        .await
+        .expect("bulk enqueue should succeed");
+    let first_job_id = results[0].job_id.clone();
+    let reserved_output = download_dir.join("Bulk").join("Bundle");
+
+    let mut settings = state.settings().await;
+    settings.bulk.output_directory = download_dir.join("OtherBulk").display().to_string();
+    state.save_settings(settings).await.unwrap();
+    complete_bulk_members_for_ready(&state).await;
+
+    let ready = state
+        .bulk_archive_ready_for_job(&first_job_id)
+        .await
+        .expect("ready check should succeed")
+        .expect("completed members should claim archive");
+
+    assert_eq!(ready.output_path, reserved_output);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn unique_archive_entry_name_treats_case_only_collisions_as_duplicates() {
+    let mut used_names = HashSet::new();
+
+    assert_eq!(
+        unique_archive_entry_name("File.txt", &mut used_names),
+        "File.txt"
+    );
+    assert_eq!(
+        unique_archive_entry_name("file.txt", &mut used_names),
+        "file (1).txt"
+    );
 }
 
 #[tokio::test]

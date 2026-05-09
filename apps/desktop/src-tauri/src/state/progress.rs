@@ -312,7 +312,11 @@ impl SharedState {
             }
 
             let output_kind = BulkArchiveOutputKind::Folder;
-            let output_path = bulk_output_path_from_settings(&state.settings, &archive.name);
+            let output_path = archive
+                .output_path
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bulk_output_path_from_settings(&state.settings, &archive.name));
 
             let mut used_names = HashSet::new();
             let mut entries = Vec::with_capacity(members.len());
@@ -734,11 +738,7 @@ fn should_preserve_worker_interrupted_state(state: JobState) -> bool {
     )
 }
 
-fn apply_download_progress(
-    job: &mut DownloadJob,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
-) {
+fn apply_download_progress(job: &mut DownloadJob, downloaded_bytes: u64, total_bytes: Option<u64>) {
     job.downloaded_bytes = downloaded_bytes;
     if let Some(total_bytes) = total_bytes {
         job.total_bytes = total_bytes.max(downloaded_bytes);

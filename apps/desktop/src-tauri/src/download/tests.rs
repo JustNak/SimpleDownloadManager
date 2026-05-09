@@ -183,6 +183,48 @@ fn bulk_archive_source_plan_detects_multipart_rar_set() {
 }
 
 #[test]
+fn bulk_archive_source_plan_detects_legacy_rar_volumes() {
+    let root = test_download_runtime_dir("bulk-archive-detect-legacy-rar");
+    let entries = vec![
+        archive_test_entry(&root, "Game.rar", b"first"),
+        archive_test_entry(&root, "Game.r00", b"second"),
+        archive_test_entry(&root, "Game.r01", b"third"),
+    ];
+
+    let plan = build_bulk_archive_source_plan(&entries).expect("legacy rar volumes should group");
+
+    assert_eq!(plan.raw_entries.len(), 0);
+    assert_eq!(plan.archive_sets.len(), 1);
+    assert_eq!(plan.archive_sets[0].first_part.archive_name, "Game.rar");
+    assert_eq!(
+        plan.archive_sets[0]
+            .members
+            .iter()
+            .map(|entry| entry.archive_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Game.rar", "Game.r00", "Game.r01"]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_archive_source_plan_rejects_missing_legacy_rar_volume() {
+    let root = test_download_runtime_dir("bulk-archive-missing-legacy-rar");
+    let entries = vec![
+        archive_test_entry(&root, "Game.rar", b"first"),
+        archive_test_entry(&root, "Game.r01", b"third"),
+    ];
+
+    let error = build_bulk_archive_source_plan(&entries)
+        .expect_err("missing legacy rar volumes should fail before extraction");
+
+    assert!(error.contains("Game.r00"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn bulk_archive_source_plan_detects_dot_001_set_and_missing_number() {
     let root = test_download_runtime_dir("bulk-archive-detect-001-set");
     let entries = vec![
@@ -407,6 +449,54 @@ fn folder_combine_failure_keeps_original_sources_and_removes_incomplete_output()
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn folder_combine_removes_stale_staging_dirs_for_same_output() {
+    let root = test_download_runtime_dir("bulk-folder-removes-stale-staging");
+    let source = root.join("source.txt");
+    std::fs::write(&source, b"source").unwrap();
+    let output_path = root.join("Bundle");
+    let stale_staging = root.join(".Bundle.extracting-111-222");
+    std::fs::create_dir_all(&stale_staging).unwrap();
+    std::fs::write(stale_staging.join("old.tmp"), b"old").unwrap();
+    let prepared = PreparedBulkArchive {
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: output_path.clone(),
+        entries: vec![crate::state::BulkArchiveEntry {
+            source_path: source.clone(),
+            archive_name: "source.txt".into(),
+        }],
+        cleanup_paths: vec![source],
+        staging_root: None,
+    };
+
+    let outcome = finish_prepared_bulk_archive_sync(prepared)
+        .expect("folder finalization should clean stale staging and complete");
+
+    assert_eq!(outcome.output_path, output_path);
+    assert!(!stale_staging.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn bulk_file_operation_retries_transient_failures() {
+    let calls = std::cell::Cell::new(0);
+
+    retry_bulk_file_operation("test copy", || {
+        calls.set(calls.get() + 1);
+        if calls.get() == 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "The process cannot access the file because it is being used by another process.",
+            ));
+        }
+        Ok(())
+    })
+    .expect("transient file operation should be retried");
+
+    assert_eq!(calls.get(), 2);
 }
 
 #[test]
@@ -1700,6 +1790,7 @@ fn cached_torrent_metadata_source_is_preferred_for_resume() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        retry_attempts: 0,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
     };
@@ -1731,6 +1822,7 @@ fn cached_torrent_metadata_source_falls_back_to_original_source_when_absent() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        retry_attempts: 0,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
     };
