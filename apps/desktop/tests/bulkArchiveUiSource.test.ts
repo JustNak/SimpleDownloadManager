@@ -37,7 +37,7 @@ assert.match(
   'completed bulk aggregates should not render the inline dropdown trigger',
 );
 const bulkExpansionSource = queueSource.match(
-  /\{#if isBulkTable && canExpandBulkAggregate\(job\) && expandedBulkRowIds\.has\(job\.id\)\}([\s\S]*?)\n            \{\/if\}\n          \{\/each\}/,
+  /\{#if isBulkTable && canExpandBulkAggregate\(job\) && expandedBulkRowIds\.has\(job\.id\)\}([\s\S]*?)\r?\n            \{\/if\}\r?\n          \{\/each\}/,
 )?.[1] ?? '';
 assert.ok(bulkExpansionSource, 'bulk queue should render an inline expansion block');
 assert.doesNotMatch(bulkExpansionSource, /files included|includedBulkMemberCount/, 'bulk inline expansion should not render a separate review summary/start strip');
