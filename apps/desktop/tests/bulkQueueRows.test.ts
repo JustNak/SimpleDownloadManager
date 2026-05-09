@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { groupBulkQueueRows, isBulkAggregateJob } from '../src/bulkQueueRows.ts';
+import { groupBulkMembersByArchiveId, groupBulkQueueRows, isBulkAggregateJob } from '../src/bulkQueueRows.ts';
 import { filterJobsForView, getQueueCounts } from '../src/downloadViews.ts';
 import type { DownloadJob } from '../src/types.ts';
 
@@ -26,39 +26,40 @@ const bulkArchive = {
   archiveStatus: 'pending' as const,
 };
 
-const rows = groupBulkQueueRows([
-  job({
-    id: 'part_1',
-    filename: 'Game.part01.rar',
-    url: 'https://dl.fuckingfast.co/dl/one',
-    state: 'completed',
-    progress: 100,
-    totalBytes: 500,
-    downloadedBytes: 500,
-    speed: 0,
-    bulkArchive,
-  }),
-  job({
-    id: 'part_2',
-    filename: 'Game.part02.rar',
-    url: 'https://dl.fuckingfast.co/dl/two',
-    state: 'downloading',
-    progress: 50,
-    totalBytes: 500,
-    downloadedBytes: 250,
-    speed: 25,
-    eta: 10,
-    bulkArchive,
-  }),
-  job({
-    id: 'loose',
-    filename: 'guide.pdf',
-    state: 'completed',
-    progress: 100,
-    totalBytes: 100,
-    downloadedBytes: 100,
-  }),
-]);
+const partOne = job({
+  id: 'part_1',
+  filename: 'Game.part01.rar',
+  url: 'https://dl.fuckingfast.co/dl/one',
+  state: 'completed',
+  progress: 100,
+  totalBytes: 500,
+  downloadedBytes: 500,
+  speed: 0,
+  bulkArchive,
+});
+const partTwo = job({
+  id: 'part_2',
+  filename: 'Game.part02.rar',
+  url: 'https://dl.fuckingfast.co/dl/two',
+  state: 'downloading',
+  progress: 50,
+  totalBytes: 500,
+  downloadedBytes: 250,
+  speed: 25,
+  eta: 10,
+  bulkArchive,
+});
+const looseJob = job({
+  id: 'loose',
+  filename: 'guide.pdf',
+  state: 'completed',
+  progress: 100,
+  totalBytes: 100,
+  downloadedBytes: 100,
+});
+
+const rows = groupBulkQueueRows([partOne, partTwo, looseJob]);
+const membersByArchiveId = groupBulkMembersByArchiveId([partOne, partTwo, looseJob]);
 
 assert.equal(rows.length, 2, 'bulk archive members should collapse into one visible queue row');
 assert.equal(rows[0].filename, 'bulk-download.zip', 'aggregate row should use the archive filename');
@@ -77,10 +78,13 @@ if (!isBulkAggregateJob(aggregate)) {
 assert.deepEqual(aggregate.bulkMemberIds, ['part_1', 'part_2']);
 assert.equal(aggregate.bulkArchiveId, 'bulk_1');
 assert.deepEqual(
-  aggregate.bulkMembers.map((member) => member.id),
+  membersByArchiveId.bulk_1.map((member) => member.id),
   ['part_1', 'part_2'],
-  'aggregate rows should expose member data for inline expansion',
+  'bulk member lookup should expose member data for inline expansion',
 );
+assert.equal(membersByArchiveId.bulk_1[0], partOne, 'bulk member lookup should keep original job object references');
+assert.equal('bulkMembers' in aggregate, false, 'aggregate rows should not clone member data');
+assert.equal('bulkArchiveMemberSearchText' in aggregate, false, 'aggregate rows should not store always-built member search text');
 
 assert.deepEqual(
   getQueueCounts(rows),
@@ -123,9 +127,15 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
-  filterJobsForView(rows, 'bulk', 'part02').map((row) => row.id),
+  filterJobsForView(rows, 'bulk', 'part02', membersByArchiveId).map((row) => row.id),
   [aggregate.id],
-  'bulk search should match filenames from collapsed bulk members',
+  'bulk search should match filenames from collapsed bulk members via the lookup',
+);
+
+assert.deepEqual(
+  filterJobsForView(rows, 'bulk', 'dl.fuckingfast.co/dl/two', membersByArchiveId).map((row) => row.id),
+  [aggregate.id],
+  'bulk search should match URLs from collapsed bulk members via the lookup',
 );
 
 const completedRows = groupBulkQueueRows([

@@ -15,7 +15,10 @@ assert.match(backendSource, /export async function openBulkArchive\(archiveId: s
 assert.match(backendSource, /export async function revealBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level reveal wrapper');
 assert.match(queueSource, /function bulkOpenLabel[\s\S]*return 'Open Folder'/, 'completed bulk aggregate menus should always label folder outputs as Open Folder');
 assert.match(queueSource, /expandedBulkRowIds/, 'bulk aggregate rows should keep inline expansion state in the queue view');
-assert.match(queueSource, /bulkMembers/, 'bulk aggregate expansion should render member file data inline');
+assert.match(queueSource, /bulkMembersByArchiveId/, 'bulk aggregate expansion should read member file data from a lookup');
+assert.match(queueSource, /bulkMembersForJob/, 'bulk aggregate expansion should resolve member rows without cloned aggregate data');
+assert.match(queueSource, /bulkMemberVirtualQueue/, 'bulk aggregate expansion should virtualize large inline member lists');
+assert.match(queueSource, /type="checkbox"[\s\S]*setBulkMemberIncluded/, 'bulk review rows should keep per-member include checkboxes inline');
 assert.match(queueSource, /excludedBulkMemberIds/, 'bulk review rows should track excluded member files in the main bulk view');
 assert.match(queueSource, /startBulkReview/, 'the main bulk view should start included members and remove excluded queued members');
 assert.match(queueSource, /function bulkPrimaryActionLabel[\s\S]*\? 'Start' : 'Resume'/, 'bulk review groups should expose Start on the aggregate row');
