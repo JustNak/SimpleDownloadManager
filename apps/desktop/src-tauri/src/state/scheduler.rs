@@ -7,6 +7,7 @@ impl SharedState {
         let auth_by_job = self.handoff_auth.read().await.clone();
         let (snapshot, persisted, tasks) = {
             let mut state = self.inner.write().await;
+            let now = Instant::now();
             let active_download_workers = state
                 .active_workers
                 .iter()
@@ -40,6 +41,8 @@ impl SharedState {
 
             let mut scheduled_ids = Vec::new();
             let mut scheduled_bulk_workers = 0_u32;
+            let mut protected_bulk_hoster_claim_blocked =
+                protected_bulk_hoster_worker_blocks_claim(&state, now);
             for job in &state.jobs {
                 if scheduled_ids.len() >= available_slots {
                     break;
@@ -50,7 +53,14 @@ impl SharedState {
                         if active_bulk_workers + scheduled_bulk_workers >= bulk_slot_limit {
                             continue;
                         }
+                        if is_protected_bulk_hoster_job(job) && protected_bulk_hoster_claim_blocked
+                        {
+                            continue;
+                        }
                         scheduled_bulk_workers += 1;
+                        if is_protected_bulk_hoster_job(job) {
+                            protected_bulk_hoster_claim_blocked = true;
+                        }
                     }
                     scheduled_ids.push(job.id.clone());
                 }
@@ -71,13 +81,21 @@ impl SharedState {
                         torrent: job.torrent.clone(),
                         handoff_auth: auth_by_job.get(&job.id).cloned(),
                         resolved_from_url: job.resolved_from_url.clone(),
+                        is_bulk_member: is_bulk_member_job(job),
                         retry_attempts: job.retry_attempts,
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
                     };
                     let task_id = task.id.clone();
+                    let hoster_health = is_protected_bulk_hoster_job(job)
+                        .then(|| BulkHosterWorkerHealth::from_job(job, now));
                     let _ = job;
                     state.active_workers.insert(task_id);
+                    if let Some(health) = hoster_health {
+                        state
+                            .bulk_hoster_worker_health
+                            .insert(task.id.clone(), health);
+                    }
                     state.push_diagnostic_event(
                         DiagnosticLevel::Info,
                         "download".into(),
@@ -124,4 +142,18 @@ impl SharedState {
 
 fn is_bulk_member_job(job: &DownloadJob) -> bool {
     job.transfer_kind == TransferKind::Http && job.bulk_archive.is_some()
+}
+
+fn is_protected_bulk_hoster_job(job: &DownloadJob) -> bool {
+    is_bulk_member_job(job) && job.resolved_from_url.is_some()
+}
+
+fn protected_bulk_hoster_worker_blocks_claim(state: &RuntimeState, now: Instant) -> bool {
+    state.active_workers.iter().any(|id| {
+        state
+            .job(id)
+            .filter(|job| is_protected_bulk_hoster_job(job))
+            .and_then(|_| state.bulk_hoster_worker_health.get(id))
+            .is_some_and(|health| health.blocks_bulk_hoster_claim(now))
+    })
 }

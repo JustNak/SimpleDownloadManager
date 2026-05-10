@@ -20,6 +20,7 @@ pub struct DownloadTask {
     pub torrent: Option<TorrentInfo>,
     pub handoff_auth: Option<HandoffAuth>,
     pub resolved_from_url: Option<String>,
+    pub is_bulk_member: bool,
     pub retry_attempts: u32,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,

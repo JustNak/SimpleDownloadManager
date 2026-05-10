@@ -4,6 +4,7 @@ const BULK_SLOW_RECOVERY_MIN_SIZE: u64 = 32 * 1024 * 1024;
 const BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const BULK_SLOW_RECOVERY_BALANCED_THRESHOLD: u64 = 64 * 1024;
 const BULK_SLOW_RECOVERY_FAST_THRESHOLD: u64 = 128 * 1024;
+const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BulkSlowStreamRecoveryAction {
@@ -68,7 +69,8 @@ async fn run_http_download_attempt_for_url(
         preflight_download(&client, effective_url, request_auth.as_ref()).await;
 
     let has_segment_state = segment_meta_path(&task.temp_path).exists();
-    let can_try_segmented = (existing_bytes == 0 || has_segment_state)
+    let can_try_segmented = task_allows_segmented_download(task)
+        && (existing_bytes == 0 || has_segment_state)
         && speed_limit.is_none()
         && profile.max_segments >= 2
         && !range_backoffs().is_backed_off(effective_url, Instant::now());
@@ -353,6 +355,9 @@ async fn run_http_download_attempt_for_url(
                 )
                 .await?;
             emit_download_update(app, &snapshot, &task.id);
+            if task_releases_bulk_hoster_fairness(task, speed) {
+                schedule_downloads(app.clone(), state.clone());
+            }
             last_emitted_bytes = downloaded_bytes;
             if should_persist {
                 last_persisted_at = Instant::now();
@@ -419,6 +424,19 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
     }
 
     (!auth.headers.is_empty()).then_some(auth)
+}
+
+pub(super) fn task_allows_segmented_download(task: &crate::state::DownloadTask) -> bool {
+    !(task.is_bulk_member && task.resolved_from_url.is_some())
+}
+
+pub(super) fn task_releases_bulk_hoster_fairness(
+    task: &crate::state::DownloadTask,
+    speed: u64,
+) -> bool {
+    task.is_bulk_member
+        && task.resolved_from_url.is_some()
+        && speed >= BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD
 }
 
 async fn refresh_hoster_url_before_attempt(

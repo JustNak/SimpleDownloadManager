@@ -400,7 +400,7 @@ impl RuntimeState {
             };
         let replaced_duplicate = duplicate_replacement_index.map(|index| {
             let job = self.remove_job_at_index(index);
-            self.active_workers.remove(&job.id);
+            self.remove_active_worker(&job.id);
             self.external_reseed_jobs.remove(&job.id);
             if job.state != JobState::Completed {
                 let _ = remove_path_if_exists(Path::new(&job.temp_path));

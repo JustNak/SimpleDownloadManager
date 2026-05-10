@@ -203,6 +203,23 @@ impl RuntimeState {
         self.last_progress_persist_at = Some(now);
         true
     }
+
+    pub(super) fn remove_active_worker(&mut self, id: &str) {
+        self.active_workers.remove(id);
+        self.bulk_hoster_worker_health.remove(id);
+    }
+
+    pub(super) fn update_bulk_hoster_worker_health(
+        &mut self,
+        id: &str,
+        downloaded_bytes: u64,
+        speed: u64,
+        now: Instant,
+    ) {
+        if let Some(health) = self.bulk_hoster_worker_health.get_mut(id) {
+            health.update(downloaded_bytes, speed, now);
+        }
+    }
 }
 
 pub(super) fn job_indexes_for(jobs: &[DownloadJob]) -> HashMap<String, usize> {

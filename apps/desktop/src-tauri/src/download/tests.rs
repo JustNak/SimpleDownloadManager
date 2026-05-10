@@ -1798,6 +1798,7 @@ fn cached_torrent_metadata_source_is_preferred_for_resume() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        is_bulk_member: false,
         retry_attempts: 0,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
@@ -1830,6 +1831,7 @@ fn cached_torrent_metadata_source_falls_back_to_original_source_when_absent() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        is_bulk_member: false,
         retry_attempts: 0,
         target_path: PathBuf::from(job.target_path),
         temp_path: PathBuf::from(job.temp_path),
@@ -2064,6 +2066,35 @@ fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
         performance_profile(DownloadPerformanceMode::Balanced),
     )
     .is_none());
+}
+
+#[test]
+fn hoster_managed_bulk_tasks_disallow_segmented_downloads() {
+    let task = http_segment_policy_task(true, Some("https://fuckingfast.co/source"));
+
+    assert!(!task_allows_segmented_download(&task));
+}
+
+#[test]
+fn direct_bulk_and_non_bulk_hoster_tasks_still_allow_segmented_downloads() {
+    let direct_bulk = http_segment_policy_task(true, None);
+    let non_bulk_hoster = http_segment_policy_task(false, Some("https://fuckingfast.co/source"));
+
+    assert!(task_allows_segmented_download(&direct_bulk));
+    assert!(task_allows_segmented_download(&non_bulk_hoster));
+}
+
+#[test]
+fn healthy_hoster_bulk_progress_releases_fairness_scheduler() {
+    let hoster_bulk = http_segment_policy_task(true, Some("https://fuckingfast.co/source"));
+    let direct_bulk = http_segment_policy_task(true, None);
+
+    assert!(task_releases_bulk_hoster_fairness(&hoster_bulk, 64 * 1024));
+    assert!(!task_releases_bulk_hoster_fairness(
+        &hoster_bulk,
+        64 * 1024 - 1
+    ));
+    assert!(!task_releases_bulk_hoster_fairness(&direct_bulk, 96 * 1024));
 }
 
 #[test]
@@ -3068,6 +3099,25 @@ fn zip_central_directory_names(path: &Path) -> Vec<String> {
     }
 
     names
+}
+
+fn http_segment_policy_task(
+    is_bulk_member: bool,
+    resolved_from_url: Option<&str>,
+) -> crate::state::DownloadTask {
+    crate::state::DownloadTask {
+        id: "job_policy".into(),
+        url: "https://cdn.example.com/file.bin".into(),
+        filename: "file.bin".into(),
+        transfer_kind: TransferKind::Http,
+        torrent: None,
+        handoff_auth: None,
+        resolved_from_url: resolved_from_url.map(str::to_string),
+        is_bulk_member,
+        retry_attempts: 0,
+        target_path: PathBuf::from("C:/Downloads/file.bin"),
+        temp_path: PathBuf::from("C:/Downloads/file.bin.part"),
+    }
 }
 
 async fn spawn_cookie_required_server() -> (String, tokio::task::JoinHandle<String>) {

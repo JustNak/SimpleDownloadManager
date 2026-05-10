@@ -263,7 +263,7 @@ impl SharedState {
                 return Ok(None);
             }
 
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             let event_message = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
                     state.external_reseed_jobs.remove(id);
@@ -331,7 +331,7 @@ impl SharedState {
                 job.filename.clone()
             };
 
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             let event_message = if retry_reseed {
                 state.external_reseed_jobs.insert(id.into());
                 format!(
@@ -415,7 +415,7 @@ impl SharedState {
         let message = message.into();
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             state.external_reseed_jobs.remove(id);
             let filename = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -809,7 +809,7 @@ impl SharedState {
                 job.eta = 0;
                 job.filename.clone()
             };
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             state.push_diagnostic_event(
                 DiagnosticLevel::Info,
                 "torrent".into(),

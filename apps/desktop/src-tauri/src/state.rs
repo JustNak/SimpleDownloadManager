@@ -62,6 +62,9 @@ const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
 const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
 const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
 const PROGRESS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
+const BULK_HOSTER_STARTUP_GRACE_WINDOW: Duration = Duration::from_secs(20);
+const BULK_HOSTER_LOW_SPEED_WINDOW: Duration = Duration::from_secs(20);
+const BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND: u64 = 64 * 1024;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -92,9 +95,63 @@ struct RuntimeState {
     next_job_number: u64,
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
+    bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct BulkHosterWorkerHealth {
+    claimed_at: Instant,
+    last_progress_at: Instant,
+    last_downloaded_bytes: u64,
+    last_reported_speed: u64,
+    low_speed_since: Option<Instant>,
+}
+
+impl BulkHosterWorkerHealth {
+    fn from_job(job: &DownloadJob, now: Instant) -> Self {
+        Self {
+            claimed_at: now,
+            last_progress_at: now,
+            last_downloaded_bytes: job.downloaded_bytes,
+            last_reported_speed: job.speed,
+            low_speed_since: (job.speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND).then_some(now),
+        }
+    }
+
+    fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
+        if downloaded_bytes > self.last_downloaded_bytes {
+            self.last_progress_at = now;
+        }
+        self.last_downloaded_bytes = downloaded_bytes;
+        self.last_reported_speed = speed;
+
+        if speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND {
+            self.low_speed_since.get_or_insert(now);
+        } else {
+            self.low_speed_since = None;
+        }
+    }
+
+    fn blocks_bulk_hoster_claim(&self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.claimed_at) < BULK_HOSTER_STARTUP_GRACE_WINDOW {
+            return true;
+        }
+
+        if self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND {
+            return false;
+        }
+
+        let sustained_low_speed = self.low_speed_since.is_some_and(|since| {
+            now.saturating_duration_since(since) >= BULK_HOSTER_LOW_SPEED_WINDOW
+        });
+        let stalled_progress =
+            now.saturating_duration_since(self.last_progress_at) >= BULK_HOSTER_LOW_SPEED_WINDOW;
+
+        sustained_low_speed || stalled_progress
+    }
 }
 
 #[derive(Clone)]

@@ -268,7 +268,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
                 remove_file_if_exists(Path::new(&job.temp_path))?;
@@ -350,7 +350,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
                 if job.transfer_kind != TransferKind::Http
@@ -491,7 +491,7 @@ impl SharedState {
             let removed_canceled_torrent =
                 job.transfer_kind == TransferKind::Torrent && job.state == JobState::Canceled;
             let filename = job.filename.clone();
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             state.remove_job_at_index(job_index);
             if removed_canceled_torrent {
                 state.push_diagnostic_event(

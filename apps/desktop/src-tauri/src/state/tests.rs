@@ -4627,6 +4627,227 @@ async fn bulk_scheduler_cap_skips_bulk_members_but_keeps_normal_downloads_flowin
 }
 
 #[tokio::test]
+async fn protected_bulk_hoster_claim_holds_back_next_hoster_but_allows_direct_bulk() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-startup");
+    let archive = BulkArchiveInfo {
+        id: "bulk_hoster_fairness".into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
+        output_path: Some(download_dir.join("Bulk").join("Game").display().to_string()),
+        error: None,
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
+    };
+    let mut first_hoster = download_job(
+        "job_hoster_first",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    first_hoster.url = "https://fuckingfast.co/first".into();
+    first_hoster.resolved_from_url = Some("https://fuckingfast.co/first".into());
+    first_hoster.bulk_archive = Some(archive.clone());
+    let mut second_hoster = download_job(
+        "job_hoster_second",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    second_hoster.url = "https://fuckingfast.co/second".into();
+    second_hoster.resolved_from_url = Some("https://fuckingfast.co/second".into());
+    second_hoster.bulk_archive = Some(archive.clone());
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    direct_bulk.url = "https://cdn.example.com/direct.part03.rar".into();
+    direct_bulk.bulk_archive = Some(archive);
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![first_hoster, second_hoster, direct_bulk],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 3;
+        runtime.settings.bulk.max_concurrent_downloads = 3;
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(task_ids, vec!["job_hoster_first", "job_direct_bulk"]);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn protected_bulk_hoster_health_allows_next_hoster_after_recovery() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-recovered");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_recovered");
+    let mut active_hoster = download_job(
+        "job_hoster_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    active_hoster.resolved_from_url = Some("https://fuckingfast.co/active".into());
+    active_hoster.bulk_archive = Some(archive.clone());
+    active_hoster.speed = 96 * 1024;
+    let mut queued_hoster = download_job(
+        "job_hoster_queued",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    queued_hoster.resolved_from_url = Some("https://fuckingfast.co/queued".into());
+    queued_hoster.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active_hoster, queued_hoster],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 2;
+        runtime.settings.bulk.max_concurrent_downloads = 2;
+        runtime.active_workers.insert("job_hoster_active".into());
+        let now = Instant::now();
+        let active_job = runtime.job("job_hoster_active").unwrap();
+        let mut health = BulkHosterWorkerHealth::from_job(
+            active_job,
+            now - BULK_HOSTER_STARTUP_GRACE_WINDOW - Duration::from_secs(1),
+        );
+        health.update(50, 96 * 1024, now);
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_hoster_active".into(), health);
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_hoster_queued");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn protected_bulk_hoster_sustained_low_speed_holds_back_next_hoster() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-slow");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_slow");
+    let mut active_hoster = download_job(
+        "job_hoster_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    active_hoster.resolved_from_url = Some("https://fuckingfast.co/active".into());
+    active_hoster.bulk_archive = Some(archive.clone());
+    active_hoster.speed = 32 * 1024;
+    let mut queued_hoster = download_job(
+        "job_hoster_queued",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    queued_hoster.resolved_from_url = Some("https://fuckingfast.co/queued".into());
+    queued_hoster.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active_hoster, queued_hoster],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 2;
+        runtime.settings.bulk.max_concurrent_downloads = 2;
+        runtime.active_workers.insert("job_hoster_active".into());
+        let now = Instant::now();
+        let active_job = runtime.job("job_hoster_active").unwrap();
+        let mut health = BulkHosterWorkerHealth::from_job(
+            active_job,
+            now - BULK_HOSTER_STARTUP_GRACE_WINDOW - Duration::from_secs(1),
+        );
+        health.update(
+            50,
+            32 * 1024,
+            now - BULK_HOSTER_LOW_SPEED_WINDOW - Duration::from_secs(1),
+        );
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_hoster_active".into(), health);
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert!(tasks.is_empty());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn protected_bulk_hoster_health_is_cleared_after_failure() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-cleanup");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_cleanup");
+    let mut active_hoster = download_job(
+        "job_hoster_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    active_hoster.resolved_from_url = Some("https://fuckingfast.co/active".into());
+    active_hoster.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active_hoster]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_hoster_active".into());
+        let now = Instant::now();
+        let health = {
+            let active_job = runtime.job("job_hoster_active").unwrap();
+            BulkHosterWorkerHealth::from_job(active_job, now)
+        };
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_hoster_active".into(), health);
+    }
+
+    state
+        .fail_job(
+            "job_hoster_active",
+            "hoster timed out",
+            FailureCategory::Network,
+        )
+        .await
+        .expect("job should fail");
+
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_hoster_active"));
+    assert!(!runtime
+        .bulk_hoster_worker_health
+        .contains_key("job_hoster_active"));
+    drop(runtime);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn queued_torrent_task_preserves_resume_metadata() {
     let download_dir = test_runtime_dir("torrent-task-resume-metadata");
     let mut queued_job = download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0);
@@ -5028,9 +5249,26 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         next_job_number: 99,
         job_indexes,
         active_workers: HashSet::new(),
+        bulk_hoster_worker_health: HashMap::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
         last_progress_persist_at: None,
+    }
+}
+
+fn bulk_archive_info(download_dir: &Path, id: &str) -> BulkArchiveInfo {
+    BulkArchiveInfo {
+        id: id.into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Pending,
+        requires_extraction: None,
+        output_path: Some(download_dir.join("Bulk").join("Game").display().to_string()),
+        error: None,
+        warning: None,
+        finalize_total_bytes: None,
+        finalize_processed_bytes: None,
+        finalize_mode: None,
     }
 }
 

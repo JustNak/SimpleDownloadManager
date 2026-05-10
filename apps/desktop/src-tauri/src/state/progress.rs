@@ -8,17 +8,20 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.job_mut(id) else {
-                return Err("Job not found.".into());
-            };
+            {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
+                };
 
-            job.downloaded_bytes = downloaded_bytes;
-            if job.total_bytes > 0 {
-                job.progress =
-                    (downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0);
-            } else {
-                job.progress = 0.0;
+                job.downloaded_bytes = downloaded_bytes;
+                if job.total_bytes > 0 {
+                    job.progress = (downloaded_bytes as f64 / job.total_bytes as f64 * 100.0)
+                        .clamp(0.0, 100.0);
+                } else {
+                    job.progress = 0.0;
+                }
             }
+            state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
             (state.snapshot(), state.persisted())
         };
 
@@ -36,24 +39,28 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.job_mut(id) else {
-                return Err("Job not found.".into());
-            };
+            {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
+                };
 
-            let preserve_interrupted_state = should_preserve_worker_interrupted_state(job.state);
-            if preserve_interrupted_state {
-                job.speed = 0;
-                job.eta = 0;
-            } else {
-                job.state = JobState::Downloading;
-                job.error = None;
-                job.failure_category = None;
+                let preserve_interrupted_state =
+                    should_preserve_worker_interrupted_state(job.state);
+                if preserve_interrupted_state {
+                    job.speed = 0;
+                    job.eta = 0;
+                } else {
+                    job.state = JobState::Downloading;
+                    job.error = None;
+                    job.failure_category = None;
+                }
+                if let Some(filename) = filename {
+                    apply_download_filename(job, &filename);
+                }
+                apply_download_progress(job, downloaded_bytes, total_bytes);
+                job.resume_support = resume_support;
             }
-            if let Some(filename) = filename {
-                apply_download_filename(job, &filename);
-            }
-            apply_download_progress(job, downloaded_bytes, total_bytes);
-            job.resume_support = resume_support;
+            state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
             (state.snapshot(), state.persisted())
         };
 
@@ -122,28 +129,32 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            let Some(job) = state.job_mut(id) else {
-                return Err("Job not found.".into());
-            };
-
-            let preserve_interrupted_state = should_preserve_worker_interrupted_state(job.state);
-            if !preserve_interrupted_state {
-                job.state = JobState::Downloading;
-            }
-            apply_download_progress(job, downloaded_bytes, total_bytes);
-
-            if preserve_interrupted_state {
-                job.speed = 0;
-                job.eta = 0;
-            } else {
-                job.speed = speed;
-                let remaining = job.total_bytes.saturating_sub(job.downloaded_bytes);
-                job.eta = if speed == 0 {
-                    0
-                } else {
-                    ((remaining as f64) / (speed as f64)).ceil() as u64
+            {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
                 };
+
+                let preserve_interrupted_state =
+                    should_preserve_worker_interrupted_state(job.state);
+                if !preserve_interrupted_state {
+                    job.state = JobState::Downloading;
+                }
+                apply_download_progress(job, downloaded_bytes, total_bytes);
+
+                if preserve_interrupted_state {
+                    job.speed = 0;
+                    job.eta = 0;
+                } else {
+                    job.speed = speed;
+                    let remaining = job.total_bytes.saturating_sub(job.downloaded_bytes);
+                    job.eta = if speed == 0 {
+                        0
+                    } else {
+                        ((remaining as f64) / (speed as f64)).ceil() as u64
+                    };
+                }
             }
+            state.update_bulk_hoster_worker_health(id, downloaded_bytes, speed, Instant::now());
 
             let persisted = persist
                 .then(|| state.should_persist_progress_at(Instant::now()))
@@ -235,7 +246,7 @@ impl SharedState {
                     }
                 }
             }
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             state.push_diagnostic_event(event.0, "download".into(), event.1, Some(id.into()));
             (state.snapshot(), state.persisted())
         };
@@ -484,7 +495,7 @@ impl SharedState {
         let message = message.into();
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             state.external_reseed_jobs.remove(id);
             let event_message = {
                 let Some(job) = state.job_mut(id) else {
@@ -514,7 +525,7 @@ impl SharedState {
     pub async fn finish_interrupted_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.active_workers.remove(id);
+            state.remove_active_worker(id);
             let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
             };
