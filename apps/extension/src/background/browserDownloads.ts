@@ -69,6 +69,8 @@ export type FirefoxWebRequestDownloadDetails = {
   url: string;
   method?: string;
   type?: string;
+  statusCode?: number;
+  statusLine?: string;
   responseHeaders?: FirefoxWebRequestHeader[];
   incognito?: boolean;
 };
@@ -217,6 +219,10 @@ export function firefoxWebRequestDownloadCandidate(
   }
 
   if (details.type && !FIREFOX_DOWNLOAD_RESOURCE_TYPES.has(details.type)) {
+    return null;
+  }
+
+  if (isRedirectResponse(details)) {
     return null;
   }
 
@@ -500,6 +506,14 @@ function headerValue(headers: FirefoxWebRequestHeader[] | undefined, name: strin
 
 function normalizeContentType(value: string | undefined): string | undefined {
   return value?.split(';', 1)[0]?.trim().toLowerCase() || undefined;
+}
+
+function isRedirectResponse(details: FirefoxWebRequestDownloadDetails): boolean {
+  if (details.statusCode !== undefined) {
+    return details.statusCode >= 300 && details.statusCode < 400;
+  }
+
+  return /^HTTP\/\S+\s+3\d\d\b/i.test(details.statusLine ?? '');
 }
 
 function positiveIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {

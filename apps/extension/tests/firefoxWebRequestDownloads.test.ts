@@ -61,6 +61,38 @@ assert.equal(
 );
 
 assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://search.brave.com/search?q=What%20is%20the%20date%3F%20%21g&source=web',
+      statusCode: 307,
+      responseHeaders: [
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Location', value: 'https://www.google.com/search?q=What%20is%20the%20date%3F' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Brave bang redirects with binary content type should stay as browser navigation',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/redirect',
+      statusLine: 'HTTP/2 302 Found',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="redirect.zip"' },
+        { name: 'Location', value: 'https://downloads.example.com/movie.zip' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not intercept redirect responses even when they look like attachments',
+);
+
+assert.equal(
   firefoxWebRequestDownloadCandidate(details({ method: 'POST' }), defaultSettings),
   null,
   'non-replayable POST downloads should stay with Firefox',
