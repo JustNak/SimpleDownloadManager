@@ -42,6 +42,8 @@
   import { DEFAULT_EXTENSION_LISTEN_PORT, defaultBulkDownloadDirectory } from './defaultSettings';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
+  const downloadPerformanceModes = new Set(['stable', 'balanced', 'fast']);
+  const bulkHosterFairnessModes = new Set(['adaptive', 'safe', 'off']);
 
   interface Props {
     settings: Settings;
@@ -256,6 +258,9 @@
       ...settings,
       outputDirectory: settings.outputDirectory.trim() || defaultBulkDownloadDirectory(downloadDirectory),
       maxConcurrentDownloads: Math.max(1, Math.min(10, Math.trunc(settings.maxConcurrentDownloads) || 2)),
+      speedLimitKibPerSecond: Math.max(0, Math.min(1048576, Math.trunc(settings.speedLimitKibPerSecond) || 0)),
+      downloadPerformanceMode: downloadPerformanceModes.has(settings.downloadPerformanceMode) ? settings.downloadPerformanceMode : 'balanced',
+      hosterFairnessMode: bulkHosterFairnessModes.has(settings.hosterFairnessMode) ? settings.hosterFairnessMode : 'adaptive',
       autoRetryAttempts: Math.max(0, Math.min(10, Math.trunc(settings.autoRetryAttempts) || 0)),
     };
   }
@@ -504,6 +509,9 @@
   <div>
     {@render FieldRow('Output Folder', 'Grouped Bulk output path.', bulkDirectoryControl)}
     {@render FieldRow('Max Active Bulk Files', 'Concurrent member file limit.', bulkMaxConcurrentControl)}
+    {@render FieldRow('Bulk Speed Limit', 'Per-file Bulk download cap.', bulkSpeedLimitControl)}
+    {@render FieldRow('Bulk Performance Mode', 'Bulk direct-link connection strategy.', bulkPerformanceControl)}
+    {@render FieldRow('Hoster Fairness', 'Protected hoster Bulk scheduling policy.', bulkHosterFairnessControl)}
     {@render SwitchFieldRow(RotateCw, 'Retry override', 'Use Bulk-specific retry attempts.', bulkRetryOverrideControl)}
     {#if formData.bulk.autoRetryOverrideEnabled}
       {@render FieldRow('Bulk Retry Attempts', 'Failure retries for Bulk members.', bulkRetryAttemptsControl)}
@@ -772,6 +780,29 @@
 
 {#snippet bulkMaxConcurrentControl()}
   <input type="number" min="1" max="10" bind:value={formData.bulk.maxConcurrentDownloads} onchange={() => updateBulkSettings({ maxConcurrentDownloads: formData.bulk.maxConcurrentDownloads })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+{/snippet}
+
+{#snippet bulkSpeedLimitControl()}
+  <div class="flex items-center gap-2">
+    <input type="number" min="0" max="1048576" bind:value={formData.bulk.speedLimitKibPerSecond} onchange={() => updateBulkSettings({ speedLimitKibPerSecond: formData.bulk.speedLimitKibPerSecond })} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+    <span class="text-sm text-muted-foreground">KB/s</span>
+  </div>
+{/snippet}
+
+{#snippet bulkPerformanceControl()}
+  <select bind:value={formData.bulk.downloadPerformanceMode} onchange={() => updateBulkSettings({ downloadPerformanceMode: formData.bulk.downloadPerformanceMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="stable">Stable</option>
+    <option value="balanced">Balanced</option>
+    <option value="fast">Fast</option>
+  </select>
+{/snippet}
+
+{#snippet bulkHosterFairnessControl()}
+  <select bind:value={formData.bulk.hosterFairnessMode} onchange={() => updateBulkSettings({ hosterFairnessMode: formData.bulk.hosterFairnessMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
+    <option value="adaptive">Adaptive</option>
+    <option value="safe">Safe</option>
+    <option value="off">Off</option>
+  </select>
 {/snippet}
 
 {#snippet bulkRetryOverrideControl()}

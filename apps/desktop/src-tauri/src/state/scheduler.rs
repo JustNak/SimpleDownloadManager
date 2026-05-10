@@ -8,13 +8,13 @@ impl SharedState {
         let (snapshot, persisted, tasks) = {
             let mut state = self.inner.write().await;
             let now = Instant::now();
-            let active_download_workers = state
+            let active_normal_workers = state
                 .active_workers
                 .iter()
                 .filter(|id| {
                     state
                         .job(id)
-                        .map(|job| job.state != JobState::Seeding)
+                        .map(|job| job.state != JobState::Seeding && !is_bulk_member_job(job))
                         .unwrap_or(false)
                 })
                 .count() as u32;
@@ -28,24 +28,27 @@ impl SharedState {
                         .unwrap_or(false)
                 })
                 .count() as u32;
-            let available_slots = state
-                .settings
-                .max_concurrent_downloads
-                .max(1)
-                .saturating_sub(active_download_workers) as usize;
+            let normal_slot_limit = state.settings.max_concurrent_downloads.max(1);
             let bulk_slot_limit = state.settings.bulk.max_concurrent_downloads.max(1);
+            let available_normal_slots = normal_slot_limit.saturating_sub(active_normal_workers);
+            let available_bulk_slots = bulk_slot_limit.saturating_sub(active_bulk_workers);
 
-            if available_slots == 0 {
+            if available_normal_slots == 0 && available_bulk_slots == 0 {
                 return Ok((state.snapshot(), Vec::new()));
             }
 
             let mut scheduled_ids = Vec::new();
+            let mut scheduled_normal_workers = 0_u32;
             let mut scheduled_bulk_workers = 0_u32;
             let fairness_metrics = bulk_hoster_fairness_metrics(&state, now);
-            let fairness_diagnostics =
+            let fairness_mode = state.settings.bulk.hoster_fairness_mode;
+            let fairness_diagnostics = if fairness_mode == BulkHosterFairnessMode::Adaptive {
                 state
                     .bulk_hoster_fairness
-                    .reconcile(fairness_metrics, bulk_slot_limit, now);
+                    .reconcile(fairness_metrics, bulk_slot_limit, now)
+            } else {
+                Vec::new()
+            };
             for message in fairness_diagnostics {
                 state.push_diagnostic_event(
                     DiagnosticLevel::Info,
@@ -54,20 +57,27 @@ impl SharedState {
                     None,
                 );
             }
-            let protected_bulk_hoster_target = state
-                .bulk_hoster_fairness
-                .target_for_bulk_limit(bulk_slot_limit);
+            let protected_bulk_hoster_target = match fairness_mode {
+                BulkHosterFairnessMode::Adaptive => state
+                    .bulk_hoster_fairness
+                    .target_for_bulk_limit(bulk_slot_limit),
+                BulkHosterFairnessMode::Safe => 1,
+                BulkHosterFairnessMode::Off => bulk_slot_limit,
+            };
             let active_protected_bulk_hoster_workers = fairness_metrics.active_count;
-            let protected_bulk_hoster_claim_blocked = fairness_metrics.has_blocking_worker;
+            let protected_bulk_hoster_claim_blocked = fairness_mode != BulkHosterFairnessMode::Off
+                && fairness_metrics.has_blocking_worker;
             let mut scheduled_protected_bulk_hoster_workers = 0_u32;
             for job in &state.jobs {
-                if scheduled_ids.len() >= available_slots {
+                if scheduled_normal_workers >= available_normal_slots
+                    && scheduled_bulk_workers >= available_bulk_slots
+                {
                     break;
                 }
 
                 if job.state == JobState::Queued && !state.active_workers.contains(&job.id) {
                     if is_bulk_member_job(job) {
-                        if active_bulk_workers + scheduled_bulk_workers >= bulk_slot_limit {
+                        if scheduled_bulk_workers >= available_bulk_slots {
                             continue;
                         }
                         if is_protected_bulk_hoster_job(job) {
@@ -81,6 +91,11 @@ impl SharedState {
                             scheduled_protected_bulk_hoster_workers += 1;
                         }
                         scheduled_bulk_workers += 1;
+                    } else {
+                        if scheduled_normal_workers >= available_normal_slots {
+                            continue;
+                        }
+                        scheduled_normal_workers += 1;
                     }
                     scheduled_ids.push(job.id.clone());
                 }

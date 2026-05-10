@@ -450,6 +450,15 @@ pub enum BulkStartBehavior {
     StartImmediately,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkHosterFairnessMode {
+    #[default]
+    Adaptive,
+    Safe,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkDownloadSettings {
@@ -458,6 +467,12 @@ pub struct BulkDownloadSettings {
     #[serde(default = "default_bulk_max_concurrent_downloads")]
     pub max_concurrent_downloads: u32,
     #[serde(default)]
+    pub speed_limit_kib_per_second: u32,
+    #[serde(default)]
+    pub download_performance_mode: DownloadPerformanceMode,
+    #[serde(default)]
+    pub hoster_fairness_mode: BulkHosterFairnessMode,
+    #[serde(default)]
     pub auto_retry_override_enabled: bool,
     #[serde(default = "default_auto_retry_attempts")]
     pub auto_retry_attempts: u32,
@@ -465,6 +480,56 @@ pub struct BulkDownloadSettings {
     pub start_behavior: BulkStartBehavior,
     #[serde(default)]
     pub expand_active_rows_by_default: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkDownloadSettingsWire {
+    output_directory: Option<String>,
+    max_concurrent_downloads: Option<u32>,
+    speed_limit_kib_per_second: Option<u32>,
+    download_performance_mode: Option<DownloadPerformanceMode>,
+    hoster_fairness_mode: Option<BulkHosterFairnessMode>,
+    auto_retry_override_enabled: Option<bool>,
+    auto_retry_attempts: Option<u32>,
+    start_behavior: Option<BulkStartBehavior>,
+    expand_active_rows_by_default: Option<bool>,
+}
+
+impl BulkDownloadSettingsWire {
+    fn into_settings(
+        self,
+        download_directory: &str,
+        fallback_speed_limit_kib_per_second: u32,
+        fallback_download_performance_mode: DownloadPerformanceMode,
+    ) -> BulkDownloadSettings {
+        let defaults = BulkDownloadSettings::for_download_directory(download_directory);
+        BulkDownloadSettings {
+            output_directory: self.output_directory.unwrap_or(defaults.output_directory),
+            max_concurrent_downloads: self
+                .max_concurrent_downloads
+                .unwrap_or(defaults.max_concurrent_downloads),
+            speed_limit_kib_per_second: self
+                .speed_limit_kib_per_second
+                .unwrap_or(fallback_speed_limit_kib_per_second),
+            download_performance_mode: self
+                .download_performance_mode
+                .unwrap_or(fallback_download_performance_mode),
+            hoster_fairness_mode: self
+                .hoster_fairness_mode
+                .unwrap_or(defaults.hoster_fairness_mode),
+            auto_retry_override_enabled: self
+                .auto_retry_override_enabled
+                .unwrap_or(defaults.auto_retry_override_enabled),
+            auto_retry_attempts: self
+                .auto_retry_attempts
+                .unwrap_or(defaults.auto_retry_attempts),
+            start_behavior: self.start_behavior.unwrap_or(defaults.start_behavior),
+            expand_active_rows_by_default: self
+                .expand_active_rows_by_default
+                .unwrap_or(defaults.expand_active_rows_by_default),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,7 +584,7 @@ struct SettingsWire {
     speed_limit_kib_per_second: u32,
     download_performance_mode: DownloadPerformanceMode,
     torrent: TorrentSettings,
-    bulk: BulkDownloadSettings,
+    bulk: BulkDownloadSettingsWire,
     notifications_enabled: bool,
     theme: Theme,
     accent_color: String,
@@ -540,7 +605,7 @@ impl Default for SettingsWire {
             speed_limit_kib_per_second: settings.speed_limit_kib_per_second,
             download_performance_mode: settings.download_performance_mode,
             torrent: settings.torrent,
-            bulk: settings.bulk,
+            bulk: BulkDownloadSettingsWire::default(),
             notifications_enabled: settings.notifications_enabled,
             theme: settings.theme,
             accent_color: settings.accent_color,
@@ -559,7 +624,11 @@ impl<'de> Deserialize<'de> for Settings {
         D: serde::Deserializer<'de>,
     {
         let wire = SettingsWire::deserialize(deserializer)?;
-        let mut bulk = wire.bulk;
+        let mut bulk = wire.bulk.into_settings(
+            &wire.download_directory,
+            wire.speed_limit_kib_per_second,
+            wire.download_performance_mode,
+        );
         normalize_bulk_settings_for_download_directory(&mut bulk, &wire.download_directory);
 
         Ok(Self {
@@ -725,6 +794,9 @@ impl Default for BulkDownloadSettings {
         Self {
             output_directory: String::new(),
             max_concurrent_downloads: default_bulk_max_concurrent_downloads(),
+            speed_limit_kib_per_second: 0,
+            download_performance_mode: DownloadPerformanceMode::Balanced,
+            hoster_fairness_mode: BulkHosterFairnessMode::Adaptive,
             auto_retry_override_enabled: false,
             auto_retry_attempts: default_auto_retry_attempts(),
             start_behavior: BulkStartBehavior::ReviewThenStart,
@@ -856,6 +928,7 @@ pub fn normalize_bulk_settings_for_download_directory(
         output_directory.to_string()
     };
     settings.max_concurrent_downloads = settings.max_concurrent_downloads.max(1);
+    settings.speed_limit_kib_per_second = settings.speed_limit_kib_per_second.min(1_048_576);
     settings.auto_retry_attempts = settings.auto_retry_attempts.min(10);
 }
 
@@ -1366,6 +1439,15 @@ mod tests {
         assert!(settings.download_directory.ends_with("Downloads"));
         assert_eq!(settings.auto_retry_attempts, 3);
         assert_eq!(settings.bulk.max_concurrent_downloads, 2);
+        assert_eq!(settings.bulk.speed_limit_kib_per_second, 0);
+        assert_eq!(
+            settings.bulk.download_performance_mode,
+            DownloadPerformanceMode::Balanced
+        );
+        assert_eq!(
+            settings.bulk.hoster_fairness_mode,
+            BulkHosterFairnessMode::Adaptive
+        );
         assert_eq!(settings.bulk.auto_retry_attempts, 3);
         assert!(!settings.bulk.auto_retry_override_enabled);
         assert_eq!(
@@ -1403,6 +1485,9 @@ mod tests {
         assert_eq!(value["startOnStartup"], true);
         assert_eq!(value["startupLaunchMode"], "tray");
         assert_eq!(value["downloadPerformanceMode"], "balanced");
+        assert_eq!(value["bulk"]["speedLimitKibPerSecond"], 0);
+        assert_eq!(value["bulk"]["downloadPerformanceMode"], "balanced");
+        assert_eq!(value["bulk"]["hosterFairnessMode"], "adaptive");
         assert_eq!(value["showDetailsOnClick"], true);
         assert_eq!(value["queueRowSize"], "medium");
     }
@@ -1427,6 +1512,45 @@ mod tests {
             BulkStartBehavior::ReviewThenStart
         );
         assert_eq!(settings.bulk.output_directory, "C:/Downloads/Bulk");
+    }
+
+    #[test]
+    fn legacy_bulk_settings_copy_global_runtime_tuning() {
+        let settings = serde_json::from_str::<Settings>(
+            r#"{
+              "downloadDirectory": "C:/Downloads",
+              "maxConcurrentDownloads": 3,
+              "autoRetryAttempts": 4,
+              "speedLimitKibPerSecond": 512,
+              "downloadPerformanceMode": "fast",
+              "bulk": {
+                "outputDirectory": "C:/Downloads/Bulk",
+                "maxConcurrentDownloads": 2,
+                "autoRetryOverrideEnabled": false,
+                "autoRetryAttempts": 3,
+                "startBehavior": "review_then_start",
+                "expandActiveRowsByDefault": false
+              },
+              "notificationsEnabled": true,
+              "theme": "system"
+            }"#,
+        )
+        .expect("legacy settings should parse");
+
+        assert_eq!(settings.speed_limit_kib_per_second, 512);
+        assert_eq!(
+            settings.download_performance_mode,
+            DownloadPerformanceMode::Fast
+        );
+        assert_eq!(settings.bulk.speed_limit_kib_per_second, 512);
+        assert_eq!(
+            settings.bulk.download_performance_mode,
+            DownloadPerformanceMode::Fast
+        );
+        assert_eq!(
+            settings.bulk.hoster_fairness_mode,
+            BulkHosterFairnessMode::Adaptive
+        );
     }
 
     #[test]

@@ -39,6 +39,7 @@ export type BulkOutputKind = 'archive' | 'folder';
 export type BulkFinalizeMode = 'move' | 'extract' | 'zip';
 export type BulkArchiveStatus = 'pending' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
 export type BulkStartBehavior = 'review_then_start' | 'start_immediately';
+export type BulkHosterFairnessMode = 'adaptive' | 'safe' | 'off';
 export type HosterPreflightStatus = 'unchecked' | 'checking' | 'ready' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
@@ -160,6 +161,9 @@ export interface TorrentSettings {
 export interface BulkDownloadSettings {
   outputDirectory: string;
   maxConcurrentDownloads: number;
+  speedLimitKibPerSecond: number;
+  downloadPerformanceMode: DownloadPerformanceMode;
+  hosterFairnessMode: BulkHosterFairnessMode;
   autoRetryOverrideEnabled: boolean;
   autoRetryAttempts: number;
   startBehavior: BulkStartBehavior;

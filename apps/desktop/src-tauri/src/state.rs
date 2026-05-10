@@ -2,13 +2,14 @@ use crate::storage::{
     default_download_directory, default_extension_listen_port,
     default_torrent_download_directory_for, default_torrent_port_forwarding_port,
     load_persisted_state, normalize_bulk_settings_for_download_directory, persist_state,
-    BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus, BulkFinalizeMode, ConnectionState,
-    DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
-    DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
-    FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
-    HosterPreflightInfo, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
-    MainWindowState, PersistedState, ProtectedDownloadAuthScope, QueueSummary, ResumeSupport,
-    Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
+    BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus, BulkFinalizeMode,
+    BulkHosterFairnessMode, ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel,
+    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
+    ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
+    HostRegistrationDiagnostics, HosterPreflightInfo, IntegrityAlgorithm, IntegrityCheck,
+    IntegrityStatus, JobState, MainWindowState, PersistedState, ProtectedDownloadAuthScope,
+    QueueSummary, ResumeSupport, Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode,
+    TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -109,7 +110,10 @@ struct RuntimeState {
 
 #[derive(Debug, Clone)]
 struct BulkHosterWorkerHealth {
-    claimed_at: Instant,
+    _claimed_at: Instant,
+    resolver_started_at: Option<Instant>,
+    transfer_started_at: Option<Instant>,
+    phase: BulkHosterWorkerPhase,
     last_progress_at: Instant,
     last_downloaded_bytes: u64,
     last_reported_speed: u64,
@@ -118,20 +122,51 @@ struct BulkHosterWorkerHealth {
     last_healthy_at: Option<Instant>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkHosterWorkerPhase {
+    Claimed,
+    Resolving,
+    Transferring,
+}
+
 impl BulkHosterWorkerHealth {
     fn from_job(job: &DownloadJob, now: Instant) -> Self {
         Self {
-            claimed_at: now,
+            _claimed_at: now,
+            resolver_started_at: None,
+            transfer_started_at: None,
+            phase: BulkHosterWorkerPhase::Claimed,
             last_progress_at: now,
             last_downloaded_bytes: job.downloaded_bytes,
             last_reported_speed: job.speed,
-            low_speed_since: (job.speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND).then_some(now),
+            low_speed_since: None,
             healthy_sample_count: 0,
             last_healthy_at: None,
         }
     }
 
+    fn mark_resolving(&mut self, now: Instant) {
+        self.resolver_started_at.get_or_insert(now);
+        if self.phase == BulkHosterWorkerPhase::Claimed {
+            self.phase = BulkHosterWorkerPhase::Resolving;
+        }
+    }
+
+    fn mark_transferring(&mut self, downloaded_bytes: u64, now: Instant) {
+        self.transfer_started_at.get_or_insert(now);
+        self.phase = BulkHosterWorkerPhase::Transferring;
+        self.last_progress_at = now;
+        self.last_downloaded_bytes = downloaded_bytes;
+        self.last_reported_speed = 0;
+        self.low_speed_since = Some(now);
+        self.healthy_sample_count = 0;
+        self.last_healthy_at = None;
+    }
+
     fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
+        if self.phase != BulkHosterWorkerPhase::Transferring {
+            self.mark_transferring(self.last_downloaded_bytes, now);
+        }
         let progressed = downloaded_bytes > self.last_downloaded_bytes;
         if progressed {
             self.last_progress_at = now;
@@ -152,7 +187,14 @@ impl BulkHosterWorkerHealth {
     }
 
     fn blocks_bulk_hoster_claim(&self, now: Instant) -> bool {
-        if now.saturating_duration_since(self.claimed_at) < BULK_HOSTER_STARTUP_GRACE_WINDOW {
+        if self.phase != BulkHosterWorkerPhase::Transferring {
+            return true;
+        }
+
+        let Some(transfer_started_at) = self.transfer_started_at else {
+            return true;
+        };
+        if now.saturating_duration_since(transfer_started_at) < BULK_HOSTER_STARTUP_GRACE_WINDOW {
             return true;
         }
 
@@ -170,7 +212,10 @@ impl BulkHosterWorkerHealth {
     }
 
     fn is_healthy(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.claimed_at) >= BULK_HOSTER_STARTUP_GRACE_WINDOW
+        self.phase == BulkHosterWorkerPhase::Transferring
+            && self.transfer_started_at.is_some_and(|started| {
+                now.saturating_duration_since(started) >= BULK_HOSTER_STARTUP_GRACE_WINDOW
+            })
             && self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
             && self.healthy_sample_count >= 2
             && self.last_healthy_at.is_some_and(|last| {

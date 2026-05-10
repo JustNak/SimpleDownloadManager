@@ -231,6 +231,25 @@ impl RuntimeState {
             health.update(downloaded_bytes, speed, now);
         }
     }
+
+    pub(super) fn mark_bulk_hoster_worker_resolving(&mut self, id: &str, now: Instant) {
+        if let Some(health) = self.bulk_hoster_worker_health.get_mut(id) {
+            health.mark_resolving(now);
+        }
+    }
+
+    pub(super) fn mark_bulk_hoster_worker_transferring(
+        &mut self,
+        id: &str,
+        downloaded_bytes: u64,
+        now: Instant,
+    ) {
+        if let Some(health) = self.bulk_hoster_worker_health.get_mut(id) {
+            if health.phase != BulkHosterWorkerPhase::Transferring {
+                health.mark_transferring(downloaded_bytes, now);
+            }
+        }
+    }
 }
 
 pub(super) fn job_indexes_for(jobs: &[DownloadJob]) -> HashMap<String, usize> {

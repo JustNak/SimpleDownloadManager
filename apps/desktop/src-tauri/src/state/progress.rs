@@ -60,12 +60,18 @@ impl SharedState {
                 apply_download_progress(job, downloaded_bytes, total_bytes);
                 job.resume_support = resume_support;
             }
+            state.mark_bulk_hoster_worker_transferring(id, downloaded_bytes, Instant::now());
             state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
             (state.snapshot(), state.persisted())
         };
 
         persist_state(&self.storage_path, &persisted)?;
         Ok(snapshot)
+    }
+
+    pub async fn mark_bulk_hoster_resolving(&self, id: &str) {
+        let mut state = self.inner.write().await;
+        state.mark_bulk_hoster_worker_resolving(id, Instant::now());
     }
 
     pub async fn apply_preflight_metadata(

@@ -62,8 +62,14 @@ async fn run_http_download_attempt_for_url(
     let mut existing_bytes = metadata_len(&task.temp_path).await.unwrap_or(0);
     let client = download_client()?;
     let request_auth = request_auth_for_task_url(task, effective_url);
-    let speed_limit = state.speed_limit_bytes_per_second().await;
-    let profile = performance_profile(state.download_performance_mode().await);
+    let speed_limit = state
+        .speed_limit_bytes_per_second_for_task(task.is_bulk_member)
+        .await;
+    let profile = performance_profile(
+        state
+            .download_performance_mode_for_task(task.is_bulk_member)
+            .await,
+    );
 
     let mut preflight_metadata =
         preflight_download(&client, effective_url, request_auth.as_ref()).await;
@@ -443,6 +449,9 @@ async fn refresh_hoster_url_before_attempt(
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<Option<String>, DownloadError> {
+    if task.is_bulk_member && task.resolved_from_url.is_some() {
+        state.mark_bulk_hoster_resolving(&task.id).await;
+    }
     let result = refresh_hoster_url_for_task(task).await;
     if let Err(error) = &result {
         let _ = state

@@ -164,8 +164,16 @@ impl SharedState {
     }
 
     pub async fn speed_limit_bytes_per_second(&self) -> Option<u64> {
+        self.speed_limit_bytes_per_second_for_task(false).await
+    }
+
+    pub async fn speed_limit_bytes_per_second_for_task(&self, is_bulk_member: bool) -> Option<u64> {
         let state = self.inner.read().await;
-        let limit = state.settings.speed_limit_kib_per_second;
+        let limit = if is_bulk_member {
+            state.settings.bulk.speed_limit_kib_per_second
+        } else {
+            state.settings.speed_limit_kib_per_second
+        };
         if limit == 0 {
             None
         } else {
@@ -174,8 +182,19 @@ impl SharedState {
     }
 
     pub async fn download_performance_mode(&self) -> DownloadPerformanceMode {
+        self.download_performance_mode_for_task(false).await
+    }
+
+    pub async fn download_performance_mode_for_task(
+        &self,
+        is_bulk_member: bool,
+    ) -> DownloadPerformanceMode {
         let state = self.inner.read().await;
-        state.settings.download_performance_mode
+        if is_bulk_member {
+            state.settings.bulk.download_performance_mode
+        } else {
+            state.settings.download_performance_mode
+        }
     }
 
     pub async fn extension_integration_settings(&self) -> ExtensionIntegrationSettings {

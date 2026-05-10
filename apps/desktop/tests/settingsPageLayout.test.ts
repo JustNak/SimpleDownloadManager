@@ -31,6 +31,9 @@ assert.match(source, /Beta channel updates/, 'app update card should be present'
 assert.match(source, /CategorySettingsCard\('Bulk Downloads'/, 'bulk download settings should render through the category card helper');
 assert.match(source, /bind:value=\{formData\.bulk\.outputDirectory\}/, 'bulk settings should expose the bulk output directory field');
 assert.match(source, /bind:value=\{formData\.bulk\.maxConcurrentDownloads\}/, 'bulk settings should expose the max active bulk files field');
+assert.match(source, /bind:value=\{formData\.bulk\.speedLimitKibPerSecond\}/, 'bulk settings should expose an independent speed limit field');
+assert.match(source, /bind:value=\{formData\.bulk\.downloadPerformanceMode\}/, 'bulk settings should expose an independent performance mode field');
+assert.match(source, /bind:value=\{formData\.bulk\.hosterFairnessMode\}/, 'bulk settings should expose a hoster fairness mode field');
 assert.match(source, /formData\.bulk\.autoRetryOverrideEnabled[\s\S]*formData\.bulk\.autoRetryOverrideEnabled = checked/, 'bulk retry override setting should be wired to the settings draft');
 assert.match(source, /bind:value=\{formData\.bulk\.autoRetryAttempts\}/, 'bulk retry override attempts should be wired to the settings draft');
 assert.match(source, /bind:value=\{formData\.bulk\.startBehavior\}/, 'bulk start behavior setting should be wired to the settings draft');
