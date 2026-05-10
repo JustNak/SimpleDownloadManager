@@ -13,7 +13,18 @@ assert.match(appSource, /groupBulkQueueRows\(jobs\)/, 'App should group bulk mem
 assert.match(appSource, /openBatchProgressWindow\(\{[\s\S]*kind: 'bulk'[\s\S]*bulkMemberIds/, 'bulk aggregate Show Popup should open the batch progress popup for all member jobs');
 assert.match(backendSource, /export async function openBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level open wrapper');
 assert.match(backendSource, /export async function revealBulkArchive\(archiveId: string\)/, 'backend should expose an archive-level reveal wrapper');
-assert.match(queueSource, /function bulkOpenLabel[\s\S]*return 'Open Folder'/, 'completed bulk aggregate menus should always label folder outputs as Open Folder');
+const completedBulkRowActionBranch = queueSource.match(
+  /\{#if isCompletedBulkAggregate\(job\)\}([\s\S]*?)\{:else if isBulkAggregateJob\(job\) && canShowBulkPrimaryAction\(job\)\}/,
+)?.[1] ?? '';
+assert.ok(completedBulkRowActionBranch, 'completed bulk aggregate rows should define a dedicated row action branch');
+assert.match(completedBulkRowActionBranch, /title="Show"[\s\S]*onclick=\{\(\) => onReveal\(job\.id\)\}/, 'completed bulk aggregate rows should keep the Show action');
+assert.doesNotMatch(completedBulkRowActionBranch, /bulkOpenLabel|onOpen\(job\.id\)|FileArchive/, 'completed bulk aggregate rows should not render a second Open Folder action');
+const completedBulkMenuBranch = queueSource.match(
+  /\{#if isCompletedBulkAggregate\(job\)\}([\s\S]*?)\{:else if isFailedBulkAggregate\(job\)\}/,
+)?.[1] ?? '';
+assert.ok(completedBulkMenuBranch, 'completed bulk aggregate menus should define a dedicated menu branch');
+assert.match(completedBulkMenuBranch, /MenuItem\(FolderOpen, 'Show'[\s\S]*onReveal\(job\.id\)/, 'completed bulk aggregate menus should keep Show');
+assert.doesNotMatch(completedBulkMenuBranch, /bulkOpenLabel|Open Folder|onOpen\(job\.id\)|FileArchive/, 'completed bulk aggregate menus should not render a duplicate Open Folder item');
 assert.match(queueSource, /expandedBulkRowIds/, 'bulk aggregate rows should keep inline expansion state in the queue view');
 assert.match(queueSource, /bulkMembersByArchiveId/, 'bulk aggregate expansion should read member file data from a lookup');
 assert.match(queueSource, /bulkMembersForJob/, 'bulk aggregate expansion should resolve member rows without cloned aggregate data');

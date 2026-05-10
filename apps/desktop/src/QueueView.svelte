@@ -10,7 +10,6 @@
     Clock3,
     Download,
     ExternalLink,
-    FileArchive,
     FileText,
     FolderOpen,
     Globe,
@@ -833,10 +832,6 @@
     return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
   }
 
-  function bulkOpenLabel(job: DownloadJob): string {
-    return 'Open Folder';
-  }
-
   function showsEtaMetrics(job: DownloadJob): boolean {
     return !isBulkAggregateJob(job);
   }
@@ -1014,7 +1009,6 @@
               >
                 {#if isCompletedBulkAggregate(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Show" aria-label="Show" onclick={() => onReveal(job.id)}><FolderOpen size={17} /></button>
-                  <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title={bulkOpenLabel(job)} aria-label={bulkOpenLabel(job)} onclick={() => onOpen(job.id)}><FileArchive size={17} /></button>
                 {:else if isBulkAggregateJob(job) && canShowBulkPrimaryAction(job)}
                   <button
                     class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
@@ -1264,7 +1258,6 @@
   {#if isBulkAggregateJob(job)}
     {#if isCompletedBulkAggregate(job)}
       {@render MenuItem(FolderOpen, 'Show', () => onReveal(job.id))}
-      {@render MenuItem(FileArchive, bulkOpenLabel(job), () => onOpen(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}
       {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
     {:else if isFailedBulkAggregate(job)}
