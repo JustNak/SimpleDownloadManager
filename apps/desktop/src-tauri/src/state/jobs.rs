@@ -228,16 +228,22 @@ impl SharedState {
         &self,
         id: &str,
         failure_category: FailureCategory,
+        failure_message: &str,
+        retryable: bool,
     ) -> Result<Option<BulkMemberAutoRestartCandidate>, String> {
         let state = self.inner.read().await;
         let Some(job) = state.job(id) else {
             return Ok(None);
         };
         let max_attempts = max_auto_retry_attempts_for_job(&state.settings, job);
+        let Some(mode) =
+            bulk_member_auto_restart_mode(job, failure_category, failure_message, retryable)
+        else {
+            return Ok(None);
+        };
 
         if max_attempts == 0
             || job.auto_restart_attempts >= max_attempts
-            || !bulk_member_auto_restart_failure_category(failure_category)
             || !is_pending_http_bulk_member(job)
         {
             return Ok(None);
@@ -245,6 +251,7 @@ impl SharedState {
 
         Ok(Some(BulkMemberAutoRestartCandidate {
             resolved_from_url: job.resolved_from_url.clone(),
+            mode,
             attempt: job.auto_restart_attempts.saturating_add(1),
             max_attempts,
         }))
@@ -273,19 +280,36 @@ impl SharedState {
         &self,
         id: &str,
         resolved_url: String,
+        mode: BulkMemberAutoRestartMode,
         attempt: u32,
+        max_attempts: u32,
+        failure_category: FailureCategory,
+        failure_message: &str,
     ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             state.remove_active_worker(id);
+            state.clear_bulk_hoster_worker_health(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
-                remove_file_if_exists(Path::new(&job.temp_path))?;
-                reset_job_for_restart(job);
+                match mode {
+                    BulkMemberAutoRestartMode::PreservePartial => {
+                        queue_job_for_preserved_bulk_recovery(job);
+                    }
+                    BulkMemberAutoRestartMode::ResetPartial => {
+                        remove_file_if_exists(Path::new(&job.temp_path))?;
+                        reset_job_for_restart(job);
+                    }
+                }
                 job.url = resolved_url;
                 job.auto_restart_attempts = attempt;
-                format!("Auto-restart queued for {}", job.filename)
+                format!(
+                    "Auto-restart queued for {} ({} partial, attempt {attempt}/{max_attempts}, {} error: {failure_message})",
+                    job.filename,
+                    bulk_member_auto_restart_mode_label(mode),
+                    failure_category_label(failure_category),
+                )
             };
             state.push_diagnostic_event(
                 DiagnosticLevel::Warning,
@@ -791,6 +815,16 @@ pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
     }
 }
 
+fn queue_job_for_preserved_bulk_recovery(job: &mut DownloadJob) {
+    job.state = JobState::Queued;
+    job.speed = 0;
+    job.eta = 0;
+    job.error = None;
+    job.failure_category = None;
+    job.retry_attempts = 0;
+    reset_integrity_for_retry(job);
+}
+
 pub(super) fn reset_integrity_for_retry(job: &mut DownloadJob) {
     if let Some(check) = &mut job.integrity_check {
         check.actual = None;
@@ -798,14 +832,71 @@ pub(super) fn reset_integrity_for_retry(job: &mut DownloadJob) {
     }
 }
 
-pub(super) fn bulk_member_auto_restart_failure_category(failure_category: FailureCategory) -> bool {
-    matches!(
+pub(super) fn bulk_member_auto_restart_mode(
+    job: &DownloadJob,
+    failure_category: FailureCategory,
+    failure_message: &str,
+    retryable: bool,
+) -> Option<BulkMemberAutoRestartMode> {
+    if !bulk_member_auto_restart_failure_is_transient(
+        job,
         failure_category,
-        FailureCategory::Network
-            | FailureCategory::Server
-            | FailureCategory::Http
-            | FailureCategory::Resume
-    )
+        failure_message,
+        retryable,
+    ) {
+        return None;
+    }
+
+    if failure_category == FailureCategory::Resume || job.auto_restart_attempts > 0 {
+        Some(BulkMemberAutoRestartMode::ResetPartial)
+    } else {
+        Some(BulkMemberAutoRestartMode::PreservePartial)
+    }
+}
+
+fn bulk_member_auto_restart_failure_is_transient(
+    job: &DownloadJob,
+    failure_category: FailureCategory,
+    failure_message: &str,
+    retryable: bool,
+) -> bool {
+    match failure_category {
+        FailureCategory::Network | FailureCategory::Server | FailureCategory::Resume => true,
+        FailureCategory::Http => {
+            retryable
+                || (is_protected_bulk_hoster_job(job)
+                    && hoster_token_recovery_failure_message(failure_message))
+        }
+        _ => false,
+    }
+}
+
+fn hoster_token_recovery_failure_message(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    ["403", "404", "410", "416", "html"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+}
+
+fn bulk_member_auto_restart_mode_label(mode: BulkMemberAutoRestartMode) -> &'static str {
+    match mode {
+        BulkMemberAutoRestartMode::PreservePartial => "preserve",
+        BulkMemberAutoRestartMode::ResetPartial => "reset",
+    }
+}
+
+fn failure_category_label(category: FailureCategory) -> &'static str {
+    match category {
+        FailureCategory::Network => "network",
+        FailureCategory::Http => "http",
+        FailureCategory::Server => "server",
+        FailureCategory::Disk => "disk",
+        FailureCategory::Permission => "permission",
+        FailureCategory::Resume => "resume",
+        FailureCategory::Integrity => "integrity",
+        FailureCategory::Torrent => "torrent",
+        FailureCategory::Internal => "internal",
+    }
 }
 
 pub(super) fn is_pending_http_bulk_member(job: &DownloadJob) -> bool {

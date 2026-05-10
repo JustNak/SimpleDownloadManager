@@ -44,11 +44,11 @@ pub(crate) use torrent::{
 };
 pub use types::{
     BackendError, BatchDownloadEntry, BulkArchiveEntry, BulkArchiveReady,
-    BulkMemberAutoRestartCandidate, BulkMemberRetryCandidate, BulkMemberSlowRecoveryState,
-    DownloadTask, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus,
-    ExternalReseedAttempt, ExternalUsePreparation, TorrentRemovalCleanupInfo, TorrentRuntimePhase,
-    TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult,
-    TorrentSessionCacheClearState, WorkerControl,
+    BulkMemberAutoRestartCandidate, BulkMemberAutoRestartMode, BulkMemberRetryCandidate,
+    BulkMemberSlowRecoveryState, DownloadTask, DuplicatePolicy, EnqueueOptions, EnqueueResult,
+    EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation, TorrentRemovalCleanupInfo,
+    TorrentRuntimePhase, TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure,
+    TorrentSessionCacheClearResult, TorrentSessionCacheClearState, WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;

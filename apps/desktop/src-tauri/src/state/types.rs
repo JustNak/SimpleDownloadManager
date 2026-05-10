@@ -144,8 +144,15 @@ pub struct BatchDownloadEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkMemberAutoRestartCandidate {
     pub resolved_from_url: Option<String>,
+    pub mode: BulkMemberAutoRestartMode,
     pub attempt: u32,
     pub max_attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkMemberAutoRestartMode {
+    PreservePartial,
+    ResetPartial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

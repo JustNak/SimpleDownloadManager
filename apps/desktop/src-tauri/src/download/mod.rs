@@ -1,7 +1,7 @@
 use crate::commands::{emit_download_update, emit_snapshot};
 use crate::state::{
-    should_stop_seeding, BulkArchiveReady, BulkMemberSlowRecoveryState, ExternalReseedAttempt,
-    SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
+    should_stop_seeding, BulkArchiveReady, BulkMemberAutoRestartMode, BulkMemberSlowRecoveryState,
+    ExternalReseedAttempt, SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,
@@ -505,7 +505,12 @@ async fn try_auto_restart_failed_bulk_member(
     error: &DownloadError,
 ) -> BulkMemberAutoRestartOutcome {
     let candidate = match state
-        .bulk_member_auto_restart_candidate(&task.id, error.category)
+        .bulk_member_auto_restart_candidate(
+            &task.id,
+            error.category,
+            &error.message,
+            error.retryable,
+        )
         .await
     {
         Ok(Some(candidate)) => candidate,
@@ -525,8 +530,20 @@ async fn try_auto_restart_failed_bulk_member(
         task.url.clone()
     };
 
+    if candidate.mode == BulkMemberAutoRestartMode::ResetPartial {
+        cleanup_partial_artifacts(&task.temp_path).await;
+    }
+
     match state
-        .auto_restart_bulk_member(&task.id, resolved_url, candidate.attempt)
+        .auto_restart_bulk_member(
+            &task.id,
+            resolved_url,
+            candidate.mode,
+            candidate.attempt,
+            candidate.max_attempts,
+            error.category,
+            &error.message,
+        )
         .await
     {
         Ok(snapshot) => {

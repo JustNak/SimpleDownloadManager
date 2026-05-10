@@ -82,6 +82,27 @@ fn hoster_refresh_before_attempt_fails_closed_instead_of_using_source_url() {
 }
 
 #[test]
+fn hoster_refresh_preserves_resolution_retryability() {
+    let terminal = crate::hosters::HosterResolutionError {
+        code: "HOSTER_RESOLUTION_FAILED",
+        message: "DataNodes captcha-protected downloads are not supported.".into(),
+        retryable: false,
+    };
+    let terminal_error = hoster_resolution_download_error(terminal);
+    assert_eq!(terminal_error.category, FailureCategory::Http);
+    assert!(!terminal_error.retryable);
+
+    let transient = crate::hosters::HosterResolutionError {
+        code: "HOSTER_RESOLUTION_FAILED",
+        message: "hoster resolver: HTTP 503 Service Unavailable.".into(),
+        retryable: true,
+    };
+    let transient_error = hoster_resolution_download_error(transient);
+    assert_eq!(transient_error.category, FailureCategory::Http);
+    assert!(transient_error.retryable);
+}
+
+#[test]
 fn retry_delay_caps_at_last_configured_delay() {
     assert_eq!(retry_delay_for_attempt(0), REQUEST_RETRY_DELAYS[0]);
     assert_eq!(

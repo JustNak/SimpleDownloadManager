@@ -253,7 +253,13 @@ async fn run_http_download_attempt_for_url(
             WorkerControl::Continue => {}
         }
 
-        let chunk = chunk_result.map_err(download_stream_error)?;
+        let chunk = match chunk_result {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                file.flush().await.ok();
+                return Err(download_stream_error(error));
+            }
+        };
         let chunk_len = chunk.len() as u64;
         file.write_all(&chunk)
             .await
@@ -499,14 +505,18 @@ async fn refresh_hoster_url_for_task(
     };
     let refreshed = crate::hosters::refresh_resolved_hoster_link(source_url)
         .await
-        .map_err(|error| {
-            download_error(
-                FailureCategory::Http,
-                format!("Could not refresh hoster link: {}", error.message),
-                true,
-            )
-        })?;
+        .map_err(hoster_resolution_download_error)?;
     Ok(Some(refreshed.url))
+}
+
+pub(super) fn hoster_resolution_download_error(
+    error: crate::hosters::HosterResolutionError,
+) -> DownloadError {
+    download_error(
+        FailureCategory::Http,
+        format!("Could not refresh hoster link: {}", error.message),
+        error.retryable,
+    )
 }
 
 pub(super) fn hoster_refresh_error_allows_retry(error: &DownloadError) -> bool {

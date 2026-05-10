@@ -3799,7 +3799,7 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
         42,
     );
     job.resolved_from_url = Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar".into());
-    job.auto_restart_attempts = 1;
+    job.auto_restart_attempts = 0;
     job.bulk_archive = Some(BulkArchiveInfo {
         id: "bulk_auto".into(),
         name: "Game.zip".into(),
@@ -3828,19 +3828,40 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
         .await
         .unwrap();
 
-    for category in [
-        FailureCategory::Network,
-        FailureCategory::Server,
-        FailureCategory::Http,
-        FailureCategory::Resume,
+    for (category, message, retryable, expected_mode) in [
+        (
+            FailureCategory::Network,
+            "Download failed: operation timed out",
+            true,
+            BulkMemberAutoRestartMode::PreservePartial,
+        ),
+        (
+            FailureCategory::Server,
+            "Download request failed with HTTP 503 Service Unavailable.",
+            true,
+            BulkMemberAutoRestartMode::PreservePartial,
+        ),
+        (
+            FailureCategory::Http,
+            "Download request failed with HTTP 403 Forbidden.",
+            false,
+            BulkMemberAutoRestartMode::PreservePartial,
+        ),
+        (
+            FailureCategory::Resume,
+            "The remote server rejected the resume request.",
+            false,
+            BulkMemberAutoRestartMode::ResetPartial,
+        ),
     ] {
         let candidate = state
-            .bulk_member_auto_restart_candidate("job_auto", category)
+            .bulk_member_auto_restart_candidate("job_auto", category, message, retryable)
             .await
             .expect("candidate lookup should succeed")
             .expect("transient pending HTTP bulk member should be eligible");
-        assert_eq!(candidate.attempt, 2);
+        assert_eq!(candidate.attempt, 1);
         assert_eq!(candidate.max_attempts, 5);
+        assert_eq!(candidate.mode, expected_mode);
         assert_eq!(
             candidate.resolved_from_url.as_deref(),
             Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar")
@@ -3848,10 +3869,115 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
     }
 
     assert!(state
-        .bulk_member_auto_restart_candidate("job_auto", FailureCategory::Disk)
+        .bulk_member_auto_restart_candidate(
+            "job_auto",
+            FailureCategory::Disk,
+            "Could not write download chunk",
+            false,
+        )
         .await
         .unwrap()
         .is_none());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_member_auto_restart_candidate_resets_after_preserved_attempt() {
+    let download_dir = test_runtime_dir("bulk-auto-restart-reset-after-preserve");
+    let archive = bulk_archive_info(&download_dir, "bulk_auto_reset_after_preserve");
+    let mut job = download_job(
+        "job_auto",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        42,
+    );
+    job.bulk_archive = Some(archive);
+    job.auto_restart_attempts = 1;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            auto_retry_attempts: 3,
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let candidate = state
+        .bulk_member_auto_restart_candidate(
+            "job_auto",
+            FailureCategory::Network,
+            "Download failed: connection closed",
+            true,
+        )
+        .await
+        .expect("candidate lookup should succeed")
+        .expect("second recovery should be eligible");
+
+    assert_eq!(candidate.attempt, 2);
+    assert_eq!(candidate.max_attempts, 3);
+    assert_eq!(candidate.mode, BulkMemberAutoRestartMode::ResetPartial);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn bulk_member_auto_restart_candidate_rejects_direct_nonretryable_http_failures() {
+    let download_dir = test_runtime_dir("bulk-auto-restart-direct-http-rejected");
+    let archive = bulk_archive_info(&download_dir, "bulk_auto_direct_http");
+
+    let mut direct = download_job(
+        "job_direct",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        42,
+    );
+    direct.url = "https://example.com/missing.part01.rar".into();
+    direct.bulk_archive = Some(archive.clone());
+
+    let mut hoster = download_job(
+        "job_hoster",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        42,
+    );
+    hoster.url = "https://dl.fuckingfast.co/dl/expired-token".into();
+    hoster.resolved_from_url = Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar".into());
+    hoster.bulk_archive = Some(archive);
+
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![direct, hoster]);
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            auto_retry_attempts: 2,
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(state
+        .bulk_member_auto_restart_candidate(
+            "job_direct",
+            FailureCategory::Http,
+            "Download request failed with HTTP 404 Not Found.",
+            false,
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+    let candidate = state
+        .bulk_member_auto_restart_candidate(
+            "job_hoster",
+            FailureCategory::Http,
+            "Download request failed with HTTP 404 Not Found.",
+            false,
+        )
+        .await
+        .unwrap()
+        .expect("expired hoster token should be recoverable");
+    assert_eq!(candidate.mode, BulkMemberAutoRestartMode::PreservePartial);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -3927,7 +4053,12 @@ async fn bulk_member_auto_restart_candidate_rejects_exhausted_non_bulk_and_faile
     ] {
         assert!(
             state
-                .bulk_member_auto_restart_candidate(id, FailureCategory::Network)
+                .bulk_member_auto_restart_candidate(
+                    id,
+                    FailureCategory::Network,
+                    "Download failed: connection closed",
+                    true,
+                )
                 .await
                 .unwrap()
                 .is_none(),
@@ -4103,7 +4234,11 @@ async fn auto_restart_bulk_member_resets_partial_state_and_preserves_bulk_identi
         .auto_restart_bulk_member(
             "job_auto_reset",
             "https://dl.fuckingfast.co/dl/new-token".into(),
+            BulkMemberAutoRestartMode::ResetPartial,
             2,
+            5,
+            FailureCategory::Resume,
+            "The remote server rejected the resume request.",
         )
         .await
         .expect("auto-restart should reset and queue the member");
@@ -4135,6 +4270,100 @@ async fn auto_restart_bulk_member_resets_partial_state_and_preserves_bulk_identi
         .await
         .active_workers
         .contains("job_auto_reset"));
+    let diagnostics = state
+        .diagnostics_snapshot(HostRegistrationDiagnostics {
+            status: HostRegistrationStatus::Configured,
+            entries: Vec::new(),
+        })
+        .await;
+    assert!(diagnostics.recent_events.iter().any(|event| {
+        event.message.contains("reset partial")
+            && event.message.contains("attempt 2/5")
+            && event.message.contains("resume")
+    }));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn auto_restart_bulk_member_preserves_partial_state_and_clears_hoster_health() {
+    let download_dir = test_runtime_dir("bulk-auto-restart-preserve");
+    let target_path = download_dir.join("Game.part01.rar");
+    let temp_path = download_dir.join("Game.part01.rar.part");
+    std::fs::write(&temp_path, b"partial").unwrap();
+
+    let archive = bulk_archive_info(&download_dir, "bulk_auto_preserve");
+    let mut job = download_job(
+        "job_auto_preserve",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.url = "https://dl.fuckingfast.co/dl/old-token".into();
+    job.filename = "Game.part01.rar".into();
+    job.target_path = target_path.display().to_string();
+    job.temp_path = temp_path.display().to_string();
+    job.downloaded_bytes = 512;
+    job.total_bytes = 1024;
+    job.progress = 50.0;
+    job.resolved_from_url = Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar".into());
+    job.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_auto_preserve".into());
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_auto_preserve", 96 * 1024);
+    }
+
+    let snapshot = state
+        .auto_restart_bulk_member(
+            "job_auto_preserve",
+            "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar".into(),
+            BulkMemberAutoRestartMode::PreservePartial,
+            1,
+            4,
+            FailureCategory::Network,
+            "Download failed: connection closed",
+        )
+        .await
+        .expect("preserve recovery should queue the member");
+
+    let recovered = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_auto_preserve")
+        .expect("job should remain in queue");
+    assert_eq!(recovered.state, JobState::Queued);
+    assert_eq!(
+        recovered.url,
+        "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar"
+    );
+    assert_eq!(recovered.downloaded_bytes, 512);
+    assert_eq!(recovered.total_bytes, 1024);
+    assert_eq!(recovered.progress, 50.0);
+    assert_eq!(recovered.resume_support, ResumeSupport::Supported);
+    assert_eq!(recovered.retry_attempts, 0);
+    assert_eq!(recovered.auto_restart_attempts, 1);
+    assert_eq!(recovered.error, None);
+    assert_eq!(recovered.failure_category, None);
+    assert!(temp_path.exists());
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_auto_preserve"));
+    assert!(!runtime
+        .bulk_hoster_worker_health
+        .contains_key("job_auto_preserve"));
+    drop(runtime);
+    let diagnostics = state
+        .diagnostics_snapshot(HostRegistrationDiagnostics {
+            status: HostRegistrationStatus::Configured,
+            entries: Vec::new(),
+        })
+        .await;
+    assert!(diagnostics.recent_events.iter().any(|event| {
+        event.message.contains("preserve partial")
+            && event.message.contains("attempt 1/4")
+            && event.message.contains("network")
+    }));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
