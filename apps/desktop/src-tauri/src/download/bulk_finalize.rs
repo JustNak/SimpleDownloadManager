@@ -23,12 +23,6 @@ const BULK_FILE_OPERATION_RETRY_DELAY: std::time::Duration = std::time::Duration
 const BULK_FILE_OPERATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[cfg(test)]
-pub(super) fn create_bulk_archive_sync(archive: BulkArchiveReady) -> Result<PathBuf, String> {
-    let prepared = prepare_bulk_archive_sources_without_extraction(archive)?;
-    finish_prepared_bulk_archive_sync(prepared).map(|outcome| outcome.output_path)
-}
-
-#[cfg(test)]
 pub(super) fn bulk_archive_needs_extraction(entries: &[BulkArchiveEntry]) -> bool {
     build_bulk_archive_source_plan(entries)
         .map(|plan| !plan.archive_sets.is_empty())
@@ -94,14 +88,12 @@ pub(super) fn prepare_bulk_archive_sources_without_extraction(
         return Err("Archive extraction requires the bundled 7-Zip sidecar.".into());
     }
     let output_path = archive.output_path;
-    let entries = prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
-    let cleanup_paths = cleanup_paths_for_output(&entries, archive.output_kind);
+    let entries = prepare_entries_for_output(plan.raw_entries)?;
 
     Ok(PreparedBulkArchive {
-        output_kind: archive.output_kind,
         output_path,
         entries,
-        cleanup_paths,
+        cleanup_paths: Vec::new(),
         staging_root: None,
     })
 }
@@ -123,19 +115,15 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
     let plan = build_bulk_archive_source_plan(&archive.entries)?;
     if plan.archive_sets.is_empty() {
         let output_path = archive.output_path;
-        let entries =
-            prepare_entries_for_output(plan.raw_entries, &output_path, archive.output_kind)?;
-        let cleanup_paths = cleanup_paths_for_output(&entries, archive.output_kind);
+        let entries = prepare_entries_for_output(plan.raw_entries)?;
         return Ok(PreparedBulkArchive {
-            output_kind: archive.output_kind,
             output_path,
             entries,
-            cleanup_paths,
+            cleanup_paths: Vec::new(),
             staging_root: None,
         });
     }
 
-    let output_kind = archive.output_kind;
     let output_path = archive.output_path;
     let staging_root = archive_staging_root(&output_path)?;
     let extract_dir = staging_root.join("extracted");
@@ -165,15 +153,13 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
             entries.append(&mut set_entries);
         }
 
-        let raw_cleanup_paths = cleanup_paths_for_output(&plan.raw_entries, output_kind);
         entries.extend(plan.raw_entries);
         if entries.is_empty() {
-            return Err("Archive extraction did not produce any files to compress.".into());
+            return Err("Archive extraction did not produce any files to combine.".into());
         }
-        let entries = prepare_entries_for_output(entries, &output_path, output_kind)?;
+        let entries = prepare_entries_for_output(entries)?;
 
         Ok(PreparedBulkArchive {
-            output_kind,
             output_path,
             entries,
             cleanup_paths: plan
@@ -185,7 +171,6 @@ pub(super) fn prepare_bulk_archive_sources_with_extractor(
                         .iter()
                         .map(|entry| entry.source_path.clone())
                 })
-                .chain(raw_cleanup_paths)
                 .collect(),
             staging_root: Some(staging_root.clone()),
         })
@@ -215,11 +200,8 @@ pub(super) fn finish_prepared_bulk_archive_sync(
         })?;
     }
 
-    let temp_path = temporary_output_path(&prepared.output_path, prepared.output_kind)?;
-    let result: Result<PathBuf, String> = match prepared.output_kind {
-        BulkArchiveOutputKind::Archive => finish_prepared_zip_output(&prepared, &temp_path),
-        BulkArchiveOutputKind::Folder => finish_prepared_folder_output(&prepared, &temp_path),
-    };
+    let temp_path = temporary_output_path(&prepared.output_path)?;
+    let result = finish_prepared_folder_output(&prepared, &temp_path);
 
     if result.is_err() {
         let _ = remove_incomplete_output(&temp_path);
@@ -228,15 +210,22 @@ pub(super) fn finish_prepared_bulk_archive_sync(
         }
     }
 
-    let output_path = result?;
-    verify_finished_output(&output_path, prepared.output_kind)?;
-    let cleanup_warnings = cleanup_original_archive_parts(&prepared.cleanup_paths);
+    let folder_outcome = result?;
+    verify_finished_output(&folder_outcome.output_path)?;
+    let cleanup_paths = prepared
+        .cleanup_paths
+        .iter()
+        .chain(folder_outcome.copy_cleanup_paths.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let cleanup_warnings =
+        cleanup_original_archive_parts(&cleanup_paths, &folder_outcome.moved_source_paths);
     if let Some(staging_root) = &prepared.staging_root {
         let _ = std::fs::remove_dir_all(staging_root);
     }
 
     Ok(BulkArchiveCreateOutcome {
-        output_path,
+        output_path: folder_outcome.output_path,
         cleanup_warnings,
     })
 }
@@ -249,11 +238,24 @@ pub(super) struct BulkArchiveCreateOutcome {
 
 #[derive(Debug)]
 pub(super) struct PreparedBulkArchive {
-    pub(super) output_kind: BulkArchiveOutputKind,
     pub(super) output_path: PathBuf,
     pub(super) entries: Vec<BulkArchiveEntry>,
     pub(super) cleanup_paths: Vec<PathBuf>,
     pub(super) staging_root: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct FolderFinalizeOutcome {
+    output_path: PathBuf,
+    moved_source_paths: Vec<PathBuf>,
+    copy_cleanup_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct MovedFolderEntry {
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    rollback_required: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -704,19 +706,14 @@ fn collect_zip_entries_from_directory_inner(
 
 fn prepare_entries_for_output(
     entries: Vec<BulkArchiveEntry>,
-    output_path: &Path,
-    output_kind: BulkArchiveOutputKind,
 ) -> Result<Vec<BulkArchiveEntry>, String> {
-    let entries = match output_kind {
-        BulkArchiveOutputKind::Archive => wrap_entries_in_archive_folder(entries, output_path),
-        BulkArchiveOutputKind::Folder => entries
-            .into_iter()
-            .map(|mut entry| {
-                entry.archive_name = validate_zip_entry_name(&entry.archive_name)?;
-                Ok(entry)
-            })
-            .collect(),
-    }?;
+    let entries = entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.archive_name = validate_zip_entry_name(&entry.archive_name)?;
+            Ok(entry)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     reject_duplicate_output_paths(&entries)?;
     Ok(entries)
 }
@@ -735,64 +732,9 @@ fn reject_duplicate_output_paths(entries: &[BulkArchiveEntry]) -> Result<(), Str
     Ok(())
 }
 
-fn cleanup_paths_for_output(
-    entries: &[BulkArchiveEntry],
-    output_kind: BulkArchiveOutputKind,
-) -> Vec<PathBuf> {
-    match output_kind {
-        BulkArchiveOutputKind::Archive => Vec::new(),
-        BulkArchiveOutputKind::Folder => entries
-            .iter()
-            .map(|entry| entry.source_path.clone())
-            .collect(),
-    }
-}
-
-fn wrap_entries_in_archive_folder(
-    entries: Vec<BulkArchiveEntry>,
-    output_path: &Path,
-) -> Result<Vec<BulkArchiveEntry>, String> {
-    let folder_name = archive_folder_name_for_output_path(output_path)?;
-    entries
-        .into_iter()
-        .map(|mut entry| {
-            entry.archive_name =
-                validate_zip_entry_name(&format!("{folder_name}/{}", entry.archive_name))?;
-            Ok(entry)
-        })
-        .collect()
-}
-
-fn archive_folder_name_for_output_path(output_path: &Path) -> Result<String, String> {
-    let stem = output_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("bulk-download");
-    let sanitized = stem
-        .chars()
-        .filter(|character| {
-            !character.is_control()
-                && !matches!(
-                    character,
-                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-                )
-        })
-        .collect::<String>()
-        .trim()
-        .trim_matches('.')
-        .to_string();
-    let folder_name = if sanitized.is_empty() {
-        "bulk-download".to_string()
-    } else {
-        sanitized
-    };
-    validate_zip_entry_name(&folder_name)
-}
-
 fn huge_bulk_folder_warning(total_completed_bytes: u64) -> Option<String> {
     (total_completed_bytes >= HUGE_BULK_ARCHIVE_THRESHOLD_BYTES).then(|| {
-        "Bulk output is 100 GiB or larger; finalization will use folder moves/extraction instead of ZIP creation."
-            .into()
+        "Bulk output is 100 GiB or larger; finalization will use folder moves/extraction.".into()
     })
 }
 
@@ -800,79 +742,142 @@ fn same_volume_for_bulk_move(source: &Path, output_path: &Path) -> bool {
     source.components().next() == output_path.components().next()
 }
 
-fn temporary_output_path(
-    output_path: &Path,
-    output_kind: BulkArchiveOutputKind,
-) -> Result<PathBuf, String> {
-    match output_kind {
-        BulkArchiveOutputKind::Archive => Ok(output_path.with_extension(
-            output_path
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|extension| format!("{extension}.tmp"))
-                .unwrap_or_else(|| "tmp".into()),
-        )),
-        BulkArchiveOutputKind::Folder => archive_staging_root(output_path),
-    }
-}
-
-fn finish_prepared_zip_output(
-    prepared: &PreparedBulkArchive,
-    temp_path: &Path,
-) -> Result<PathBuf, String> {
-    let mut file = retry_bulk_file_operation("Could not create archive file", || {
-        std::fs::File::create(temp_path)
-    })?;
-    write_zip_archive(&mut file, &prepared.entries)?;
-    retry_bulk_file_operation("Could not flush archive file", || file.sync_all())?;
-    retry_bulk_file_operation("Could not finalize archive file", || {
-        std::fs::rename(temp_path, &prepared.output_path)
-    })?;
-    Ok(prepared.output_path.clone())
+fn temporary_output_path(output_path: &Path) -> Result<PathBuf, String> {
+    archive_staging_root(output_path)
 }
 
 fn finish_prepared_folder_output(
     prepared: &PreparedBulkArchive,
     temp_path: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<FolderFinalizeOutcome, String> {
     retry_bulk_file_operation("Could not create bulk output folder", || {
         std::fs::create_dir_all(temp_path)
     })?;
-    copy_entries_to_folder_verified(&prepared.entries, temp_path)?;
-    retry_bulk_file_operation("Could not finalize bulk output folder", || {
-        std::fs::rename(temp_path, &prepared.output_path)
-    })?;
-    Ok(prepared.output_path.clone())
+    let move_outcome = move_or_copy_entries_to_folder(
+        &prepared.entries,
+        temp_path,
+        prepared.staging_root.as_deref(),
+    )?;
+    let finalize_result =
+        retry_bulk_file_operation("Could not finalize bulk output folder", || {
+            std::fs::rename(temp_path, &prepared.output_path)
+        });
+    if let Err(error) = finalize_result {
+        rollback_moved_raw_entries(&move_outcome.moved_entries);
+        return Err(error);
+    }
+
+    Ok(FolderFinalizeOutcome {
+        output_path: prepared.output_path.clone(),
+        moved_source_paths: move_outcome
+            .moved_entries
+            .iter()
+            .filter(|entry| entry.rollback_required)
+            .map(|entry| entry.source_path.clone())
+            .collect(),
+        copy_cleanup_paths: move_outcome.copy_cleanup_paths,
+    })
 }
 
-fn copy_entries_to_folder_verified(
+#[derive(Debug)]
+struct MoveOrCopyOutcome {
+    moved_entries: Vec<MovedFolderEntry>,
+    copy_cleanup_paths: Vec<PathBuf>,
+}
+
+fn move_or_copy_entries_to_folder(
     entries: &[BulkArchiveEntry],
     output_root: &Path,
-) -> Result<(), String> {
+    staging_root: Option<&Path>,
+) -> Result<MoveOrCopyOutcome, String> {
+    let mut moved_entries = Vec::new();
+    let mut copy_cleanup_paths = Vec::new();
     for entry in entries {
-        let archive_name = validate_zip_entry_name(&entry.archive_name)?;
-        let mut destination = output_root.to_path_buf();
-        for part in archive_name.split('/') {
-            destination.push(part);
-        }
-        if let Some(parent) = destination.parent() {
-            retry_bulk_file_operation("Could not create bulk output folder", || {
-                std::fs::create_dir_all(parent)
-            })?;
-        }
-        if destination.exists() {
-            return Err(format!(
-                "Bulk output file already exists while finalizing: {}",
-                destination.display()
-            ));
+        let destination = match destination_path_for_entry(output_root, entry) {
+            Ok(destination) => destination,
+            Err(error) => {
+                rollback_moved_raw_entries(&moved_entries);
+                return Err(error);
+            }
+        };
+        let rollback_required = !is_path_inside_root(&entry.source_path, staging_root);
+        if !same_volume_for_bulk_move(&entry.source_path, &destination) {
+            if let Err(error) = copy_file_checked(&entry.source_path, &destination) {
+                rollback_moved_raw_entries(&moved_entries);
+                return Err(error);
+            }
+            copy_cleanup_paths.push(entry.source_path.clone());
+            continue;
         }
 
-        copy_file_verified(&entry.source_path, &destination)?;
+        match move_entry_to_folder(entry, &destination, rollback_required) {
+            Ok(moved) => moved_entries.push(moved),
+            Err(_) if can_fallback_to_copy(&entry.source_path, &destination) => {
+                if let Err(error) = copy_file_checked(&entry.source_path, &destination) {
+                    rollback_moved_raw_entries(&moved_entries);
+                    return Err(error);
+                }
+                copy_cleanup_paths.push(entry.source_path.clone());
+            }
+            Err(error) => {
+                rollback_moved_raw_entries(&moved_entries);
+                return Err(error);
+            }
+        }
     }
-    Ok(())
+    Ok(MoveOrCopyOutcome {
+        moved_entries,
+        copy_cleanup_paths,
+    })
 }
 
-fn copy_file_verified(source: &Path, destination: &Path) -> Result<(), String> {
+fn destination_path_for_entry(
+    output_root: &Path,
+    entry: &BulkArchiveEntry,
+) -> Result<PathBuf, String> {
+    let archive_name = validate_zip_entry_name(&entry.archive_name)?;
+    let mut destination = output_root.to_path_buf();
+    for part in archive_name.split('/') {
+        destination.push(part);
+    }
+    if let Some(parent) = destination.parent() {
+        retry_bulk_file_operation("Could not create bulk output folder", || {
+            std::fs::create_dir_all(parent)
+        })?;
+    }
+    if destination.exists() {
+        return Err(format!(
+            "Bulk output file already exists while finalizing: {}",
+            destination.display()
+        ));
+    }
+    Ok(destination)
+}
+
+fn move_entry_to_folder(
+    entry: &BulkArchiveEntry,
+    destination: &Path,
+    rollback_required: bool,
+) -> Result<MovedFolderEntry, String> {
+    retry_bulk_file_operation(
+        &format!(
+            "Could not move {} into bulk output folder",
+            entry.source_path.display()
+        ),
+        || std::fs::rename(&entry.source_path, destination),
+    )?;
+    Ok(MovedFolderEntry {
+        source_path: entry.source_path.clone(),
+        destination_path: destination.to_path_buf(),
+        rollback_required,
+    })
+}
+
+fn can_fallback_to_copy(source: &Path, destination: &Path) -> bool {
+    source.is_file() && !destination.exists()
+}
+
+fn copy_file_checked(source: &Path, destination: &Path) -> Result<(), String> {
     let source_metadata = std::fs::metadata(source).map_err(|error| {
         format!(
             "Could not inspect {} before copying into bulk output folder: {error}",
@@ -913,52 +918,23 @@ fn copy_file_verified(source: &Path, destination: &Path) -> Result<(), String> {
             destination.display()
         ));
     }
-
-    let source_crc = crc32_for_file(source)?;
-    let destination_crc = crc32_for_file(destination)?;
-    if source_crc != destination_crc {
-        return Err(format!(
-            "Could not verify copied bulk output file {}: checksum does not match source.",
-            destination.display()
-        ));
-    }
-
-    let file = retry_bulk_file_operation(
-        &format!(
-            "Could not reopen copied bulk output file {}",
-            destination.display()
-        ),
-        || {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(destination)
-        },
-    )?;
-    retry_bulk_file_operation(
-        &format!(
-            "Could not flush copied bulk output file {}",
-            destination.display()
-        ),
-        || file.sync_all(),
-    )
+    Ok(())
 }
 
-fn crc32_for_file(path: &Path) -> Result<u32, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("Could not open {} for checksum: {error}", path.display()))?;
-    let mut crc = 0xffff_ffff;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("Could not read {} for checksum: {error}", path.display()))?;
-        if read == 0 {
-            break;
+fn rollback_moved_raw_entries(moved_entries: &[MovedFolderEntry]) {
+    for entry in moved_entries.iter().rev() {
+        if !entry.rollback_required {
+            continue;
         }
-        crc = update_crc32(crc, &buffer[..read]);
+        if entry.source_path.exists() || !entry.destination_path.exists() {
+            continue;
+        }
+        let _ = std::fs::rename(&entry.destination_path, &entry.source_path);
     }
-    Ok(!crc)
+}
+
+fn is_path_inside_root(path: &Path, root: Option<&Path>) -> bool {
+    root.is_some_and(|root| path.starts_with(root))
 }
 
 fn remove_incomplete_output(path: &Path) -> Result<(), String> {
@@ -971,9 +947,13 @@ fn remove_incomplete_output(path: &Path) -> Result<(), String> {
     }
 }
 
-fn cleanup_original_archive_parts(paths: &[PathBuf]) -> Vec<String> {
+fn cleanup_original_archive_parts(
+    paths: &[PathBuf],
+    already_moved_paths: &[PathBuf],
+) -> Vec<String> {
     paths
         .iter()
+        .filter(|path| !already_moved_paths.iter().any(|moved| moved == *path))
         .filter_map(|path| match std::fs::remove_file(path) {
             Ok(()) => None,
             Err(error) => Some(format!(
@@ -1075,21 +1055,14 @@ fn cleanup_stale_archive_staging_roots(
     Ok(())
 }
 
-fn verify_finished_output(
-    output_path: &Path,
-    output_kind: BulkArchiveOutputKind,
-) -> Result<(), String> {
-    match output_kind {
-        BulkArchiveOutputKind::Archive if output_path.is_file() => Ok(()),
-        BulkArchiveOutputKind::Folder if output_path.is_dir() => Ok(()),
-        BulkArchiveOutputKind::Archive => Err(format!(
-            "Could not verify finalized archive file: {}",
-            output_path.display()
-        )),
-        BulkArchiveOutputKind::Folder => Err(format!(
+fn verify_finished_output(output_path: &Path) -> Result<(), String> {
+    if output_path.is_dir() {
+        Ok(())
+    } else {
+        Err(format!(
             "Could not verify finalized bulk output folder: {}",
             output_path.display()
-        )),
+        ))
     }
 }
 
@@ -1098,65 +1071,6 @@ fn archive_part_display_name(path: &Path) -> String {
         .and_then(|value| value.to_str())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
-}
-
-#[derive(Debug)]
-pub(super) struct ZipCentralDirectoryEntry {
-    pub(super) name: String,
-    pub(super) crc32: u32,
-    pub(super) compressed_size: u64,
-    pub(super) uncompressed_size: u64,
-    pub(super) local_header_offset: u64,
-}
-
-pub(super) fn write_zip_archive(
-    writer: &mut (impl Write + Seek),
-    entries: &[crate::state::BulkArchiveEntry],
-) -> Result<(), String> {
-    let mut central_entries = Vec::with_capacity(entries.len());
-
-    for entry in entries {
-        let name = validate_zip_entry_name(&entry.archive_name)?;
-        let metadata = std::fs::metadata(&entry.source_path).map_err(|error| {
-            format!(
-                "Could not read {} for archiving: {error}",
-                entry.source_path.display()
-            )
-        })?;
-        if !metadata.is_file() {
-            return Err(format!(
-                "Could not archive {} because it is not a file.",
-                entry.source_path.display()
-            ));
-        }
-        let size = metadata.len();
-        let local_header_offset = zip_stream_position(writer)?;
-
-        write_zip_local_header(writer, &name, size)?;
-        let crc32 = write_zip_file_data(writer, &entry.source_path)?;
-        write_zip_data_descriptor(writer, crc32, size)?;
-
-        central_entries.push(ZipCentralDirectoryEntry {
-            name,
-            crc32,
-            compressed_size: size,
-            uncompressed_size: size,
-            local_header_offset,
-        });
-    }
-
-    let central_directory_offset = zip_stream_position(writer)?;
-    for entry in &central_entries {
-        write_zip_central_directory_entry(writer, entry)?;
-    }
-    let central_directory_size =
-        zip_stream_position(writer)?.saturating_sub(central_directory_offset);
-    write_zip_end_of_central_directory(
-        writer,
-        central_entries.len(),
-        central_directory_size,
-        central_directory_offset,
-    )
 }
 
 pub(super) fn validate_zip_entry_name(name: &str) -> Result<String, String> {
@@ -1172,290 +1086,3 @@ pub(super) fn validate_zip_entry_name(name: &str) -> Result<String, String> {
 
     Ok(normalized)
 }
-
-pub(super) fn write_zip_local_header(
-    writer: &mut impl Write,
-    name: &str,
-    size: u64,
-) -> Result<(), String> {
-    let name_bytes = zip_entry_name_bytes(name)?;
-    let needs_zip64 = size > ZIP32_MAX;
-    let extra_len = if needs_zip64 {
-        zip64_extra_field_len(2)?
-    } else {
-        0
-    };
-    write_u32_le(writer, 0x0403_4b50)?;
-    write_u16_le(writer, zip_version_needed(needs_zip64))?;
-    write_u16_le(writer, ZIP_GENERAL_PURPOSE_FLAGS)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, ZIP_DOS_DATE_1980_01_01)?;
-    write_u32_le(writer, 0)?;
-    write_u32_le(writer, if needs_zip64 { u32::MAX } else { 0 })?;
-    write_u32_le(writer, if needs_zip64 { u32::MAX } else { 0 })?;
-    write_u16_le(
-        writer,
-        checked_u16_len(name_bytes.len(), "archive entry name")?,
-    )?;
-    write_u16_le(writer, extra_len)?;
-    writer
-        .write_all(name_bytes)
-        .map_err(|error| format!("Could not write ZIP header: {error}"))?;
-    if needs_zip64 {
-        write_zip64_extra_field(writer, &[size, size])?;
-    }
-    Ok(())
-}
-
-pub(super) fn write_zip_file_data(
-    writer: &mut impl Write,
-    source_path: &Path,
-) -> Result<u32, String> {
-    let mut source = std::fs::File::open(source_path).map_err(|error| {
-        format!(
-            "Could not open {} for archiving: {error}",
-            source_path.display()
-        )
-    })?;
-    let mut crc = 0xffff_ffff;
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let read = source.read(&mut buffer).map_err(|error| {
-            format!(
-                "Could not read {} for archiving: {error}",
-                source_path.display()
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        crc = update_crc32(crc, &buffer[..read]);
-        writer
-            .write_all(&buffer[..read])
-            .map_err(|error| format!("Could not write ZIP data: {error}"))?;
-    }
-
-    Ok(!crc)
-}
-
-pub(super) fn write_zip_data_descriptor(
-    writer: &mut impl Write,
-    crc32: u32,
-    size: u64,
-) -> Result<(), String> {
-    write_u32_le(writer, 0x0807_4b50)?;
-    write_u32_le(writer, crc32)?;
-    if size > ZIP32_MAX {
-        write_u64_le(writer, size)?;
-        write_u64_le(writer, size)
-    } else {
-        let size = size as u32;
-        write_u32_le(writer, size)?;
-        write_u32_le(writer, size)
-    }
-}
-
-pub(super) fn write_zip_central_directory_entry(
-    writer: &mut impl Write,
-    entry: &ZipCentralDirectoryEntry,
-) -> Result<(), String> {
-    let name_bytes = zip_entry_name_bytes(&entry.name)?;
-    let zip64_values = central_directory_zip64_values(entry);
-    let needs_zip64 = !zip64_values.is_empty();
-    write_u32_le(writer, 0x0201_4b50)?;
-    write_u16_le(writer, zip_version_needed(needs_zip64))?;
-    write_u16_le(writer, zip_version_needed(needs_zip64))?;
-    write_u16_le(writer, ZIP_GENERAL_PURPOSE_FLAGS)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, ZIP_DOS_DATE_1980_01_01)?;
-    write_u32_le(writer, entry.crc32)?;
-    write_u32_le(writer, zip32_or_max(entry.compressed_size))?;
-    write_u32_le(writer, zip32_or_max(entry.uncompressed_size))?;
-    write_u16_le(
-        writer,
-        checked_u16_len(name_bytes.len(), "archive entry name")?,
-    )?;
-    write_u16_le(writer, zip64_extra_field_len(zip64_values.len())?)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, 0)?;
-    write_u32_le(writer, 0)?;
-    write_u32_le(writer, zip32_or_max(entry.local_header_offset))?;
-    writer
-        .write_all(name_bytes)
-        .map_err(|error| format!("Could not write ZIP central directory: {error}"))?;
-    if needs_zip64 {
-        write_zip64_extra_field(writer, &zip64_values)?;
-    }
-    Ok(())
-}
-
-pub(super) fn write_zip_end_of_central_directory(
-    writer: &mut (impl Write + Seek),
-    entry_count: usize,
-    central_directory_size: u64,
-    central_directory_offset: u64,
-) -> Result<(), String> {
-    let needs_zip64 = entry_count > usize::from(u16::MAX)
-        || central_directory_size > ZIP32_MAX
-        || central_directory_offset > ZIP32_MAX;
-
-    if needs_zip64 {
-        write_zip64_end_of_central_directory(
-            writer,
-            entry_count,
-            central_directory_size,
-            central_directory_offset,
-        )?;
-    }
-
-    write_u32_le(writer, 0x0605_4b50)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(writer, 0)?;
-    write_u16_le(
-        writer,
-        if entry_count > usize::from(u16::MAX) {
-            u16::MAX
-        } else {
-            entry_count as u16
-        },
-    )?;
-    write_u16_le(
-        writer,
-        if entry_count > usize::from(u16::MAX) {
-            u16::MAX
-        } else {
-            entry_count as u16
-        },
-    )?;
-    write_u32_le(writer, zip32_or_max(central_directory_size))?;
-    write_u32_le(writer, zip32_or_max(central_directory_offset))?;
-    write_u16_le(writer, 0)
-}
-
-fn write_zip64_end_of_central_directory(
-    writer: &mut (impl Write + Seek),
-    entry_count: usize,
-    central_directory_size: u64,
-    central_directory_offset: u64,
-) -> Result<(), String> {
-    let zip64_eocd_offset = zip_stream_position(writer)?;
-    write_u32_le(writer, 0x0606_4b50)?;
-    write_u64_le(writer, 44)?;
-    write_u16_le(writer, ZIP64_VERSION_NEEDED)?;
-    write_u16_le(writer, ZIP64_VERSION_NEEDED)?;
-    write_u32_le(writer, 0)?;
-    write_u32_le(writer, 0)?;
-    write_u64_le(writer, entry_count as u64)?;
-    write_u64_le(writer, entry_count as u64)?;
-    write_u64_le(writer, central_directory_size)?;
-    write_u64_le(writer, central_directory_offset)?;
-
-    write_u32_le(writer, 0x0706_4b50)?;
-    write_u32_le(writer, 0)?;
-    write_u64_le(writer, zip64_eocd_offset)?;
-    write_u32_le(writer, 1)
-}
-
-pub(super) fn zip_entry_name_bytes(name: &str) -> Result<&[u8], String> {
-    let bytes = name.as_bytes();
-    checked_u16_len(bytes.len(), "archive entry name")?;
-    Ok(bytes)
-}
-
-pub(super) fn checked_u16_len(value: usize, label: &str) -> Result<u16, String> {
-    u16::try_from(value).map_err(|_| format!("{label} exceeds the ZIP32 limit."))
-}
-
-pub(super) fn zip_stream_position(writer: &mut impl Seek) -> Result<u64, String> {
-    writer
-        .stream_position()
-        .map_err(|error| format!("Could not read ZIP writer position: {error}"))
-}
-
-pub(super) fn write_u16_le(writer: &mut impl Write, value: u16) -> Result<(), String> {
-    writer
-        .write_all(&value.to_le_bytes())
-        .map_err(|error| format!("Could not write ZIP archive: {error}"))
-}
-
-pub(super) fn write_u32_le(writer: &mut impl Write, value: u32) -> Result<(), String> {
-    writer
-        .write_all(&value.to_le_bytes())
-        .map_err(|error| format!("Could not write ZIP archive: {error}"))
-}
-
-pub(super) fn write_u64_le(writer: &mut impl Write, value: u64) -> Result<(), String> {
-    writer
-        .write_all(&value.to_le_bytes())
-        .map_err(|error| format!("Could not write ZIP archive: {error}"))
-}
-
-fn write_zip64_extra_field(writer: &mut impl Write, values: &[u64]) -> Result<(), String> {
-    write_u16_le(writer, 0x0001)?;
-    write_u16_le(
-        writer,
-        checked_u16_len(values.len() * 8, "ZIP64 extra field")?,
-    )?;
-    for value in values {
-        write_u64_le(writer, *value)?;
-    }
-    Ok(())
-}
-
-fn central_directory_zip64_values(entry: &ZipCentralDirectoryEntry) -> Vec<u64> {
-    let mut values = Vec::with_capacity(3);
-    if entry.uncompressed_size > ZIP32_MAX {
-        values.push(entry.uncompressed_size);
-    }
-    if entry.compressed_size > ZIP32_MAX {
-        values.push(entry.compressed_size);
-    }
-    if entry.local_header_offset > ZIP32_MAX {
-        values.push(entry.local_header_offset);
-    }
-    values
-}
-
-fn zip64_extra_field_len(value_count: usize) -> Result<u16, String> {
-    if value_count == 0 {
-        return Ok(0);
-    }
-    checked_u16_len(4 + value_count * 8, "ZIP64 extra field")
-}
-
-fn zip32_or_max(value: u64) -> u32 {
-    if value > ZIP32_MAX {
-        u32::MAX
-    } else {
-        value as u32
-    }
-}
-
-fn zip_version_needed(needs_zip64: bool) -> u16 {
-    if needs_zip64 {
-        ZIP64_VERSION_NEEDED
-    } else {
-        ZIP32_VERSION_NEEDED
-    }
-}
-
-pub(super) fn update_crc32(mut crc: u32, bytes: &[u8]) -> u32 {
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    crc
-}
-
-pub(super) const ZIP_GENERAL_PURPOSE_FLAGS: u16 = 0x0808;
-pub(super) const ZIP_DOS_DATE_1980_01_01: u16 = 33;
-pub(super) const ZIP32_VERSION_NEEDED: u16 = 20;
-pub(super) const ZIP64_VERSION_NEEDED: u16 = 45;
-pub(super) const ZIP32_MAX: u64 = u32::MAX as u64;

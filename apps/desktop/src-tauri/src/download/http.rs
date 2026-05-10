@@ -697,7 +697,6 @@ async fn create_bulk_archive_from_ready(
         output_kind: plan.output_kind,
         ..archive
     };
-    let output_kind = archive.output_kind;
     let archive_output_path = archive.output_path.display().to_string();
     let requires_extraction = plan.requires_extraction;
     let seven_zip_path = if requires_extraction {
@@ -771,23 +770,6 @@ async fn create_bulk_archive_from_ready(
                 None,
                 plan.warning.clone(),
                 Some(plan.finalize_mode),
-                Some(plan.total_completed_bytes),
-                Some(0),
-            )
-            .await?;
-        emit_snapshot(app, &snapshot);
-    }
-
-    if output_kind == BulkArchiveOutputKind::Archive {
-        let snapshot = state
-            .mark_bulk_archive_status(
-                &archive_id,
-                BulkArchiveStatus::Compressing,
-                Some(requires_extraction),
-                Some(archive_output_path.clone()),
-                None,
-                plan.warning.clone(),
-                Some(BulkFinalizeMode::Zip),
                 Some(plan.total_completed_bytes),
                 Some(0),
             )

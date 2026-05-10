@@ -4,10 +4,9 @@ use crate::state::{
     ExternalReseedAttempt, SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
-    default_torrent_download_directory_for, BulkArchiveOutputKind, BulkArchiveStatus,
-    BulkFinalizeMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory, HandoffAuth,
-    JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
-    TransferKind,
+    default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode, DiagnosticLevel,
+    DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState, ResumeSupport, Settings,
+    TorrentInfo, TorrentPeerConnectionWatchdogMode, TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
@@ -26,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -38,7 +37,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio::sync::{mpsc, Mutex};
 
-mod archive;
+mod bulk_finalize;
 mod client;
 mod filesystem;
 mod http;
@@ -47,7 +46,7 @@ mod segmented;
 mod torrent;
 mod types;
 
-use archive::*;
+use bulk_finalize::*;
 use client::*;
 use filesystem::*;
 use http::*;

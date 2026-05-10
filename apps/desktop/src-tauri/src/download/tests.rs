@@ -112,67 +112,6 @@ fn retry_delay_caps_at_last_configured_delay() {
 }
 
 #[test]
-fn create_bulk_archive_sync_writes_zip_with_distinct_entry_names() {
-    let root = test_download_runtime_dir("bulk-archive-native-zip");
-    let source_a = root.join("source-a.txt");
-    let source_b = root.join("source-b.txt");
-    std::fs::write(&source_a, b"alpha").unwrap();
-    std::fs::write(&source_b, b"bravo").unwrap();
-    let output_path = root.join("downloads.zip");
-
-    let archive = BulkArchiveReady {
-        archive_id: "bulk_1".into(),
-        output_kind: BulkArchiveOutputKind::Archive,
-        output_path: output_path.clone(),
-        entries: vec![
-            crate::state::BulkArchiveEntry {
-                source_path: source_a,
-                archive_name: "file.txt".into(),
-            },
-            crate::state::BulkArchiveEntry {
-                source_path: source_b,
-                archive_name: "file (1).txt".into(),
-            },
-        ],
-    };
-
-    let result = create_bulk_archive_sync(archive).expect("archive should be created");
-
-    assert_eq!(result, output_path);
-    assert_eq!(
-        zip_central_directory_names(&result),
-        vec![
-            "downloads/file.txt".to_string(),
-            "downloads/file (1).txt".to_string()
-        ]
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn create_bulk_archive_sync_rejects_missing_source() {
-    let root = test_download_runtime_dir("bulk-archive-missing-source");
-    let output_path = root.join("downloads.zip");
-    let archive = BulkArchiveReady {
-        archive_id: "bulk_2".into(),
-        output_kind: BulkArchiveOutputKind::Archive,
-        output_path: output_path.clone(),
-        entries: vec![crate::state::BulkArchiveEntry {
-            source_path: root.join("missing.txt"),
-            archive_name: "missing.txt".into(),
-        }],
-    };
-
-    let error = create_bulk_archive_sync(archive).expect_err("missing source should fail");
-
-    assert!(error.contains("missing.txt"));
-    assert!(!output_path.exists());
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
 fn bulk_archive_source_plan_detects_multipart_rar_set() {
     let root = test_download_runtime_dir("bulk-archive-detect-rar-set");
     let entries = vec![
@@ -327,10 +266,7 @@ fn prepare_bulk_archive_sources_extracts_multiple_sets_into_staging() {
             .iter()
             .map(|entry| entry.archive_name.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "bulk-download/Game/content.bin",
-            "bulk-download/Patch/content.bin"
-        ]
+        vec!["Game/content.bin", "Patch/content.bin"]
     );
     assert_eq!(prepared.cleanup_paths.len(), 4);
 
@@ -338,12 +274,12 @@ fn prepare_bulk_archive_sources_extracts_multiple_sets_into_staging() {
 }
 
 #[test]
-fn finish_bulk_archive_sources_zips_extracted_files_and_deletes_original_parts() {
+fn legacy_archive_extracted_sources_finalize_as_folder_and_delete_original_parts() {
     let root = test_download_runtime_dir("bulk-archive-finish-extracted");
     let archive = BulkArchiveReady {
         archive_id: "bulk_finish".into(),
         output_kind: BulkArchiveOutputKind::Archive,
-        output_path: root.join("bulk-download.zip"),
+        output_path: root.join("bulk-download"),
         entries: vec![
             archive_test_entry(&root, "Game.part01.rar", b"first"),
             archive_test_entry(&root, "Game.part02.rar", b"second"),
@@ -355,11 +291,13 @@ fn finish_bulk_archive_sources_zips_extracted_files_and_deletes_original_parts()
     let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
         .expect("archive set should be staged");
 
-    let outcome = finish_prepared_bulk_archive_sync(prepared).expect("zip should be finalized");
+    let outcome =
+        finish_prepared_bulk_archive_sync(prepared).expect("folder output should be finalized");
 
+    assert!(outcome.output_path.is_dir());
     assert_eq!(
-        zip_central_directory_names(&outcome.output_path),
-        vec!["bulk-download/Game/content.bin"]
+        std::fs::read(outcome.output_path.join("Game").join("content.bin")).unwrap(),
+        b"Game"
     );
     assert!(!source_part_1.exists());
     assert!(!source_part_2.exists());
@@ -402,7 +340,7 @@ fn finish_bulk_folder_sources_writes_extracted_files_and_deletes_original_parts(
 }
 
 #[test]
-fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
+fn finish_bulk_folder_sources_moves_raw_files_without_cleanup_warnings() {
     let root = test_download_runtime_dir("bulk-folder-finish-raw");
     let readme = root.join("readme.txt");
     let cover = root.join("cover.jpg");
@@ -427,7 +365,7 @@ fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
         .expect("raw files should be prepared for folder output");
 
     let outcome =
-        finish_prepared_bulk_archive_sync(prepared).expect("folder output should copy raw files");
+        finish_prepared_bulk_archive_sync(prepared).expect("folder output should move raw files");
 
     assert_eq!(
         std::fs::read(outcome.output_path.join("readme.txt")).unwrap(),
@@ -444,13 +382,56 @@ fn finish_bulk_folder_sources_copies_raw_files_and_deletes_originals() {
 }
 
 #[test]
+fn legacy_archive_output_kind_finalizes_as_folder_output() {
+    let root = test_download_runtime_dir("bulk-folder-legacy-archive-output");
+    let readme = root.join("readme.txt");
+    let cover = root.join("cover.jpg");
+    std::fs::write(&readme, b"readme").unwrap();
+    std::fs::write(&cover, b"cover").unwrap();
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_legacy_archive".into(),
+        output_kind: BulkArchiveOutputKind::Archive,
+        output_path: root.join("Bundle"),
+        entries: vec![
+            crate::state::BulkArchiveEntry {
+                source_path: readme.clone(),
+                archive_name: "readme.txt".into(),
+            },
+            crate::state::BulkArchiveEntry {
+                source_path: cover.clone(),
+                archive_name: "cover.jpg".into(),
+            },
+        ],
+    };
+    let prepared = prepare_bulk_archive_sources_without_extraction(archive)
+        .expect("legacy archive output should normalize to folder preparation");
+
+    let outcome =
+        finish_prepared_bulk_archive_sync(prepared).expect("legacy archive output should finalize");
+
+    assert!(outcome.output_path.is_dir());
+    assert_eq!(
+        std::fs::read(outcome.output_path.join("readme.txt")).unwrap(),
+        b"readme"
+    );
+    assert_eq!(
+        std::fs::read(outcome.output_path.join("cover.jpg")).unwrap(),
+        b"cover"
+    );
+    assert!(!readme.exists());
+    assert!(!cover.exists());
+    assert!(outcome.cleanup_warnings.is_empty());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn folder_combine_failure_keeps_original_sources_and_removes_incomplete_output() {
     let root = test_download_runtime_dir("bulk-folder-finish-failure-keeps-sources");
     let source = root.join("source.txt");
     let missing = root.join("missing.txt");
     std::fs::write(&source, b"source").unwrap();
     let prepared = PreparedBulkArchive {
-        output_kind: BulkArchiveOutputKind::Folder,
         output_path: root.join("Bundle"),
         entries: vec![
             crate::state::BulkArchiveEntry {
@@ -490,7 +471,6 @@ fn folder_combine_removes_stale_staging_dirs_for_same_output() {
     std::fs::create_dir_all(&stale_staging).unwrap();
     std::fs::write(stale_staging.join("old.tmp"), b"old").unwrap();
     let prepared = PreparedBulkArchive {
-        output_kind: BulkArchiveOutputKind::Folder,
         output_path: output_path.clone(),
         entries: vec![crate::state::BulkArchiveEntry {
             source_path: source.clone(),
@@ -631,13 +611,12 @@ fn bulk_finalization_plan_normalizes_huge_requests_to_folder_output() {
 }
 
 #[test]
-fn cleanup_failures_warn_without_failing_completed_zip() {
+fn cleanup_failures_warn_without_failing_completed_folder() {
     let root = test_download_runtime_dir("bulk-archive-cleanup-warning");
     let source = root.join("source.txt");
     std::fs::write(&source, b"payload").unwrap();
     let prepared = PreparedBulkArchive {
-        output_kind: BulkArchiveOutputKind::Archive,
-        output_path: root.join("bulk-download.zip"),
+        output_path: root.join("bulk-download"),
         entries: vec![crate::state::BulkArchiveEntry {
             source_path: source,
             archive_name: "source.txt".into(),
@@ -647,11 +626,12 @@ fn cleanup_failures_warn_without_failing_completed_zip() {
     };
 
     let outcome = finish_prepared_bulk_archive_sync(prepared)
-        .expect("cleanup warnings should not fail a completed zip");
+        .expect("cleanup warnings should not fail a completed folder");
 
+    assert!(outcome.output_path.is_dir());
     assert_eq!(
-        zip_central_directory_names(&outcome.output_path),
-        vec!["source.txt"]
+        std::fs::read(outcome.output_path.join("source.txt")).unwrap(),
+        b"payload"
     );
     assert_eq!(outcome.cleanup_warnings.len(), 1);
     assert!(outcome.cleanup_warnings[0].contains("missing.part01.rar"));
@@ -826,93 +806,6 @@ fn extracted_symlink_entries_are_rejected() {
     assert!(error.contains("Unsupported extracted archive entry"));
 
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn zip_central_directory_entry_uses_zip64_extra_for_large_sizes_and_offsets() {
-    let entry = ZipCentralDirectoryEntry {
-        name: "large.bin".into(),
-        crc32: 0x1234_5678,
-        compressed_size: u64::from(u32::MAX) + 1,
-        uncompressed_size: u64::from(u32::MAX) + 1,
-        local_header_offset: u64::from(u32::MAX) + 24,
-    };
-    let mut zip = Vec::new();
-
-    write_zip_central_directory_entry(&mut zip, &entry).unwrap();
-
-    assert_eq!(&zip[0..4], &[0x50, 0x4b, 0x01, 0x02]);
-    assert_eq!(u16::from_le_bytes(zip[6..8].try_into().unwrap()), 45);
-    assert_eq!(
-        u32::from_le_bytes(zip[20..24].try_into().unwrap()),
-        u32::MAX
-    );
-    assert_eq!(
-        u32::from_le_bytes(zip[24..28].try_into().unwrap()),
-        u32::MAX
-    );
-    assert_eq!(
-        u32::from_le_bytes(zip[42..46].try_into().unwrap()),
-        u32::MAX
-    );
-
-    let name_len = u16::from_le_bytes(zip[28..30].try_into().unwrap()) as usize;
-    let extra_len = u16::from_le_bytes(zip[30..32].try_into().unwrap()) as usize;
-    let extra_start = 46 + name_len;
-    let extra = &zip[extra_start..extra_start + extra_len];
-    assert_eq!(u16::from_le_bytes(extra[0..2].try_into().unwrap()), 0x0001);
-    assert_eq!(u16::from_le_bytes(extra[2..4].try_into().unwrap()), 24);
-    assert_eq!(
-        u64::from_le_bytes(extra[4..12].try_into().unwrap()),
-        u64::from(u32::MAX) + 1
-    );
-    assert_eq!(
-        u64::from_le_bytes(extra[12..20].try_into().unwrap()),
-        u64::from(u32::MAX) + 1
-    );
-    assert_eq!(
-        u64::from_le_bytes(extra[20..28].try_into().unwrap()),
-        u64::from(u32::MAX) + 24
-    );
-}
-
-#[test]
-fn zip_end_of_central_directory_emits_zip64_locator_when_zip32_limits_are_exceeded() {
-    let mut zip = std::io::Cursor::new(Vec::new());
-
-    write_zip_end_of_central_directory(
-        &mut zip,
-        usize::from(u16::MAX) + 1,
-        u64::from(u32::MAX) + 128,
-        u64::from(u32::MAX) + 256,
-    )
-    .unwrap();
-
-    let bytes = zip.into_inner();
-    assert!(
-        bytes
-            .windows(4)
-            .any(|window| window == [0x50, 0x4b, 0x06, 0x06]),
-        "ZIP64 end of central directory record should be present"
-    );
-    assert!(
-        bytes
-            .windows(4)
-            .any(|window| window == [0x50, 0x4b, 0x06, 0x07]),
-        "ZIP64 end of central directory locator should be present"
-    );
-    let eocd_index = bytes
-        .windows(4)
-        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
-        .unwrap();
-    assert_eq!(
-        u16::from_le_bytes(bytes[eocd_index + 10..eocd_index + 12].try_into().unwrap()),
-        u16::MAX
-    );
-    assert_eq!(
-        u32::from_le_bytes(bytes[eocd_index + 12..eocd_index + 16].try_into().unwrap()),
-        u32::MAX
-    );
 }
 
 #[tokio::test]
@@ -3091,35 +2984,6 @@ fn extracting_staging_dirs(root: &Path) -> Vec<PathBuf> {
                 .is_some_and(|name| name.contains(".extracting-"))
         })
         .collect()
-}
-
-fn zip_central_directory_names(path: &Path) -> Vec<String> {
-    let bytes = std::fs::read(path).expect("zip should be readable");
-    let eocd_index = bytes
-        .windows(4)
-        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
-        .expect("zip end of central directory should exist");
-    let entry_count =
-        u16::from_le_bytes(bytes[eocd_index + 10..eocd_index + 12].try_into().unwrap()) as usize;
-    let mut offset =
-        u32::from_le_bytes(bytes[eocd_index + 16..eocd_index + 20].try_into().unwrap()) as usize;
-
-    let mut names = Vec::with_capacity(entry_count);
-    for _ in 0..entry_count {
-        assert_eq!(&bytes[offset..offset + 4], &[0x50, 0x4b, 0x01, 0x02]);
-        let name_len =
-            u16::from_le_bytes(bytes[offset + 28..offset + 30].try_into().unwrap()) as usize;
-        let extra_len =
-            u16::from_le_bytes(bytes[offset + 30..offset + 32].try_into().unwrap()) as usize;
-        let comment_len =
-            u16::from_le_bytes(bytes[offset + 32..offset + 34].try_into().unwrap()) as usize;
-        let name_start = offset + 46;
-        let name_end = name_start + name_len;
-        names.push(String::from_utf8(bytes[name_start..name_end].to_vec()).unwrap());
-        offset = name_end + extra_len + comment_len;
-    }
-
-    names
 }
 
 fn http_segment_policy_task(
