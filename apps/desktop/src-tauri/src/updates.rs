@@ -294,6 +294,7 @@ mod tests {
             retry_attempts: 0,
             auto_restart_attempts: 0,
             resolved_from_url: None,
+            hoster_preflight: None,
             target_path: format!("C:/Downloads/{id}.bin"),
             temp_path: format!("C:/Downloads/{id}.bin.part"),
             artifact_exists: None,

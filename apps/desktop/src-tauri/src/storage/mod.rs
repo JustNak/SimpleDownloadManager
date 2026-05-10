@@ -179,6 +179,24 @@ pub struct HandoffAuth {
     pub headers: Vec<HandoffAuthHeader>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HosterPreflightStatus {
+    #[default]
+    Unchecked,
+    Checking,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HosterPreflightInfo {
+    pub status: HosterPreflightStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadJob {
@@ -217,6 +235,8 @@ pub struct DownloadJob {
     pub auto_restart_attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_from_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hoster_preflight: Option<HosterPreflightInfo>,
     #[serde(default)]
     pub target_path: String,
     #[serde(default)]
@@ -1068,9 +1088,57 @@ mod tests {
         assert_eq!(state.jobs[0].retry_attempts, 0);
         assert_eq!(state.jobs[0].auto_restart_attempts, 0);
         assert_eq!(state.jobs[0].resolved_from_url, None);
+        assert_eq!(state.jobs[0].hoster_preflight, None);
         assert_eq!(state.jobs[0].transfer_kind, TransferKind::Http);
         assert_eq!(state.jobs[0].integrity_check, None);
         assert!(state.diagnostic_events.is_empty());
+    }
+
+    #[test]
+    fn persisted_jobs_round_trip_hoster_preflight_metadata() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_1",
+                "url": "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar",
+                "filename": "archive.part01.rar",
+                "state": "paused",
+                "progress": 0.0,
+                "totalBytes": 0,
+                "downloadedBytes": 0,
+                "speed": 0,
+                "eta": 0,
+                "resolvedFromUrl": "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar",
+                "hosterPreflight": {
+                  "status": "ready",
+                  "message": "Validated source page"
+                },
+                "targetPath": "C:/Downloads/archive.part01.rar",
+                "tempPath": "C:/Downloads/archive.part01.rar.part"
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("persisted hoster preflight metadata should parse");
+
+        let preflight = state.jobs[0]
+            .hoster_preflight
+            .as_ref()
+            .expect("hoster preflight metadata should be present");
+        assert_eq!(preflight.status, HosterPreflightStatus::Ready);
+        assert_eq!(preflight.message.as_deref(), Some("Validated source page"));
+
+        let serialized = serde_json::to_value(&state.jobs[0]).expect("job should serialize");
+        assert_eq!(serialized["hosterPreflight"]["status"], "ready");
+        assert_eq!(
+            serialized["hosterPreflight"]["message"],
+            "Validated source page"
+        );
     }
 
     #[test]

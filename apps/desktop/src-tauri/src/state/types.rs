@@ -1,6 +1,6 @@
 use crate::storage::{
     BulkArchiveInfo, BulkArchiveOutputKind, DesktopSnapshot, DownloadSource, HandoffAuth,
-    TorrentInfo, TorrentRuntimeDiagnostics, TransferKind,
+    HosterPreflightInfo, TorrentInfo, TorrentRuntimeDiagnostics, TransferKind,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -129,6 +129,7 @@ pub struct EnqueueOptions {
     pub handoff_auth: Option<HandoffAuth>,
     pub start_paused: bool,
     pub resolved_from_url: Option<String>,
+    pub hoster_preflight: Option<HosterPreflightInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +137,7 @@ pub struct BatchDownloadEntry {
     pub url: String,
     pub filename_hint: Option<String>,
     pub resolved_from_url: Option<String>,
+    pub hoster_preflight: Option<HosterPreflightInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

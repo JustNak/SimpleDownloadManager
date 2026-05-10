@@ -381,6 +381,22 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn set_hoster_preflight(
+        &self,
+        id: &str,
+        preflight: HosterPreflightInfo,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            let job = find_job_mut(&mut state.jobs, id).map_err(|error| error.message)?;
+            job.hoster_preflight = Some(preflight);
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn torrent_restart_cleanup_info(
         &self,
         id: &str,

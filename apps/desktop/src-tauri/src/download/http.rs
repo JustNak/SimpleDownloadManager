@@ -19,7 +19,8 @@ pub(super) async fn run_http_download_attempt(
 ) -> Result<DownloadOutcome, DownloadError> {
     let mut current_url = match refresh_hoster_url_before_attempt(state, task).await {
         Ok(Some(url)) => url,
-        Ok(None) | Err(_) => task.url.clone(),
+        Ok(None) => task.url.clone(),
+        Err(error) => return Err(error),
     };
     let mut refreshed_after_failure = false;
 

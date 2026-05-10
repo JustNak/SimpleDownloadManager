@@ -17,12 +17,16 @@
   import {
     activeBulkFinalizingStepId,
     bulkCancelConfirmPlan,
+    bulkReviewCanStart,
     bulkFailedRetrySelection,
     bulkFinalizingSteps,
     bulkReviewStartSelection,
     calculateBatchProgress,
     deriveBulkPhase,
     deriveBulkUiState,
+    isBulkReviewPendingJob,
+    isBulkReviewReadyJob,
+    isBulkReviewUnavailableJob,
     isUntouchedBulkReviewGate,
     type BulkFinalizingStepId,
     type BulkPhase,
@@ -54,6 +58,7 @@
   let errorMessage = $state('');
   let selectedBulkJobIds = $state<Set<string>>(new Set());
   let reviewSelectionSignature = $state('');
+  let reviewDefaultSelectedReadyJobIds = $state<Set<string>>(new Set());
   let lastBulkUiState = $state<BulkUiState | null>(null);
   let batchListScrollRoot: HTMLElement | null = $state(null);
   let batchListScrollTop = $state(0);
@@ -68,7 +73,9 @@
   const rawBulkUiState = $derived(context?.kind === 'bulk' ? deriveBulkUiState(jobs) : null);
   const bulkUiState = $derived(context?.kind === 'bulk' ? rawBulkUiState : null);
   const isBulkReviewPhase = $derived(bulkUiState === 'review');
-  const selectedBulkCount = $derived(jobs.filter((job) => selectedBulkJobIds.has(job.id)).length);
+  const bulkReviewSelection = $derived(bulkReviewStartSelection(jobs, selectedBulkJobIds));
+  const selectedBulkCount = $derived(bulkReviewSelection.includedJobs.length);
+  const bulkReviewReadyToStart = $derived(bulkReviewCanStart(jobs, selectedBulkJobIds));
   const failedRetrySelection = $derived(bulkFailedRetrySelection(jobs, selectedBulkJobIds));
   const completedArchive = $derived(jobs.find((job) => (
     job.bulkArchive?.archiveStatus === 'completed'
@@ -157,13 +164,39 @@
   $effect(() => {
     if (context?.kind !== 'bulk' || (bulkUiState !== 'review' && bulkUiState !== 'failed')) {
       reviewSelectionSignature = '';
+      reviewDefaultSelectedReadyJobIds = new Set();
       return;
     }
 
     const nextSignature = `${bulkUiState}:${jobs.map((job) => job.id).join('|')}`;
     if (nextSignature !== reviewSelectionSignature) {
-      selectedBulkJobIds = new Set(jobs.map((job) => job.id));
+      const defaultSelectedJobs = jobs.filter((job) => bulkUiState === 'review' ? isBulkReviewReadyJob(job) : true);
+      selectedBulkJobIds = new Set(defaultSelectedJobs.map((job) => job.id));
+      reviewDefaultSelectedReadyJobIds = new Set(jobs.filter(isBulkReviewReadyJob).map((job) => job.id));
       reviewSelectionSignature = nextSignature;
+      return;
+    }
+
+    if (bulkUiState !== 'review') return;
+    const nextSelection = new Set(selectedBulkJobIds);
+    let changed = false;
+    for (const job of jobs) {
+      if (!isBulkReviewReadyJob(job)) {
+        if (nextSelection.delete(job.id)) changed = true;
+        continue;
+      }
+
+      if (!reviewDefaultSelectedReadyJobIds.has(job.id)) {
+        nextSelection.add(job.id);
+        changed = true;
+      }
+    }
+    const nextDefaultSelectedReadyJobIds = new Set(jobs.filter(isBulkReviewReadyJob).map((job) => job.id));
+    if (!setsEqual(reviewDefaultSelectedReadyJobIds, nextDefaultSelectedReadyJobIds)) {
+      reviewDefaultSelectedReadyJobIds = nextDefaultSelectedReadyJobIds;
+    }
+    if (changed) {
+      selectedBulkJobIds = nextSelection;
     }
   });
 
@@ -278,10 +311,20 @@
     selectedBulkJobIds = nextSelection;
   }
 
+  function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>) {
+    if (left.size !== right.size) return false;
+    for (const value of left) {
+      if (!right.has(value)) return false;
+    }
+    return true;
+  }
+
   function startBulkDownload() {
     const selection = bulkReviewStartSelection(jobs, selectedBulkJobIds);
-    if (selection.includedJobs.length === 0) {
-      errorMessage = 'Select at least one file to start.';
+    if (!bulkReviewCanStart(jobs, selectedBulkJobIds)) {
+      errorMessage = jobs.some(isBulkReviewPendingJob)
+        ? 'Wait for availability checks to finish.'
+        : 'Select at least one available file to start.';
       return;
     }
 
@@ -366,6 +409,18 @@
       default:
         return job.state;
     }
+  }
+
+  function bulkReviewStatusText(job: DownloadJob) {
+    if (isBulkReviewPendingJob(job)) return 'Checking';
+    if (isBulkReviewUnavailableJob(job)) return 'Unavailable';
+    return 'Ready';
+  }
+
+  function bulkReviewStatusClass(job: DownloadJob) {
+    if (isBulkReviewPendingJob(job)) return 'font-semibold text-warning';
+    if (isBulkReviewUnavailableJob(job)) return 'font-semibold text-destructive';
+    return 'font-semibold text-primary';
   }
 
   function statusTextClass(state: JobState) {
@@ -600,22 +655,24 @@
           <div style={`height: ${virtualBatchQueue.topPadding}px;`}></div>
         {/if}
         {#each renderedBatchJobs as job (job.id)}
-          <label class="grid cursor-pointer grid-cols-[28px_40px_minmax(0,1fr)_82px] items-center gap-2 px-3 py-2 transition hover:bg-row-hover">
+          {@const reviewDisabled = isBulkReviewPendingJob(job) || isBulkReviewUnavailableJob(job)}
+          <label class={`grid grid-cols-[28px_40px_minmax(0,1fr)_82px] items-center gap-2 px-3 py-2 transition ${reviewDisabled ? 'cursor-default' : 'cursor-pointer hover:bg-row-hover'}`}>
             <input
               type="checkbox"
-              checked={selectedBulkJobIds.has(job.id)}
+              checked={!reviewDisabled && selectedBulkJobIds.has(job.id)}
+              disabled={reviewDisabled}
               onchange={() => toggleBulkJobSelection(job.id)}
-              class="h-4 w-4 accent-primary"
+              class="h-4 w-4 accent-primary disabled:cursor-not-allowed disabled:opacity-45"
               aria-label={`Include ${job.filename}`}
             />
             <FileBadge filename={job.filename} transferKind={job.transferKind} />
             <div class="min-w-0">
-              <div class={`truncate text-sm font-semibold leading-5 ${selectedBulkJobIds.has(job.id) ? 'text-foreground' : 'text-muted-foreground'}`} title={job.filename}>{job.filename}</div>
+              <div class={`truncate text-sm font-semibold leading-5 ${isBulkReviewReadyJob(job) ? 'text-foreground' : 'text-muted-foreground'}`} title={job.filename}>{job.filename}</div>
               <div class="truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
             </div>
             <div class="min-w-0 text-right text-xs">
-              <div class={selectedBulkJobIds.has(job.id) ? 'font-semibold text-primary' : 'font-semibold text-muted-foreground'}>
-                {selectedBulkJobIds.has(job.id) ? 'Included' : 'Excluded'}
+              <div class={bulkReviewStatusClass(job)}>
+                {bulkReviewStatusText(job)}
               </div>
               <div class="mt-0.5 truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
                 {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
@@ -744,7 +801,7 @@
       {#if bulkUiState === 'ready' && completedArchive}
         {@render ActionButton('Show', FolderOpen, () => void runAction(() => revealBulkArchive(completedArchive.id), { closeOnSuccess: true }), isBusy, 'show')}
       {:else if bulkUiState === 'review'}
-        {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || selectedBulkCount === 0, 'primary')}
+        {@render ActionButton('Start', Play, () => void startBulkDownload(), isBusy || !bulkReviewReadyToStart, 'primary')}
       {:else if bulkUiState === 'downloading'}
         {@render ActionButton(canPause ? 'Pause' : 'Resume', canPause ? Pause : Play, onBulkPauseResumeClick, isBusy || (!canPause && !canResume), 'primary')}
       {:else if bulkUiState === 'failed'}

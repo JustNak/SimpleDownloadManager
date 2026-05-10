@@ -74,6 +74,14 @@ fn hoster_refresh_retries_expired_links_range_failures_and_early_eof() {
 }
 
 #[test]
+fn hoster_refresh_before_attempt_fails_closed_instead_of_using_source_url() {
+    let source = include_str!("http.rs");
+
+    assert!(source.contains("Err(error) => return Err(error),"));
+    assert!(!source.contains("Ok(None) | Err(_) => task.url.clone()"));
+}
+
+#[test]
 fn retry_delay_caps_at_last_configured_delay() {
     assert_eq!(retry_delay_for_attempt(0), REQUEST_RETRY_DELAYS[0]);
     assert_eq!(
@@ -1877,6 +1885,7 @@ fn torrent_job(id: &str, state: JobState) -> DownloadJob {
         retry_attempts: 0,
         auto_restart_attempts: 0,
         resolved_from_url: None,
+        hoster_preflight: None,
         target_path: format!("C:/Downloads/torrent-{id}"),
         temp_path: format!("C:/Downloads/torrent-{id}.part"),
         artifact_exists: None,

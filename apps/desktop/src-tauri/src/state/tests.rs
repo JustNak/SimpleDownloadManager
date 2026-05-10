@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::{
-    BulkDownloadSettings, HostRegistrationStatus, TorrentPeerConnectionWatchdogMode,
-    TorrentRuntimeDiagnostics,
+    BulkDownloadSettings, HostRegistrationStatus, HosterPreflightInfo, HosterPreflightStatus,
+    TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
 };
 
 #[test]
@@ -2225,6 +2225,7 @@ async fn enqueue_download_entries_uses_filename_hints_for_resolved_hoster_links(
                 resolved_from_url: Some(
                     "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar".into(),
                 ),
+                hoster_preflight: None,
             }],
             None,
             None,
@@ -2240,6 +2241,49 @@ async fn enqueue_download_entries_uses_filename_hints_for_resolved_hoster_links(
     assert_eq!(
         results[0].snapshot.jobs[0].resolved_from_url.as_deref(),
         Some("https://fuckingfast.co/ecw0lw398okf#archive.part01.rar")
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn enqueue_hoster_bulk_entry_keeps_source_url_and_marks_preflight_checking() {
+    let download_dir = test_runtime_dir("enqueue-hoster-source-preflight");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let source_url = "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar";
+    let results = state
+        .enqueue_download_entries(
+            vec![BatchDownloadEntry {
+                url: source_url.into(),
+                filename_hint: Some("archive.part01.rar".into()),
+                resolved_from_url: Some(source_url.into()),
+                hoster_preflight: Some(HosterPreflightInfo {
+                    status: HosterPreflightStatus::Checking,
+                    message: None,
+                }),
+            }],
+            None,
+            Some("Game".into()),
+        )
+        .await
+        .expect("hoster source row should enqueue without a direct token");
+
+    let job = &results[0].snapshot.jobs[0];
+    assert_eq!(job.url, source_url);
+    assert_eq!(job.resolved_from_url.as_deref(), Some(source_url));
+    assert_eq!(
+        job.hoster_preflight
+            .as_ref()
+            .map(|preflight| preflight.status),
+        Some(HosterPreflightStatus::Checking)
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -2264,11 +2308,13 @@ async fn enqueue_download_entries_can_start_bulk_batches_paused() {
                     url: "https://example.com/Game.part01.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
                 BatchDownloadEntry {
                     url: "https://example.com/Game.part02.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
             ],
             None,
@@ -2314,11 +2360,13 @@ async fn enqueue_download_entries_defaults_omitted_bulk_output_kind_to_folder() 
                     url: "https://example.com/Game.part01.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
                 BatchDownloadEntry {
                     url: "https://example.com/Game.part02.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
             ],
             None,
@@ -2357,11 +2405,13 @@ async fn enqueue_download_entries_stores_folder_bulk_output_kind() {
                     url: "https://example.com/Game.part01.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
                 BatchDownloadEntry {
                     url: "https://example.com/Game.part02.rar".into(),
                     filename_hint: None,
                     resolved_from_url: None,
+                    hoster_preflight: None,
                 },
             ],
             None,
@@ -2990,6 +3040,7 @@ fn restart_reset_clears_partial_progress_and_failure_metadata() {
         retry_attempts: 2,
         auto_restart_attempts: 0,
         resolved_from_url: None,
+        hoster_preflight: None,
         target_path: "C:/Downloads/file.zip".into(),
         temp_path: "C:/Downloads/file.zip.part".into(),
         artifact_exists: None,
@@ -3048,6 +3099,7 @@ fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
         retry_attempts: 2,
         auto_restart_attempts: 0,
         resolved_from_url: None,
+        hoster_preflight: None,
         target_path: "C:/Downloads/example-torrent".into(),
         temp_path: "C:/Downloads/.torrent-state/job_1".into(),
         artifact_exists: None,
@@ -4931,6 +4983,7 @@ fn download_job(
         retry_attempts: 0,
         auto_restart_attempts: 0,
         resolved_from_url: None,
+        hoster_preflight: None,
         target_path: format!("C:/Downloads/{id}.zip"),
         temp_path: format!("C:/Downloads/{id}.zip.part"),
         artifact_exists: None,
@@ -4995,11 +5048,13 @@ fn bulk_test_entries() -> Vec<BatchDownloadEntry> {
             url: "https://example.com/Game.part01.rar".into(),
             filename_hint: None,
             resolved_from_url: None,
+            hoster_preflight: None,
         },
         BatchDownloadEntry {
             url: "https://example.com/Game.part02.rar".into(),
             filename_hint: None,
             resolved_from_url: None,
+            hoster_preflight: None,
         },
     ]
 }

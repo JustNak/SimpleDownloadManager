@@ -520,19 +520,7 @@ async fn try_auto_restart_failed_bulk_member(
     };
 
     let resolved_url = if let Some(source_url) = candidate.resolved_from_url.as_deref() {
-        match crate::hosters::resolve_hoster_links(vec![source_url.to_string()]).await {
-            Ok(mut links) => links
-                .pop()
-                .map(|link| link.url)
-                .unwrap_or_else(|| source_url.to_string()),
-            Err(error) => {
-                return BulkMemberAutoRestartOutcome::Failed(download_error(
-                    FailureCategory::Http,
-                    format!("Could not refresh bulk member link: {}", error.message),
-                    false,
-                ))
-            }
-        }
+        source_url.to_string()
     } else {
         task.url.clone()
     };

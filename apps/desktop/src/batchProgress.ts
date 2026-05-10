@@ -156,13 +156,33 @@ export function bulkReviewStartSelection(
   jobs: DownloadJob[],
   selectedJobIds: ReadonlySet<string>,
 ): BulkReviewStartSelection {
-  const includedJobs = jobs.filter((job) => selectedJobIds.has(job.id));
-  const excludedJobs = jobs.filter((job) => !selectedJobIds.has(job.id));
+  const includedJobs = jobs.filter((job) => selectedJobIds.has(job.id) && isBulkReviewReadyJob(job));
+  const excludedJobs = jobs.filter((job) => !selectedJobIds.has(job.id) || !isBulkReviewReadyJob(job));
   return {
     includedJobs,
     excludedJobs,
     resumableJobs: includedJobs.filter(isResumableReviewJob),
   };
+}
+
+export function bulkReviewCanStart(
+  jobs: DownloadJob[],
+  selectedJobIds: ReadonlySet<string>,
+): boolean {
+  if (jobs.some(hasPendingHosterPreflight)) return false;
+  return bulkReviewStartSelection(jobs, selectedJobIds).resumableJobs.length > 0;
+}
+
+export function isBulkReviewReadyJob(job: DownloadJob): boolean {
+  return !job.hosterPreflight || job.hosterPreflight.status === 'ready';
+}
+
+export function isBulkReviewPendingJob(job: DownloadJob): boolean {
+  return hasPendingHosterPreflight(job);
+}
+
+export function isBulkReviewUnavailableJob(job: DownloadJob): boolean {
+  return job.hosterPreflight?.status === 'failed';
 }
 
 export function bulkFailedRetrySelection(
@@ -263,6 +283,10 @@ function createProgressBatchId() {
 function bulkArchiveStatus(job: DownloadJob): BulkArchiveStatus | null {
   if (!job.bulkArchive) return null;
   return job.bulkArchive.archiveStatus ?? 'pending';
+}
+
+function hasPendingHosterPreflight(job: DownloadJob): boolean {
+  return job.hosterPreflight?.status === 'checking' || job.hosterPreflight?.status === 'unchecked';
 }
 
 function isResumableReviewJob(job: DownloadJob) {

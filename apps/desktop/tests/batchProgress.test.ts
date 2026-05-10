@@ -4,6 +4,7 @@ import {
   bulkFailedRetrySelection,
   bulkFinalizingSteps,
   bulkCancelConfirmPlan,
+  bulkReviewCanStart,
   bulkReviewStartSelection,
   calculateBatchProgress,
   deriveBulkPhase,
@@ -214,6 +215,37 @@ assert.deepEqual(
     resumableJobs: [job({ id: 'job_1', state: 'paused' }), job({ id: 'job_3', state: 'paused' })],
   },
   'starting a reviewed bulk batch should delete unchecked jobs and resume only checked resumable jobs',
+);
+
+assert.equal(
+  bulkReviewCanStart([
+    job({ id: 'job_1', state: 'paused', hosterPreflight: { status: 'ready' } }),
+    job({ id: 'job_2', state: 'paused', hosterPreflight: { status: 'checking' } }),
+  ], new Set(['job_1'])),
+  false,
+  'bulk review Start should stay disabled while any hoster preflight is still checking',
+);
+
+assert.deepEqual(
+  bulkReviewStartSelection([
+    job({ id: 'job_1', state: 'paused', hosterPreflight: { status: 'ready' } }),
+    job({ id: 'job_2', state: 'paused', hosterPreflight: { status: 'failed', message: 'File unavailable' } }),
+    job({ id: 'job_3', state: 'paused' }),
+  ], new Set(['job_1', 'job_2', 'job_3'])),
+  {
+    includedJobs: [
+      job({ id: 'job_1', state: 'paused', hosterPreflight: { status: 'ready' } }),
+      job({ id: 'job_3', state: 'paused' }),
+    ],
+    excludedJobs: [
+      job({ id: 'job_2', state: 'paused', hosterPreflight: { status: 'failed', message: 'File unavailable' } }),
+    ],
+    resumableJobs: [
+      job({ id: 'job_1', state: 'paused', hosterPreflight: { status: 'ready' } }),
+      job({ id: 'job_3', state: 'paused' }),
+    ],
+  },
+  'starting a reviewed bulk batch should resume ready/direct rows and exclude unavailable hoster rows',
 );
 
 assert.deepEqual(

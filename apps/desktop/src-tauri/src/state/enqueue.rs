@@ -65,6 +65,7 @@ impl SharedState {
                 url,
                 filename_hint: None,
                 resolved_from_url: None,
+                hoster_preflight: None,
             })
             .collect();
         self.enqueue_download_entries_with_bulk_options(
@@ -129,6 +130,7 @@ impl SharedState {
                     resolved_from_url: normalize_optional_resolved_from_url(
                         entry.resolved_from_url,
                     ),
+                    hoster_preflight: entry.hoster_preflight,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -195,6 +197,7 @@ impl SharedState {
                         bulk_archive: bulk_archive.clone(),
                         start_paused,
                         resolved_from_url: entry.resolved_from_url,
+                        hoster_preflight: entry.hoster_preflight,
                         ..Default::default()
                     },
                 )
@@ -475,6 +478,7 @@ impl RuntimeState {
             retry_attempts: 0,
             auto_restart_attempts: 0,
             resolved_from_url: options.resolved_from_url,
+            hoster_preflight: options.hoster_preflight,
             target_path: target_path.display().to_string(),
             temp_path: temp_path.display().to_string(),
             artifact_exists: None,

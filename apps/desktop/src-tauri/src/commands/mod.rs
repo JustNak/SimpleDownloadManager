@@ -12,14 +12,15 @@ use crate::state::{
 };
 use crate::storage::{
     BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
-    DownloadPrompt, DownloadSource, FailureCategory, HostRegistrationStatus, JobState, Settings,
-    TransferKind,
+    DownloadPrompt, DownloadSource, HostRegistrationStatus, HosterPreflightInfo,
+    HosterPreflightStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window_async, progress_window_label,
     show_batch_progress_window, show_download_prompt_window,
     show_progress_window_for_transfer_kind, torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
 };
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -135,6 +136,12 @@ pub struct AddJobsResult {
 pub struct BulkMemberRetryResult {
     pub queued_count: usize,
     pub failed_items: Vec<FailedBatchItem>,
+}
+
+#[derive(Debug, Clone)]
+struct HosterPreflightTarget {
+    job_id: String,
+    source_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -531,22 +538,38 @@ pub async fn add_jobs(
     let start_paused = start_paused.unwrap_or(false);
     let _ = bulk_output_kind;
     let bulk_output_kind = BulkArchiveOutputKind::Folder;
-    let mut failed_items = Vec::new();
+    let failed_items = Vec::new();
+    let mut preflight_targets = Vec::new();
     let results = if resolve_hoster_links.unwrap_or(false) {
-        let batch = crate::hosters::resolve_hoster_links_partial(urls)
-            .await
-            .map_err(|error| error.message)?;
-        failed_items = batch.failed_links.into_iter().map(Into::into).collect();
-        let entries = batch
-            .links
+        let prepared_entries = urls
             .into_iter()
-            .map(|link| BatchDownloadEntry {
-                url: link.url,
-                filename_hint: link.filename_hint,
-                resolved_from_url: link.resolved_from_url,
+            .map(|url| {
+                let source_url = url.trim().to_string();
+                let is_hoster = crate::hosters::is_supported_hoster_url(&source_url);
+                let preflight = is_hoster.then(|| HosterPreflightInfo {
+                    status: HosterPreflightStatus::Checking,
+                    message: None,
+                });
+                (
+                    is_hoster.then(|| source_url.clone()),
+                    BatchDownloadEntry {
+                        url: source_url.clone(),
+                        filename_hint: crate::hosters::source_filename_hint_for_url(&source_url),
+                        resolved_from_url: is_hoster.then_some(source_url),
+                        hoster_preflight: preflight,
+                    },
+                )
             })
             .collect::<Vec<_>>();
-        if entries.is_empty() {
+        let preflight_sources = prepared_entries
+            .iter()
+            .map(|(source_url, _entry)| source_url.clone())
+            .collect::<Vec<_>>();
+        let entries = prepared_entries
+            .into_iter()
+            .map(|(_source_url, entry)| entry)
+            .collect::<Vec<_>>();
+        let results = if entries.is_empty() {
             Vec::new()
         } else {
             let archive_name = bulk_archive_name.filter(|_| entries.len() > 1);
@@ -560,7 +583,19 @@ pub async fn add_jobs(
                 )
                 .await
                 .map_err(|error| error.message)?
-        }
+        };
+        preflight_targets = results
+            .iter()
+            .zip(preflight_sources)
+            .filter_map(|(result, source_url)| {
+                let source_url = source_url?;
+                (result.status == EnqueueStatus::Queued).then(|| HosterPreflightTarget {
+                    job_id: result.job_id.clone(),
+                    source_url,
+                })
+            })
+            .collect();
+        results
     } else {
         state
             .enqueue_downloads_with_bulk_options(
@@ -578,6 +613,10 @@ pub async fn add_jobs(
         emit_snapshot(&app, &result.snapshot);
     }
 
+    if !preflight_targets.is_empty() {
+        spawn_hoster_preflight_checks(app.clone(), state.inner().clone(), preflight_targets);
+    }
+
     if results
         .iter()
         .any(|result| result.status == EnqueueStatus::Queued)
@@ -587,6 +626,43 @@ pub async fn add_jobs(
     }
 
     Ok(add_jobs_result_from_parts(results, failed_items))
+}
+
+fn spawn_hoster_preflight_checks(
+    app: AppHandle,
+    state: SharedState,
+    targets: Vec<HosterPreflightTarget>,
+) {
+    tauri::async_runtime::spawn(async move {
+        stream::iter(targets)
+            .for_each_concurrent(4, |target| {
+                let app = app.clone();
+                let state = state.clone();
+                async move {
+                    let preflight =
+                        match crate::hosters::preflight_hoster_source(&target.source_url).await {
+                            Ok(Some(_)) => HosterPreflightInfo {
+                                status: HosterPreflightStatus::Ready,
+                                message: None,
+                            },
+                            Ok(None) => HosterPreflightInfo {
+                                status: HosterPreflightStatus::Failed,
+                                message: Some("Unsupported hoster URL.".into()),
+                            },
+                            Err(error) => HosterPreflightInfo {
+                                status: HosterPreflightStatus::Failed,
+                                message: Some(error.message),
+                            },
+                        };
+
+                    match state.set_hoster_preflight(&target.job_id, preflight).await {
+                        Ok(snapshot) => emit_snapshot(&app, &snapshot),
+                        Err(error) => eprintln!("failed to update hoster preflight: {error}"),
+                    }
+                }
+            })
+            .await;
+    });
 }
 
 #[tauri::command]
@@ -1273,33 +1349,11 @@ pub async fn retry_bulk_members(
         .await
         .map_err(|error| error.to_string())?;
     let mut queued_count = 0;
-    let mut failed_items = Vec::new();
+    let failed_items = Vec::new();
     let mut snapshot = None;
 
     for candidate in candidates {
-        let resolved_url = if candidate.resolved_from_url.is_some() {
-            match crate::hosters::resolve_hoster_links(vec![candidate.source_url.clone()]).await {
-                Ok(mut links) => links
-                    .pop()
-                    .map(|link| link.url)
-                    .unwrap_or_else(|| candidate.source_url.clone()),
-                Err(error) => {
-                    let message = format!("Could not refresh bulk member link: {}", error.message);
-                    snapshot = Some(
-                        state
-                            .fail_job(&candidate.id, message.clone(), FailureCategory::Http)
-                            .await?,
-                    );
-                    failed_items.push(FailedBatchItem {
-                        url: candidate.source_url,
-                        message,
-                    });
-                    continue;
-                }
-            }
-        } else {
-            candidate.source_url.clone()
-        };
+        let resolved_url = candidate.source_url.clone();
 
         snapshot = Some(
             state
@@ -1847,6 +1901,20 @@ mod tests {
     }
 
     #[test]
+    fn add_jobs_hoster_resolution_queues_sources_for_background_preflight() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        assert!(production_source.contains("HosterPreflightStatus::Checking"));
+        assert!(production_source.contains("spawn_hoster_preflight_checks"));
+        assert!(production_source.contains("preflight_hoster_source"));
+        assert!(!production_source.contains("resolve_hoster_links_partial(urls)"));
+    }
+
+    #[test]
     fn scoped_batch_job_commands_are_registered_for_single_ipc_actions() {
         let source = include_str!("mod.rs");
         let production_source = source
@@ -1863,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_member_retry_command_refreshes_links_and_records_lookup_failures() {
+    fn bulk_member_retry_command_preserves_source_urls_for_worker_refresh() {
         let source = include_str!("mod.rs");
         let production_source = source
             .split("#[cfg(test)]")
@@ -1871,13 +1939,11 @@ mod tests {
             .expect("commands source should contain production code");
 
         assert!(production_source.contains("pub async fn retry_bulk_members("));
-        assert!(
-            production_source.contains("resolve_hoster_links(vec![candidate.source_url.clone()])")
-        );
+        assert!(production_source.contains("let resolved_url = candidate.source_url.clone();"));
         assert!(production_source.contains(".retry_bulk_member(&candidate.id, resolved_url)"));
-        assert!(production_source
-            .contains(".fail_job(&candidate.id, message.clone(), FailureCategory::Http)"));
-        assert!(production_source.contains("failed_items.push(FailedBatchItem"));
+        assert!(
+            !production_source.contains("resolve_hoster_links(vec![candidate.source_url.clone()])")
+        );
     }
 
     #[test]
@@ -2034,6 +2100,7 @@ mod tests {
             retry_attempts: 1,
             auto_restart_attempts: 0,
             resolved_from_url: None,
+            hoster_preflight: None,
             target_path: "C:/Downloads/file.zip".into(),
             temp_path: "C:/Downloads/file.zip.part".into(),
             artifact_exists: None,

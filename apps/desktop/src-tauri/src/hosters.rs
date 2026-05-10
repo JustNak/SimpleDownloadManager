@@ -67,6 +67,12 @@ pub struct HosterLinkRefreshOutcome {
     pub download_context: Option<HosterDownloadContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HosterSourcePreflight {
+    pub filename_hint: Option<String>,
+    pub resolved_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HosterKind {
     FuckingFast,
@@ -137,16 +143,40 @@ pub async fn refresh_resolved_hoster_link(
     })
 }
 
+pub fn is_supported_hoster_url(raw_url: &str) -> bool {
+    hoster_kind_for_url(raw_url).is_some()
+}
+
+pub fn source_filename_hint_for_url(raw_url: &str) -> Option<String> {
+    filename_hint_from_fragment(raw_url).or_else(|| datanodes_filename_hint_from_url(raw_url))
+}
+
+pub async fn preflight_hoster_source(
+    source_url: &str,
+) -> Result<Option<HosterSourcePreflight>, HosterResolutionError> {
+    let trimmed_url = source_url.trim().to_string();
+    let Some(kind) = hoster_kind_for_url(&trimmed_url) else {
+        return Ok(None);
+    };
+    let client = hoster_client()?;
+    let preflight = retry_hoster_resolution("hoster source preflight", || {
+        let client = client.clone();
+        let source_url = trimmed_url.clone();
+        async move {
+            match kind {
+                HosterKind::FuckingFast => preflight_fuckingfast_source(&client, &source_url).await,
+                HosterKind::Datanodes => preflight_datanodes_source(&client, &source_url).await,
+            }
+        }
+    })
+    .await?;
+    Ok(Some(preflight))
+}
+
 pub async fn resolve_hoster_links_partial(
     urls: Vec<String>,
 ) -> Result<HosterResolutionBatch, HosterResolutionError> {
-    let client = Client::builder()
-        .connect_timeout(HOSTER_CONNECT_TIMEOUT)
-        .read_timeout(HOSTER_READ_TIMEOUT)
-        .redirect(Policy::limited(5))
-        .user_agent("SimpleDownloadManager/0.5")
-        .build()
-        .map_err(|error| resolution_error(format!("Could not create hoster resolver: {error}")))?;
+    let client = hoster_client()?;
 
     let expected_len = urls.len();
     let indexed = stream::iter(urls.into_iter().enumerate().map(|(index, url)| {
@@ -172,6 +202,16 @@ pub async fn resolve_hoster_links_partial(
     .await;
 
     ordered_resolved_hoster_batch(indexed, expected_len)
+}
+
+fn hoster_client() -> Result<Client, HosterResolutionError> {
+    Client::builder()
+        .connect_timeout(HOSTER_CONNECT_TIMEOUT)
+        .read_timeout(HOSTER_READ_TIMEOUT)
+        .redirect(Policy::limited(5))
+        .user_agent("SimpleDownloadManager/0.5")
+        .build()
+        .map_err(|error| resolution_error(format!("Could not create hoster resolver: {error}")))
 }
 
 async fn resolve_hoster_link_with_retry(
@@ -249,6 +289,41 @@ async fn resolve_fuckingfast_link(
         .await
         .map_err(|error| reqwest_resolution_error("Could not read FuckingFast page", error))?;
     resolve_hoster_link_from_html(url, &html)
+}
+
+async fn preflight_fuckingfast_source(
+    client: &Client,
+    url: &str,
+) -> Result<HosterSourcePreflight, HosterResolutionError> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| reqwest_resolution_error("Could not load FuckingFast page", error))?;
+
+    if !response.status().is_success() {
+        return Err(http_status_resolution_error(
+            "Could not load FuckingFast page",
+            response.status(),
+        ));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|error| reqwest_resolution_error("Could not read FuckingFast page", error))?;
+    preflight_fuckingfast_source_from_html(url, &html)
+}
+
+fn preflight_fuckingfast_source_from_html(
+    original_url: &str,
+    html: &str,
+) -> Result<HosterSourcePreflight, HosterResolutionError> {
+    let resolved = resolve_hoster_link_from_html(original_url, html)?;
+    Ok(HosterSourcePreflight {
+        filename_hint: resolved.filename_hint,
+        resolved_url: None,
+    })
 }
 
 async fn resolve_datanodes_link(
@@ -332,6 +407,67 @@ async fn resolve_datanodes_link(
         resolved_from_url: original_url_for_resolved_link(original_url, &direct_url),
         url: direct_url,
         filename_hint: datanodes_filename_hint_from_url(original_url).or(page.filename_hint),
+    })
+}
+
+async fn preflight_datanodes_source(
+    client: &Client,
+    original_url: &str,
+) -> Result<HosterSourcePreflight, HosterResolutionError> {
+    let file_code = datanodes_file_code_from_url(original_url).ok_or_else(|| {
+        resolution_error("DataNodes URL does not contain a supported file code.".into())
+    })?;
+    let cookie = format!("file_code={file_code}");
+    let response = client
+        .get(DATANODES_DOWNLOAD_URL)
+        .header(COOKIE, cookie.clone())
+        .send()
+        .await
+        .map_err(|error| reqwest_resolution_error("Could not load DataNodes page", error))?;
+
+    if !response.status().is_success() {
+        return Err(http_status_resolution_error(
+            "Could not load DataNodes page",
+            response.status(),
+        ));
+    }
+
+    let html = response
+        .text()
+        .await
+        .map_err(|error| reqwest_resolution_error("Could not read DataNodes page", error))?;
+    let mut preflight =
+        preflight_datanodes_source_from_html(html, &file_code, {
+            let client = client.clone();
+            let cookie = cookie.clone();
+            move |preliminary| {
+                let client = client.clone();
+                let cookie = cookie.clone();
+                async move {
+                    request_datanodes_preliminary_download(&client, &cookie, preliminary).await
+                }
+            }
+        })
+        .await?;
+    preflight.filename_hint =
+        datanodes_filename_hint_from_url(original_url).or(preflight.filename_hint);
+    Ok(preflight)
+}
+
+async fn preflight_datanodes_source_from_html<F, Fut>(
+    html: String,
+    file_code: &str,
+    request_preliminary: F,
+) -> Result<HosterSourcePreflight, HosterResolutionError>
+where
+    F: FnMut(DatanodesPreliminaryDownloadPage) -> Fut,
+    Fut: Future<Output = Result<String, HosterResolutionError>>,
+{
+    let page =
+        resolve_datanodes_download_page_from_html(html, file_code, request_preliminary).await?;
+    Ok(HosterSourcePreflight {
+        filename_hint: page.filename_hint,
+        resolved_url: None,
     })
 }
 
@@ -1381,6 +1517,28 @@ mod tests {
     }
 
     #[test]
+    fn fuckingfast_source_preflight_validates_without_returning_direct_url() {
+        let original_url = "https://fuckingfast.co/ecw0lw398okf#archive.part01.rar";
+        let html = r#"
+            <html>
+              <head><title>Ignored title</title></head>
+              <body>
+                <script>window.open("https://dl.fuckingfast.co/dl/direct-token_123")</script>
+              </body>
+            </html>
+        "#;
+
+        let preflight = preflight_fuckingfast_source_from_html(original_url, html)
+            .expect("source-only FuckingFast preflight should validate supported pages");
+
+        assert_eq!(
+            preflight.filename_hint.as_deref(),
+            Some("archive.part01.rar")
+        );
+        assert_eq!(preflight.resolved_url, None);
+    }
+
+    #[test]
     fn hoster_resolver_leaves_unsupported_hosts_unchanged() {
         let resolved =
             resolve_hoster_link_from_html("https://example.com/file.zip", "<html></html>")
@@ -1453,6 +1611,45 @@ mod tests {
         assert_eq!(page.free_method, "Free Download >>");
         assert_eq!(page.premium_method, "");
         assert_eq!(page.filename_hint.as_deref(), Some("Neon-White.rar"));
+    }
+
+    #[tokio::test]
+    async fn datanodes_source_preflight_stops_before_direct_link_request() {
+        let preliminary_html = r#"
+            <form method="POST" action="/download" id="downloadForm">
+                <input type="hidden" name="op" value="download1">
+                <input type="hidden" name="id" value="61nni6me5p0n">
+                <input type="hidden" name="fname" value="Neon White.rar">
+                <input type="hidden" name="referer" value="">
+                <button type="submit" name="method_free" value="Free Download &gt;&gt;">Continue</button>
+            </form>
+        "#;
+        let standard_html = r#"
+            <download-countdown :countdown="45"
+                code="61nni6me5p0n" referer="https://datanodes.to/download" rand="rand-token"
+                free-method="Free Download &gt;&gt;" premium-method=""
+                :has-password="false" :has-captcha="false"
+                :has-countdown="true"
+                name="Neon White.rar"></download-countdown>
+        "#;
+        let submitted_methods = std::cell::RefCell::new(Vec::new());
+
+        let preflight = preflight_datanodes_source_from_html(
+            preliminary_html.to_string(),
+            "61nni6me5p0n",
+            |preliminary| {
+                submitted_methods
+                    .borrow_mut()
+                    .push(preliminary.method_free.clone());
+                futures_util::future::ready(Ok(standard_html.to_string()))
+            },
+        )
+        .await
+        .expect("source-only DataNodes preflight should reach the standard form");
+
+        assert_eq!(submitted_methods.into_inner(), vec!["Free Download >>"]);
+        assert_eq!(preflight.filename_hint.as_deref(), Some("Neon White.rar"));
+        assert_eq!(preflight.resolved_url, None);
     }
 
     #[test]

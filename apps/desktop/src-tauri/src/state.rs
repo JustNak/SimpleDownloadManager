@@ -6,9 +6,9 @@ use crate::storage::{
     DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
     DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
     FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
-    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    ProtectedDownloadAuthScope, QueueSummary, ResumeSupport, Settings, TorrentInfo,
-    TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
+    HosterPreflightInfo, IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState,
+    MainWindowState, PersistedState, ProtectedDownloadAuthScope, QueueSummary, ResumeSupport,
+    Settings, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};

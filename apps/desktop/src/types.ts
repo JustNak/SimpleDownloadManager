@@ -39,6 +39,7 @@ export type BulkOutputKind = 'archive' | 'folder';
 export type BulkFinalizeMode = 'move' | 'extract' | 'zip';
 export type BulkArchiveStatus = 'pending' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'completed' | 'failed';
 export type BulkStartBehavior = 'review_then_start' | 'start_immediately';
+export type HosterPreflightStatus = 'unchecked' | 'checking' | 'ready' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
 export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'experimental';
@@ -94,6 +95,10 @@ export interface DownloadJob {
   retryAttempts?: number;
   autoRestartAttempts?: number;
   resolvedFromUrl?: string;
+  hosterPreflight?: {
+    status: HosterPreflightStatus;
+    message?: string;
+  };
   targetPath?: string;
   tempPath?: string;
   artifactExists?: boolean;
