@@ -41,8 +41,25 @@ impl SharedState {
 
             let mut scheduled_ids = Vec::new();
             let mut scheduled_bulk_workers = 0_u32;
-            let mut protected_bulk_hoster_claim_blocked =
-                protected_bulk_hoster_worker_blocks_claim(&state, now);
+            let fairness_metrics = bulk_hoster_fairness_metrics(&state, now);
+            let fairness_diagnostics =
+                state
+                    .bulk_hoster_fairness
+                    .reconcile(fairness_metrics, bulk_slot_limit, now);
+            for message in fairness_diagnostics {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    message,
+                    None,
+                );
+            }
+            let protected_bulk_hoster_target = state
+                .bulk_hoster_fairness
+                .target_for_bulk_limit(bulk_slot_limit);
+            let active_protected_bulk_hoster_workers = fairness_metrics.active_count;
+            let protected_bulk_hoster_claim_blocked = fairness_metrics.has_blocking_worker;
+            let mut scheduled_protected_bulk_hoster_workers = 0_u32;
             for job in &state.jobs {
                 if scheduled_ids.len() >= available_slots {
                     break;
@@ -53,14 +70,17 @@ impl SharedState {
                         if active_bulk_workers + scheduled_bulk_workers >= bulk_slot_limit {
                             continue;
                         }
-                        if is_protected_bulk_hoster_job(job) && protected_bulk_hoster_claim_blocked
-                        {
-                            continue;
+                        if is_protected_bulk_hoster_job(job) {
+                            if protected_bulk_hoster_claim_blocked
+                                || active_protected_bulk_hoster_workers
+                                    + scheduled_protected_bulk_hoster_workers
+                                    >= protected_bulk_hoster_target
+                            {
+                                continue;
+                            }
+                            scheduled_protected_bulk_hoster_workers += 1;
                         }
                         scheduled_bulk_workers += 1;
-                        if is_protected_bulk_hoster_job(job) {
-                            protected_bulk_hoster_claim_blocked = true;
-                        }
                     }
                     scheduled_ids.push(job.id.clone());
                 }
@@ -140,20 +160,40 @@ impl SharedState {
     }
 }
 
-fn is_bulk_member_job(job: &DownloadJob) -> bool {
-    job.transfer_kind == TransferKind::Http && job.bulk_archive.is_some()
-}
+fn bulk_hoster_fairness_metrics(state: &RuntimeState, now: Instant) -> BulkHosterFairnessMetrics {
+    let mut metrics = BulkHosterFairnessMetrics {
+        all_healthy: true,
+        ..Default::default()
+    };
 
-fn is_protected_bulk_hoster_job(job: &DownloadJob) -> bool {
-    is_bulk_member_job(job) && job.resolved_from_url.is_some()
-}
+    for id in &state.active_workers {
+        let Some(job) = state.job(id) else {
+            continue;
+        };
+        if !is_protected_bulk_hoster_job(job)
+            || !matches!(job.state, JobState::Starting | JobState::Downloading)
+        {
+            continue;
+        }
 
-fn protected_bulk_hoster_worker_blocks_claim(state: &RuntimeState, now: Instant) -> bool {
-    state.active_workers.iter().any(|id| {
-        state
-            .job(id)
-            .filter(|job| is_protected_bulk_hoster_job(job))
-            .and_then(|_| state.bulk_hoster_worker_health.get(id))
-            .is_some_and(|health| health.blocks_bulk_hoster_claim(now))
-    })
+        let Some(health) = state.bulk_hoster_worker_health.get(id) else {
+            continue;
+        };
+        metrics.active_count = metrics.active_count.saturating_add(1);
+        metrics.aggregate_speed = metrics
+            .aggregate_speed
+            .saturating_add(health.last_reported_speed);
+        if health.blocks_bulk_hoster_claim(now) {
+            metrics.has_blocking_worker = true;
+        }
+        if !health.is_healthy(now) {
+            metrics.all_healthy = false;
+        }
+    }
+
+    if metrics.active_count == 0 {
+        metrics.all_healthy = false;
+    }
+
+    metrics
 }

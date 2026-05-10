@@ -52,6 +52,8 @@ impl RuntimeState {
                 job.eta = 0;
             }
         }
+        self.bulk_hoster_worker_health.clear();
+        self.bulk_hoster_fairness.reset();
     }
 
     pub(super) fn resume_all_jobs(&mut self) {
@@ -69,6 +71,8 @@ impl RuntimeState {
                 job.eta = 0;
             }
         }
+        self.bulk_hoster_worker_health.clear();
+        self.bulk_hoster_fairness.reset();
     }
 
     #[cfg(test)]
@@ -206,7 +210,14 @@ impl RuntimeState {
 
     pub(super) fn remove_active_worker(&mut self, id: &str) {
         self.active_workers.remove(id);
+        self.clear_bulk_hoster_worker_health(id);
+    }
+
+    pub(super) fn clear_bulk_hoster_worker_health(&mut self, id: &str) {
         self.bulk_hoster_worker_health.remove(id);
+        if self.bulk_hoster_worker_health.is_empty() {
+            self.bulk_hoster_fairness.reset();
+        }
     }
 
     pub(super) fn update_bulk_hoster_worker_health(

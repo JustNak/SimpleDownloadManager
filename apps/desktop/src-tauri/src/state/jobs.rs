@@ -5,7 +5,7 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
-            let event_message = {
+            let (event_message, clear_hoster_health) = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 if matches!(
                     job.state,
@@ -17,11 +17,17 @@ impl SharedState {
                     job.state = JobState::Paused;
                     job.speed = 0;
                     job.eta = 0;
-                    Some(format!("Paused {}", job.filename))
+                    (
+                        Some(format!("Paused {}", job.filename)),
+                        is_protected_bulk_hoster_job(job),
+                    )
                 } else {
-                    None
+                    (None, false)
                 }
             };
+            if clear_hoster_health {
+                state.clear_bulk_hoster_worker_health(id);
+            }
             if let Some(message) = event_message {
                 state.push_diagnostic_event(
                     DiagnosticLevel::Info,
@@ -126,8 +132,9 @@ impl SharedState {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
-            let event_message = {
+            let (event_message, clear_hoster_health) = {
                 let job = find_job_mut(&mut state.jobs, id)?;
+                let clear_hoster_health = is_protected_bulk_hoster_job(job);
                 job.state = JobState::Canceled;
                 job.progress = 0.0;
                 job.total_bytes = 0;
@@ -139,8 +146,11 @@ impl SharedState {
                 job.retry_attempts = 0;
                 job.auto_restart_attempts = 0;
                 reset_integrity_for_retry(job);
-                format!("Canceled {}", job.filename)
+                (format!("Canceled {}", job.filename), clear_hoster_health)
             };
+            if clear_hoster_health {
+                state.clear_bulk_hoster_worker_health(id);
+            }
             state.push_diagnostic_event(
                 DiagnosticLevel::Info,
                 "download".into(),

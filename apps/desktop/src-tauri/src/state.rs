@@ -65,6 +65,11 @@ const PROGRESS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
 const BULK_HOSTER_STARTUP_GRACE_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_LOW_SPEED_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND: u64 = 64 * 1024;
+const BULK_HOSTER_HEALTH_SAMPLE_WINDOW: Duration = Duration::from_secs(1);
+const BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW: Duration = Duration::from_secs(20);
+const BULK_HOSTER_FAIRNESS_COOLDOWN_WINDOW: Duration = Duration::from_secs(30);
+const BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY: u32 = 4;
+const BULK_HOSTER_AGGREGATE_DEGRADATION_PERCENT: u64 = 35;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -96,6 +101,7 @@ struct RuntimeState {
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
+    bulk_hoster_fairness: BulkHosterFairnessController,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
@@ -108,6 +114,8 @@ struct BulkHosterWorkerHealth {
     last_downloaded_bytes: u64,
     last_reported_speed: u64,
     low_speed_since: Option<Instant>,
+    healthy_sample_count: u8,
+    last_healthy_at: Option<Instant>,
 }
 
 impl BulkHosterWorkerHealth {
@@ -118,11 +126,14 @@ impl BulkHosterWorkerHealth {
             last_downloaded_bytes: job.downloaded_bytes,
             last_reported_speed: job.speed,
             low_speed_since: (job.speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND).then_some(now),
+            healthy_sample_count: 0,
+            last_healthy_at: None,
         }
     }
 
     fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
-        if downloaded_bytes > self.last_downloaded_bytes {
+        let progressed = downloaded_bytes > self.last_downloaded_bytes;
+        if progressed {
             self.last_progress_at = now;
         }
         self.last_downloaded_bytes = downloaded_bytes;
@@ -130,8 +141,13 @@ impl BulkHosterWorkerHealth {
 
         if speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND {
             self.low_speed_since.get_or_insert(now);
+            self.healthy_sample_count = 0;
         } else {
             self.low_speed_since = None;
+            if progressed {
+                self.healthy_sample_count = self.healthy_sample_count.saturating_add(1);
+                self.last_healthy_at = Some(now);
+            }
         }
     }
 
@@ -152,6 +168,148 @@ impl BulkHosterWorkerHealth {
 
         sustained_low_speed || stalled_progress
     }
+
+    fn is_healthy(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.claimed_at) >= BULK_HOSTER_STARTUP_GRACE_WINDOW
+            && self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
+            && self.healthy_sample_count >= 2
+            && self.last_healthy_at.is_some_and(|last| {
+                now.saturating_duration_since(last)
+                    <= BULK_HOSTER_LOW_SPEED_WINDOW + BULK_HOSTER_HEALTH_SAMPLE_WINDOW
+            })
+            && now.saturating_duration_since(self.last_progress_at) < BULK_HOSTER_LOW_SPEED_WINDOW
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BulkHosterFairnessController {
+    target_active: u32,
+    aggregate_baseline_speed: Option<u64>,
+    degraded_since: Option<Instant>,
+    cooldown_until: Option<Instant>,
+    last_freeze_reported_at: Option<Instant>,
+}
+
+impl Default for BulkHosterFairnessController {
+    fn default() -> Self {
+        Self {
+            target_active: 1,
+            aggregate_baseline_speed: None,
+            degraded_since: None,
+            cooldown_until: None,
+            last_freeze_reported_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BulkHosterFairnessMetrics {
+    active_count: u32,
+    aggregate_speed: u64,
+    all_healthy: bool,
+    has_blocking_worker: bool,
+}
+
+impl BulkHosterFairnessController {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn target_for_bulk_limit(&self, bulk_slot_limit: u32) -> u32 {
+        self.target_active
+            .max(1)
+            .min(bulk_slot_limit.max(1))
+            .min(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
+    }
+
+    fn reconcile(
+        &mut self,
+        metrics: BulkHosterFairnessMetrics,
+        bulk_slot_limit: u32,
+        now: Instant,
+    ) -> Vec<String> {
+        let max_target = bulk_slot_limit
+            .max(1)
+            .min(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY);
+        self.target_active = self.target_active.max(1).min(max_target);
+
+        if metrics.active_count == 0 {
+            self.reset();
+            return Vec::new();
+        }
+
+        let mut diagnostics = Vec::new();
+        let cooldown_active = self.cooldown_until.is_some_and(|until| now < until);
+        let mut downshifted = false;
+
+        if metrics.active_count >= 2 && metrics.all_healthy {
+            if let Some(baseline) = self.aggregate_baseline_speed {
+                let degraded_threshold = baseline.saturating_mul(
+                    100_u64.saturating_sub(BULK_HOSTER_AGGREGATE_DEGRADATION_PERCENT),
+                ) / 100;
+                if metrics.aggregate_speed < degraded_threshold {
+                    let degraded_since = *self.degraded_since.get_or_insert(now);
+                    if now.saturating_duration_since(degraded_since)
+                        >= BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW
+                        && self.target_active > 1
+                    {
+                        self.target_active = self.target_active.saturating_sub(1).max(1);
+                        self.cooldown_until = Some(now + BULK_HOSTER_FAIRNESS_COOLDOWN_WINDOW);
+                        self.aggregate_baseline_speed = Some(metrics.aggregate_speed.max(1));
+                        self.degraded_since = None;
+                        downshifted = true;
+                        diagnostics.push(format!(
+                            "Adaptive fairness downshifted protected bulk hoster concurrency to {} after aggregate speed dropped from {} B/s to {} B/s.",
+                            self.target_active, baseline, metrics.aggregate_speed
+                        ));
+                    }
+                } else {
+                    self.degraded_since = None;
+                    if metrics.aggregate_speed > baseline {
+                        self.aggregate_baseline_speed = Some(metrics.aggregate_speed);
+                    }
+                }
+            } else {
+                self.aggregate_baseline_speed = Some(metrics.aggregate_speed.max(1));
+            }
+        } else if metrics.has_blocking_worker {
+            self.degraded_since = None;
+        }
+
+        if metrics.has_blocking_worker {
+            let should_report_freeze = match self.last_freeze_reported_at {
+                Some(last) => {
+                    now.saturating_duration_since(last) >= BULK_HOSTER_FAIRNESS_COOLDOWN_WINDOW
+                }
+                None => true,
+            };
+            if should_report_freeze {
+                self.last_freeze_reported_at = Some(now);
+                diagnostics.push(
+                    "Adaptive fairness froze protected bulk hoster claims while an active hoster row is warming up or slow."
+                        .into(),
+                );
+            }
+            return diagnostics;
+        }
+
+        if metrics.all_healthy
+            && !cooldown_active
+            && !downshifted
+            && metrics.active_count >= self.target_active
+            && self.target_active < max_target
+        {
+            self.target_active += 1;
+            self.aggregate_baseline_speed = Some(metrics.aggregate_speed.max(1));
+            self.degraded_since = None;
+            diagnostics.push(format!(
+                "Adaptive fairness ramped protected bulk hoster concurrency to {}.",
+                self.target_active
+            ));
+        }
+
+        diagnostics
+    }
 }
 
 #[derive(Clone)]
@@ -166,6 +324,14 @@ fn internal_error(error: String) -> BackendError {
         code: "INTERNAL_ERROR",
         message: error,
     }
+}
+
+fn is_bulk_member_job(job: &DownloadJob) -> bool {
+    job.transfer_kind == TransferKind::Http && job.bulk_archive.is_some()
+}
+
+fn is_protected_bulk_hoster_job(job: &DownloadJob) -> bool {
+    is_bulk_member_job(job) && job.resolved_from_url.is_some()
 }
 
 #[cfg(test)]

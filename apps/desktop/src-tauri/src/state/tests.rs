@@ -4694,6 +4694,74 @@ async fn protected_bulk_hoster_claim_holds_back_next_hoster_but_allows_direct_bu
 }
 
 #[tokio::test]
+async fn adaptive_bulk_hoster_fairness_claims_one_hoster_initially() {
+    let download_dir = test_runtime_dir("bulk-hoster-adaptive-initial");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_adaptive_initial");
+    let jobs = (1..=4)
+        .map(|index| protected_hoster_bulk_job(&format!("job_hoster_{index}"), archive.clone()))
+        .collect::<Vec<_>>();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 4;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_hoster_1");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn adaptive_bulk_hoster_fairness_ramps_to_four_after_healthy_progress() {
+    let download_dir = test_runtime_dir("bulk-hoster-adaptive-ramp");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_adaptive_ramp");
+    let mut active = protected_hoster_bulk_job("job_hoster_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 128 * 1024;
+    active.downloaded_bytes = 128 * 1024;
+    let queued = (2..=4)
+        .map(|index| protected_hoster_bulk_job(&format!("job_hoster_{index}"), archive.clone()))
+        .collect::<Vec<_>>();
+    let mut jobs = vec![active];
+    jobs.extend(queued);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 4;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.active_workers.insert("job_hoster_1".into());
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_hoster_1", 128 * 1024);
+    }
+
+    for next_id in ["job_hoster_2", "job_hoster_3", "job_hoster_4"] {
+        let (_, tasks) = state
+            .claim_schedulable_jobs()
+            .await
+            .expect("claiming jobs should work");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, next_id);
+
+        let mut runtime = state.inner.write().await;
+        let job = runtime
+            .job_mut(next_id)
+            .expect("claimed hoster job should exist");
+        job.state = JobState::Downloading;
+        job.speed = 128 * 1024;
+        job.downloaded_bytes = 128 * 1024;
+        seed_healthy_bulk_hoster_health(&mut runtime, next_id, 128 * 1024);
+    }
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn protected_bulk_hoster_health_allows_next_hoster_after_recovery() {
     let download_dir = test_runtime_dir("bulk-hoster-fairness-recovered");
     let archive = bulk_archive_info(&download_dir, "bulk_hoster_recovered");
@@ -4723,16 +4791,7 @@ async fn protected_bulk_hoster_health_allows_next_hoster_after_recovery() {
         runtime.settings.max_concurrent_downloads = 2;
         runtime.settings.bulk.max_concurrent_downloads = 2;
         runtime.active_workers.insert("job_hoster_active".into());
-        let now = Instant::now();
-        let active_job = runtime.job("job_hoster_active").unwrap();
-        let mut health = BulkHosterWorkerHealth::from_job(
-            active_job,
-            now - BULK_HOSTER_STARTUP_GRACE_WINDOW - Duration::from_secs(1),
-        );
-        health.update(50, 96 * 1024, now);
-        runtime
-            .bulk_hoster_worker_health
-            .insert("job_hoster_active".into(), health);
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_hoster_active", 96 * 1024);
     }
 
     let (_, tasks) = state
@@ -4742,6 +4801,56 @@ async fn protected_bulk_hoster_health_allows_next_hoster_after_recovery() {
 
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "job_hoster_queued");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn adaptive_bulk_hoster_fairness_downshifts_after_aggregate_speed_collapse() {
+    let download_dir = test_runtime_dir("bulk-hoster-adaptive-downshift");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_adaptive_downshift");
+    let mut jobs = (1..=3)
+        .map(|index| {
+            let mut job =
+                protected_hoster_bulk_job(&format!("job_hoster_{index}"), archive.clone());
+            job.state = JobState::Downloading;
+            job.speed = 96 * 1024;
+            job.downloaded_bytes = 96 * 1024;
+            job
+        })
+        .collect::<Vec<_>>();
+    jobs.push(protected_hoster_bulk_job("job_hoster_4", archive));
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 4;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        let now = Instant::now();
+        runtime.bulk_hoster_fairness.target_active = 4;
+        runtime.bulk_hoster_fairness.aggregate_baseline_speed = Some(512 * 1024);
+        runtime.bulk_hoster_fairness.degraded_since =
+            Some(now - BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW - Duration::from_secs(1));
+        for id in ["job_hoster_1", "job_hoster_2", "job_hoster_3"] {
+            runtime.active_workers.insert(id.into());
+            seed_healthy_bulk_hoster_health(&mut runtime, id, 96 * 1024);
+        }
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert!(tasks.is_empty());
+    let runtime = state.inner.read().await;
+    assert_eq!(runtime.bulk_hoster_fairness.target_active, 3);
+    for id in ["job_hoster_1", "job_hoster_2", "job_hoster_3"] {
+        assert!(runtime.active_workers.contains(id));
+    }
+    assert!(runtime.diagnostic_events.iter().any(|event| event
+        .message
+        .contains("downshifted protected bulk hoster concurrency")));
+    drop(runtime);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -4798,6 +4907,47 @@ async fn protected_bulk_hoster_sustained_low_speed_holds_back_next_hoster() {
         .expect("claiming jobs should work");
 
     assert!(tasks.is_empty());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn protected_bulk_hoster_health_is_cleared_after_pause_and_cancel() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-pause-cancel");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_pause_cancel");
+    let mut paused_hoster = protected_hoster_bulk_job("job_hoster_pause", archive.clone());
+    paused_hoster.state = JobState::Downloading;
+    let mut canceled_hoster = protected_hoster_bulk_job("job_hoster_cancel", archive);
+    canceled_hoster.state = JobState::Downloading;
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![paused_hoster, canceled_hoster],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        for id in ["job_hoster_pause", "job_hoster_cancel"] {
+            runtime.active_workers.insert(id.into());
+            seed_healthy_bulk_hoster_health(&mut runtime, id, 96 * 1024);
+        }
+    }
+
+    state
+        .pause_job("job_hoster_pause")
+        .await
+        .expect("pause should work");
+    state
+        .cancel_job("job_hoster_cancel")
+        .await
+        .expect("cancel should work");
+
+    let runtime = state.inner.read().await;
+    assert!(!runtime
+        .bulk_hoster_worker_health
+        .contains_key("job_hoster_pause"));
+    assert!(!runtime
+        .bulk_hoster_worker_health
+        .contains_key("job_hoster_cancel"));
+    drop(runtime);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -5250,6 +5400,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         job_indexes,
         active_workers: HashSet::new(),
         bulk_hoster_worker_health: HashMap::new(),
+        bulk_hoster_fairness: BulkHosterFairnessController::default(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
         last_progress_persist_at: None,
@@ -5270,6 +5421,33 @@ fn bulk_archive_info(download_dir: &Path, id: &str) -> BulkArchiveInfo {
         finalize_processed_bytes: None,
         finalize_mode: None,
     }
+}
+
+fn protected_hoster_bulk_job(id: &str, archive: BulkArchiveInfo) -> DownloadJob {
+    let mut job = download_job(id, JobState::Queued, ResumeSupport::Unknown, 0);
+    job.url = format!("https://fuckingfast.co/{id}");
+    job.resolved_from_url = Some(job.url.clone());
+    job.bulk_archive = Some(archive);
+    job
+}
+
+fn seed_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: u64) {
+    let now = Instant::now();
+    let job = runtime.job(id).expect("hoster job should exist");
+    let mut health = BulkHosterWorkerHealth::from_job(
+        job,
+        now - BULK_HOSTER_STARTUP_GRACE_WINDOW - Duration::from_secs(1),
+    );
+    let first_bytes = job.downloaded_bytes.saturating_add(speed.max(1));
+    health.update(
+        first_bytes,
+        speed,
+        now - BULK_HOSTER_HEALTH_SAMPLE_WINDOW - Duration::from_secs(1),
+    );
+    health.update(first_bytes.saturating_add(speed.max(1)), speed, now);
+    runtime
+        .bulk_hoster_worker_health
+        .insert(id.to_string(), health);
 }
 
 fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> SharedState {
