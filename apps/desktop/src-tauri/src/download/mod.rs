@@ -4,9 +4,10 @@ use crate::state::{
     ExternalReseedAttempt, SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
-    default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode, DiagnosticLevel,
-    DownloadPerformanceMode, FailureCategory, HandoffAuth, JobState, ResumeSupport, Settings,
-    TorrentInfo, TorrentPeerConnectionWatchdogMode, TransferKind,
+    default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode,
+    BulkHosterAccelerationMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory,
+    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
+    TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
@@ -83,6 +84,8 @@ const FAST_TARGET_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
 const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
 const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const HOSTER_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const HOSTER_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 4;
 const MAX_RETRY_AFTER_DELAY: Duration = Duration::from_secs(60);
 const MAX_RETRY_JITTER: Duration = Duration::from_millis(250);
 const SEGMENT_WORKER_STOP_GRACE: Duration = Duration::from_millis(100);

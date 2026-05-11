@@ -34,6 +34,7 @@ assert.match(source, /bind:value=\{formData\.bulk\.maxConcurrentDownloads\}/, 'b
 assert.match(source, /bind:value=\{formData\.bulk\.speedLimitKibPerSecond\}/, 'bulk settings should expose an independent speed limit field');
 assert.match(source, /bind:value=\{formData\.bulk\.downloadPerformanceMode\}/, 'bulk settings should expose an independent performance mode field');
 assert.match(source, /bind:value=\{formData\.bulk\.hosterFairnessMode\}/, 'bulk settings should expose a hoster fairness mode field');
+assert.match(source, /bind:value=\{formData\.bulk\.hosterAccelerationMode\}/, 'bulk settings should expose a hoster acceleration mode field');
 assert.match(source, /formData\.bulk\.autoRetryOverrideEnabled[\s\S]*formData\.bulk\.autoRetryOverrideEnabled = checked/, 'bulk retry override setting should be wired to the settings draft');
 assert.match(source, /bind:value=\{formData\.bulk\.autoRetryAttempts\}/, 'bulk retry override attempts should be wired to the settings draft');
 assert.match(source, /bind:value=\{formData\.bulk\.startBehavior\}/, 'bulk start behavior setting should be wired to the settings draft');

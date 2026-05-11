@@ -44,6 +44,7 @@
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
   const downloadPerformanceModes = new Set(['stable', 'balanced', 'fast']);
   const bulkHosterFairnessModes = new Set(['adaptive', 'safe', 'off']);
+  const bulkHosterAccelerationModes = new Set(['safe', 'off']);
 
   interface Props {
     settings: Settings;
@@ -261,6 +262,7 @@
       speedLimitKibPerSecond: Math.max(0, Math.min(1048576, Math.trunc(settings.speedLimitKibPerSecond) || 0)),
       downloadPerformanceMode: downloadPerformanceModes.has(settings.downloadPerformanceMode) ? settings.downloadPerformanceMode : 'balanced',
       hosterFairnessMode: bulkHosterFairnessModes.has(settings.hosterFairnessMode) ? settings.hosterFairnessMode : 'adaptive',
+      hosterAccelerationMode: bulkHosterAccelerationModes.has(settings.hosterAccelerationMode) ? settings.hosterAccelerationMode : 'safe',
       autoRetryAttempts: Math.max(0, Math.min(10, Math.trunc(settings.autoRetryAttempts) || 0)),
     };
   }
@@ -512,6 +514,7 @@
     {@render FieldRow('Bulk Speed Limit', 'Per-file Bulk download cap.', bulkSpeedLimitControl)}
     {@render FieldRow('Bulk Performance Mode', 'Bulk direct-link connection strategy.', bulkPerformanceControl)}
     {@render FieldRow('Hoster Fairness', 'Protected hoster Bulk scheduling policy.', bulkHosterFairnessControl)}
+    {@render FieldRow('Hoster Acceleration', 'Supported hoster connection strategy.', bulkHosterAccelerationControl)}
     {@render SwitchFieldRow(RotateCw, 'Retry override', 'Use Bulk-specific retry attempts.', bulkRetryOverrideControl)}
     {#if formData.bulk.autoRetryOverrideEnabled}
       {@render FieldRow('Bulk Retry Attempts', 'Failure retries for Bulk members.', bulkRetryAttemptsControl)}
@@ -800,6 +803,13 @@
 {#snippet bulkHosterFairnessControl()}
   <select bind:value={formData.bulk.hosterFairnessMode} onchange={() => updateBulkSettings({ hosterFairnessMode: formData.bulk.hosterFairnessMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
     <option value="adaptive">Adaptive</option>
+    <option value="safe">Safe</option>
+    <option value="off">Off</option>
+  </select>
+{/snippet}
+
+{#snippet bulkHosterAccelerationControl()}
+  <select bind:value={formData.bulk.hosterAccelerationMode} onchange={() => updateBulkSettings({ hosterAccelerationMode: formData.bulk.hosterAccelerationMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
     <option value="safe">Safe</option>
     <option value="off">Off</option>
   </select>

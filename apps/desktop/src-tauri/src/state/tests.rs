@@ -5220,6 +5220,33 @@ async fn adaptive_hoster_fairness_isolated_by_origin_and_allows_direct_bulk() {
 }
 
 #[tokio::test]
+async fn protected_hoster_segment_budget_counts_current_effective_origin() {
+    let download_dir = test_runtime_dir("bulk-hoster-segment-budget-current-origin");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_segment_budget");
+    let mut active = protected_hoster_bulk_job("job_hoster_active", archive);
+    active.state = JobState::Starting;
+    active.url = "https://node41.datanodes.to/d/old-token/Game.bin".into();
+    active.resolved_from_url = Some("https://datanodes.to/abc123456789/Game.bin".into());
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_hoster_active".into());
+    }
+
+    assert_eq!(
+        state
+            .active_protected_hoster_bulk_worker_counts(
+                "job_hoster_active",
+                "https://node42.datanodes.to/d/new-token/Game.bin",
+            )
+            .await,
+        (1, 1)
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn safe_hoster_fairness_keeps_one_active_protected_hoster() {
     let download_dir = test_runtime_dir("bulk-hoster-safe-mode");
     let archive = bulk_archive_info(&download_dir, "bulk_hoster_safe");

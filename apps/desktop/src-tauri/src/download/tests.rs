@@ -1,6 +1,7 @@
 use super::*;
 use crate::storage::{
-    BulkArchiveOutputKind, DownloadJob, HandoffAuth, HandoffAuthHeader, JobState, TorrentInfo,
+    BulkArchiveOutputKind, BulkHosterAccelerationMode, DownloadJob, HandoffAuth, HandoffAuthHeader,
+    JobState, TorrentInfo,
 };
 use std::future::pending;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2013,6 +2014,61 @@ fn hoster_managed_bulk_tasks_disallow_segmented_downloads() {
 }
 
 #[test]
+fn datanodes_hoster_bulk_tasks_allow_safe_segmented_downloads() {
+    let mut task = http_segment_policy_task(
+        true,
+        Some("https://datanodes.to/abc123456789/fg-optional-bonus-content.bin"),
+    );
+    task.url = "https://s42.datanodes.to/d/abc123456789/fg-optional-bonus-content.bin".into();
+
+    assert!(task_allows_segmented_download(&task));
+}
+
+#[test]
+fn hoster_acceleration_off_disallows_datanodes_bulk_segmentation() {
+    let mut task = http_segment_policy_task(
+        true,
+        Some("https://datanodes.to/abc123456789/fg-optional-bonus-content.bin"),
+    );
+    task.url = "https://s42.datanodes.to/d/abc123456789/fg-optional-bonus-content.bin".into();
+
+    assert!(!task_allows_segmented_download_with_mode(
+        &task,
+        BulkHosterAccelerationMode::Off
+    ));
+}
+
+#[test]
+fn hoster_acceleration_caps_segments_by_performance_mode() {
+    let policy = crate::hosters::HosterAccelerationPolicy {
+        backoff_key: "hoster:datanodes:abc123456789".into(),
+        max_balanced_segments: 2,
+        max_fast_segments: 4,
+    };
+
+    assert_eq!(
+        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Stable),
+        1
+    );
+    assert_eq!(
+        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Balanced),
+        2
+    );
+    assert_eq!(
+        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
+        4
+    );
+}
+
+#[test]
+fn segment_budget_caps_by_total_origin_and_policy_limits() {
+    assert_eq!(segment_budget_from_counts(8, 4, 1, 1, 4), Some(4));
+    assert_eq!(segment_budget_from_counts(8, 4, 3, 1, 4), Some(2));
+    assert_eq!(segment_budget_from_counts(8, 4, 1, 3, 4), None);
+    assert_eq!(segment_budget_from_counts(8, 4, 1, 1, 1), None);
+}
+
+#[test]
 fn direct_bulk_and_non_bulk_hoster_tasks_still_allow_segmented_downloads() {
     let direct_bulk = http_segment_policy_task(true, None);
     let non_bulk_hoster = http_segment_policy_task(false, Some("https://fuckingfast.co/source"));
@@ -2316,6 +2372,20 @@ fn range_backoff_does_not_apply_to_different_files_on_same_host() {
     assert!(backoff.is_backed_off(rejected_url, now + Duration::from_secs(1)));
     assert!(!backoff.is_backed_off(other_path_url, now + Duration::from_secs(1)));
     assert!(!backoff.is_backed_off(other_query_url, now + Duration::from_secs(1)));
+}
+
+#[test]
+fn range_backoff_supports_source_keyed_hoster_policies() {
+    let backoff = RangeBackoffRegistry::default();
+    let now = Instant::now();
+    let key = "hoster:datanodes:abc123456789";
+
+    assert!(!backoff.is_key_backed_off(key, now));
+    backoff.record_key_rejection(key, now);
+
+    assert!(backoff.is_key_backed_off(key, now + Duration::from_secs(1)));
+    assert!(!backoff.is_key_backed_off("hoster:datanodes:other-file", now + Duration::from_secs(1)));
+    assert!(!backoff.is_key_backed_off(key, now + RANGE_BACKOFF_DURATION));
 }
 
 #[test]
