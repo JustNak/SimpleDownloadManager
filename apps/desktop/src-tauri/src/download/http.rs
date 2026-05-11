@@ -359,6 +359,7 @@ async fn run_http_download_attempt_for_url(
     let mut low_speed_monitor = LowSpeedMonitor::new(profile);
     let mut low_speed_bytes = 0_u64;
     let mut low_speed_started = Instant::now();
+    let mut priority_throttle_limited = false;
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
     let priority_throttle = Mutex::new(DynamicThrottleState::default());
@@ -457,7 +458,8 @@ async fn run_http_download_attempt_for_url(
                 WorkerControl::Continue => {}
             }
         }
-        if let Some(decision) = state.datanodes_priority_throttle_decision(&task.id).await {
+        if let Some(decision) = state.hoster_priority_throttle_decision(&task.id).await {
+            priority_throttle_limited = true;
             match throttle_download_with_dynamic_limit(
                 state,
                 &task.id,
@@ -491,7 +493,7 @@ async fn run_http_download_attempt_for_url(
                 low_speed_elapsed,
                 total_bytes,
                 downloaded_bytes,
-                speed_limit,
+                speed_limit.or(priority_throttle_limited.then_some(1)),
                 profile,
                 bulk_slow_recovery_state,
             ) {
@@ -514,7 +516,7 @@ async fn run_http_download_attempt_for_url(
                     if low_speed_monitor.observe(
                         low_speed_bytes,
                         low_speed_elapsed,
-                        speed_limit.is_some(),
+                        speed_limit.is_some() || priority_throttle_limited,
                     ) == LowSpeedDecision::Retry
                     {
                         file.flush().await.ok();
@@ -529,6 +531,7 @@ async fn run_http_download_attempt_for_url(
             }
             low_speed_bytes = 0;
             low_speed_started = Instant::now();
+            priority_throttle_limited = false;
         }
 
         if elapsed >= PROGRESS_UPDATE_INTERVAL {

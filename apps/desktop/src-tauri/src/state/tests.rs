@@ -5958,7 +5958,7 @@ async fn datanodes_priority_pressure_blocks_same_key_warmup_candidates() {
 }
 
 #[tokio::test]
-async fn datanodes_priority_throttle_caps_newer_workers_instead_of_deferring_them() {
+async fn hoster_priority_throttle_caps_newer_workers_instead_of_deferring_them() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-cap");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_throttle_cap");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -5989,16 +5989,17 @@ async fn datanodes_priority_throttle_caps_newer_workers_instead_of_deferring_the
     }
 
     let decision = state
-        .datanodes_priority_throttle_decision("job_datanodes_2")
+        .hoster_priority_throttle_decision("job_datanodes_2")
         .await
         .expect("newer worker should be throttled to protect the older worker");
     assert_eq!(decision.protected_job_id, "job_datanodes_1");
     assert_eq!(decision.target_speed, 768 * 1024);
     assert_eq!(decision.baseline_speed, 1024 * 1024);
-    assert_eq!(decision.cap_bytes_per_second, 256 * 1024);
+    assert_eq!(decision.reference_bytes_per_second, 48 * 1024);
+    assert_eq!(decision.cap_bytes_per_second, 24 * 1024);
 
     let protected_decision = state
-        .datanodes_priority_throttle_decision("job_datanodes_1")
+        .hoster_priority_throttle_decision("job_datanodes_1")
         .await;
     assert!(
         protected_decision.is_none(),
@@ -6009,7 +6010,253 @@ async fn datanodes_priority_throttle_caps_newer_workers_instead_of_deferring_the
 }
 
 #[tokio::test]
-async fn datanodes_priority_throttle_waits_for_older_worker_baseline() {
+async fn hoster_priority_cascade_halves_each_newer_worker_in_same_archive_and_hoster() {
+    let download_dir = test_runtime_dir("bulk-hoster-priority-cascade");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_priority_cascade");
+    let mut oldest = protected_hoster_bulk_job("job_hoster_1", archive.clone());
+    oldest.state = JobState::Downloading;
+    oldest.speed = 1024 * 1024;
+    oldest.downloaded_bytes = 16 * 1024 * 1024;
+    let mut second = protected_hoster_bulk_job("job_hoster_2", archive.clone());
+    second.state = JobState::Downloading;
+    second.speed = 1024 * 1024;
+    second.downloaded_bytes = 8 * 1024 * 1024;
+    let mut third = protected_hoster_bulk_job("job_hoster_3", archive);
+    third.state = JobState::Downloading;
+    third.speed = 1024 * 1024;
+    third.downloaded_bytes = 4 * 1024 * 1024;
+    let state =
+        shared_state_with_jobs(download_dir.join("state.json"), vec![oldest, second, third]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        for (id, transfer_age) in [
+            ("job_hoster_1", Duration::from_secs(30)),
+            ("job_hoster_2", Duration::from_secs(20)),
+            ("job_hoster_3", Duration::from_secs(10)),
+        ] {
+            runtime.active_workers.insert(id.into());
+            seed_priority_hoster_health(&mut runtime, id, 1024 * 1024, transfer_age, 3);
+        }
+    }
+
+    assert!(
+        state
+            .hoster_priority_throttle_decision("job_hoster_1")
+            .await
+            .is_none(),
+        "oldest worker should never throttle itself"
+    );
+    let second_decision = state
+        .hoster_priority_throttle_decision("job_hoster_2")
+        .await
+        .expect("first newer worker should be throttled");
+    assert_eq!(second_decision.protected_job_id, "job_hoster_1");
+    assert_eq!(second_decision.reference_bytes_per_second, 1024 * 1024);
+    assert_eq!(second_decision.cap_bytes_per_second, 512 * 1024);
+
+    let third_decision = state
+        .hoster_priority_throttle_decision("job_hoster_3")
+        .await
+        .expect("second newer worker should be throttled");
+    assert_eq!(third_decision.protected_job_id, "job_hoster_2");
+    assert_eq!(third_decision.reference_bytes_per_second, 512 * 1024);
+    assert_eq!(third_decision.cap_bytes_per_second, 256 * 1024);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn hoster_priority_cascade_isolated_by_archive_and_hoster_origin() {
+    let download_dir = test_runtime_dir("bulk-hoster-priority-isolated");
+    let archive_a = bulk_archive_info(&download_dir, "bulk_hoster_priority_a");
+    let archive_b = bulk_archive_info(&download_dir, "bulk_hoster_priority_b");
+    let mut ff_a = protected_hoster_bulk_job("job_ff_a", archive_a.clone());
+    ff_a.state = JobState::Downloading;
+    ff_a.speed = 1024 * 1024;
+    ff_a.downloaded_bytes = 8 * 1024 * 1024;
+    let mut ff_b = protected_hoster_bulk_job("job_ff_b", archive_b);
+    ff_b.state = JobState::Downloading;
+    ff_b.speed = 1024 * 1024;
+    ff_b.downloaded_bytes = 8 * 1024 * 1024;
+    let mut datanodes_a = datanodes_bulk_job("job_datanodes_a", archive_a);
+    datanodes_a.state = JobState::Downloading;
+    datanodes_a.speed = 1024 * 1024;
+    datanodes_a.downloaded_bytes = 8 * 1024 * 1024;
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![ff_a, ff_b, datanodes_a],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        for (id, transfer_age) in [
+            ("job_ff_a", Duration::from_secs(30)),
+            ("job_ff_b", Duration::from_secs(20)),
+            ("job_datanodes_a", Duration::from_secs(10)),
+        ] {
+            runtime.active_workers.insert(id.into());
+            seed_priority_hoster_health(&mut runtime, id, 1024 * 1024, transfer_age, 3);
+        }
+    }
+
+    for id in ["job_ff_a", "job_ff_b", "job_datanodes_a"] {
+        assert!(
+            state.hoster_priority_throttle_decision(id).await.is_none(),
+            "{id} should not be throttled by another archive or hoster origin"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn hoster_priority_cascade_uses_baseline_when_older_live_sample_is_zero() {
+    let download_dir = test_runtime_dir("bulk-hoster-priority-zero-fallback");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_priority_zero");
+    let mut oldest = protected_hoster_bulk_job("job_hoster_1", archive.clone());
+    oldest.state = JobState::Downloading;
+    oldest.speed = 0;
+    oldest.downloaded_bytes = 16 * 1024 * 1024;
+    let mut second = protected_hoster_bulk_job("job_hoster_2", archive);
+    second.state = JobState::Downloading;
+    second.speed = 1024 * 1024;
+    second.downloaded_bytes = 8 * 1024 * 1024;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![oldest, second]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_hoster_1".into());
+        runtime.active_workers.insert("job_hoster_2".into());
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_hoster_1",
+            1024 * 1024,
+            Duration::from_secs(30),
+            3,
+        );
+        let downloaded = runtime
+            .job("job_hoster_1")
+            .expect("oldest job should exist")
+            .downloaded_bytes;
+        runtime.update_bulk_hoster_worker_health("job_hoster_1", downloaded, 0, Instant::now());
+        runtime
+            .job_mut("job_hoster_1")
+            .expect("oldest job should exist")
+            .speed = 0;
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_hoster_2",
+            1024 * 1024,
+            Duration::from_secs(20),
+            3,
+        );
+    }
+
+    let decision = state
+        .hoster_priority_throttle_decision("job_hoster_2")
+        .await
+        .expect("newer worker should use the older worker baseline instead of a zero live sample");
+    assert_eq!(decision.reference_bytes_per_second, 1024 * 1024);
+    assert_eq!(decision.cap_bytes_per_second, 512 * 1024);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn hoster_priority_cascade_waits_when_older_worker_has_no_usable_speed() {
+    let download_dir = test_runtime_dir("bulk-hoster-priority-no-baseline");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_priority_no_baseline");
+    let mut oldest = protected_hoster_bulk_job("job_hoster_1", archive.clone());
+    oldest.state = JobState::Downloading;
+    oldest.speed = 0;
+    let mut second = protected_hoster_bulk_job("job_hoster_2", archive);
+    second.state = JobState::Downloading;
+    second.speed = 1024 * 1024;
+    second.downloaded_bytes = 8 * 1024 * 1024;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![oldest, second]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_hoster_1".into());
+        runtime.active_workers.insert("job_hoster_2".into());
+        let now = Instant::now();
+        let oldest_job = runtime
+            .job("job_hoster_1")
+            .expect("oldest job should exist");
+        let mut health =
+            BulkHosterWorkerHealth::from_job(oldest_job, now - Duration::from_secs(30));
+        health.mark_transferring(oldest_job.downloaded_bytes, now - Duration::from_secs(30));
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_hoster_1".into(), health);
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_hoster_2",
+            1024 * 1024,
+            Duration::from_secs(20),
+            3,
+        );
+    }
+
+    assert!(
+        state
+            .hoster_priority_throttle_decision("job_hoster_2")
+            .await
+            .is_none(),
+        "newer workers should not be capped until the older worker has live speed or baseline"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn hoster_priority_cascade_is_disabled_when_hoster_fairness_is_off() {
+    let download_dir = test_runtime_dir("bulk-hoster-priority-off");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_priority_off");
+    let mut oldest = protected_hoster_bulk_job("job_hoster_1", archive.clone());
+    oldest.state = JobState::Downloading;
+    oldest.speed = 1024 * 1024;
+    oldest.downloaded_bytes = 16 * 1024 * 1024;
+    let mut second = protected_hoster_bulk_job("job_hoster_2", archive);
+    second.state = JobState::Downloading;
+    second.speed = 1024 * 1024;
+    second.downloaded_bytes = 8 * 1024 * 1024;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![oldest, second]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Off;
+        runtime.active_workers.insert("job_hoster_1".into());
+        runtime.active_workers.insert("job_hoster_2".into());
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_hoster_1",
+            1024 * 1024,
+            Duration::from_secs(30),
+            3,
+        );
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_hoster_2",
+            1024 * 1024,
+            Duration::from_secs(20),
+            3,
+        );
+    }
+
+    assert!(
+        state
+            .hoster_priority_throttle_decision("job_hoster_2")
+            .await
+            .is_none(),
+        "hoster fairness off should disable the cascade throttle escape hatch"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn hoster_priority_throttle_uses_live_speed_before_older_worker_baseline() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-no-baseline");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_no_baseline");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -6044,19 +6291,18 @@ async fn datanodes_priority_throttle_waits_for_older_worker_baseline() {
         );
     }
 
-    assert!(
-        state
-            .datanodes_priority_throttle_decision("job_datanodes_2")
-            .await
-            .is_none(),
-        "newer workers should not be capped until the older worker establishes a healthy baseline"
-    );
+    let decision = state
+        .hoster_priority_throttle_decision("job_datanodes_2")
+        .await
+        .expect("newer workers should use a nonzero live speed before baseline exists");
+    assert_eq!(decision.reference_bytes_per_second, 32 * 1024);
+    assert_eq!(decision.cap_bytes_per_second, 16 * 1024);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
 #[tokio::test]
-async fn datanodes_priority_throttle_releases_after_three_recovery_samples() {
+async fn hoster_priority_throttle_keeps_cascade_after_older_worker_recovers() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-release");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_throttle_release");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -6104,10 +6350,10 @@ async fn datanodes_priority_throttle_releases_after_three_recovery_samples() {
 
     assert!(
         state
-            .datanodes_priority_throttle_decision("job_datanodes_2")
+            .hoster_priority_throttle_decision("job_datanodes_2")
             .await
             .is_some(),
-        "two recovery samples should not release caps yet"
+        "newer workers should remain capped by the cascade after partial recovery"
     );
 
     {
@@ -6129,13 +6375,12 @@ async fn datanodes_priority_throttle_releases_after_three_recovery_samples() {
             .downloaded_bytes = downloaded;
     }
 
-    assert!(
-        state
-            .datanodes_priority_throttle_decision("job_datanodes_2")
-            .await
-            .is_none(),
-        "three recovery samples should release priority caps"
-    );
+    let decision = state
+        .hoster_priority_throttle_decision("job_datanodes_2")
+        .await
+        .expect("cascade caps should remain while multiple same-group workers are active");
+    assert_eq!(decision.reference_bytes_per_second, 900 * 1024);
+    assert_eq!(decision.cap_bytes_per_second, 450 * 1024);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -6905,7 +7150,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         bulk_hoster_worker_health: HashMap::new(),
         bulk_hoster_fairness: HashMap::new(),
         datanodes_priority_defer_until: HashMap::new(),
-        datanodes_priority_cap_reports: HashMap::new(),
+        hoster_priority_cap_reports: HashMap::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
         last_progress_persist_at: None,
@@ -6969,6 +7214,39 @@ fn seed_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: 
     runtime
         .bulk_hoster_worker_health
         .insert(id.to_string(), health);
+}
+
+fn seed_priority_hoster_health(
+    runtime: &mut RuntimeState,
+    id: &str,
+    speed: u64,
+    transfer_age: Duration,
+    healthy_samples: u8,
+) {
+    let now = Instant::now();
+    let mut downloaded_bytes = runtime
+        .job(id)
+        .expect("hoster job should exist")
+        .downloaded_bytes;
+    let mut health = {
+        let job = runtime.job(id).expect("hoster job should exist");
+        BulkHosterWorkerHealth::from_job(job, now - transfer_age)
+    };
+    health.mark_transferring(downloaded_bytes, now - transfer_age);
+    let samples = healthy_samples.max(1);
+    for sample_index in 0..samples {
+        downloaded_bytes = downloaded_bytes.saturating_add(speed.max(1));
+        let sample_age = Duration::from_secs((samples - sample_index) as u64);
+        health.update(downloaded_bytes, speed, now - sample_age.min(transfer_age));
+    }
+    runtime
+        .bulk_hoster_worker_health
+        .insert(id.to_string(), health);
+    if let Some(job) = runtime.job_mut(id) {
+        job.state = JobState::Downloading;
+        job.speed = speed;
+        job.downloaded_bytes = downloaded_bytes;
+    }
 }
 
 fn seed_accelerated_datanodes_health(

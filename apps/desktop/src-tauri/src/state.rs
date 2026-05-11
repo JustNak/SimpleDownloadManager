@@ -78,10 +78,8 @@ const DATANODES_PRIORITY_BALANCED_RUNWAY: Duration = Duration::from_secs(8);
 const DATANODES_PRIORITY_FAST_RUNWAY: Duration = Duration::from_secs(5);
 const DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND: u64 = 128 * 1024;
 const DATANODES_PRIORITY_BASELINE_SPEED_PERCENT: u64 = 75;
-const DATANODES_PRIORITY_NEWER_BUDGET_PERCENT: u64 = 25;
-const DATANODES_PRIORITY_MIN_NEWER_CAP_BYTES_PER_SECOND: u64 = 64 * 1024;
 const DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES: u8 = 3;
-const DATANODES_PRIORITY_CAP_REPORT_CHANGE_PERCENT: u64 = 25;
+const HOSTER_PRIORITY_CAP_REPORT_CHANGE_PERCENT: u64 = 25;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -115,7 +113,7 @@ struct RuntimeState {
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
     bulk_hoster_fairness: HashMap<String, BulkHosterFairnessController>,
     datanodes_priority_defer_until: HashMap<String, Instant>,
-    datanodes_priority_cap_reports: HashMap<String, DataNodesPriorityCapReport>,
+    hoster_priority_cap_reports: HashMap<String, HosterPriorityCapReport>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
@@ -371,6 +369,31 @@ impl BulkHosterWorkerHealth {
         })
     }
 
+    fn hoster_priority_reference(&self) -> Option<HosterPrioritySpeedReference> {
+        if self.phase != BulkHosterWorkerPhase::Transferring {
+            return None;
+        }
+
+        let baseline_speed = self.priority_baseline_speed.unwrap_or(0);
+        let target_speed = self
+            .priority_baseline_speed
+            .map(datanodes_priority_pressure_floor)
+            .unwrap_or(0);
+        let reference_bytes_per_second = if self.last_reported_speed > 0 {
+            self.last_reported_speed
+        } else {
+            self.priority_baseline_speed?
+        };
+
+        Some(HosterPrioritySpeedReference {
+            current_speed: self.last_reported_speed,
+            peak_speed: self.priority_peak_speed,
+            baseline_speed,
+            target_speed,
+            reference_bytes_per_second,
+        })
+    }
+
     fn recent_healthy_samples(&self, now: Instant) -> bool {
         self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
             && self.recent_healthy_progress(now)
@@ -446,12 +469,13 @@ pub(crate) struct DataNodesPriorityPressure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DataNodesPriorityThrottleDecision {
+pub(crate) struct HosterPriorityThrottleDecision {
     pub protected_job_id: String,
     pub current_speed: u64,
     pub peak_speed: u64,
     pub baseline_speed: u64,
     pub target_speed: u64,
+    pub reference_bytes_per_second: u64,
     pub cap_bytes_per_second: u64,
 }
 
@@ -463,8 +487,17 @@ struct DataNodesPriorityPressureSample {
     target_speed: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HosterPrioritySpeedReference {
+    current_speed: u64,
+    peak_speed: u64,
+    baseline_speed: u64,
+    target_speed: u64,
+    reference_bytes_per_second: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DataNodesPriorityCapReport {
+struct HosterPriorityCapReport {
     protected_job_id: String,
     cap_bytes_per_second: u64,
 }
@@ -621,6 +654,12 @@ fn protected_bulk_hoster_fairness_key(job: &DownloadJob) -> Option<String> {
     }
 
     download_origin_key(job.resolved_from_url.as_deref().unwrap_or(&job.url))
+}
+
+fn protected_bulk_hoster_priority_group_key(job: &DownloadJob) -> Option<(String, String)> {
+    let archive_id = job.bulk_archive.as_ref()?.id.clone();
+    let hoster_origin = protected_bulk_hoster_fairness_key(job)?;
+    Some((archive_id, hoster_origin))
 }
 
 fn bulk_hoster_worker_profile_for_job(

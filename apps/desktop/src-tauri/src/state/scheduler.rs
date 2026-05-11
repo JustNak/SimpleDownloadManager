@@ -259,28 +259,28 @@ impl SharedState {
         }
     }
 
-    pub(crate) async fn datanodes_priority_throttle_decision(
+    pub(crate) async fn hoster_priority_throttle_decision(
         &self,
         id: &str,
-    ) -> Option<DataNodesPriorityThrottleDecision> {
+    ) -> Option<HosterPriorityThrottleDecision> {
         let mut state = self.inner.write().await;
-        let now = Instant::now();
-        let decision = datanodes_priority_throttle_decision_for_state(&state, id, now);
+        let decision = hoster_priority_throttle_decision_for_state(&state, id);
         match decision.as_ref() {
             Some(decision) => {
                 let should_report = state
-                    .datanodes_priority_cap_reports
+                    .hoster_priority_cap_reports
                     .get(id)
-                    .map(|report| datanodes_priority_cap_report_changed(report, decision))
+                    .map(|report| hoster_priority_cap_report_changed(report, decision))
                     .unwrap_or(true);
                 if should_report {
                     state.push_diagnostic_event(
                         DiagnosticLevel::Warning,
                         "download".into(),
                         format!(
-                            "DataNodes priority capped {id} to {} B/s to protect {} at {} B/s; target {} B/s, average {} B/s, peak {} B/s.",
+                            "Hoster priority capped {id} to {} B/s to keep {} ahead; reference {} B/s, current {} B/s, target {} B/s, average {} B/s, peak {} B/s.",
                             decision.cap_bytes_per_second,
                             decision.protected_job_id,
+                            decision.reference_bytes_per_second,
                             decision.current_speed,
                             decision.target_speed,
                             decision.baseline_speed,
@@ -289,21 +289,21 @@ impl SharedState {
                         Some(id.into()),
                     );
                 }
-                state.datanodes_priority_cap_reports.insert(
+                state.hoster_priority_cap_reports.insert(
                     id.to_string(),
-                    DataNodesPriorityCapReport {
+                    HosterPriorityCapReport {
                         protected_job_id: decision.protected_job_id.clone(),
                         cap_bytes_per_second: decision.cap_bytes_per_second,
                     },
                 );
             }
             None => {
-                if let Some(report) = state.datanodes_priority_cap_reports.remove(id) {
+                if let Some(report) = state.hoster_priority_cap_reports.remove(id) {
                     state.push_diagnostic_event(
                         DiagnosticLevel::Info,
                         "download".into(),
                         format!(
-                            "DataNodes priority released cap for {id}; protected worker {} recovered or left the active set.",
+                            "Hoster priority released cap for {id}; protected worker {} left the active priority group or no longer needs a cascade cap.",
                             report.protected_job_id
                         ),
                         Some(id.into()),
@@ -315,48 +315,94 @@ impl SharedState {
     }
 }
 
-fn datanodes_priority_cap_report_changed(
-    report: &DataNodesPriorityCapReport,
-    decision: &DataNodesPriorityThrottleDecision,
+fn hoster_priority_cap_report_changed(
+    report: &HosterPriorityCapReport,
+    decision: &HosterPriorityThrottleDecision,
 ) -> bool {
     if report.protected_job_id != decision.protected_job_id {
         return true;
     }
     let old_cap = report.cap_bytes_per_second.max(1);
     let delta = old_cap.abs_diff(decision.cap_bytes_per_second);
-    delta.saturating_mul(100)
-        >= old_cap.saturating_mul(DATANODES_PRIORITY_CAP_REPORT_CHANGE_PERCENT)
+    delta.saturating_mul(100) >= old_cap.saturating_mul(HOSTER_PRIORITY_CAP_REPORT_CHANGE_PERCENT)
 }
 
-fn datanodes_priority_throttle_decision_for_state(
+fn hoster_priority_throttle_decision_for_state(
     state: &RuntimeState,
     id: &str,
-    now: Instant,
-) -> Option<DataNodesPriorityThrottleDecision> {
+) -> Option<HosterPriorityThrottleDecision> {
     #[derive(Clone)]
     struct Candidate {
         id: String,
         started_at: Instant,
-        pressure: Option<DataNodesPriorityPressureSample>,
+        reference: Option<HosterPrioritySpeedReference>,
+    }
+
+    #[derive(Clone)]
+    struct EffectiveReference {
+        id: String,
+        current_speed: u64,
+        peak_speed: u64,
+        baseline_speed: u64,
+        target_speed: u64,
+        reference_bytes_per_second: u64,
+    }
+
+    impl EffectiveReference {
+        fn from_candidate_reference(id: String, reference: HosterPrioritySpeedReference) -> Self {
+            Self {
+                id,
+                current_speed: reference.current_speed,
+                peak_speed: reference.peak_speed,
+                baseline_speed: reference.baseline_speed,
+                target_speed: reference.target_speed,
+                reference_bytes_per_second: reference.reference_bytes_per_second,
+            }
+        }
+
+        fn capped_candidate(
+            id: String,
+            reference: Option<HosterPrioritySpeedReference>,
+            cap: u64,
+        ) -> Self {
+            let reference = reference.unwrap_or(HosterPrioritySpeedReference {
+                current_speed: 0,
+                peak_speed: 0,
+                baseline_speed: 0,
+                target_speed: 0,
+                reference_bytes_per_second: cap,
+            });
+            Self {
+                id,
+                current_speed: reference.current_speed,
+                peak_speed: reference.peak_speed,
+                baseline_speed: reference.baseline_speed,
+                target_speed: reference.target_speed,
+                reference_bytes_per_second: cap,
+            }
+        }
     }
 
     let job = state.job(id)?;
+    if state.settings.bulk.hoster_fairness_mode == BulkHosterFairnessMode::Off {
+        return None;
+    }
     if !state.active_workers.contains(id)
         || !matches!(job.state, JobState::Starting | JobState::Downloading)
-        || !is_accelerated_datanodes_bulk_job(&state.settings, job)
+        || !is_protected_bulk_hoster_job(job)
     {
         return None;
     }
-    let fairness_key = protected_bulk_hoster_fairness_key(job)?;
+    let priority_key = protected_bulk_hoster_priority_group_key(job)?;
     let mut candidates = state
         .active_workers
         .iter()
         .filter_map(|active_id| {
             let active_job = state.job(active_id)?;
             if !matches!(active_job.state, JobState::Starting | JobState::Downloading)
-                || protected_bulk_hoster_fairness_key(active_job).as_deref()
-                    != Some(fairness_key.as_str())
-                || !is_accelerated_datanodes_bulk_job(&state.settings, active_job)
+                || !is_protected_bulk_hoster_job(active_job)
+                || protected_bulk_hoster_priority_group_key(active_job).as_ref()
+                    != Some(&priority_key)
             {
                 return None;
             }
@@ -364,7 +410,7 @@ fn datanodes_priority_throttle_decision_for_state(
             Some(Candidate {
                 id: active_id.clone(),
                 started_at: health.priority_started_at(),
-                pressure: health.datanodes_priority_pressure(now),
+                reference: health.hoster_priority_reference(),
             })
         })
         .collect::<Vec<_>>();
@@ -377,34 +423,44 @@ fn datanodes_priority_throttle_decision_for_state(
             .then_with(|| left.id.cmp(&right.id))
     });
     let current_index = candidates.iter().position(|candidate| candidate.id == id)?;
-    let (protected_index, pressure) = candidates
-        .iter()
-        .take(current_index)
-        .enumerate()
-        .find_map(|(index, candidate)| candidate.pressure.map(|pressure| (index, pressure)))?;
-    let protected = &candidates[protected_index];
-    let newer_count = candidates
-        .iter()
-        .filter(|candidate| candidate.started_at > protected.started_at)
-        .count()
-        .max(1);
-    let newer_total_budget = DATANODES_PRIORITY_MIN_NEWER_CAP_BYTES_PER_SECOND
-        .saturating_mul(newer_count as u64)
-        .max(
-            pressure
-                .baseline_speed
-                .saturating_mul(DATANODES_PRIORITY_NEWER_BUDGET_PERCENT)
-                / 100,
-        );
-    let cap_bytes_per_second = newer_total_budget / newer_count as u64;
-    Some(DataNodesPriorityThrottleDecision {
-        protected_job_id: protected.id.clone(),
-        current_speed: pressure.current_speed,
-        peak_speed: pressure.peak_speed,
-        baseline_speed: pressure.baseline_speed,
-        target_speed: pressure.target_speed,
-        cap_bytes_per_second,
-    })
+    if current_index == 0 {
+        return None;
+    }
+
+    let mut previous_effective = candidates[0].reference.map(|reference| {
+        EffectiveReference::from_candidate_reference(candidates[0].id.clone(), reference)
+    });
+    for candidate in candidates.iter().skip(1) {
+        let Some(previous) = previous_effective.clone() else {
+            if candidate.id == id {
+                return None;
+            }
+            previous_effective = candidate.reference.map(|reference| {
+                EffectiveReference::from_candidate_reference(candidate.id.clone(), reference)
+            });
+            continue;
+        };
+
+        let cap_bytes_per_second = previous.reference_bytes_per_second.saturating_div(2).max(1);
+        if candidate.id == id {
+            return Some(HosterPriorityThrottleDecision {
+                protected_job_id: previous.id,
+                current_speed: previous.current_speed,
+                peak_speed: previous.peak_speed,
+                baseline_speed: previous.baseline_speed,
+                target_speed: previous.target_speed,
+                reference_bytes_per_second: previous.reference_bytes_per_second,
+                cap_bytes_per_second,
+            });
+        }
+        previous_effective = Some(EffectiveReference::capped_candidate(
+            candidate.id.clone(),
+            candidate.reference,
+            cap_bytes_per_second,
+        ));
+    }
+
+    None
 }
 
 fn bulk_hoster_fairness_metrics_by_key(

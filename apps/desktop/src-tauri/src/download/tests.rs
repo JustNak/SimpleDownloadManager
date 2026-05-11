@@ -2435,8 +2435,10 @@ fn single_stream_hoster_loop_uses_priority_throttle_without_deferring() {
         .nth(1)
         .expect("HTTP download attempt function should exist");
 
-    assert!(single_stream.contains("datanodes_priority_throttle_decision"));
+    assert!(single_stream.contains("hoster_priority_throttle_decision"));
     assert!(single_stream.contains("throttle_download_with_dynamic_limit"));
+    assert!(single_stream.contains("priority_throttle_limited"));
+    assert!(single_stream.contains("speed_limit.is_some() || priority_throttle_limited"));
     assert!(!single_stream.contains("DownloadOutcome::Deferred"));
 }
 
@@ -2448,8 +2450,9 @@ fn segmented_hoster_workers_use_aggregate_priority_throttle_without_deferring() 
         .nth(1)
         .expect("segmented worker should exist");
 
-    assert!(worker.contains("datanodes_priority_throttle_decision"));
+    assert!(worker.contains("hoster_priority_throttle_decision"));
     assert!(worker.contains("throttle_download_with_dynamic_limit"));
+    assert!(worker.contains("priority_throttle_limited"));
     assert!(source.contains("priority_throttle"));
     assert!(!source.contains("DownloadOutcome::Deferred"));
 }

@@ -417,6 +417,7 @@ pub(super) async fn download_segment_worker(
         let mut stream = response.bytes_stream();
         let mut low_speed_bytes = 0_u64;
         let mut low_speed_started = Instant::now();
+        let mut priority_throttle_limited = false;
 
         loop {
             let chunk_result = match next_stream_item_with_control(
@@ -562,9 +563,10 @@ pub(super) async fn download_segment_worker(
             context.progress.add_sample_bytes(chunk_len);
             if let Some(decision) = context
                 .state
-                .datanodes_priority_throttle_decision(&context.job_id)
+                .hoster_priority_throttle_decision(&context.job_id)
                 .await
             {
+                priority_throttle_limited = true;
                 match throttle_download_with_dynamic_limit(
                     &context.state,
                     &context.job_id,
@@ -620,8 +622,11 @@ pub(super) async fn download_segment_worker(
             }
 
             if low_speed_started.elapsed() >= context.profile.low_speed_window {
-                if low_speed_monitor.observe(low_speed_bytes, low_speed_started.elapsed(), false)
-                    == LowSpeedDecision::Retry
+                if low_speed_monitor.observe(
+                    low_speed_bytes,
+                    low_speed_started.elapsed(),
+                    priority_throttle_limited,
+                ) == LowSpeedDecision::Retry
                 {
                     record_segment_progress(
                         &context.temp_path,
@@ -640,6 +645,7 @@ pub(super) async fn download_segment_worker(
                 }
                 low_speed_bytes = 0;
                 low_speed_started = Instant::now();
+                priority_throttle_limited = false;
             }
         }
 
