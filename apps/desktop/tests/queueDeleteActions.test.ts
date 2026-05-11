@@ -13,4 +13,7 @@ assert.match(source, /isCanceledBulkAggregate\(job\)[\s\S]*Delete[\s\S]*openDele
 assert.match(source, /isCompletedBulkAggregate\(job\)[\s\S]*Delete from disk[\s\S]*openDeleteFromDiskPrompt\(job\)/, 'completed bulk archive context menus should offer Delete from disk');
 assert.match(source, /isFailedBulkAggregate\(job\)[\s\S]*Delete from disk[\s\S]*openDeleteFromDiskPrompt\(job\)/, 'failed bulk archive context menus should offer Delete from disk for downloaded parts');
 assert.match(source, /selectedJobs\.every\(\(job\) => canOpenSelectedDeletePrompt\(job\)\)[\s\S]*openDeletePromptForJobs\(selectedJobs\)/, 'selected canceled bulk aggregate rows should be able to open the delete prompt');
+assert.match(source, /function isRemoving\(job: QueueDisplayJob\)[\s\S]*removalState === 'removing'/, 'queue actions should centralize removing-state checks');
+assert.match(source, /isRemoving\(job\)[\s\S]*MenuItem\(Trash2, 'Removing files'/, 'removing rows should show disabled cleanup progress instead of retry/delete actions');
+assert.match(source, /isCleanupFailed\(job\)[\s\S]*Delete from disk[\s\S]*openDeleteFromDiskPrompt\(job\)/, 'cleanup-failed rows should expose Delete from disk retry');
 assert.doesNotMatch(source, /label="Remove"|>\s*Remove\s*</, 'row action menus should not bypass disk deletion through a direct Remove action');

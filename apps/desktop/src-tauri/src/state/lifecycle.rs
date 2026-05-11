@@ -45,12 +45,30 @@ impl SharedState {
         std::fs::create_dir_all(&persisted.settings.bulk.output_directory)
             .map_err(|error| format!("Could not create bulk download directory: {error}"))?;
 
+        let mut diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
         let jobs = persisted
             .jobs
             .into_iter()
-            .map(|job| normalize_job(job, &persisted.settings))
+            .map(|job| {
+                let was_removing = job.removal_state == Some(RemovalState::Removing);
+                let job_id = job.id.clone();
+                let filename = job.filename.clone();
+                let normalized = normalize_job(job, &persisted.settings);
+                if was_removing {
+                    diagnostic_events.push(DiagnosticEvent {
+                        timestamp: current_unix_timestamp_millis(),
+                        level: DiagnosticLevel::Warning,
+                        category: "download".into(),
+                        message: format!(
+                            "Disk cleanup for {filename} was interrupted by app shutdown"
+                        ),
+                        job_id: Some(job_id),
+                    });
+                }
+                normalized
+            })
             .collect::<Vec<_>>();
-        let diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
+        trim_diagnostic_events(&mut diagnostic_events);
         let next_job_number = next_job_number(&jobs);
         let job_indexes = job_indexes_for(&jobs);
 

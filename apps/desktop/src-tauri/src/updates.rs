@@ -282,6 +282,7 @@ mod tests {
             integrity_check: None,
             torrent: None,
             state,
+            removal_state: None,
             created_at: 1,
             progress: 0.0,
             total_bytes: 100,

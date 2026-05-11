@@ -60,7 +60,17 @@
     return Math.round((clampedProgress / 100) * segmentCount);
   }
 
+  function isRemoving(job: DownloadJob) {
+    return job.removalState === 'removing';
+  }
+
+  function isCleanupFailed(job: DownloadJob) {
+    return job.removalState === 'cleanup_failed';
+  }
+
   function statusText(job: DownloadJob) {
+    if (isRemoving(job)) return 'Removing files...';
+    if (isCleanupFailed(job)) return 'Cleanup failed';
     if (isTorrentSeedingRestore(job)) return 'Restoring seeding';
     if (isTorrentCheckingFiles(job)) return 'Checking files';
     if (isTorrentMetadataPending(job)) return 'Finding metadata';
@@ -96,6 +106,8 @@
   }
 
   function statusClass(job: DownloadJob) {
+    if (isRemoving(job)) return 'border-warning/40 bg-warning/10 text-warning';
+    if (isCleanupFailed(job)) return 'border-destructive/40 bg-destructive/10 text-destructive';
     if (job.state === JobState.Completed) return 'border-success/40 bg-success/10 text-success';
     if (job.state === JobState.Failed) return 'border-destructive/40 bg-destructive/10 text-destructive';
     if (job.state === JobState.Paused || job.state === JobState.Canceled) return 'border-border bg-muted text-muted-foreground';
@@ -269,7 +281,9 @@
       </section>
 
       <div class="mt-auto flex shrink-0 justify-end gap-3 border-t border-border bg-background px-6 py-2">
-        {#if (isActive(job) || isPaused(job) || isSeeding(job)) && canShow}
+        {#if isRemoving(job)}
+          {@render Action('Close', X, popup.onClose)}
+        {:else if (isActive(job) || isPaused(job) || isSeeding(job)) && canShow}
           {@render Action('Show', FolderOpen, () => void popup.runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
         {/if}
         {#if isActive(job)}

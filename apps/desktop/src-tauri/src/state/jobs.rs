@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::{stream, StreamExt};
 
 impl SharedState {
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
@@ -50,6 +51,7 @@ impl SharedState {
             state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
+                ensure_not_removing(job)?;
                 if matches!(
                     job.state,
                     JobState::Paused | JobState::Failed | JobState::Canceled
@@ -113,60 +115,60 @@ impl SharedState {
     pub async fn cancel_jobs_for_delete(
         &self,
         ids: &[String],
-    ) -> Result<DesktopSnapshot, BackendError> {
+    ) -> Result<DestructiveCleanupPlan, BackendError> {
         if ids.is_empty() {
-            return Ok(self.snapshot().await);
+            return Ok(DestructiveCleanupPlan {
+                snapshot: self.snapshot().await,
+                jobs: Vec::new(),
+            });
         }
 
-        let temp_paths_to_remove =
-            {
-                let state = self.inner.read().await;
-                let mut temp_paths = Vec::new();
-                for id in ids {
-                    let job = state.jobs.iter().find(|job| job.id == *id).ok_or_else(|| {
-                        BackendError {
-                            code: "INTERNAL_ERROR",
-                            message: "Job not found.".into(),
-                        }
-                    })?;
-
-                    if !state.active_workers.contains(id) && is_cancel_delete_cancel_target(job) {
-                        temp_paths.push(PathBuf::from(&job.temp_path));
-                    }
-                }
-                temp_paths
-            };
-
-        for temp_path in temp_paths_to_remove {
-            let _ = remove_path_if_exists(&temp_path);
-        }
-
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, cleanup_jobs) = {
             let mut state = self.inner.write().await;
+            let mut cleanup_jobs = Vec::new();
+            let mut captured_archive_outputs = HashSet::new();
             for id in ids {
+                let Some(job_index) = state.jobs.iter().position(|job| job.id == *id) else {
+                    continue;
+                };
                 state.external_reseed_jobs.remove(id);
-                let job_index =
-                    state
-                        .jobs
-                        .iter()
-                        .position(|job| job.id == *id)
-                        .ok_or_else(|| BackendError {
-                            code: "INTERNAL_ERROR",
-                            message: "Job not found.".into(),
-                        })?;
-                let (event_message, should_push_event) = {
+                let active = state.active_workers.contains(id);
+                let (event_message, should_push_event, clear_hoster_health, cleanup_job) = {
                     let job = &mut state.jobs[job_index];
+                    let paths =
+                        destructive_cleanup_paths_for_job(job, &mut captured_archive_outputs);
+                    let cleanup_job = DestructiveCleanupJob {
+                        id: job.id.clone(),
+                        filename: job.filename.clone(),
+                        paths,
+                        wait_for_worker_release: active,
+                    };
+                    let clear_hoster_health = is_protected_bulk_hoster_job(job);
                     if is_cancel_delete_cancel_target(job) {
                         mark_job_canceled(job);
+                        job.removal_state = Some(RemovalState::Removing);
                         (
                             Some(format!("Canceled {} for disk cleanup", job.filename)),
                             true,
+                            clear_hoster_health,
+                            cleanup_job,
                         )
                     } else {
-                        (None, false)
+                        job.removal_state = Some(RemovalState::Removing);
+                        job.error = None;
+                        job.failure_category = None;
+                        (
+                            Some(format!("Scheduled {} for disk cleanup", job.filename)),
+                            true,
+                            clear_hoster_health,
+                            cleanup_job,
+                        )
                     }
                 };
-                state.clear_bulk_hoster_worker_health(id);
+                if clear_hoster_health {
+                    state.clear_bulk_hoster_worker_health(id);
+                }
+                cleanup_jobs.push(cleanup_job);
                 if should_push_event {
                     state.push_diagnostic_event(
                         DiagnosticLevel::Info,
@@ -176,7 +178,7 @@ impl SharedState {
                     );
                 }
             }
-            (state.snapshot(), state.persisted())
+            (state.snapshot(), state.persisted(), cleanup_jobs)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
@@ -186,7 +188,10 @@ impl SharedState {
                 handoff_auth.remove(id);
             }
         }
-        Ok(snapshot)
+        Ok(DestructiveCleanupPlan {
+            snapshot,
+            jobs: cleanup_jobs,
+        })
     }
 
     pub async fn cancel_jobs(&self, ids: &[String]) -> Result<DesktopSnapshot, BackendError> {
@@ -265,7 +270,9 @@ impl SharedState {
             state.external_reseed_jobs.remove(id);
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
+                ensure_not_removing(job)?;
                 job.state = JobState::Queued;
+                job.removal_state = None;
                 job.speed = 0;
                 job.eta = 0;
                 job.error = None;
@@ -301,6 +308,7 @@ impl SharedState {
 
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
+                ensure_not_removing(job)?;
                 remove_file_if_exists(Path::new(&job.temp_path)).map_err(internal_error)?;
                 reset_job_for_restart(job);
                 format!("Restart queued for {}", job.filename)
@@ -558,8 +566,9 @@ impl SharedState {
             let mut state = self.inner.write().await;
 
             for job in &mut state.jobs {
-                if job.state == JobState::Failed {
+                if job.state == JobState::Failed && job.removal_state.is_none() {
                     job.state = JobState::Queued;
+                    job.removal_state = None;
                     job.speed = 0;
                     job.eta = 0;
                     job.error = None;
@@ -586,7 +595,10 @@ impl SharedState {
     pub async fn clear_completed_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.retain_jobs(|job| !matches!(job.state, JobState::Completed | JobState::Canceled));
+            state.retain_jobs(|job| {
+                job.removal_state.is_some()
+                    || !matches!(job.state, JobState::Completed | JobState::Canceled)
+            });
             (state.snapshot(), state.persisted())
         };
 
@@ -598,16 +610,12 @@ impl SharedState {
         let (snapshot, persisted, paths_to_cleanup) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
-            let job_index = state
-                .jobs
-                .iter()
-                .position(|job| job.id == id)
-                .ok_or_else(|| BackendError {
-                    code: "INTERNAL_ERROR",
-                    message: "Job not found.".into(),
-                })?;
+            let Some(job_index) = state.jobs.iter().position(|job| job.id == id) else {
+                return Ok(state.snapshot());
+            };
             let is_active_worker = state.active_workers.contains(id);
             let job = &state.jobs[job_index];
+            ensure_not_removing(job)?;
 
             if job_blocks_removal(job, is_active_worker) {
                 return Err(BackendError {
@@ -648,6 +656,10 @@ impl SharedState {
         id: &str,
         delete_from_disk: bool,
     ) -> Result<DesktopSnapshot, BackendError> {
+        if !self.inner.read().await.jobs.iter().any(|job| job.id == id) {
+            return Ok(self.snapshot().await);
+        }
+
         if delete_from_disk {
             self.wait_for_disk_delete_release(id).await?;
             let (target_path, temp_path, bulk_archive_output_path) = {
@@ -698,6 +710,185 @@ impl SharedState {
         self.remove_job(id).await
     }
 
+    pub async fn delete_jobs_for_disk_cleanup(
+        &self,
+        ids: &[String],
+    ) -> Result<DestructiveCleanupPlan, BackendError> {
+        if ids.is_empty() {
+            return Ok(DestructiveCleanupPlan {
+                snapshot: self.snapshot().await,
+                jobs: Vec::new(),
+            });
+        }
+
+        let (snapshot, persisted, cleanup_jobs) = {
+            let mut state = self.inner.write().await;
+            let mut cleanup_jobs = Vec::new();
+            let mut captured_archive_outputs = HashSet::new();
+
+            for id in ids {
+                let Some(job_index) = state.jobs.iter().position(|job| job.id == *id) else {
+                    continue;
+                };
+                let active = state.active_workers.contains(id);
+                let job = &state.jobs[job_index];
+                if job_blocks_removal(job, active) {
+                    return Err(BackendError {
+                        code: "INTERNAL_ERROR",
+                        message:
+                            "Pause or cancel the active transfer before deleting files from disk."
+                                .into(),
+                    });
+                }
+
+                state.external_reseed_jobs.remove(id);
+                let cleanup_job = {
+                    let job = &mut state.jobs[job_index];
+                    let paths =
+                        destructive_cleanup_paths_for_job(job, &mut captured_archive_outputs);
+                    job.removal_state = Some(RemovalState::Removing);
+                    job.error = None;
+                    job.failure_category = None;
+                    DestructiveCleanupJob {
+                        id: job.id.clone(),
+                        filename: job.filename.clone(),
+                        paths,
+                        wait_for_worker_release: active,
+                    }
+                };
+                state.clear_bulk_hoster_worker_health(id);
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    format!("Scheduled {} for disk cleanup", cleanup_job.filename),
+                    Some(id.clone()),
+                );
+                cleanup_jobs.push(cleanup_job);
+            }
+
+            (state.snapshot(), state.persisted(), cleanup_jobs)
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        {
+            let mut handoff_auth = self.handoff_auth.write().await;
+            for id in ids {
+                handoff_auth.remove(id);
+            }
+        }
+        Ok(DestructiveCleanupPlan {
+            snapshot,
+            jobs: cleanup_jobs,
+        })
+    }
+
+    pub async fn run_destructive_cleanup(
+        &self,
+        jobs: Vec<DestructiveCleanupJob>,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        if jobs.is_empty() {
+            return Ok(self.snapshot().await);
+        }
+
+        let state = self.clone();
+        let mut cleanup_results = stream::iter(jobs)
+            .map(move |job| {
+                let state = state.clone();
+                async move { state.cleanup_destructive_job(job).await }
+            })
+            .buffer_unordered(8);
+
+        let mut snapshot = self.snapshot().await;
+        while let Some(result) = cleanup_results.next().await {
+            snapshot = match result {
+                Ok(id) => self.finish_destructive_cleanup_success(&id).await?,
+                Err((job, message)) => {
+                    self.record_destructive_cleanup_failure(&job, message)
+                        .await?
+                }
+            };
+        }
+
+        Ok(snapshot)
+    }
+
+    async fn cleanup_destructive_job(
+        &self,
+        job: DestructiveCleanupJob,
+    ) -> Result<String, (DestructiveCleanupJob, String)> {
+        if job.wait_for_worker_release {
+            if let Err(error) = self
+                .wait_for_active_worker_release(
+                    &job.id,
+                    "Canceled download files are still being released. Use Delete from disk again in a moment.",
+                )
+                .await
+            {
+                return Err((job, error.message));
+            }
+        }
+
+        let cleanup_job = job.clone();
+        let cleanup_result = tokio::task::spawn_blocking(move || {
+            remove_destructive_cleanup_paths(&cleanup_job.paths)
+        })
+        .await
+        .map_err(|error| (job.clone(), format!("Could not run disk cleanup: {error}")))?;
+
+        match cleanup_result {
+            Ok(()) => Ok(job.id),
+            Err(message) => Err((job, message)),
+        }
+    }
+
+    async fn finish_destructive_cleanup_success(
+        &self,
+        id: &str,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.external_reseed_jobs.remove(id);
+            state.remove_active_worker(id);
+            if let Some(index) = state.jobs.iter().position(|job| job.id == id) {
+                state.remove_job_at_index(index);
+            }
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
+    async fn record_destructive_cleanup_failure(
+        &self,
+        job: &DestructiveCleanupJob,
+        message: String,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            if let Some(existing) = state.job_mut(&job.id) {
+                existing.removal_state = Some(RemovalState::CleanupFailed);
+                mark_job_canceled(existing);
+                existing.removal_state = Some(RemovalState::CleanupFailed);
+                existing.error = Some(format!("Could not delete files from disk: {message}"));
+                existing.failure_category = Some(FailureCategory::Disk);
+            }
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                format!(
+                    "Could not delete canceled download files for {}: {message}",
+                    job.filename
+                ),
+                Some(job.id.clone()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
     pub async fn delete_canceled_jobs_after_release(
         &self,
         ids: &[String],
@@ -737,7 +928,8 @@ impl SharedState {
             .await?;
         }
 
-        self.delete_job(id, true).await
+        let plan = self.delete_jobs_for_disk_cleanup(&[id.to_string()]).await?;
+        self.run_destructive_cleanup(plan.jobs).await
     }
 
     async fn record_cancel_delete_cleanup_failure(
@@ -961,6 +1153,7 @@ pub(super) fn find_job_mut<'a>(
 
 pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
     job.state = JobState::Queued;
+    job.removal_state = None;
     job.progress = 0.0;
     job.total_bytes = 0;
     job.downloaded_bytes = 0;
@@ -979,6 +1172,7 @@ pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
 
 fn queue_job_for_preserved_bulk_recovery(job: &mut DownloadJob) {
     job.state = JobState::Queued;
+    job.removal_state = None;
     job.speed = 0;
     job.eta = 0;
     job.error = None;
@@ -1081,6 +1275,45 @@ fn is_cancel_delete_cancel_target(job: &DownloadJob) -> bool {
     )
 }
 
+fn destructive_cleanup_paths_for_job(
+    job: &DownloadJob,
+    captured_archive_outputs: &mut HashSet<String>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    push_unique_cleanup_path(&mut paths, PathBuf::from(&job.target_path));
+    push_unique_cleanup_path(&mut paths, PathBuf::from(&job.temp_path));
+
+    if let Some(archive_path) = job.bulk_archive.as_ref().and_then(|archive| {
+        if archive.archive_status == BulkArchiveStatus::Completed {
+            archive.output_path.as_ref()
+        } else {
+            None
+        }
+    }) {
+        if captured_archive_outputs.insert(archive_path.clone()) {
+            push_unique_cleanup_path(&mut paths, PathBuf::from(archive_path));
+        }
+    }
+
+    paths
+}
+
+fn push_unique_cleanup_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.as_os_str().is_empty() {
+        return;
+    }
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn remove_destructive_cleanup_paths(paths: &[PathBuf]) -> Result<(), String> {
+    for path in paths {
+        remove_path_if_exists(path)?;
+    }
+    Ok(())
+}
+
 fn mark_job_canceled(job: &mut DownloadJob) {
     job.state = JobState::Canceled;
     job.progress = 0.0;
@@ -1093,6 +1326,16 @@ fn mark_job_canceled(job: &mut DownloadJob) {
     job.retry_attempts = 0;
     job.auto_restart_attempts = 0;
     reset_integrity_for_retry(job);
+}
+
+fn ensure_not_removing(job: &DownloadJob) -> Result<(), BackendError> {
+    if job.removal_state.is_some() {
+        return Err(BackendError {
+            code: "INTERNAL_ERROR",
+            message: "This download is waiting for disk cleanup. Use Delete from disk to retry failed cleanup.".into(),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {

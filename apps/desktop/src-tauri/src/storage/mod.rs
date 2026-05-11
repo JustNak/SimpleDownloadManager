@@ -30,6 +30,13 @@ pub enum JobState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RemovalState {
+    Removing,
+    CleanupFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FailureCategory {
     Network,
     Http,
@@ -212,6 +219,8 @@ pub struct DownloadJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub torrent: Option<TorrentInfo>,
     pub state: JobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removal_state: Option<RemovalState>,
     #[serde(default)]
     pub created_at: u64,
     pub progress: f64,

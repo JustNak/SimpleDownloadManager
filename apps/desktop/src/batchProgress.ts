@@ -5,8 +5,8 @@ export type { FailedBatchItem };
 
 export type DownloadMode = 'single' | 'torrent' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
-export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed' | 'canceled';
-export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed' | 'canceled';
+export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed' | 'canceled' | 'removing';
+export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed' | 'canceled' | 'removing';
 export type BulkFinalizingStepId = 'uncompressing' | 'combining' | 'compressing';
 
 export interface BulkFinalizingStep {
@@ -99,6 +99,9 @@ export function calculateBatchProgress(jobs: DownloadJob[]): BatchProgressSummar
 
 export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   const archiveJobs = jobs.filter((job) => job.bulkArchive);
+  if (jobs.some((job) => job.removalState === 'removing')) {
+    return 'removing';
+  }
   if (jobs.some((job) => bulkArchiveStatus(job) === 'failed')) {
     return 'failed';
   }
@@ -153,7 +156,7 @@ export function isUntouchedBulkReviewGate(jobs: DownloadJob[]): boolean {
 
 export function deriveBulkUiState(jobs: DownloadJob[]): BulkUiState {
   const phase = deriveBulkPhase(jobs);
-  if (phase === 'review' || phase === 'ready' || phase === 'failed' || phase === 'canceled') return phase;
+  if (phase === 'review' || phase === 'ready' || phase === 'failed' || phase === 'canceled' || phase === 'removing') return phase;
   if (phase === 'extracting' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing') {
     return 'finalizing';
   }

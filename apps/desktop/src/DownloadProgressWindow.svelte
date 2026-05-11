@@ -25,7 +25,17 @@
     onClose: () => void;
   }
 
+  function isRemoving(job: DownloadJob) {
+    return job.removalState === 'removing';
+  }
+
+  function isCleanupFailed(job: DownloadJob) {
+    return job.removalState === 'cleanup_failed';
+  }
+
   function statusText(job: DownloadJob) {
+    if (isRemoving(job)) return 'Removing files...';
+    if (isCleanupFailed(job)) return 'Cleanup failed';
     if (job.state === JobState.Downloading) return 'Downloading';
     if (job.state === JobState.Paused) return 'Paused';
     if (job.state === JobState.Completed) return 'Complete';
@@ -35,6 +45,8 @@
   }
 
   function progressColor(job: DownloadJob) {
+    if (isRemoving(job)) return 'bg-warning';
+    if (isCleanupFailed(job)) return 'bg-destructive';
     if (job.state === JobState.Failed) return 'bg-destructive';
     if (job.state === JobState.Completed) return 'bg-success';
     if (job.state === JobState.Canceled) return 'bg-muted-foreground/35';
@@ -139,25 +151,29 @@
       {/if}
 
       <div class="mt-auto flex justify-end gap-2 border-t border-border pt-2">
-        {#if isActiveProgressJob(job)}
-          {@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}
-          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
-        {/if}
-        {#if job.state === JobState.Paused}
-          {@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}
-          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
-        {/if}
-        {#if job.state === JobState.Failed}
-          {@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}
-          {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Swap', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
-          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
-        {/if}
-        {#if job.state === JobState.Completed}
-          {@render Action('Show', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
-          {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), 'primary')}
-        {/if}
-        {#if job.state === JobState.Canceled}
+        {#if isRemoving(job)}
           {@render Action('Close', X, isBusy, onClose)}
+        {:else}
+          {#if isActiveProgressJob(job)}
+            {@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}
+            {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {/if}
+          {#if job.state === JobState.Paused}
+            {@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}
+            {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {/if}
+          {#if job.state === JobState.Failed}
+            {@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}
+            {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Swap', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
+            {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {/if}
+          {#if job.state === JobState.Completed}
+            {@render Action('Show', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
+            {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), 'primary')}
+          {/if}
+          {#if job.state === JobState.Canceled}
+            {@render Action('Close', X, isBusy, onClose)}
+          {/if}
         {/if}
       </div>
     </main>

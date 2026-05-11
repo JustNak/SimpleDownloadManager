@@ -86,6 +86,7 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
   );
   const progress = deriveAggregateProgress(members, downloadedBytes, totalBytes);
   const state = deriveAggregateState(members, archive?.archiveStatus);
+  const removalState = deriveAggregateRemovalState(members);
   const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
 
   return {
@@ -96,6 +97,7 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     source: undefined,
     transferKind: 'http',
     state,
+    removalState,
     createdAt: firstCreatedAt(members),
     progress,
     totalBytes,
@@ -115,6 +117,20 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,
     bulkArchiveFixable: isFixableBulkArchive(members, archive?.archiveStatus),
   };
+}
+
+function deriveAggregateRemovalState(members: readonly DownloadJob[]): DownloadJob['removalState'] {
+  if (members.some((job) => job.removalState === 'removing') && !members.some(isActivelyDownloadableMember)) {
+    return 'removing';
+  }
+  if (members.some((job) => job.removalState === 'cleanup_failed')) {
+    return 'cleanup_failed';
+  }
+  return undefined;
+}
+
+function isActivelyDownloadableMember(job: DownloadJob): boolean {
+  return job.removalState !== 'removing' && activeStates.has(job.state);
 }
 
 function isRetryableBulkMember(job: DownloadJob): boolean {

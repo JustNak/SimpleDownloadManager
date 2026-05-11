@@ -8,7 +8,7 @@ use crate::storage::{
     DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory, HandoffAuth,
     HandoffAuthHeader, HostRegistrationDiagnostics, HosterPreflightInfo, HosterPreflightStatus,
     IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    ProtectedDownloadAuthScope, QueueSummary, ResumeSupport, Settings, TorrentInfo,
+    ProtectedDownloadAuthScope, QueueSummary, RemovalState, ResumeSupport, Settings, TorrentInfo,
     TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
@@ -45,11 +45,11 @@ pub(crate) use torrent::{
 pub use types::{
     BackendError, BatchDownloadEntry, BulkArchiveEntry, BulkArchiveReady,
     BulkMemberAutoRestartCandidate, BulkMemberAutoRestartMode, BulkMemberRetryCandidate,
-    BulkMemberSlowRecoveryState, DownloadTask, DuplicatePolicy, EnqueueOptions, EnqueueResult,
-    EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation, HosterWarmupCandidate,
-    TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
-    TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult, TorrentSessionCacheClearState,
-    WorkerControl,
+    BulkMemberSlowRecoveryState, DestructiveCleanupJob, DestructiveCleanupPlan, DownloadTask,
+    DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt,
+    ExternalUsePreparation, HosterWarmupCandidate, TorrentRemovalCleanupInfo, TorrentRuntimePhase,
+    TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult,
+    TorrentSessionCacheClearState, WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;

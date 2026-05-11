@@ -391,7 +391,13 @@
     return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused, JobState.Failed].includes(job.state);
   }
 
+  function isRemoving(job: DownloadJob) {
+    return job.removalState === 'removing';
+  }
+
   function statusText(job: DownloadJob) {
+    if (isRemoving(job)) return 'Removing files...';
+    if (job.removalState === 'cleanup_failed') return 'Cleanup failed';
     switch (job.state) {
       case JobState.Seeding:
         return 'Seeding';
@@ -434,16 +440,25 @@
     return 'text-primary';
   }
 
-  function progressColor(state: JobState) {
-    if (state === JobState.Completed) return 'bg-success';
-    if (state === JobState.Failed) return 'bg-destructive';
-    if (state === JobState.Queued) return 'bg-warning';
+  function jobStatusTextClass(job: DownloadJob) {
+    if (isRemoving(job)) return 'text-warning';
+    if (job.removalState === 'cleanup_failed') return 'text-destructive';
+    return statusTextClass(job.state);
+  }
+
+  function progressColor(job: DownloadJob) {
+    if (isRemoving(job)) return 'bg-warning';
+    if (job.removalState === 'cleanup_failed') return 'bg-destructive';
+    if (job.state === JobState.Completed) return 'bg-success';
+    if (job.state === JobState.Failed) return 'bg-destructive';
+    if (job.state === JobState.Queued) return 'bg-warning';
     return 'bg-primary';
   }
 
   function phaseClass(phase: BulkPhase | BulkUiState | BulkFinalizingStepId | null) {
     if (phase === 'failed') return 'text-destructive';
     if (phase === 'canceled') return 'text-muted-foreground';
+    if (phase === 'removing') return 'text-warning';
     if (phase === 'ready') return 'text-success';
     if (phase === 'extracting' || phase === 'uncompressing' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing' || phase === 'finalizing') {
       return 'text-warning';
@@ -507,6 +522,8 @@
           <div class="mt-1 text-xs text-muted-foreground">
             {#if context.kind === 'bulk' && bulkUiState === 'review'}
               {selectedBulkCount} of {summary.totalCount} selected{failedItemSuffix(failedItems.length)}
+            {:else if context.kind === 'bulk' && bulkUiState === 'removing'}
+              Removing files...
             {:else if context.kind === 'bulk' && bulkUiState === 'finalizing'}
               Preparing combined output
             {:else}
@@ -524,6 +541,8 @@
           <span>
             {#if context.kind === 'bulk' && bulkUiState === 'review'}
               Ready to start
+            {:else if context.kind === 'bulk' && bulkUiState === 'removing'}
+              Removing files
             {:else if context.kind === 'bulk' && bulkUiState === 'finalizing'}
               Finalizing
             {:else}
@@ -537,7 +556,7 @@
           </span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-progress-track">
-          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${isBulkReviewPhase ? 0 : progress}%`}></div>
+          <div class={`h-1.5 rounded-full transition-[width,background-color] duration-300 ${bulkUiState === 'removing' ? 'bg-warning' : summary.failedCount > 0 ? 'bg-destructive' : 'bg-primary'}`} style={`width: ${isBulkReviewPhase ? 0 : progress}%`}></div>
         </div>
       </section>
 
@@ -624,11 +643,11 @@
               <div class={`truncate text-sm font-semibold leading-5 ${selected ? 'text-foreground' : 'text-muted-foreground'}`} title={job.filename}>{job.filename}</div>
               <div class="truncate text-xs text-muted-foreground" title={job.url}>{getHost(job.url)}</div>
               <div class="mt-1 h-1 overflow-hidden rounded-full bg-progress-track">
-                <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${selected ? progressColor(job.state) : 'bg-muted-foreground/35'}`} style={`width: ${rowProgress}%`}></div>
+                <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${selected ? progressColor(job) : 'bg-muted-foreground/35'}`} style={`width: ${rowProgress}%`}></div>
               </div>
             </div>
             <div class="min-w-0 text-right text-xs">
-              <div class={selected ? `font-semibold ${statusTextClass(job.state)}` : 'font-semibold text-muted-foreground'}>{selected ? statusText(job) : 'Excluded'}</div>
+              <div class={selected ? `font-semibold ${jobStatusTextClass(job)}` : 'font-semibold text-muted-foreground'}>{selected ? statusText(job) : 'Excluded'}</div>
               <div class="mt-0.5 tabular-nums text-muted-foreground">{rowProgress.toFixed(0)}%</div>
               <div class="truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
                 {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
@@ -703,11 +722,11 @@
       <div class="truncate text-sm font-semibold leading-5 text-foreground" title={job.filename}>{job.filename}</div>
       <div class="truncate text-xs text-muted-foreground" title={job.url}>{job.transferKind === 'torrent' ? 'Torrent' : getHost(job.url)}</div>
       <div class="mt-1 h-1 overflow-hidden rounded-full bg-progress-track">
-        <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${progressColor(job.state)}`} style={`width: ${rowProgress}%`}></div>
+        <div class={`h-1 rounded-full transition-[width,background-color] duration-300 ${progressColor(job)}`} style={`width: ${rowProgress}%`}></div>
       </div>
     </div>
     <div class="min-w-0 text-right text-xs">
-      <div class={`font-semibold ${statusTextClass(job.state)}`}>{statusText(job)}</div>
+      <div class={`font-semibold ${jobStatusTextClass(job)}`}>{statusText(job)}</div>
       <div class="mt-0.5 tabular-nums text-muted-foreground">
         {job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : `${rowProgress.toFixed(0)}%`}
       </div>
@@ -744,26 +763,35 @@
     { id: 'ready' as BulkUiState, label: 'Ready' },
   ]}
   {@const activeIndex = phases.findIndex((item) => item.id === state)}
-  <section class="mt-3 rounded border border-border bg-background px-3 py-2">
-    <div class="grid grid-cols-4 gap-2">
-      {#each phases as item, index (item.id)}
-        {@const isDone = state !== 'failed' && index < activeIndex}
-        {@const isActive = index === activeIndex}
-        <div class={`flex min-w-0 items-center gap-1.5 text-xs font-semibold ${isActive ? phaseClass(state) : isDone ? 'text-success' : 'text-muted-foreground'}`}>
-          <span class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] ${isActive ? 'border-current' : isDone ? 'border-success bg-success text-success-foreground' : 'border-border'}`}>
-            {#if isDone}<CheckCircle2 size={10} />{:else}{index + 1}{/if}
-          </span>
-          <span class="truncate">{item.label}</span>
-        </div>
-      {/each}
-    </div>
-    {#if state === 'failed' && archive?.error}
-      <div class="mt-2 truncate text-xs text-destructive" title={archive.error}>{archive.error}</div>
-    {/if}
-    {#if state === 'ready' && archive?.warning}
-      <div class="mt-2 truncate text-xs text-warning" title={archive.warning}>{archive.warning}</div>
-    {/if}
-  </section>
+  {#if state === 'removing'}
+    <section class="mt-3 rounded border border-warning/35 bg-warning/10 px-3 py-2">
+      <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-warning">
+        <X size={14} />
+        <span class="truncate">Removing files...</span>
+      </div>
+    </section>
+  {:else}
+    <section class="mt-3 rounded border border-border bg-background px-3 py-2">
+      <div class="grid grid-cols-4 gap-2">
+        {#each phases as item, index (item.id)}
+          {@const isDone = state !== 'failed' && index < activeIndex}
+          {@const isActive = index === activeIndex}
+          <div class={`flex min-w-0 items-center gap-1.5 text-xs font-semibold ${isActive ? phaseClass(state) : isDone ? 'text-success' : 'text-muted-foreground'}`}>
+            <span class={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] ${isActive ? 'border-current' : isDone ? 'border-success bg-success text-success-foreground' : 'border-border'}`}>
+              {#if isDone}<CheckCircle2 size={10} />{:else}{index + 1}{/if}
+            </span>
+            <span class="truncate">{item.label}</span>
+          </div>
+        {/each}
+      </div>
+      {#if state === 'failed' && archive?.error}
+        <div class="mt-2 truncate text-xs text-destructive" title={archive.error}>{archive.error}</div>
+      {/if}
+      {#if state === 'ready' && archive?.warning}
+        <div class="mt-2 truncate text-xs text-warning" title={archive.warning}>{archive.warning}</div>
+      {/if}
+    </section>
+  {/if}
 {/snippet}
 
 {#snippet BulkFinalizingStrip(phase: BulkPhase | null, jobs: DownloadJob[])}
@@ -814,6 +842,8 @@
         {/if}
         {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
       {:else if bulkUiState === 'canceled'}
+        {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+      {:else if bulkUiState === 'removing'}
         {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
       {/if}
     </div>

@@ -3125,6 +3125,7 @@ fn restart_reset_clears_partial_progress_and_failure_metadata() {
         integrity_check: None,
         torrent: None,
         state: JobState::Failed,
+        removal_state: None,
         created_at: 1,
         progress: 42.0,
         total_bytes: 100,
@@ -3184,6 +3185,7 @@ fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
             diagnostics: None,
         }),
         state: JobState::Paused,
+        removal_state: None,
         created_at: 1,
         progress: 100.0,
         total_bytes: 4096,
@@ -4957,7 +4959,7 @@ async fn cancel_jobs_for_delete_cancels_unfinished_but_preserves_completed_until
         "job_failed".to_string(),
         "job_completed".to_string(),
     ];
-    let snapshot = tokio::time::timeout(
+    let prepared = tokio::time::timeout(
         Duration::from_millis(100),
         state.cancel_jobs_for_delete(&ids),
     )
@@ -4965,17 +4967,20 @@ async fn cancel_jobs_for_delete_cancels_unfinished_but_preserves_completed_until
     .expect("destructive cancel should not wait for active file handles")
     .expect("destructive cancel should succeed");
 
-    let active_snapshot = snapshot
+    let active_snapshot = prepared
+        .snapshot
         .jobs
         .iter()
         .find(|job| job.id == "job_active")
         .unwrap();
-    let failed_snapshot = snapshot
+    let failed_snapshot = prepared
+        .snapshot
         .jobs
         .iter()
         .find(|job| job.id == "job_failed")
         .unwrap();
-    let completed_snapshot = snapshot
+    let completed_snapshot = prepared
+        .snapshot
         .jobs
         .iter()
         .find(|job| job.id == "job_completed")
@@ -4998,6 +5003,55 @@ async fn cancel_jobs_for_delete_cancels_unfinished_but_preserves_completed_until
     let runtime = state.inner.read().await;
     assert!(!runtime.bulk_hoster_worker_health.contains_key("job_active"));
     drop(runtime);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn cancel_jobs_for_delete_marks_requested_jobs_removing_and_returns_cleanup_manifest() {
+    let download_dir = test_runtime_dir("cancel-delete-removing-manifest");
+    let queued_temp = download_dir.join("queued.bin.part");
+    let completed_target = download_dir.join("completed.bin");
+    std::fs::write(&queued_temp, b"queued partial").unwrap();
+    std::fs::write(&completed_target, b"completed").unwrap();
+
+    let mut queued = download_job("job_queued", JobState::Queued, ResumeSupport::Unknown, 0);
+    queued.temp_path = queued_temp.display().to_string();
+    let mut completed = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    completed.target_path = completed_target.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![queued, completed]);
+
+    let ids = vec!["job_queued".to_string(), "job_completed".to_string()];
+    let prepared = state
+        .cancel_jobs_for_delete(&ids)
+        .await
+        .expect("destructive cancel should prepare removing cleanup");
+
+    assert_eq!(prepared.jobs.len(), 2);
+    let queued_snapshot = prepared
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_queued")
+        .unwrap();
+    let completed_snapshot = prepared
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_completed")
+        .unwrap();
+    assert_eq!(queued_snapshot.state, JobState::Canceled);
+    assert_eq!(queued_snapshot.removal_state, Some(RemovalState::Removing));
+    assert_eq!(completed_snapshot.state, JobState::Completed);
+    assert_eq!(
+        completed_snapshot.removal_state,
+        Some(RemovalState::Removing)
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -5078,6 +5132,67 @@ async fn delete_canceled_jobs_after_release_removes_active_and_completed_bulk_fi
 }
 
 #[tokio::test]
+async fn destructive_cleanup_removes_rows_using_captured_paths_after_release() {
+    let download_dir = test_runtime_dir("destructive-cleanup-captured-paths");
+    let active_temp = download_dir.join("active.bin.part");
+    let completed_target = download_dir.join("completed.bin");
+    std::fs::write(&active_temp, b"active partial").unwrap();
+    std::fs::write(&completed_target, b"complete").unwrap();
+
+    let mut active = download_job(
+        "job_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    active.temp_path = active_temp.display().to_string();
+    let mut completed = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    completed.target_path = completed_target.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, completed]);
+    {
+        state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .insert("job_active".into());
+    }
+
+    let ids = vec!["job_active".to_string(), "job_completed".to_string()];
+    let prepared = state
+        .cancel_jobs_for_delete(&ids)
+        .await
+        .expect("destructive cancel should prepare cleanup from captured paths");
+
+    let release_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .remove("job_active");
+    });
+
+    let snapshot = state
+        .run_destructive_cleanup(prepared.jobs)
+        .await
+        .expect("cleanup should remove rows using manifest paths");
+
+    assert!(snapshot.jobs.is_empty());
+    assert!(!active_temp.exists());
+    assert!(!completed_target.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn delete_canceled_torrent_after_release_waits_before_payload_cleanup() {
     let download_dir = test_runtime_dir("cancel-delete-torrent-waits");
     let target_path = download_dir.join("torrent-a634dc94");
@@ -5134,13 +5249,14 @@ async fn cancel_delete_cleanup_failure_keeps_canceled_row_with_diagnostic() {
     job.target_path = "\0".to_string();
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
     let ids = vec!["job_locked".to_string()];
-    state
+
+    let prepared = state
         .cancel_jobs_for_delete(&ids)
         .await
-        .expect("cancel should succeed before cleanup");
+        .expect("cancel should prepare cleanup");
 
     let snapshot = state
-        .delete_canceled_jobs_after_release(&ids)
+        .run_destructive_cleanup(prepared.jobs)
         .await
         .expect("cleanup errors should be recorded instead of failing the finalizer");
 
@@ -5150,6 +5266,7 @@ async fn cancel_delete_cleanup_failure_keeps_canceled_row_with_diagnostic() {
         .find(|job| job.id == "job_locked")
         .unwrap();
     assert_eq!(remaining.state, JobState::Canceled);
+    assert_eq!(remaining.removal_state, Some(RemovalState::CleanupFailed));
     let runtime = state.inner.read().await;
     assert!(runtime.diagnostic_events.iter().any(|event| {
         event.level == DiagnosticLevel::Warning
@@ -5161,6 +5278,43 @@ async fn cancel_delete_cleanup_failure_keeps_canceled_row_with_diagnostic() {
     drop(runtime);
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_job_missing_ids_are_idempotent() {
+    let download_dir = test_runtime_dir("delete-missing-idempotent");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+
+    state
+        .delete_job("missing", false)
+        .await
+        .expect("removing an already deleted row should be a no-op");
+    state
+        .delete_job("missing", true)
+        .await
+        .expect("deleting already deleted files should be a no-op");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn normalize_job_converts_stale_removing_to_cleanup_failed() {
+    let mut job = download_job(
+        "job_removing",
+        JobState::Canceled,
+        ResumeSupport::Unknown,
+        0,
+    );
+    job.removal_state = Some(RemovalState::Removing);
+
+    let normalized = normalize_job(job, &Settings::default());
+
+    assert_eq!(normalized.removal_state, Some(RemovalState::CleanupFailed));
+    assert_eq!(normalized.failure_category, Some(FailureCategory::Disk));
+    assert!(normalized
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("cleanup was interrupted")));
 }
 
 #[tokio::test]
@@ -7342,6 +7496,7 @@ fn download_job(
         integrity_check: None,
         torrent: None,
         state,
+        removal_state: None,
         created_at: 1,
         progress: 0.0,
         total_bytes: 100,

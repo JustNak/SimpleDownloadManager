@@ -7,8 +7,9 @@ use crate::ipc::gather_host_registration_diagnostics;
 use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{
-    clear_torrent_session_cache_directory, validate_settings, BatchDownloadEntry, DuplicatePolicy,
-    EnqueueResult, EnqueueStatus, SharedState, TorrentSessionCacheClearResult,
+    clear_torrent_session_cache_directory, validate_settings, BatchDownloadEntry,
+    DestructiveCleanupJob, DuplicatePolicy, EnqueueResult, EnqueueStatus, SharedState,
+    TorrentSessionCacheClearResult,
 };
 use crate::storage::{
     BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
@@ -810,17 +811,18 @@ pub async fn cancel_job(
     delete_from_disk: Option<bool>,
 ) -> Result<(), String> {
     let delete_from_disk = delete_from_disk.unwrap_or(false);
-    let snapshot = if delete_from_disk {
-        state
+    if delete_from_disk {
+        let prepared = state
             .cancel_jobs_for_delete(&[id.clone()])
             .await
-            .map_err(|error| error.message)?
+            .map_err(|error| error.message)?;
+        emit_snapshot(&app, &prepared.snapshot);
+        schedule_destructive_cleanup(app.clone(), state.inner().clone(), prepared.jobs);
     } else {
-        state.cancel_job(&id).await.map_err(|error| error.message)?
-    };
-    emit_snapshot(&app, &snapshot);
-    if delete_from_disk {
-        schedule_cancel_delete_cleanup(app.clone(), state.inner().clone(), vec![id]);
+        let snapshot = state.cancel_job(&id).await.map_err(|error| error.message)?;
+        emit_snapshot(&app, &snapshot);
+        schedule_downloads(app, state.inner().clone());
+        return Ok(());
     }
     schedule_downloads(app, state.inner().clone());
     Ok(())
@@ -839,27 +841,34 @@ pub async fn cancel_jobs(
     }
 
     let delete_from_disk = delete_from_disk.unwrap_or(false);
-    let snapshot = if delete_from_disk {
-        state
+    if delete_from_disk {
+        let prepared = state
             .cancel_jobs_for_delete(&ids)
             .await
-            .map_err(|error| error.message)?
+            .map_err(|error| error.message)?;
+        emit_snapshot(&app, &prepared.snapshot);
+        schedule_destructive_cleanup(app.clone(), state.inner().clone(), prepared.jobs);
     } else {
-        state
+        let snapshot = state
             .cancel_jobs(&ids)
             .await
-            .map_err(|error| error.message)?
-    };
-    emit_snapshot(&app, &snapshot);
-    if delete_from_disk {
-        schedule_cancel_delete_cleanup(app.clone(), state.inner().clone(), ids);
+            .map_err(|error| error.message)?;
+        emit_snapshot(&app, &snapshot);
     }
     Ok(())
 }
 
-fn schedule_cancel_delete_cleanup(app: AppHandle, state: SharedState, ids: Vec<String>) {
+fn schedule_destructive_cleanup(
+    app: AppHandle,
+    state: SharedState,
+    jobs: Vec<DestructiveCleanupJob>,
+) {
+    if jobs.is_empty() {
+        return;
+    }
+
     tauri::async_runtime::spawn(async move {
-        match state.delete_canceled_jobs_after_release(&ids).await {
+        match state.run_destructive_cleanup(jobs).await {
             Ok(snapshot) => {
                 emit_snapshot(&app, &snapshot);
                 schedule_downloads(app, state);
@@ -958,9 +967,20 @@ pub async fn delete_job(
     id: String,
     delete_from_disk: bool,
 ) -> Result<(), String> {
+    if delete_from_disk {
+        let prepared = state
+            .delete_jobs_for_disk_cleanup(&[id])
+            .await
+            .map_err(|error| error.message)?;
+        emit_snapshot(&app, &prepared.snapshot);
+        schedule_destructive_cleanup(app.clone(), state.inner().clone(), prepared.jobs);
+        schedule_downloads(app, state.inner().clone());
+        return Ok(());
+    }
+
     prepare_torrent_removal(&state, &id).await?;
     let snapshot = state
-        .delete_job(&id, delete_from_disk)
+        .delete_job(&id, false)
         .await
         .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
@@ -977,6 +997,17 @@ pub async fn delete_jobs(
 ) -> Result<(), String> {
     let ids = normalized_job_ids(ids);
     if ids.is_empty() {
+        return Ok(());
+    }
+
+    if delete_from_disk {
+        let prepared = state
+            .delete_jobs_for_disk_cleanup(&ids)
+            .await
+            .map_err(|error| error.message)?;
+        emit_snapshot(&app, &prepared.snapshot);
+        schedule_destructive_cleanup(app.clone(), state.inner().clone(), prepared.jobs);
+        schedule_downloads(app, state.inner().clone());
         return Ok(());
     }
 
@@ -2154,6 +2185,7 @@ mod tests {
             integrity_check: None,
             torrent: None,
             state: JobState::Failed,
+            removal_state: None,
             created_at: 0,
             progress: 25.0,
             total_bytes: 100,

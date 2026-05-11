@@ -19,6 +19,7 @@ assert.match(progressSource, /#if job\.state === JobState\.Paused[\s\S]*Action\(
 assert.match(progressSource, /#if job\.state === JobState\.Completed[\s\S]*Action\('Show'[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}[\s\S]*Action\('Open'[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download progress should expose Show and Open, both closing the popup after success');
 assert.doesNotMatch(progressSource, /Action\('Reveal'/, 'normal download progress popup should label completed reveal as Show, not Reveal');
 assert.match(progressSource, /job\.state === JobState\.Canceled[\s\S]*Action\('Close'/, 'canceled download progress should expose a safe Close fallback');
+assert.match(progressSource, /isRemoving\(job\)[\s\S]*Removing files\.\.\.[\s\S]*Action\('Close'/, 'removing download progress should show cleanup wording with Close only');
 assert.match(progressSource, /Action\('Open'[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download Open should close the popup after a successful action');
 assert.match(sharedPopupSource, /cancelJob\(activeJobId,\s*\{\s*deleteFromDisk:\s*true\s*\}\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed progress Cancel should delete files from disk and close after scheduling cleanup');
 assert.match(progressSource, /type ActionVariant = 'default' \| 'primary' \| 'cancel' \| 'confirm'/, 'download progress actions should use explicit variants for cancel confirmation states');

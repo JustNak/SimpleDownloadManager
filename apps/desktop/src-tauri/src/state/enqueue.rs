@@ -546,6 +546,7 @@ impl RuntimeState {
             integrity_check,
             torrent: (transfer_kind == TransferKind::Torrent).then(TorrentInfo::default),
             state: initial_state,
+            removal_state: None,
             created_at: current_unix_timestamp_millis(),
             progress: 0.0,
             total_bytes: 0,

@@ -803,7 +803,16 @@
     return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state);
   }
 
+  function isRemoving(job: QueueDisplayJob) {
+    return job.removalState === 'removing';
+  }
+
+  function isCleanupFailed(job: QueueDisplayJob) {
+    return job.removalState === 'cleanup_failed';
+  }
+
   function isActionPending(job: QueueDisplayJob): boolean {
+    if (isRemoving(job)) return true;
     if (pendingActionIds.has(job.id)) return true;
     return isBulkAggregateJob(job) && job.bulkMemberIds.some((memberId) => pendingActionIds.has(memberId));
   }
@@ -813,7 +822,7 @@
   }
 
   function canExpandBulkAggregate(job: QueueDisplayJob): job is BulkAggregateDownloadJob {
-    return isBulkAggregateJob(job) && !isCompletedBulkAggregate(job);
+    return isBulkAggregateJob(job) && !isRemoving(job) && !isCompletedBulkAggregate(job);
   }
 
   function isCanceledBulkAggregate(job: DownloadJob): boolean {
@@ -829,6 +838,7 @@
   }
 
   function canOpenSelectedDeletePrompt(job: QueueDisplayJob): boolean {
+    if (isRemoving(job)) return false;
     return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
   }
 
@@ -1007,6 +1017,9 @@
                 ondblclick={(event) => event.stopPropagation()}
                 onkeydown={(event) => event.stopPropagation()}
               >
+                {#if isRemoving(job)}
+                  <button class="flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground opacity-55" title="Removing files" aria-label="Removing files" disabled><Trash2 size={17} /></button>
+                {:else}
                 {#if isCompletedBulkAggregate(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Show" aria-label="Show" onclick={() => onReveal(job.id)}><FolderOpen size={17} /></button>
                 {:else if isBulkAggregateJob(job) && canShowBulkPrimaryAction(job)}
@@ -1024,7 +1037,7 @@
                 {:else if isActive(job)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45" title="Pause" aria-label="Pause" disabled={isActionPending(job)} onclick={() => onPause(job.id)}><Pause size={17} /></button>
                 {/if}
-                {#if !isBulkAggregateJob(job) && [JobState.Failed, JobState.Canceled].includes(job.state)}
+                {#if !isCleanupFailed(job) && !isBulkAggregateJob(job) && [JobState.Failed, JobState.Canceled].includes(job.state)}
                   <button class="flex h-8 w-8 items-center justify-center rounded-md border border-transparent bg-transparent text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground" title="Retry" aria-label="Retry" onclick={() => onRetry(job.id)}><RotateCw size={17} /></button>
                 {/if}
                 {#if !isBulkAggregateJob(job) && canSwapFailedDownloadToBrowser(job)}
@@ -1039,6 +1052,7 @@
                   >
                     <MoreHorizontal size={18} />
                   </button>
+                {/if}
                 {/if}
               </div>
             </div>
@@ -1255,7 +1269,11 @@
   {@const removableJobs = menuJobs.filter((candidate) => !isBulkAggregateJob(candidate) && canRemoveDownloadImmediately(candidate))}
   {@const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state)}
   {@const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state)}
-  {#if isBulkAggregateJob(job)}
+  {#if isRemoving(job)}
+    {@render MenuItem(Trash2, 'Removing files', () => undefined, true, true)}
+  {:else if isCleanupFailed(job)}
+    {@render MenuItem(Trash2, 'Delete from disk', () => openDeleteFromDiskPrompt(job), true)}
+  {:else if isBulkAggregateJob(job)}
     {#if isCompletedBulkAggregate(job)}
       {@render MenuItem(FolderOpen, 'Show', () => onReveal(job.id))}
       {@render MenuItem(RotateCw, 'Retry', () => onRetryBulkMembers(job.id), false, job.bulkRetryableMemberCount <= 0)}

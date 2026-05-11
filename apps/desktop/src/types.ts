@@ -18,6 +18,8 @@ export enum JobState {
   Canceled = 'canceled',
 }
 
+export type RemovalState = 'removing' | 'cleanup_failed';
+
 export type FailureCategory =
   | 'network'
   | 'http'
@@ -85,6 +87,7 @@ export interface DownloadJob {
     diagnostics?: TorrentRuntimeDiagnostics;
   };
   state: JobState;
+  removalState?: RemovalState;
   createdAt?: number;
   progress: number; // 0-100
   totalBytes: number;

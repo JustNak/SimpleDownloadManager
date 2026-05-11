@@ -560,6 +560,12 @@ impl SharedState {
                 code: "INTERNAL_ERROR",
                 message: "Job not found.".into(),
             })?;
+            if job.removal_state == Some(RemovalState::Removing) {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "This download is being removed from disk.".into(),
+                });
+            }
 
             (
                 PathBuf::from(&job.target_path),
@@ -592,6 +598,12 @@ impl SharedState {
                 code: "INTERNAL_ERROR",
                 message: "Job not found.".into(),
             })?;
+            if job.removal_state == Some(RemovalState::Removing) {
+                return Err(BackendError {
+                    code: "INTERNAL_ERROR",
+                    message: "This download is being removed from disk.".into(),
+                });
+            }
 
             (
                 job.state,
@@ -656,6 +668,7 @@ impl SharedState {
             state
                 .jobs
                 .iter()
+                .filter(|job| job.removal_state != Some(RemovalState::Removing))
                 .filter_map(|job| job.bulk_archive.as_ref())
                 .find(|archive| archive.id == archive_id)
                 .cloned()

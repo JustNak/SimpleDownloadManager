@@ -29,6 +29,7 @@ export function canClearCompletedDownloads(jobs: DownloadJob[]): boolean {
 }
 
 export function canRemoveDownloadImmediately(job: DownloadJob): boolean {
+  if (job.removalState === 'removing') return false;
   return !activeRemovalStates.has(job.state);
 }
 
@@ -47,6 +48,7 @@ export function defaultDeleteFromDiskForJobs(jobs: DownloadJob[]): boolean {
 }
 
 export function canShowProgressPopup(job: DownloadJob): boolean {
+  if (job.removalState === 'removing') return true;
   return progressPopupStates.has(job.state);
 }
 

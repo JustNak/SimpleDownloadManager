@@ -61,8 +61,10 @@ impl RuntimeState {
             if matches!(
                 job.state,
                 JobState::Paused | JobState::Failed | JobState::Canceled
-            ) {
+            ) && job.removal_state.is_none()
+            {
                 job.state = JobState::Queued;
+                job.removal_state = None;
                 job.error = None;
                 job.failure_category = None;
                 job.retry_attempts = 0;
@@ -314,6 +316,7 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
     }
 
     mark_stale_bulk_archive_finalization_failed(&mut job);
+    normalize_stale_removal_state(&mut job);
 
     if job.created_at == 0 {
         job.created_at = current_unix_timestamp_millis();
@@ -322,6 +325,22 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
     job.artifact_exists = None;
 
     job
+}
+
+fn normalize_stale_removal_state(job: &mut DownloadJob) {
+    if job.removal_state != Some(RemovalState::Removing) {
+        return;
+    }
+
+    job.removal_state = Some(RemovalState::CleanupFailed);
+    job.state = JobState::Canceled;
+    job.speed = 0;
+    job.eta = 0;
+    job.error = Some(
+        "Disk cleanup was interrupted before it finished. Use Delete from disk to retry cleanup."
+            .into(),
+    );
+    job.failure_category = Some(FailureCategory::Disk);
 }
 
 fn mark_stale_bulk_archive_finalization_failed(job: &mut DownloadJob) {

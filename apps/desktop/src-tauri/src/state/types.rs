@@ -60,6 +60,20 @@ pub struct TorrentRemovalCleanupInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct DestructiveCleanupPlan {
+    pub snapshot: DesktopSnapshot,
+    pub jobs: Vec<DestructiveCleanupJob>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DestructiveCleanupJob {
+    pub id: String,
+    pub filename: String,
+    pub paths: Vec<PathBuf>,
+    pub wait_for_worker_release: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct TorrentSessionCacheClearState {
     pub snapshot: DesktopSnapshot,
     pub torrents: Vec<TorrentInfo>,

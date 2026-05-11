@@ -48,5 +48,6 @@ assert.match(torrentSource, /Show[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ c
 assert.match(torrentSource, /Confirm delete[\s\S]*popup\.onCancelClick/, 'torrent popup should make the confirmed cancel state destructive');
 assert.match(sharedPopupSource, /cancelJob\(activeJobId,\s*\{\s*deleteFromDisk:\s*true\s*\}\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed torrent Cancel should delete files from disk and close through the shared popup lifecycle');
 assert.match(torrentSource, /isCanceled\(job\)[\s\S]*Action\('Close'/, 'canceled torrent progress should expose a safe Close fallback');
+assert.match(torrentSource, /isRemoving\(job\)[\s\S]*Removing files\.\.\.[\s\S]*Action\('Close'/, 'removing torrent progress should show cleanup wording with Close only');
 assert.doesNotMatch(torrentSource, /<span className="text-muted-foreground">[>>]<\/span>/, 'torrent detail rows should not render decorative chevrons');
 assert.doesNotMatch(torrentSource, /(?<!\{)#[0-9a-fA-F]{3,8}\b|teal|cyan|emerald/, 'torrent popup should use existing theme tokens instead of hardcoded custom colors');

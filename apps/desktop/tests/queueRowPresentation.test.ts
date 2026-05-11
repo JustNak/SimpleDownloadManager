@@ -148,6 +148,18 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  queueStatusPresentation({ ...baseJob, state: 'canceled', removalState: 'removing' }),
+  { label: 'Removing', tone: 'warning' },
+  'destructive cleanup should show Removing instead of looking like a leftover canceled row',
+);
+
+assert.deepEqual(
+  queueStatusPresentation({ ...baseJob, state: 'canceled', removalState: 'cleanup_failed' }),
+  { label: 'Cleanup failed', tone: 'destructive' },
+  'failed destructive cleanup should be distinct from normal canceled rows',
+);
+
+assert.deepEqual(
   queueStatusPresentation({
     ...baseJob,
     state: 'downloading',

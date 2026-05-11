@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { groupBulkMembersByArchiveId, groupBulkQueueRows, isBulkAggregateJob } from '../src/bulkQueueRows.ts';
 import { filterJobsForView, getQueueCounts } from '../src/downloadViews.ts';
+import { queueStatusPresentation } from '../src/queueRowPresentation.ts';
 import type { DownloadJob } from '../src/types.ts';
 
 const baseJob: DownloadJob = {
@@ -173,6 +174,39 @@ const completedRows = groupBulkQueueRows([
 
 assert.equal(completedRows[0].state, 'completed', 'completed archive rows should represent the archive status');
 assert.equal(completedRows[0].targetPath, 'C:\\Downloads\\bulk-download.zip', 'completed aggregate target should be the archive output path');
+
+const removingRows = groupBulkQueueRows([
+  job({
+    id: 'part_removing',
+    filename: 'Game.part01.rar',
+    state: 'canceled',
+    removalState: 'removing',
+    bulkArchive,
+  }),
+  job({
+    id: 'part_done',
+    filename: 'Game.part02.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    bulkArchive,
+  }),
+]);
+
+if (!isBulkAggregateJob(removingRows[0])) {
+  throw new Error('removing aggregate should expose bulk metadata');
+}
+assert.equal(
+  removingRows[0].removalState,
+  'removing',
+  'bulk aggregate should inherit removing state while destructive cleanup is active',
+);
+assert.deepEqual(
+  queueStatusPresentation(removingRows[0]),
+  { label: 'Removing', tone: 'warning' },
+  'bulk aggregate rows should display Removing while member cleanup is active',
+);
 
 const failedMemberRows = groupBulkQueueRows([
   job({
