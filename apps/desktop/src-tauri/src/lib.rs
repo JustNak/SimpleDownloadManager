@@ -1,3 +1,4 @@
+pub(crate) mod archive_parts;
 pub mod commands;
 pub mod download;
 pub mod hosters;

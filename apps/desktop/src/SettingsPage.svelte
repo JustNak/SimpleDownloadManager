@@ -259,7 +259,7 @@
     return {
       ...settings,
       outputDirectory: settings.outputDirectory.trim() || defaultBulkDownloadDirectory(downloadDirectory),
-      maxConcurrentDownloads: Math.max(1, Math.min(10, Math.trunc(settings.maxConcurrentDownloads) || 2)),
+      maxConcurrentDownloads: Math.max(1, Math.min(24, Math.trunc(settings.maxConcurrentDownloads) || 4)),
       speedLimitKibPerSecond: Math.max(0, Math.min(1048576, Math.trunc(settings.speedLimitKibPerSecond) || 0)),
       downloadPerformanceMode: downloadPerformanceModes.has(settings.downloadPerformanceMode) ? settings.downloadPerformanceMode : 'balanced',
       hosterFairnessMode: bulkHosterFairnessModes.has(settings.hosterFairnessMode) ? settings.hosterFairnessMode : 'adaptive',
@@ -784,7 +784,7 @@
 {/snippet}
 
 {#snippet bulkMaxConcurrentControl()}
-  <input type="number" min="1" max="10" bind:value={formData.bulk.maxConcurrentDownloads} onchange={() => updateBulkSettings({ maxConcurrentDownloads: formData.bulk.maxConcurrentDownloads })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+  <input type="number" min="1" max="24" bind:value={formData.bulk.maxConcurrentDownloads} onchange={() => updateBulkSettings({ maxConcurrentDownloads: formData.bulk.maxConcurrentDownloads })} class="h-9 w-28 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
 {/snippet}
 
 {#snippet bulkSpeedLimitControl()}

@@ -67,6 +67,7 @@ const PROGRESS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_secs(1);
 const BULK_HOSTER_STARTUP_GRACE_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_LOW_SPEED_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND: u64 = 64 * 1024;
+const BULK_HOSTER_THROUGHPUT_RESCUE_FLOOR_BYTES_PER_SECOND: u64 = 2 * 1024 * 1024;
 const BULK_HOSTER_HEALTH_SAMPLE_WINDOW: Duration = Duration::from_secs(1);
 const BULK_HOSTER_TRANSIENT_LOW_SAMPLE_GRACE: Duration = Duration::from_secs(3);
 const BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW: Duration = Duration::from_secs(20);

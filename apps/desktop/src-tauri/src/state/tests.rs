@@ -5938,7 +5938,7 @@ async fn adaptive_bulk_hoster_fairness_ramps_to_four_after_healthy_progress() {
 }
 
 #[tokio::test]
-async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy_progress() {
+async fn accelerated_datanodes_fairness_expands_fast_window_after_recent_healthy_progress() {
     let download_dir = test_runtime_dir("bulk-datanodes-fast-ramp");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_ramp");
     let jobs = (1..=8)
@@ -5960,26 +5960,38 @@ async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy
     assert_eq!(first_tasks.len(), 1);
     assert_eq!(first_tasks[0].id, "job_datanodes_1");
 
-    for next_index in 2..=8 {
-        let current_id = format!("job_datanodes_{}", next_index - 1);
-        {
-            let mut runtime = state.inner.write().await;
-            seed_accelerated_datanodes_health(
-                &mut runtime,
-                &current_id,
-                512 * 1024,
-                Duration::from_secs(5),
-                3,
-            );
-        }
-
-        let (_, tasks) = state
-            .claim_schedulable_jobs()
-            .await
-            .expect("accelerated DataNodes claim should ramp");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, format!("job_datanodes_{next_index}"));
+    {
+        let mut runtime = state.inner.write().await;
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(5),
+            3,
+        );
     }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("accelerated DataNodes claim should expand");
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        task_ids,
+        vec![
+            "job_datanodes_2",
+            "job_datanodes_3",
+            "job_datanodes_4",
+            "job_datanodes_5",
+            "job_datanodes_6",
+            "job_datanodes_7",
+            "job_datanodes_8",
+        ],
+        "fast protected hoster batches should expand the contiguous archive window once the active worker is healthy but aggregate speed is low"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -6156,6 +6168,138 @@ async fn accelerated_fuckingfast_balanced_ramps_after_slow_positive_progress_sam
 
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "job_fuckingfast_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_fuckingfast_throughput_rescue_expands_same_archive_window() {
+    fn numbered_fuckingfast_job(
+        id: &str,
+        archive: BulkArchiveInfo,
+        part_number: u32,
+    ) -> DownloadJob {
+        let mut job = fuckingfast_bulk_job(id, archive);
+        job.filename = format!("WWE_2K25.part{part_number:03}.rar");
+        job.url = format!("https://fuckingfast.co/{id}#{}", job.filename);
+        job.resolved_from_url = Some(job.url.clone());
+        job.total_bytes = 500 * 1024 * 1024;
+        job
+    }
+
+    let download_dir = test_runtime_dir("bulk-fuckingfast-throughput-rescue");
+    let archive = bulk_archive_info(&download_dir, "bulk_fuckingfast_throughput_rescue");
+    let mut active = numbered_fuckingfast_job("job_fuckingfast_17", archive.clone(), 17);
+    active.state = JobState::Downloading;
+    active.speed = 303 * 1024;
+    active.downloaded_bytes = 8 * 1024 * 1024;
+
+    let mut jobs = vec![active];
+    for part_number in 18..=23 {
+        jobs.push(numbered_fuckingfast_job(
+            &format!("job_fuckingfast_{part_number}"),
+            archive.clone(),
+            part_number,
+        ));
+    }
+
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 2;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_fuckingfast_17".into());
+        seed_accelerated_hoster_health(
+            &mut runtime,
+            "job_fuckingfast_17",
+            303 * 1024,
+            Duration::from_secs(8),
+            2,
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming during FuckingFast throughput rescue should work");
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        task_ids.len() >= 3,
+        "slow protected-hoster batches should expand past the configured two-file floor; got {task_ids:?}"
+    );
+    assert_eq!(
+        &task_ids[..3],
+        [
+            "job_fuckingfast_18",
+            "job_fuckingfast_19",
+            "job_fuckingfast_20",
+        ],
+        "throughput rescue should keep the same archive window contiguous"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn archive_window_schedules_earliest_unfinished_part_before_later_parts() {
+    fn numbered_fuckingfast_job(
+        id: &str,
+        archive: BulkArchiveInfo,
+        part_number: u32,
+    ) -> DownloadJob {
+        let mut job = fuckingfast_bulk_job(id, archive);
+        job.filename = format!("WWE_2K25.part{part_number:03}.rar");
+        job.url = format!("https://fuckingfast.co/{id}#{}", job.filename);
+        job.resolved_from_url = Some(job.url.clone());
+        job.total_bytes = 500 * 1024 * 1024;
+        job
+    }
+
+    let download_dir = test_runtime_dir("bulk-fuckingfast-archive-window-order");
+    let archive = bulk_archive_info(&download_dir, "bulk_fuckingfast_archive_window_order");
+    let mut active = numbered_fuckingfast_job("job_fuckingfast_17", archive.clone(), 17);
+    active.state = JobState::Downloading;
+    active.speed = 5 * 1024 * 1024;
+    active.downloaded_bytes = 32 * 1024 * 1024;
+    let later = numbered_fuckingfast_job("job_fuckingfast_19", archive.clone(), 19);
+    let earlier = numbered_fuckingfast_job("job_fuckingfast_18", archive, 18);
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active, later, earlier],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 6;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_fuckingfast_17".into());
+        seed_accelerated_hoster_health(
+            &mut runtime,
+            "job_fuckingfast_17",
+            5 * 1024 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming with out-of-order multipart rows should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].id, "job_fuckingfast_18",
+        "same-archive multipart rows must not let a later queued part leapfrog the earliest unfinished part"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }

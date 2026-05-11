@@ -1,3 +1,4 @@
+import { detectMultipartArchivePart } from './bulkArchiveNaming.ts';
 import type { BulkArchiveStatus, DownloadJob } from './types';
 
 export interface BulkAggregateDownloadJob extends DownloadJob {
@@ -68,6 +69,10 @@ export function groupBulkMembersByArchiveId(jobs: readonly DownloadJob[]): BulkM
     (groups[archive.id] ??= []).push(job);
   }
 
+  for (const archiveId of Object.keys(groups)) {
+    groups[archiveId] = orderedBulkMembers(groups[archiveId]);
+  }
+
   return groups;
 }
 
@@ -76,17 +81,18 @@ export function isBulkAggregateJob(job: DownloadJob | QueueDisplayJob): job is B
 }
 
 function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDownloadJob {
-  const first = members[0];
-  const archive = members.find((job) => job.bulkArchive)?.bulkArchive;
-  const totalBytes = sum(members, (job) => Math.max(0, job.totalBytes));
-  const downloadedBytes = sum(members, (job) => Math.max(0, job.downloadedBytes));
+  const orderedMembers = orderedBulkMembers(members);
+  const first = orderedMembers[0];
+  const archive = orderedMembers.find((job) => job.bulkArchive)?.bulkArchive;
+  const totalBytes = sum(orderedMembers, (job) => Math.max(0, job.totalBytes));
+  const downloadedBytes = sum(orderedMembers, (job) => Math.max(0, job.downloadedBytes));
   const speed = sum(
-    members.filter((job) => job.state === DOWNLOADING),
+    orderedMembers.filter((job) => job.state === DOWNLOADING),
     (job) => Math.max(0, job.speed),
   );
-  const progress = deriveAggregateProgress(members, downloadedBytes, totalBytes);
-  const state = deriveAggregateState(members, archive?.archiveStatus);
-  const removalState = deriveAggregateRemovalState(members);
+  const progress = deriveAggregateProgress(orderedMembers, downloadedBytes, totalBytes);
+  const state = deriveAggregateState(orderedMembers, archive?.archiveStatus);
+  const removalState = deriveAggregateRemovalState(orderedMembers);
   const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
 
   return {
@@ -111,11 +117,11 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     artifactExists: undefined,
     bulkArchive: archive,
     bulkAggregate: true,
-    bulkMemberIds: members.map((job) => job.id),
+    bulkMemberIds: orderedMembers.map((job) => job.id),
     bulkArchiveId: archive?.id ?? first.id,
     bulkArchiveOutputPath: archive?.outputPath,
-    bulkRetryableMemberCount: members.filter(isRetryableBulkMember).length,
-    bulkArchiveFixable: isFixableBulkArchive(members, archive?.archiveStatus),
+    bulkRetryableMemberCount: orderedMembers.filter(isRetryableBulkMember).length,
+    bulkArchiveFixable: isFixableBulkArchive(orderedMembers, archive?.archiveStatus),
   };
 }
 
@@ -194,4 +200,29 @@ function clampProgress(progress: number): number {
 
 function sum<T>(items: readonly T[], getValue: (item: T) => number): number {
   return items.reduce((total, item) => total + getValue(item), 0);
+}
+
+function orderedBulkMembers(members: readonly DownloadJob[]): DownloadJob[] {
+  return [...members].sort(compareBulkMembers);
+}
+
+function compareBulkMembers(left: DownloadJob, right: DownloadJob): number {
+  const leftPart = detectMultipartArchivePart(left.filename);
+  const rightPart = detectMultipartArchivePart(right.filename);
+
+  if (leftPart && rightPart) {
+    const keyOrder = leftPart.key.localeCompare(rightPart.key);
+    if (keyOrder !== 0) return keyOrder;
+    if (leftPart.partNumber !== rightPart.partNumber) {
+      return leftPart.partNumber - rightPart.partNumber;
+    }
+  } else if (leftPart || rightPart) {
+    return leftPart ? -1 : 1;
+  }
+
+  const createdOrder = (left.createdAt ?? 0) - (right.createdAt ?? 0);
+  if (createdOrder !== 0) return createdOrder;
+  const filenameOrder = left.filename.localeCompare(right.filename);
+  if (filenameOrder !== 0) return filenameOrder;
+  return left.id.localeCompare(right.id);
 }

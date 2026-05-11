@@ -48,7 +48,7 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
     },
     bulk: {
       outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),
-      maxConcurrentDownloads: 2,
+      maxConcurrentDownloads: 4,
       speedLimitKibPerSecond: 0,
       downloadPerformanceMode: 'balanced',
       hosterFairnessMode: 'adaptive',

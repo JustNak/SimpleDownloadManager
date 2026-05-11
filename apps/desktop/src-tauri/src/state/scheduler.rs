@@ -1,4 +1,5 @@
 use super::*;
+use crate::archive_parts::detect_archive_part;
 
 impl SharedState {
     pub async fn claim_schedulable_jobs(
@@ -29,7 +30,12 @@ impl SharedState {
                 })
                 .count() as u32;
             let normal_slot_limit = state.settings.max_concurrent_downloads.max(1);
-            let bulk_slot_limit = state.settings.bulk.max_concurrent_downloads.max(1);
+            let bulk_slot_limit = state
+                .settings
+                .bulk
+                .max_concurrent_downloads
+                .max(1)
+                .max(accelerated_bulk_slot_floor(&state));
             let available_normal_slots = normal_slot_limit.saturating_sub(active_normal_workers);
             let available_bulk_slots = bulk_slot_limit.saturating_sub(active_bulk_workers);
 
@@ -97,9 +103,27 @@ impl SharedState {
                 };
                 protected_bulk_hoster_targets.insert(key, target);
             }
+            let (protected_bulk_archive_windows, archive_window_diagnostics) =
+                protected_bulk_archive_scheduling_windows(
+                    &state,
+                    &fairness_metrics_by_key,
+                    &protected_bulk_hoster_targets,
+                    bulk_slot_limit,
+                    fairness_mode,
+                );
+            for message in archive_window_diagnostics {
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    message,
+                    None,
+                );
+            }
+            let scheduler_job_order = scheduler_job_indexes(&state);
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
             let mut blocked_accelerated_hoster_queue_keys: HashSet<String> = HashSet::new();
-            for job in &state.jobs {
+            for job_index in scheduler_job_order {
+                let job = &state.jobs[job_index];
                 if scheduled_normal_workers >= available_normal_slots
                     && scheduled_bulk_workers >= available_bulk_slots
                 {
@@ -116,8 +140,15 @@ impl SharedState {
                                 .get(&fairness_key)
                                 .cloned()
                                 .unwrap_or_default();
+                            let archive_window = protected_bulk_hoster_priority_group_key(job)
+                                .and_then(|key| protected_bulk_archive_windows.get(&key));
                             let accelerated_hoster =
                                 is_accelerated_hoster_bulk_job(&state.settings, job);
+                            if archive_window
+                                .is_some_and(|window| !window.allowed_job_ids.contains(&job.id))
+                            {
+                                continue;
+                            }
                             if accelerated_hoster {
                                 if blocked_accelerated_hoster_queue_keys.contains(&fairness_key) {
                                     continue;
@@ -129,7 +160,8 @@ impl SharedState {
                             }
                             let protected_bulk_hoster_claim_blocked = fairness_mode
                                 != BulkHosterFairnessMode::Off
-                                && fairness_metrics.has_blocking_worker;
+                                && fairness_metrics.has_blocking_worker
+                                && !archive_window.is_some_and(|window| window.throughput_rescue);
                             let scheduled_for_origin = scheduled_protected_bulk_hoster_workers
                                 .get(&fairness_key)
                                 .copied()
@@ -138,10 +170,16 @@ impl SharedState {
                                 .get(&fairness_key)
                                 .copied()
                                 .unwrap_or(1);
+                            let protected_bulk_hoster_target = archive_window
+                                .map(|window| window.target_active)
+                                .unwrap_or(protected_bulk_hoster_target);
                             if protected_bulk_hoster_claim_blocked
                                 || fairness_metrics.active_count + scheduled_for_origin
                                     >= protected_bulk_hoster_target
-                                || (accelerated_hoster && scheduled_for_origin > 0)
+                                || (accelerated_hoster
+                                    && scheduled_for_origin > 0
+                                    && !archive_window
+                                        .is_some_and(|window| window.throughput_rescue))
                             {
                                 if accelerated_hoster {
                                     blocked_accelerated_hoster_queue_keys.insert(fairness_key);
@@ -464,6 +502,207 @@ fn hoster_priority_throttle_decision_for_state(
     }
 
     None
+}
+
+#[derive(Debug, Clone)]
+struct ProtectedBulkArchiveMember {
+    index: usize,
+    id: String,
+    state: JobState,
+    detected_rank: u8,
+    part_key: String,
+    part_number: u32,
+    created_at: u64,
+}
+
+impl ProtectedBulkArchiveMember {
+    fn from_job(index: usize, job: &DownloadJob) -> Self {
+        let detected_part = detect_archive_part(&job.filename);
+        let (detected_rank, part_key, part_number) = detected_part
+            .map(|part| (0, part.key, part.part_number))
+            .unwrap_or_else(|| (1, String::new(), u32::try_from(index).unwrap_or(u32::MAX)));
+
+        Self {
+            index,
+            id: job.id.clone(),
+            state: job.state,
+            detected_rank,
+            part_key,
+            part_number,
+            created_at: job.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProtectedBulkArchiveWindow {
+    allowed_job_ids: HashSet<String>,
+    target_active: u32,
+    throughput_rescue: bool,
+}
+
+fn accelerated_bulk_slot_floor(state: &RuntimeState) -> u32 {
+    state
+        .jobs
+        .iter()
+        .filter(|job| is_bulk_member_job(job))
+        .filter_map(|job| accelerated_hoster_concurrency(&state.settings, job))
+        .max()
+        .unwrap_or(0)
+}
+
+fn scheduler_job_indexes(state: &RuntimeState) -> Vec<usize> {
+    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
+    for (index, job) in state.jobs.iter().enumerate() {
+        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(ProtectedBulkArchiveMember::from_job(index, job));
+        }
+    }
+
+    for members in groups.values_mut() {
+        sort_protected_bulk_archive_members(members);
+    }
+
+    let mut emitted_groups = HashSet::new();
+    let mut order = Vec::with_capacity(state.jobs.len());
+    for (index, job) in state.jobs.iter().enumerate() {
+        let Some(group_key) = protected_bulk_hoster_priority_group_key(job) else {
+            order.push(index);
+            continue;
+        };
+
+        if emitted_groups.insert(group_key.clone()) {
+            if let Some(members) = groups.get(&group_key) {
+                order.extend(members.iter().map(|member| member.index));
+            }
+        }
+    }
+
+    order
+}
+
+fn protected_bulk_archive_scheduling_windows(
+    state: &RuntimeState,
+    fairness_metrics_by_key: &HashMap<String, BulkHosterFairnessMetrics>,
+    protected_bulk_hoster_targets: &HashMap<String, u32>,
+    bulk_slot_limit: u32,
+    fairness_mode: BulkHosterFairnessMode,
+) -> (
+    HashMap<(String, String), ProtectedBulkArchiveWindow>,
+    Vec<String>,
+) {
+    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
+    for (index, job) in state.jobs.iter().enumerate() {
+        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(ProtectedBulkArchiveMember::from_job(index, job));
+        }
+    }
+
+    let mut windows = HashMap::new();
+    let mut diagnostics = Vec::new();
+    for (group_key, mut members) in groups {
+        sort_protected_bulk_archive_members(&mut members);
+
+        let fairness_key = &group_key.1;
+        let metrics = fairness_metrics_by_key
+            .get(fairness_key)
+            .cloned()
+            .unwrap_or_default();
+        let configured_target = protected_bulk_hoster_targets
+            .get(fairness_key)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let performance_cap = members
+            .iter()
+            .filter_map(|member| state.jobs.get(member.index))
+            .filter_map(|job| accelerated_hoster_concurrency(&state.settings, job))
+            .max()
+            .unwrap_or(configured_target)
+            .max(1);
+        let has_queued_member = members
+            .iter()
+            .any(|member| member.state == JobState::Queued);
+        let throughput_rescue = fairness_mode == BulkHosterFairnessMode::Adaptive
+            && has_queued_member
+            && !metrics.has_blocking_worker
+            && metrics.active_count > 0
+            && metrics.aggregate_speed > 0
+            && metrics.aggregate_speed < BULK_HOSTER_THROUGHPUT_RESCUE_FLOOR_BYTES_PER_SECOND
+            && performance_cap > configured_target;
+        let target_active = if throughput_rescue {
+            configured_target.max(performance_cap)
+        } else {
+            configured_target
+        }
+        .min(bulk_slot_limit.max(1))
+        .max(1);
+
+        let Some(first_unfinished_index) = members
+            .iter()
+            .position(|member| is_unfinished_bulk_archive_member(member.state))
+        else {
+            continue;
+        };
+        let allowed_job_ids = members
+            .iter()
+            .skip(first_unfinished_index)
+            .take(target_active as usize)
+            .map(|member| member.id.clone())
+            .collect::<HashSet<_>>();
+
+        if throughput_rescue {
+            diagnostics.push(format!(
+                "Throughput rescue expanded protected bulk archive {} on {} to {} active files at {} B/s.",
+                group_key.0, group_key.1, target_active, metrics.aggregate_speed
+            ));
+        } else {
+            diagnostics.push(format!(
+                "Archive-aware protected bulk window for {} on {} allows {} active files at {} B/s.",
+                group_key.0, group_key.1, target_active, metrics.aggregate_speed
+            ));
+        }
+
+        windows.insert(
+            group_key,
+            ProtectedBulkArchiveWindow {
+                allowed_job_ids,
+                target_active,
+                throughput_rescue,
+            },
+        );
+    }
+
+    (windows, diagnostics)
+}
+
+fn sort_protected_bulk_archive_members(members: &mut [ProtectedBulkArchiveMember]) {
+    members.sort_by(|left, right| {
+        (
+            left.detected_rank,
+            left.part_key.as_str(),
+            left.part_number,
+            left.created_at,
+            left.index,
+        )
+            .cmp(&(
+                right.detected_rank,
+                right.part_key.as_str(),
+                right.part_number,
+                right.created_at,
+                right.index,
+            ))
+    });
+}
+
+fn is_unfinished_bulk_archive_member(state: JobState) -> bool {
+    !matches!(state, JobState::Completed | JobState::Canceled)
 }
 
 fn bulk_hoster_fairness_metrics_by_key(

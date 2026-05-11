@@ -877,7 +877,7 @@ fn default_auto_retry_attempts() -> u32 {
 }
 
 fn default_bulk_max_concurrent_downloads() -> u32 {
-    2
+    4
 }
 
 fn default_torrent_enabled() -> bool {
@@ -1463,7 +1463,7 @@ mod tests {
 
         assert!(settings.download_directory.ends_with("Downloads"));
         assert_eq!(settings.auto_retry_attempts, 3);
-        assert_eq!(settings.bulk.max_concurrent_downloads, 2);
+        assert_eq!(settings.bulk.max_concurrent_downloads, 4);
         assert_eq!(settings.bulk.speed_limit_kib_per_second, 0);
         assert_eq!(
             settings.bulk.download_performance_mode,
@@ -1539,7 +1539,7 @@ mod tests {
         assert!(settings.show_details_on_click);
         assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
         assert!(settings.notification_sounds_enabled);
-        assert_eq!(settings.bulk.max_concurrent_downloads, 2);
+        assert_eq!(settings.bulk.max_concurrent_downloads, 4);
         assert_eq!(
             settings.bulk.start_behavior,
             BulkStartBehavior::ReviewThenStart

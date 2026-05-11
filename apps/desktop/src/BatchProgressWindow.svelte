@@ -42,6 +42,7 @@
   import { runPopupAction } from './popupActions';
   import { createDefaultSettings } from './defaultSettings';
   import { getVirtualQueueWindow } from './queueVirtualization';
+  import { detectMultipartArchivePart } from './bulkArchiveNaming';
 
   type IconComponent = Component<{ size?: number; class?: string }>;
   type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm' | 'show';
@@ -116,13 +117,13 @@
       context = snapshot?.context ?? null;
       if (snapshot) {
         applySnapshotAppearance(snapshot);
-        jobs = snapshot.jobs;
+        jobs = orderedBatchJobs(snapshot.context, snapshot.jobs);
       }
 
       const nextDispose = await subscribeToBatchProgressSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
         context = nextSnapshot.context;
-        jobs = nextSnapshot.jobs;
+        jobs = orderedBatchJobs(nextSnapshot.context, nextSnapshot.jobs);
       });
       if (disposed) {
         void nextDispose();
@@ -455,6 +456,52 @@
     return 'bg-primary';
   }
 
+  function orderedBatchJobs(batchContext: ProgressBatchContext | null, batchJobs: DownloadJob[]): DownloadJob[] {
+    if (batchContext?.kind !== 'bulk') return batchJobs;
+    return batchJobs
+      .map((job, index) => ({ job, index }))
+      .sort((left, right) => compareBulkBatchJobs(left.job, right.job) || left.index - right.index)
+      .map((entry) => entry.job);
+  }
+
+  function compareBulkBatchJobs(left: DownloadJob, right: DownloadJob): number {
+    const leftPart = detectMultipartArchivePart(left.filename);
+    const rightPart = detectMultipartArchivePart(right.filename);
+    if (leftPart && rightPart) {
+      const keyOrder = leftPart.key.localeCompare(rightPart.key);
+      if (keyOrder !== 0) return keyOrder;
+      if (leftPart.partNumber !== rightPart.partNumber) {
+        return leftPart.partNumber - rightPart.partNumber;
+      }
+    } else if (leftPart || rightPart) {
+      return leftPart ? -1 : 1;
+    }
+
+    return 0;
+  }
+
+  function isQueuedProtectedUnknownBulkMember(job: DownloadJob): boolean {
+    return job.state === JobState.Queued
+      && Boolean(job.bulkArchive)
+      && Boolean(job.resolvedFromUrl)
+      && job.totalBytes <= 0
+      && job.downloadedBytes <= 0;
+  }
+
+  function batchRowProgressText(job: DownloadJob, rowProgress: number): string {
+    return isQueuedProtectedUnknownBulkMember(job) ? 'Preparing' : `${rowProgress.toFixed(0)}%`;
+  }
+
+  function batchRowSizeText(job: DownloadJob): string {
+    if (isQueuedProtectedUnknownBulkMember(job)) return 'Waiting';
+    return job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown';
+  }
+
+  function batchRowSizeTitle(job: DownloadJob): string {
+    if (isQueuedProtectedUnknownBulkMember(job)) return 'Waiting for hoster preparation';
+    return job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown';
+  }
+
   function phaseClass(phase: BulkPhase | BulkUiState | BulkFinalizingStepId | null) {
     if (phase === 'failed') return 'text-destructive';
     if (phase === 'canceled') return 'text-muted-foreground';
@@ -648,9 +695,9 @@
             </div>
             <div class="min-w-0 text-right text-xs">
               <div class={selected ? `font-semibold ${jobStatusTextClass(job)}` : 'font-semibold text-muted-foreground'}>{selected ? statusText(job) : 'Excluded'}</div>
-              <div class="mt-0.5 tabular-nums text-muted-foreground">{rowProgress.toFixed(0)}%</div>
-              <div class="truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
-                {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
+              <div class="mt-0.5 tabular-nums text-muted-foreground">{batchRowProgressText(job, rowProgress)}</div>
+              <div class="truncate tabular-nums text-muted-foreground" title={batchRowSizeTitle(job)}>
+                {batchRowSizeText(job)}
               </div>
             </div>
           </label>
@@ -697,8 +744,8 @@
               <div class={bulkReviewStatusClass(job)}>
                 {bulkReviewStatusText(job)}
               </div>
-              <div class="mt-0.5 truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
-                {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
+              <div class="mt-0.5 truncate tabular-nums text-muted-foreground" title={batchRowSizeTitle(job)}>
+                {batchRowSizeText(job)}
               </div>
             </div>
           </label>
@@ -728,10 +775,10 @@
     <div class="min-w-0 text-right text-xs">
       <div class={`font-semibold ${jobStatusTextClass(job)}`}>{statusText(job)}</div>
       <div class="mt-0.5 tabular-nums text-muted-foreground">
-        {job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : `${rowProgress.toFixed(0)}%`}
+        {job.state === JobState.Downloading ? `${formatBytes(job.speed)}/s` : batchRowProgressText(job, rowProgress)}
       </div>
-      <div class="truncate tabular-nums text-muted-foreground" title={formatBytes(job.totalBytes)}>
-        {job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown'}
+      <div class="truncate tabular-nums text-muted-foreground" title={batchRowSizeTitle(job)}>
+        {batchRowSizeText(job)}
       </div>
     </div>
   </div>

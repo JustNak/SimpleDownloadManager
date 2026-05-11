@@ -437,6 +437,19 @@ assert.equal(
   'torrent size cells should show total size instead of verified bytes over total',
 );
 
+assert.equal(
+  formatQueueSize({
+    ...baseJob,
+    state: 'queued',
+    resolvedFromUrl: 'https://fuckingfast.co/file-code#WWE_2K25.part019.rar',
+    bulkArchive: { id: 'bulk_1', name: 'bulk-download.zip' },
+    downloadedBytes: 0,
+    totalBytes: 0,
+  }, byteLabel),
+  'Waiting',
+  'queued protected-hoster bulk members with unknown size should show a waiting state instead of 0 B',
+);
+
 const torrentWithCheckedProgressJump: DownloadJob = {
   ...baseJob,
   transferKind: 'torrent',

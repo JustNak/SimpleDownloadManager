@@ -87,6 +87,31 @@ assert.equal(membersByArchiveId.bulk_1[0], partOne, 'bulk member lookup should k
 assert.equal('bulkMembers' in aggregate, false, 'aggregate rows should not clone member data');
 assert.equal('bulkArchiveMemberSearchText' in aggregate, false, 'aggregate rows should not store always-built member search text');
 
+const outOfOrderRows = groupBulkQueueRows([
+  job({ id: 'part_19', filename: 'WWE_2K25.part019.rar', bulkArchive }),
+  job({ id: 'part_17', filename: 'WWE_2K25.part017.rar', bulkArchive }),
+  job({ id: 'part_18', filename: 'WWE_2K25.part018.rar', bulkArchive }),
+]);
+const outOfOrderMembers = groupBulkMembersByArchiveId([
+  job({ id: 'part_19', filename: 'WWE_2K25.part019.rar', bulkArchive }),
+  job({ id: 'part_17', filename: 'WWE_2K25.part017.rar', bulkArchive }),
+  job({ id: 'part_18', filename: 'WWE_2K25.part018.rar', bulkArchive }),
+]);
+
+if (!isBulkAggregateJob(outOfOrderRows[0])) {
+  throw new Error('out-of-order aggregate should expose bulk metadata');
+}
+assert.deepEqual(
+  outOfOrderRows[0].bulkMemberIds,
+  ['part_17', 'part_18', 'part_19'],
+  'aggregate metadata should expose multipart members in detected part order',
+);
+assert.deepEqual(
+  outOfOrderMembers.bulk_1.map((member) => member.id),
+  ['part_17', 'part_18', 'part_19'],
+  'inline bulk member lookup should sort multipart files by sequence, not queue insertion order',
+);
+
 assert.deepEqual(
   getQueueCounts(rows),
   {

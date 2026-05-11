@@ -164,9 +164,19 @@ export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueSt
 }
 
 export function formatQueueSize(
-  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes'> & Partial<Pick<DownloadJob, 'transferKind'>>,
+  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes'>
+    & Partial<Pick<DownloadJob, 'transferKind' | 'resolvedFromUrl' | 'bulkArchive'>>,
   formatBytes: (bytes: number) => string,
 ): string {
+  if (
+    job.totalBytes <= 0
+    && job.state === 'queued'
+    && job.transferKind !== 'torrent'
+    && Boolean(job.resolvedFromUrl)
+    && Boolean(job.bulkArchive)
+  ) {
+    return 'Waiting';
+  }
   if (job.totalBytes <= 0) return formatBytes(job.downloadedBytes);
   if (job.transferKind === 'torrent') return formatBytes(job.totalBytes);
   if (job.state === 'completed') return formatBytes(job.totalBytes);
@@ -236,7 +246,8 @@ export function torrentDiagnosticsSummary(
 }
 
 export function formatQueueSizeTitle(
-  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes' | 'torrent'> & Partial<Pick<DownloadJob, 'transferKind'>>,
+  job: Pick<DownloadJob, 'state' | 'downloadedBytes' | 'totalBytes' | 'torrent'>
+    & Partial<Pick<DownloadJob, 'transferKind' | 'resolvedFromUrl' | 'bulkArchive'>>,
   formatBytes: (bytes: number) => string,
 ): string {
   if (job.transferKind !== 'torrent') return formatQueueSize(job, formatBytes);
