@@ -52,6 +52,7 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       speedLimitKibPerSecond: 0,
       downloadPerformanceMode: 'balanced',
       hosterFairnessMode: 'adaptive',
+      hosterAccelerationMode: 'safe',
       autoRetryOverrideEnabled: false,
       autoRetryAttempts: 3,
       startBehavior: 'review_then_start',

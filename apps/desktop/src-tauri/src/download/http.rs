@@ -64,23 +64,29 @@ async fn run_http_download_attempt_for_url(
     let speed_limit = state
         .speed_limit_bytes_per_second_for_task(task.is_bulk_member)
         .await;
-    let profile = performance_profile(
-        state
-            .download_performance_mode_for_task(task.is_bulk_member)
-            .await,
-    );
+    let performance_mode = state
+        .download_performance_mode_for_task(task.is_bulk_member)
+        .await;
+    let profile = performance_profile(performance_mode);
+    let segment_attempt =
+        segment_attempt_context_for_task(state, task, effective_url, performance_mode).await;
 
     let mut preflight_metadata =
         preflight_download(&client, effective_url, request_auth.as_ref()).await;
 
     let has_segment_state = segment_meta_path(&task.temp_path).exists();
-    let can_try_segmented = task_allows_segmented_download(task)
+    let can_try_segmented = segment_attempt.is_some()
         && (existing_bytes == 0 || has_segment_state)
         && speed_limit.is_none()
         && profile.max_segments >= 2
-        && !range_backoffs().is_backed_off(effective_url, Instant::now());
+        && !segment_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.is_backed_off(effective_url, Instant::now()));
 
     if can_try_segmented {
+        let segment_attempt = segment_attempt
+            .as_ref()
+            .expect("segment attempt context exists when segmented download can start");
         let probe_metadata =
             probe_range_metadata(&client, effective_url, request_auth.as_ref()).await;
         let mut range_probe_supported = false;
@@ -90,21 +96,19 @@ async fn run_http_download_attempt_for_url(
                 preflight_metadata = Some(merge_preflight_metadata(preflight_metadata, metadata));
             }
             None => {
-                range_backoffs().record_rejection(effective_url, Instant::now());
+                segment_attempt.record_rejection(effective_url, Instant::now());
             }
         }
 
         if range_probe_supported {
             if let Some(metadata) = preflight_metadata.as_ref() {
                 if let Some(total_bytes) = metadata.total_bytes {
-                    let segment_budget =
-                        direct_bulk_segment_budget_for_task(state, task, effective_url).await;
                     if let Some(plan) = plan_segmented_ranges_with_budget(
                         total_bytes,
                         metadata.resume_support,
                         speed_limit,
                         profile,
-                        segment_budget,
+                        segment_attempt.segment_budget,
                     ) {
                         match run_segmented_download_attempt(
                             app,
@@ -121,7 +125,7 @@ async fn run_http_download_attempt_for_url(
                         {
                             Ok(outcome) => return Ok(outcome),
                             Err(error) if segmented_error_allows_single_stream_fallback(&error) => {
-                                range_backoffs().record_rejection(effective_url, Instant::now());
+                                segment_attempt.record_rejection(effective_url, Instant::now());
                                 cleanup_partial_artifacts(&task.temp_path).await;
                                 existing_bytes = 0;
                             }
@@ -426,8 +430,98 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
     (!auth.headers.is_empty()).then_some(auth)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentAttemptContext {
+    backoff_key: Option<String>,
+    segment_budget: Option<usize>,
+}
+
+impl SegmentAttemptContext {
+    fn is_backed_off(&self, effective_url: &str, now: Instant) -> bool {
+        self.backoff_key
+            .as_deref()
+            .map(|key| range_backoffs().is_key_backed_off(key, now))
+            .unwrap_or_else(|| range_backoffs().is_backed_off(effective_url, now))
+    }
+
+    fn record_rejection(&self, effective_url: &str, now: Instant) {
+        if let Some(key) = self.backoff_key.as_deref() {
+            range_backoffs().record_key_rejection(key, now);
+        } else {
+            range_backoffs().record_rejection(effective_url, now);
+        }
+    }
+}
+
+async fn segment_attempt_context_for_task(
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    effective_url: &str,
+    performance_mode: DownloadPerformanceMode,
+) -> Option<SegmentAttemptContext> {
+    if task.is_bulk_member && task.resolved_from_url.is_none() {
+        let budget = direct_bulk_segment_budget_for_task(state, task, effective_url).await?;
+        return Some(SegmentAttemptContext {
+            backoff_key: None,
+            segment_budget: Some(budget),
+        });
+    }
+
+    if task.is_bulk_member && task.resolved_from_url.is_some() {
+        if state.bulk_hoster_acceleration_mode().await == BulkHosterAccelerationMode::Off {
+            return None;
+        }
+        let source_url = task.resolved_from_url.as_deref()?;
+        let policy = crate::hosters::hoster_acceleration_policy(source_url, effective_url)?;
+        let policy_cap = hoster_segment_cap_for_mode(&policy, performance_mode);
+        let budget =
+            protected_hoster_bulk_segment_budget_for_task(state, task, effective_url, policy_cap)
+                .await?;
+        return Some(SegmentAttemptContext {
+            backoff_key: Some(policy.backoff_key),
+            segment_budget: Some(budget),
+        });
+    }
+
+    Some(SegmentAttemptContext {
+        backoff_key: None,
+        segment_budget: None,
+    })
+}
+
+#[cfg(test)]
 pub(super) fn task_allows_segmented_download(task: &crate::state::DownloadTask) -> bool {
-    !(task.is_bulk_member && task.resolved_from_url.is_some())
+    task_allows_segmented_download_with_mode(task, BulkHosterAccelerationMode::Safe)
+}
+
+#[cfg(test)]
+pub(super) fn task_allows_segmented_download_with_mode(
+    task: &crate::state::DownloadTask,
+    hoster_acceleration_mode: BulkHosterAccelerationMode,
+) -> bool {
+    if !(task.is_bulk_member && task.resolved_from_url.is_some()) {
+        return true;
+    }
+
+    if hoster_acceleration_mode == BulkHosterAccelerationMode::Off {
+        return false;
+    }
+
+    let Some(source_url) = task.resolved_from_url.as_deref() else {
+        return false;
+    };
+    crate::hosters::hoster_acceleration_policy(source_url, &task.url).is_some()
+}
+
+pub(super) fn hoster_segment_cap_for_mode(
+    policy: &crate::hosters::HosterAccelerationPolicy,
+    performance_mode: DownloadPerformanceMode,
+) -> usize {
+    match performance_mode {
+        DownloadPerformanceMode::Stable => 1,
+        DownloadPerformanceMode::Balanced => policy.max_balanced_segments,
+        DownloadPerformanceMode::Fast => policy.max_fast_segments,
+    }
 }
 
 async fn direct_bulk_segment_budget_for_task(
@@ -442,12 +536,48 @@ async fn direct_bulk_segment_budget_for_task(
     let (active_direct_bulk_workers, active_same_origin_workers) = state
         .active_direct_bulk_worker_counts(&task.id, effective_url)
         .await;
-    let total_share =
-        DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET / active_direct_bulk_workers.max(1);
-    let origin_share =
-        DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET / active_same_origin_workers.max(1);
+    segment_budget_from_counts(
+        DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
+        DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        active_direct_bulk_workers,
+        active_same_origin_workers,
+        usize::MAX,
+    )
+}
 
-    Some(total_share.min(origin_share))
+async fn protected_hoster_bulk_segment_budget_for_task(
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    effective_url: &str,
+    policy_cap: usize,
+) -> Option<usize> {
+    if !(task.is_bulk_member && task.resolved_from_url.is_some()) || policy_cap < 2 {
+        return None;
+    }
+
+    let (active_hoster_workers, active_same_origin_workers) = state
+        .active_protected_hoster_bulk_worker_counts(&task.id, effective_url)
+        .await;
+    segment_budget_from_counts(
+        HOSTER_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
+        HOSTER_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        active_hoster_workers,
+        active_same_origin_workers,
+        policy_cap,
+    )
+}
+
+pub(super) fn segment_budget_from_counts(
+    total_budget: usize,
+    origin_budget: usize,
+    active_workers: usize,
+    active_same_origin_workers: usize,
+    policy_cap: usize,
+) -> Option<usize> {
+    let total_share = total_budget / active_workers.max(1);
+    let origin_share = origin_budget / active_same_origin_workers.max(1);
+    let budget = policy_cap.min(total_share).min(origin_share);
+    (budget >= 2).then_some(budget)
 }
 
 pub(super) fn task_releases_bulk_hoster_fairness(

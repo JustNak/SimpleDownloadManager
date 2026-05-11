@@ -197,6 +197,11 @@ impl SharedState {
         }
     }
 
+    pub async fn bulk_hoster_acceleration_mode(&self) -> BulkHosterAccelerationMode {
+        let state = self.inner.read().await;
+        state.settings.bulk.hoster_acceleration_mode
+    }
+
     pub async fn active_direct_bulk_worker_counts(
         &self,
         job_id: &str,
@@ -218,9 +223,10 @@ impl SharedState {
             }
 
             total += 1;
-            if target_origin
-                .as_ref()
-                .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
+            if active_id == job_id
+                || target_origin
+                    .as_ref()
+                    .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
             {
                 same_origin += 1;
             }
@@ -228,6 +234,54 @@ impl SharedState {
 
         if !state.active_workers.contains(job_id) {
             if let Some(job) = state.job(job_id).filter(|job| is_direct_bulk_http_job(job)) {
+                total += 1;
+                if target_origin
+                    .as_ref()
+                    .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
+                {
+                    same_origin += 1;
+                }
+            }
+        }
+
+        (total, same_origin)
+    }
+
+    pub async fn active_protected_hoster_bulk_worker_counts(
+        &self,
+        job_id: &str,
+        effective_url: &str,
+    ) -> (usize, usize) {
+        let state = self.inner.read().await;
+        let target_origin = download_origin_key(effective_url);
+        let mut total = 0_usize;
+        let mut same_origin = 0_usize;
+
+        for active_id in &state.active_workers {
+            let Some(job) = state.job(active_id) else {
+                continue;
+            };
+            if !is_protected_bulk_hoster_job(job)
+                || !matches!(job.state, JobState::Starting | JobState::Downloading)
+            {
+                continue;
+            }
+
+            total += 1;
+            if active_id == job_id
+                || target_origin
+                    .as_ref()
+                    .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
+            {
+                same_origin += 1;
+            }
+        }
+
+        if !state.active_workers.contains(job_id) {
+            if let Some(job) = state
+                .job(job_id)
+                .filter(|job| is_protected_bulk_hoster_job(job))
+            {
                 total += 1;
                 if target_origin
                     .as_ref()

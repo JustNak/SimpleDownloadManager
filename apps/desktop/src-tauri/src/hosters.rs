@@ -73,6 +73,13 @@ pub struct HosterSourcePreflight {
     pub resolved_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HosterAccelerationPolicy {
+    pub backoff_key: String,
+    pub max_balanced_segments: usize,
+    pub max_fast_segments: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HosterKind {
     FuckingFast,
@@ -658,6 +665,29 @@ pub fn hoster_download_context_for_resolved_url(
     }
 
     None
+}
+
+pub fn hoster_acceleration_policy(
+    source_url: &str,
+    resolved_url: &str,
+) -> Option<HosterAccelerationPolicy> {
+    match hoster_kind_for_url(source_url)? {
+        HosterKind::Datanodes => datanodes_hoster_acceleration_policy(source_url, resolved_url),
+        HosterKind::FuckingFast => None,
+    }
+}
+
+fn datanodes_hoster_acceleration_policy(
+    source_url: &str,
+    resolved_url: &str,
+) -> Option<HosterAccelerationPolicy> {
+    datanodes_direct_url_kind(resolved_url).ok()?;
+    let file_code = datanodes_file_code_from_url(source_url)?;
+    Some(HosterAccelerationPolicy {
+        backoff_key: format!("hoster:datanodes:{file_code}"),
+        max_balanced_segments: 2,
+        max_fast_segments: 4,
+    })
 }
 
 fn datanodes_download_context_for_source_url(source_url: &str) -> Option<HosterDownloadContext> {
@@ -1956,6 +1986,33 @@ mod tests {
                     && value.contains("SimpleDownloadManager")),
             "DataNodes context should carry an explicit downloader User-Agent"
         );
+    }
+
+    #[test]
+    fn datanodes_direct_urls_have_safe_hoster_acceleration_policy() {
+        let policy = hoster_acceleration_policy(
+            "https://datanodes.to/abc123456789/fg-optional-bonus-content.bin",
+            "https://s42.datanodes.to/d/abc123456789/fg-optional-bonus-content.bin",
+        )
+        .expect("validated DataNodes direct URLs should opt into safe acceleration");
+
+        assert_eq!(policy.backoff_key, "hoster:datanodes:abc123456789");
+        assert_eq!(policy.max_balanced_segments, 2);
+        assert_eq!(policy.max_fast_segments, 4);
+    }
+
+    #[test]
+    fn unverified_hosters_remain_single_stream_for_bulk_acceleration() {
+        assert!(hoster_acceleration_policy(
+            "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar",
+            "https://dl.fuckingfast.co/dl/token/Game.part01.rar",
+        )
+        .is_none());
+        assert!(hoster_acceleration_policy(
+            "https://example.com/file.bin",
+            "https://cdn.example.com/file.bin",
+        )
+        .is_none());
     }
 
     #[test]

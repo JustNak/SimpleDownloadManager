@@ -460,6 +460,14 @@ pub enum BulkHosterFairnessMode {
     Off,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkHosterAccelerationMode {
+    #[default]
+    Safe,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkDownloadSettings {
@@ -473,6 +481,8 @@ pub struct BulkDownloadSettings {
     pub download_performance_mode: DownloadPerformanceMode,
     #[serde(default)]
     pub hoster_fairness_mode: BulkHosterFairnessMode,
+    #[serde(default)]
+    pub hoster_acceleration_mode: BulkHosterAccelerationMode,
     #[serde(default)]
     pub auto_retry_override_enabled: bool,
     #[serde(default = "default_auto_retry_attempts")]
@@ -491,6 +501,7 @@ struct BulkDownloadSettingsWire {
     speed_limit_kib_per_second: Option<u32>,
     download_performance_mode: Option<DownloadPerformanceMode>,
     hoster_fairness_mode: Option<BulkHosterFairnessMode>,
+    hoster_acceleration_mode: Option<BulkHosterAccelerationMode>,
     auto_retry_override_enabled: Option<bool>,
     auto_retry_attempts: Option<u32>,
     start_behavior: Option<BulkStartBehavior>,
@@ -519,6 +530,9 @@ impl BulkDownloadSettingsWire {
             hoster_fairness_mode: self
                 .hoster_fairness_mode
                 .unwrap_or(defaults.hoster_fairness_mode),
+            hoster_acceleration_mode: self
+                .hoster_acceleration_mode
+                .unwrap_or(defaults.hoster_acceleration_mode),
             auto_retry_override_enabled: self
                 .auto_retry_override_enabled
                 .unwrap_or(defaults.auto_retry_override_enabled),
@@ -798,6 +812,7 @@ impl Default for BulkDownloadSettings {
             speed_limit_kib_per_second: 0,
             download_performance_mode: DownloadPerformanceMode::Balanced,
             hoster_fairness_mode: BulkHosterFairnessMode::Adaptive,
+            hoster_acceleration_mode: BulkHosterAccelerationMode::Safe,
             auto_retry_override_enabled: false,
             auto_retry_attempts: default_auto_retry_attempts(),
             start_behavior: BulkStartBehavior::ReviewThenStart,
@@ -1443,6 +1458,10 @@ mod tests {
             settings.bulk.hoster_fairness_mode,
             BulkHosterFairnessMode::Adaptive
         );
+        assert_eq!(
+            settings.bulk.hoster_acceleration_mode,
+            BulkHosterAccelerationMode::Safe
+        );
         assert_eq!(settings.bulk.auto_retry_attempts, 3);
         assert!(!settings.bulk.auto_retry_override_enabled);
         assert_eq!(
@@ -1483,6 +1502,7 @@ mod tests {
         assert_eq!(value["bulk"]["speedLimitKibPerSecond"], 0);
         assert_eq!(value["bulk"]["downloadPerformanceMode"], "balanced");
         assert_eq!(value["bulk"]["hosterFairnessMode"], "adaptive");
+        assert_eq!(value["bulk"]["hosterAccelerationMode"], "safe");
         assert_eq!(value["showDetailsOnClick"], true);
         assert_eq!(value["queueRowSize"], "medium");
     }
@@ -1545,6 +1565,10 @@ mod tests {
         assert_eq!(
             settings.bulk.hoster_fairness_mode,
             BulkHosterFairnessMode::Adaptive
+        );
+        assert_eq!(
+            settings.bulk.hoster_acceleration_mode,
+            BulkHosterAccelerationMode::Safe
         );
     }
 

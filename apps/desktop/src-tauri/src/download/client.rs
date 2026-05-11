@@ -44,8 +44,16 @@ impl RangeBackoffRegistry {
             return;
         };
 
+        self.record_key_rejection(&key, now);
+    }
+
+    pub(super) fn record_key_rejection(&self, key: &str, now: Instant) {
+        if key.trim().is_empty() {
+            return;
+        }
+
         if let Ok(mut rejected_hosts) = self.rejected_hosts.lock() {
-            rejected_hosts.insert(key, now);
+            rejected_hosts.insert(key.to_string(), now);
         }
     }
 
@@ -54,11 +62,19 @@ impl RangeBackoffRegistry {
             return false;
         };
 
+        self.is_key_backed_off(&key, now)
+    }
+
+    pub(super) fn is_key_backed_off(&self, key: &str, now: Instant) -> bool {
+        if key.trim().is_empty() {
+            return false;
+        }
+
         let Ok(mut rejected_hosts) = self.rejected_hosts.lock() else {
             return false;
         };
 
-        let Some(rejected_at) = rejected_hosts.get(&key).copied() else {
+        let Some(rejected_at) = rejected_hosts.get(key).copied() else {
             return false;
         };
 
@@ -66,7 +82,7 @@ impl RangeBackoffRegistry {
             return true;
         }
 
-        rejected_hosts.remove(&key);
+        rejected_hosts.remove(key);
         false
     }
 }
