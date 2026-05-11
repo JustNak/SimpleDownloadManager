@@ -276,6 +276,7 @@ impl SharedState {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn auto_restart_bulk_member(
         &self,
         id: &str,

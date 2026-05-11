@@ -132,6 +132,7 @@ pub(super) fn segmented_error_allows_single_stream_fallback(error: &DownloadErro
     error.category == FailureCategory::Resume
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_segmented_download_attempt(
     app: &AppHandle,
     state: &SharedState,
@@ -627,6 +628,7 @@ pub(super) async fn prepare_direct_segment_file(
     let current_len = metadata_len(temp_path).await;
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(temp_path)
         .await

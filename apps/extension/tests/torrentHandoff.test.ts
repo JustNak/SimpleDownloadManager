@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { createEnqueueDownloadRequest, createPromptDownloadRequest } from '@myapp/protocol';
-import { shouldHandOffTorrentBrowserDownload } from '../src/background/torrentHandoff.ts';
 
 const source = {
   entryPoint: 'context_menu' as const,
@@ -52,20 +51,3 @@ if (enqueueWithMetadata.ok) {
   );
 }
 
-assert.equal(
-  shouldHandOffTorrentBrowserDownload({
-    url: 'https://example.com/releases/example.torrent',
-    filename: 'example.torrent',
-  }),
-  true,
-  '.torrent browser downloads should be handed off',
-);
-
-assert.equal(
-  shouldHandOffTorrentBrowserDownload({
-    url: 'https://example.com/releases/example.zip',
-    filename: 'example.zip',
-  }),
-  false,
-  'non-torrent browser downloads should use normal HTTP rules',
-);

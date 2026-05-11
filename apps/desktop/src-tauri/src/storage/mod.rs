@@ -443,9 +443,10 @@ pub struct TorrentSettings {
     pub peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BulkStartBehavior {
+    #[default]
     ReviewThenStart,
     StartImmediately,
 }
@@ -802,12 +803,6 @@ impl Default for BulkDownloadSettings {
             start_behavior: BulkStartBehavior::ReviewThenStart,
             expand_active_rows_by_default: false,
         }
-    }
-}
-
-impl Default for BulkStartBehavior {
-    fn default() -> Self {
-        Self::ReviewThenStart
     }
 }
 

@@ -546,7 +546,7 @@ pub async fn add_jobs(
             .map(|url| {
                 let source_url = url.trim().to_string();
                 let is_hoster = crate::hosters::is_supported_hoster_url(&source_url);
-                let preflight = is_hoster.then(|| HosterPreflightInfo {
+                let preflight = is_hoster.then_some(HosterPreflightInfo {
                     status: HosterPreflightStatus::Checking,
                     message: None,
                 });

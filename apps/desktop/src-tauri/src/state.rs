@@ -273,10 +273,8 @@ impl BulkHosterFairnessController {
         bulk_slot_limit: u32,
         now: Instant,
     ) -> Vec<String> {
-        let max_target = bulk_slot_limit
-            .max(1)
-            .min(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY);
-        self.target_active = self.target_active.max(1).min(max_target);
+        let max_target = bulk_slot_limit.clamp(1, BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY);
+        self.target_active = self.target_active.clamp(1, max_target);
 
         if metrics.active_count == 0 {
             self.reset();

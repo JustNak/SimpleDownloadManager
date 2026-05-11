@@ -261,6 +261,7 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn mark_bulk_archive_status(
         &self,
         archive_id: &str,
@@ -701,6 +702,7 @@ impl SharedState {
 }
 
 impl RuntimeState {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn mark_bulk_archive_status_in_memory(
         &mut self,
         archive_id: &str,
