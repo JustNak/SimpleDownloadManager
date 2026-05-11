@@ -57,6 +57,8 @@ use segmented::*;
 use torrent::*;
 use types::*;
 
+pub(crate) use notifications::reset_bulk_failure_sound;
+
 #[cfg(test)]
 mod tests;
 

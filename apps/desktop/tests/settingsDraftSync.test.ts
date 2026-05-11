@@ -22,6 +22,7 @@ function makeSettings(theme: Settings['theme']): Settings {
       peerConnectionWatchdogMode: 'diagnose',
     },
     notificationsEnabled: true,
+    notificationSoundsEnabled: true,
     theme,
     accentColor: '#3b82f6',
     showDetailsOnClick: true,

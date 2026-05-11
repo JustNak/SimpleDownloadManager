@@ -23,6 +23,7 @@
     ShieldX,
     Trash2,
     Upload,
+    Volume2,
     Wrench,
     X,
   } from '@lucide/svelte';
@@ -561,6 +562,7 @@
     {@render FieldRow('Accent Color', 'Primary highlight color.', accentControl, 'Primary highlight color.', true)}
     {@render FieldRow('Queue Row Size', 'Main list density.', rowSizeControl)}
     {@render SwitchFieldRow(Bell, 'Notifications', 'Show desktop notifications for completed or failed downloads.', notificationsControl)}
+    {@render SwitchFieldRow(Volume2, 'Notification sounds', 'Play bundled sounds for completed, failed, and update notifications.', notificationSoundsControl)}
     {@render SwitchFieldRow(Clock3, 'Show details on click', 'Selecting a row opens the details pane.', showDetailsControl)}
   </div>
 {/snippet}
@@ -936,6 +938,10 @@
 
 {#snippet notificationsControl()}
   {@render ToggleSwitch('notificationsEnabled', formData.notificationsEnabled, (checked) => formData.notificationsEnabled = checked)}
+{/snippet}
+
+{#snippet notificationSoundsControl()}
+  {@render ToggleSwitch('notificationSoundsEnabled', formData.notificationSoundsEnabled, (checked) => formData.notificationSoundsEnabled = checked)}
 {/snippet}
 
 {#snippet showDetailsControl()}

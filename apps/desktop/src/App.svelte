@@ -94,6 +94,7 @@
     runHostRegistrationFix,
     saveSettings,
     subscribeToDownloadUpdateBatch,
+    subscribeToNotificationSound,
     subscribeToSelectedJobRequested,
     subscribeToStateChanged,
     subscribeToUpdateInstallProgress,
@@ -134,6 +135,7 @@
   import type { DiagnosticsSnapshot } from './types';
   import { formatBytes } from './popupShared';
   import { createDefaultSettings } from './defaultSettings';
+  import { createNotificationSoundPlayer, createUpdateNotificationSoundGate } from './notificationSounds';
   type AddDownloadOutcome = import('./AddDownloadModal.svelte').AddDownloadOutcome;
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
@@ -176,6 +178,8 @@
   let lastDiagnosticsRefreshAt = 0;
   let settingsPageLoad: Promise<void> | null = null;
   let addDownloadModalLoad: Promise<void> | null = null;
+  const notificationSoundPlayer = createNotificationSoundPlayer();
+  const updateNotificationSoundGate = createUpdateNotificationSoundGate();
 
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
@@ -257,6 +261,15 @@
           return;
         }
         disposers.push(downloadBatchDispose);
+
+        const notificationSoundDispose = await subscribeToNotificationSound((event) => {
+          notificationSoundPlayer.play(event.kind, settings);
+        });
+        if (!isMounted) {
+          void notificationSoundDispose();
+          return;
+        }
+        disposers.push(notificationSoundDispose);
 
         const startupBlocker = bulkUpdateBlockerForJobs(initialData.snapshot.jobs);
         if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted, startupBlocker)) {
@@ -637,6 +650,7 @@
       updateState = finishUpdateCheck(updateState, update);
 
       if (update) {
+        updateNotificationSoundGate.play(update.version, settings, notificationSoundPlayer);
         const blocker = bulkUpdateBlockerForJobs(jobs);
         if (!shouldOpenUpdatePrompt(blocker)) {
           isUpdatePromptOpen = false;
@@ -770,6 +784,7 @@
           ? `${result.queuedCount} ${queuedLabel} queued. ${failedCount} ${lookupLabel}.`
           : `${result.queuedCount} ${queuedLabel} queued.`,
       });
+      if (failedCount > 0) notificationSoundPlayer.play('failed', settings);
     } catch (error) {
       addToast({ type: 'error', title: 'Retry Failed', message: getErrorMessage(error) });
     }
@@ -1099,6 +1114,7 @@
       const failedCount = batchResult.failedItems?.length ?? 0;
       if (failedCount > 0) {
         view = targetView;
+        notificationSoundPlayer.play('failed', settings);
         addToast({
           type: 'warning',
           title: 'Some Links Were Not Queued',
@@ -1119,6 +1135,7 @@
     view = targetView;
     const failedCount = batchResult.failedItems?.length ?? 0;
     if (failedCount > 0) {
+      notificationSoundPlayer.play('failed', settings);
       addToast({
         type: 'warning',
         title: 'Bulk Download Partially Added',

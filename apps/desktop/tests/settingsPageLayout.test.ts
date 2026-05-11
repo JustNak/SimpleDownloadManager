@@ -68,6 +68,8 @@ assert.match(source, /bind:value=\{formData\.torrent\.downloadDirectory\}/, 'tor
 assert.match(source, /Clear torrent session cache/, 'torrent settings should expose the torrent session cache cleanup action');
 assert.match(source, /Show details on click/, 'settings should expose the click-to-show details pane toggle');
 assert.match(source, /formData\.showDetailsOnClick[\s\S]*formData\.showDetailsOnClick = checked/, 'click-to-show details setting should be wired to the settings draft');
+assert.match(source, /Notification sounds/, 'settings should expose the custom notification sound toggle');
+assert.match(source, /formData\.notificationSoundsEnabled[\s\S]*formData\.notificationSoundsEnabled = checked/, 'notification sound setting should be wired to the settings draft');
 assert.match(source, /bind:value=\{formData\.queueRowSize\}/, 'queue row-size setting should be wired to the settings draft');
 assert.match(source, /bind:value=\{accentColorInput\}/, 'accent color setting should be wired through the normalized color draft');
 assert.match(source, /const accentGradientPresets = \[/, 'accent settings should offer gradient preset options above the palette');

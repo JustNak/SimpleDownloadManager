@@ -581,6 +581,7 @@ pub struct Settings {
     pub torrent: TorrentSettings,
     pub bulk: BulkDownloadSettings,
     pub notifications_enabled: bool,
+    pub notification_sounds_enabled: bool,
     pub theme: Theme,
     pub accent_color: String,
     pub show_details_on_click: bool,
@@ -601,6 +602,7 @@ struct SettingsWire {
     torrent: TorrentSettings,
     bulk: BulkDownloadSettingsWire,
     notifications_enabled: bool,
+    notification_sounds_enabled: bool,
     theme: Theme,
     accent_color: String,
     show_details_on_click: bool,
@@ -622,6 +624,7 @@ impl Default for SettingsWire {
             torrent: settings.torrent,
             bulk: BulkDownloadSettingsWire::default(),
             notifications_enabled: settings.notifications_enabled,
+            notification_sounds_enabled: settings.notification_sounds_enabled,
             theme: settings.theme,
             accent_color: settings.accent_color,
             show_details_on_click: settings.show_details_on_click,
@@ -655,6 +658,7 @@ impl<'de> Deserialize<'de> for Settings {
             torrent: wire.torrent,
             bulk,
             notifications_enabled: wire.notifications_enabled,
+            notification_sounds_enabled: wire.notification_sounds_enabled,
             theme: wire.theme,
             accent_color: wire.accent_color,
             show_details_on_click: wire.show_details_on_click,
@@ -784,6 +788,7 @@ impl Default for Settings {
             download_performance_mode: DownloadPerformanceMode::Balanced,
             torrent: TorrentSettings::default(),
             notifications_enabled: true,
+            notification_sounds_enabled: true,
             theme: Theme::System,
             accent_color: default_accent_color(),
             show_details_on_click: default_show_details_on_click(),
@@ -1174,6 +1179,7 @@ mod tests {
         assert_eq!(state.jobs[0].hoster_preflight, None);
         assert_eq!(state.jobs[0].transfer_kind, TransferKind::Http);
         assert_eq!(state.jobs[0].integrity_check, None);
+        assert!(state.settings.notification_sounds_enabled);
         assert!(state.diagnostic_events.is_empty());
     }
 
@@ -1484,6 +1490,7 @@ mod tests {
         assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
         assert!(!settings.start_on_startup);
         assert_eq!(settings.startup_launch_mode, StartupLaunchMode::Open);
+        assert!(settings.notification_sounds_enabled);
     }
 
     #[test]
@@ -1505,6 +1512,7 @@ mod tests {
         assert_eq!(value["bulk"]["hosterAccelerationMode"], "safe");
         assert_eq!(value["showDetailsOnClick"], true);
         assert_eq!(value["queueRowSize"], "medium");
+        assert_eq!(value["notificationSoundsEnabled"], true);
     }
 
     #[test]
@@ -1521,6 +1529,7 @@ mod tests {
 
         assert!(settings.show_details_on_click);
         assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
+        assert!(settings.notification_sounds_enabled);
         assert_eq!(settings.bulk.max_concurrent_downloads, 2);
         assert_eq!(
             settings.bulk.start_behavior,

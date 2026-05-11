@@ -716,7 +716,7 @@ pub(super) async fn run_torrent_download_attempt(
                     .await
                     .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
                 emit_snapshot(app, &snapshot);
-                notify_download_completed(app, state, &task.target_path).await;
+                notify_download_completed(app, state, &task.target_path, false).await;
                 return Ok(DownloadOutcome::Completed);
             }
         }

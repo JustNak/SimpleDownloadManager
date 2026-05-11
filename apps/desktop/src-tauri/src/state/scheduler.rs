@@ -180,6 +180,10 @@ impl SharedState {
                         handoff_auth: auth_by_job.get(&job.id).cloned(),
                         resolved_from_url: job.resolved_from_url.clone(),
                         is_bulk_member: is_bulk_member_job(job),
+                        bulk_archive_id: job
+                            .bulk_archive
+                            .as_ref()
+                            .map(|archive| archive.id.clone()),
                         retry_attempts: job.retry_attempts,
                         target_path: PathBuf::from(&job.target_path),
                         temp_path: PathBuf::from(&job.temp_path),
