@@ -59,6 +59,7 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       expandActiveRowsByDefault: false,
     },
     notificationsEnabled: true,
+    notificationSoundsEnabled: true,
     theme: 'system',
     accentColor: DEFAULT_ACCENT_COLOR,
     showDetailsOnClick: true,

@@ -1286,7 +1286,7 @@ pub(super) async fn complete_http_download(
     }
 
     handle_bulk_archive_after_completion(app, state, &task.id).await?;
-    notify_download_completed(app, state, final_path).await;
+    notify_download_completed(app, state, final_path, task.is_bulk_member).await;
     Ok(())
 }
 

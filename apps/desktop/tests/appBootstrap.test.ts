@@ -37,6 +37,7 @@ const snapshot: DesktopSnapshot = {
       peerConnectionWatchdogMode: 'diagnose',
     },
     notificationsEnabled: true,
+    notificationSoundsEnabled: true,
     theme: 'system',
     accentColor: '#3b82f6',
     showDetailsOnClick: true,

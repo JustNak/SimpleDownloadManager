@@ -35,6 +35,10 @@ export interface SettingsSnapshot {
   settings: Settings;
 }
 
+export interface NotificationSoundEvent {
+  kind: 'success' | 'failed';
+}
+
 export type AddJobStatus = 'queued' | 'duplicate_existing_job';
 
 export interface AddJobResult {
@@ -73,6 +77,7 @@ const SETTINGS_SNAPSHOT_EVENT = 'app://settings-snapshot';
 const DOWNLOAD_PROMPT_CHANGED_EVENT = 'app://download-prompt-changed';
 const SELECT_JOB_EVENT = 'app://select-job';
 const UPDATE_INSTALL_PROGRESS_EVENT = 'app://update-install-progress';
+const NOTIFICATION_SOUND_EVENT = 'app://notification-sound';
 
 type PreviewBackend = typeof import('./backendPreview');
 let previewBackendLoad: Promise<PreviewBackend> | null = null;
@@ -506,4 +511,11 @@ export async function subscribeToUpdateInstallProgress(
 ): Promise<UnlistenFn> {
   if (!isTauriRuntime()) return async () => undefined;
   return listen<UpdateInstallProgressEvent>(UPDATE_INSTALL_PROGRESS_EVENT, (event) => listener(event.payload));
+}
+
+export async function subscribeToNotificationSound(
+  listener: (event: NotificationSoundEvent) => void,
+): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return async () => undefined;
+  return listen<NotificationSoundEvent>(NOTIFICATION_SOUND_EVENT, (event) => listener(event.payload));
 }

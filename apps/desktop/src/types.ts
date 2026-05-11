@@ -187,6 +187,7 @@ export interface Settings {
   torrent: TorrentSettings;
   bulk: BulkDownloadSettings;
   notificationsEnabled: boolean;
+  notificationSoundsEnabled: boolean;
   theme: 'light' | 'dark' | 'oled_dark' | 'system';
   accentColor: string;
   showDetailsOnClick: boolean;

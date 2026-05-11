@@ -49,6 +49,7 @@ use winreg::RegKey;
 
 pub const STATE_CHANGED_EVENT: &str = "app://state-changed";
 const DOWNLOADS_UPDATE_BATCH_EVENT: &str = "app://downloads-update-batch";
+pub const NOTIFICATION_SOUND_EVENT: &str = "app://notification-sound";
 const PROGRESS_JOB_SNAPSHOT_EVENT: &str = "app://progress-job-snapshot";
 const BATCH_PROGRESS_SNAPSHOT_EVENT: &str = "app://batch-progress-snapshot";
 const SETTINGS_SNAPSHOT_EVENT: &str = "app://settings-snapshot";
@@ -172,6 +173,19 @@ pub struct SettingsSnapshot {
     pub settings: Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationSoundKind {
+    Success,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSoundEvent {
+    pub kind: NotificationSoundKind,
+}
+
 #[derive(Debug, Default)]
 struct PendingDownloadUpdateBatch {
     jobs: HashMap<String, DownloadJob>,
@@ -234,6 +248,16 @@ pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
         eprintln!("failed to emit state snapshot: {error}");
     }
     emit_popup_snapshots(app, snapshot);
+}
+
+pub fn emit_notification_sound(app: &AppHandle, kind: NotificationSoundKind) {
+    if let Err(error) = app.emit_to(
+        "main",
+        NOTIFICATION_SOUND_EVENT,
+        NotificationSoundEvent { kind },
+    ) {
+        eprintln!("failed to emit notification sound event: {error}");
+    }
 }
 
 pub fn emit_download_update(app: &AppHandle, snapshot: &DesktopSnapshot, job_id: &str) {
@@ -1344,6 +1368,7 @@ pub async fn retry_bulk_members(
     state: State<'_, SharedState>,
     archive_id: String,
 ) -> Result<BulkMemberRetryResult, String> {
+    crate::download::reset_bulk_failure_sound(&archive_id);
     let candidates = state
         .bulk_member_retry_candidates(&archive_id)
         .await
