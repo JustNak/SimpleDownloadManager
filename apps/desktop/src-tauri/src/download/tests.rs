@@ -1940,6 +1940,52 @@ fn speed_limit_throttle_calculates_remaining_delay() {
     );
 }
 
+#[tokio::test]
+async fn stream_wait_observes_canceled_control_before_next_chunk_arrives() {
+    let job = DownloadJob {
+        id: "job_cancel_wait".into(),
+        url: "https://example.com/file.bin".into(),
+        filename: "file.bin".into(),
+        source: None,
+        transfer_kind: TransferKind::Http,
+        integrity_check: None,
+        torrent: None,
+        state: JobState::Canceled,
+        created_at: 1,
+        progress: 0.0,
+        total_bytes: 0,
+        downloaded_bytes: 0,
+        speed: 0,
+        eta: 0,
+        error: None,
+        failure_category: None,
+        resume_support: ResumeSupport::Unknown,
+        retry_attempts: 0,
+        auto_restart_attempts: 0,
+        resolved_from_url: None,
+        hoster_preflight: None,
+        target_path: "C:/Downloads/file.bin".into(),
+        temp_path: test_storage_path("stream-wait-cancel-part")
+            .display()
+            .to_string(),
+        artifact_exists: None,
+        bulk_archive: None,
+    };
+    let state = SharedState::for_tests(test_storage_path("stream-wait-cancel-state"), vec![job]);
+    let result = next_stream_item_with_control(
+        &state,
+        "job_cancel_wait",
+        None,
+        std::future::pending::<Option<Result<(), ()>>>(),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        StreamItemWait::Interrupted(DownloadOutcome::Canceled)
+    ));
+}
+
 #[test]
 fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
     let profile = performance_profile(DownloadPerformanceMode::Balanced);

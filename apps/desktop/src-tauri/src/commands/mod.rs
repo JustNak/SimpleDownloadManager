@@ -801,11 +801,11 @@ pub async fn cancel_jobs(
         return Ok(());
     }
 
-    let mut snapshot = None;
-    for id in &ids {
-        snapshot = Some(state.cancel_job(id).await.map_err(|error| error.message)?);
-    }
-    emit_optional_batch_snapshot(&app, state.inner().clone(), snapshot);
+    let snapshot = state
+        .cancel_jobs(&ids)
+        .await
+        .map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
     Ok(())
 }
 

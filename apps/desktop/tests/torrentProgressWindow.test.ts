@@ -8,6 +8,7 @@ assert.ok(existsSync(sharedPopupUrl), 'progress popup lifecycle should be extrac
 assert.ok(existsSync(torrentProgressUrl), 'torrent progress UI should live in a dedicated TorrentProgressWindow.svelte file');
 
 const torrentSource = readFileSync(torrentProgressUrl, 'utf8');
+const sharedPopupSource = readFileSync(sharedPopupUrl, 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
@@ -45,5 +46,7 @@ assert.match(torrentSource, /Open[\s\S]*openJobFile\(job\.id\)/, 'completed torr
 assert.match(torrentSource, /Open[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed torrent Open should close the popup after a successful action');
 assert.match(torrentSource, /Show[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed torrent Show should close the popup after a successful action');
 assert.match(torrentSource, /Confirm(?: cancel)?[\s\S]*popup\.onCancelClick/, 'torrent popup should keep two-click Cancel behavior');
+assert.match(sharedPopupSource, /cancelJob\(activeJobId\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed torrent Cancel should close through the shared popup lifecycle');
+assert.match(torrentSource, /isCanceled\(job\)[\s\S]*Action\('Close'/, 'canceled torrent progress should expose a safe Close fallback');
 assert.doesNotMatch(torrentSource, /<span className="text-muted-foreground">[>>]<\/span>/, 'torrent detail rows should not render decorative chevrons');
 assert.doesNotMatch(torrentSource, /(?<!\{)#[0-9a-fA-F]{3,8}\b|teal|cyan|emerald/, 'torrent popup should use existing theme tokens instead of hardcoded custom colors');

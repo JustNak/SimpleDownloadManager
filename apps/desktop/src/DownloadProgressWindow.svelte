@@ -22,6 +22,7 @@
     errorMessage: string;
     runAction: PopupActionRunner;
     onCancelClick: () => void;
+    onClose: () => void;
   }
 
   function statusText(job: DownloadJob) {
@@ -29,12 +30,14 @@
     if (job.state === JobState.Paused) return 'Paused';
     if (job.state === JobState.Completed) return 'Complete';
     if (job.state === JobState.Failed) return 'Failed';
+    if (job.state === JobState.Canceled) return 'Canceled';
     return job.state;
   }
 
   function progressColor(job: DownloadJob) {
     if (job.state === JobState.Failed) return 'bg-destructive';
     if (job.state === JobState.Completed) return 'bg-success';
+    if (job.state === JobState.Canceled) return 'bg-muted-foreground/35';
     return 'bg-primary';
   }
 
@@ -77,6 +80,7 @@
     popup.errorMessage,
     popup.runAction,
     popup.onCancelClick,
+    popup.onClose,
   )}
 {/if}
 
@@ -89,6 +93,7 @@
   errorMessage: string,
   runAction: PopupActionRunner,
   onCancelClick: () => void,
+  onClose: () => void,
 )}
   <div class="app-window flex h-screen flex-col overflow-hidden border border-border bg-background text-foreground shadow-2xl">
     <PopupTitlebar title="Download progress" />
@@ -150,6 +155,9 @@
         {#if job.state === JobState.Completed}
           {@render Action('Show', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
           {@render Action('Open', ExternalLink, isBusy, () => void runAction(async () => { await openJobFile(job.id); }, { closeOnSuccess: true }), 'primary')}
+        {/if}
+        {#if job.state === JobState.Canceled}
+          {@render Action('Close', X, isBusy, onClose)}
         {/if}
       </div>
     </main>

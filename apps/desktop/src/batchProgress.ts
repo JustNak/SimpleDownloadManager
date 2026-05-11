@@ -5,8 +5,8 @@ export type { FailedBatchItem };
 
 export type DownloadMode = 'single' | 'torrent' | 'bulk';
 export type ProgressBatchKind = 'multi' | 'bulk';
-export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed';
-export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed';
+export type BulkPhase = 'review' | 'downloading' | 'extracting' | 'combining' | 'creating_folder' | 'compressing' | 'ready' | 'failed' | 'canceled';
+export type BulkUiState = 'review' | 'downloading' | 'finalizing' | 'ready' | 'failed' | 'canceled';
 export type BulkFinalizingStepId = 'uncompressing' | 'combining' | 'compressing';
 
 export interface BulkFinalizingStep {
@@ -30,7 +30,6 @@ export interface BulkFailedRetrySelection {
 
 export interface BulkCancelConfirmPlan {
   cancelJobIds: string[];
-  deleteJobIds: string[];
   closeOnSuccess: boolean;
 }
 
@@ -122,6 +121,13 @@ export function deriveBulkPhase(jobs: DownloadJob[]): BulkPhase {
   if (jobs.length > 0 && archiveJobs.length === 0 && jobs.every((job) => job.state === 'completed')) {
     return 'ready';
   }
+  if (
+    jobs.length > 0
+    && jobs.every((job) => job.state === 'completed' || job.state === 'canceled')
+    && jobs.some((job) => job.state === 'canceled')
+  ) {
+    return 'canceled';
+  }
   if (jobs.length > 0 && jobs.every((job) => job.state === 'completed')) {
     const outputKind = archiveJobs.find((job) => job.bulkArchive)?.bulkArchive?.outputKind ?? 'folder';
     return outputKind === 'folder' ? 'combining' : 'compressing';
@@ -145,7 +151,7 @@ export function isUntouchedBulkReviewGate(jobs: DownloadJob[]): boolean {
 
 export function deriveBulkUiState(jobs: DownloadJob[]): BulkUiState {
   const phase = deriveBulkPhase(jobs);
-  if (phase === 'review' || phase === 'ready' || phase === 'failed') return phase;
+  if (phase === 'review' || phase === 'ready' || phase === 'failed' || phase === 'canceled') return phase;
   if (phase === 'extracting' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing') {
     return 'finalizing';
   }
@@ -204,14 +210,12 @@ export function bulkCancelConfirmPlan(
   jobs: DownloadJob[],
   state: BulkUiState | null,
 ): BulkCancelConfirmPlan {
-  const deleteJobIds = jobs.map((job) => job.id).filter(Boolean);
-  const cancelJobIds = state === 'downloading'
+  const cancelJobIds = state === 'review' || state === 'downloading'
     ? jobs.filter(isCancelableBulkCancelJob).map((job) => job.id).filter(Boolean)
     : [];
 
   return {
     cancelJobIds,
-    deleteJobIds,
     closeOnSuccess: state === 'review' || state === 'downloading',
   };
 }
@@ -294,5 +298,5 @@ function isResumableReviewJob(job: DownloadJob) {
 }
 
 function isCancelableBulkCancelJob(job: DownloadJob) {
-  return ['queued', 'starting', 'downloading', 'seeding', 'paused'].includes(job.state);
+  return ['queued', 'starting', 'downloading', 'seeding', 'paused', 'failed'].includes(job.state);
 }

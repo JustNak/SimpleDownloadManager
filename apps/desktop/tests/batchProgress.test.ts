@@ -254,11 +254,10 @@ assert.deepEqual(
     job({ id: 'job_2', state: 'queued' }),
   ], 'review'),
   {
-    cancelJobIds: [],
-    deleteJobIds: ['job_1', 'job_2'],
+    cancelJobIds: ['job_1', 'job_2'],
     closeOnSuccess: true,
   },
-  'confirming bulk cancel in review should delete the whole batch from disk without a cancel step',
+  'confirming bulk cancel in review should cancel queued and paused rows without deleting them from disk',
 );
 
 assert.deepEqual(
@@ -269,11 +268,10 @@ assert.deepEqual(
     job({ id: 'job_4', state: 'canceled' }),
   ], 'downloading'),
   {
-    cancelJobIds: ['job_2'],
-    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
+    cancelJobIds: ['job_2', 'job_3'],
     closeOnSuccess: true,
   },
-  'confirming bulk cancel while downloading should cancel active members but delete every popup member from disk',
+  'confirming bulk cancel while downloading should cancel unfinished members and skip completed or already canceled rows',
 );
 
 assert.deepEqual(
@@ -286,10 +284,27 @@ assert.deepEqual(
   ], 'downloading'),
   {
     cancelJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
-    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4', 'job_5'],
     closeOnSuccess: true,
   },
-  'mixed active and completed bulk batches should still delete the whole popup batch',
+  'mixed active and completed bulk batches should cancel unfinished rows without deleting completed output',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({ id: 'job_1', state: 'canceled', bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' } }),
+    job({ id: 'job_2', state: 'canceled', bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' } }),
+  ]),
+  'canceled',
+  'all-canceled bulk batches should be terminal instead of looking like active downloads',
+);
+
+assert.equal(
+  deriveBulkUiState([
+    job({ id: 'job_1', state: 'completed', bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' } }),
+    job({ id: 'job_2', state: 'canceled', bulkArchive: { id: 'bulk_1', name: 'bundle.zip', archiveStatus: 'pending' } }),
+  ]),
+  'canceled',
+  'mixed completed and canceled bulk batches should be terminal canceled when no archive output is ready',
 );
 
 assert.deepEqual(

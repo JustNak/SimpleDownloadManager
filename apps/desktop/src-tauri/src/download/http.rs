@@ -364,25 +364,41 @@ async fn run_http_download_attempt_for_url(
     let priority_throttle = Mutex::new(DynamicThrottleState::default());
 
     loop {
-        let chunk_result = match stall_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
-                Ok(result) => result,
-                Err(_) => {
-                    file.flush().await.ok();
-                    record_download_diagnostic(
-                        state,
-                        DiagnosticLevel::Warning,
-                        task,
-                        format!(
-                            "Protected hoster stream received no data for {} seconds; retrying.",
-                            timeout.as_secs()
-                        ),
-                    )
-                    .await;
-                    return Err(bulk_hoster_stall_error(timeout));
-                }
-            },
-            None => stream.next().await,
+        let chunk_result = match next_stream_item_with_control(
+            state,
+            &task.id,
+            stall_timeout,
+            stream.next(),
+        )
+        .await
+        {
+            StreamItemWait::Item(result) => result,
+            StreamItemWait::Interrupted(DownloadOutcome::Paused) => {
+                file.flush().await.ok();
+                return Ok(DownloadOutcome::Paused);
+            }
+            StreamItemWait::Interrupted(DownloadOutcome::Canceled) => {
+                file.flush().await.ok();
+                return Ok(DownloadOutcome::Canceled);
+            }
+            StreamItemWait::Interrupted(DownloadOutcome::Completed) => unreachable!(
+                "stream control cannot produce a completed outcome while waiting for chunks"
+            ),
+            StreamItemWait::Stalled => {
+                let timeout = stall_timeout.expect("stall wait can only stall when configured");
+                file.flush().await.ok();
+                record_download_diagnostic(
+                    state,
+                    DiagnosticLevel::Warning,
+                    task,
+                    format!(
+                        "Protected hoster stream received no data for {} seconds; retrying.",
+                        timeout.as_secs()
+                    ),
+                )
+                .await;
+                return Err(bulk_hoster_stall_error(timeout));
+            }
         };
         let Some(chunk_result) = chunk_result else {
             break;

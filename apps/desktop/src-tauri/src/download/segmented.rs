@@ -419,23 +419,57 @@ pub(super) async fn download_segment_worker(
         let mut low_speed_started = Instant::now();
 
         loop {
-            let chunk_result = match context.stall_timeout {
-                Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        record_segment_progress(
-                            &context.temp_path,
-                            &context.metadata,
-                            segment.index,
-                            current_len,
-                            false,
-                            true,
-                        )
-                        .await?;
-                        return Err(bulk_hoster_stall_error(timeout));
-                    }
-                },
-                None => stream.next().await,
+            let chunk_result = match next_stream_item_with_control(
+                &context.state,
+                &context.job_id,
+                context.stall_timeout,
+                stream.next(),
+            )
+            .await
+            {
+                StreamItemWait::Item(result) => result,
+                StreamItemWait::Interrupted(DownloadOutcome::Paused) => {
+                    record_segment_progress(
+                        &context.temp_path,
+                        &context.metadata,
+                        segment.index,
+                        current_len,
+                        false,
+                        true,
+                    )
+                    .await?;
+                    return Ok(DownloadOutcome::Paused);
+                }
+                StreamItemWait::Interrupted(DownloadOutcome::Canceled) => {
+                    record_segment_progress(
+                        &context.temp_path,
+                        &context.metadata,
+                        segment.index,
+                        current_len,
+                        false,
+                        true,
+                    )
+                    .await?;
+                    return Ok(DownloadOutcome::Canceled);
+                }
+                StreamItemWait::Interrupted(DownloadOutcome::Completed) => unreachable!(
+                    "stream control cannot produce a completed outcome while waiting for chunks"
+                ),
+                StreamItemWait::Stalled => {
+                    let timeout = context
+                        .stall_timeout
+                        .expect("stall wait can only stall when configured");
+                    record_segment_progress(
+                        &context.temp_path,
+                        &context.metadata,
+                        segment.index,
+                        current_len,
+                        false,
+                        true,
+                    )
+                    .await?;
+                    return Err(bulk_hoster_stall_error(timeout));
+                }
             };
             let Some(chunk_result) = chunk_result else {
                 break;
