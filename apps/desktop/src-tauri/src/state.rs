@@ -607,7 +607,7 @@ impl BulkHosterFairnessController {
                 self.last_freeze_reported_at = Some(now);
                 if let Some(pressure) = metrics.priority_pressure.as_ref() {
                     diagnostics.push(format!(
-                        "DataNodes priority blocked newer hoster claims to protect {} at {} B/s after peak {} B/s.",
+                        "Accelerated hoster priority blocked newer claims to protect {} at {} B/s after peak {} B/s.",
                         pressure.older_job_id, pressure.current_speed, pressure.peak_speed
                     ));
                 } else {
@@ -695,7 +695,7 @@ fn bulk_hoster_worker_profile_for_job(
     settings: &Settings,
     job: &DownloadJob,
 ) -> BulkHosterWorkerProfile {
-    datanodes_accelerated_hoster_concurrency(settings, job)
+    accelerated_hoster_concurrency(settings, job)
         .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
         .unwrap_or(BulkHosterWorkerProfile::Conservative)
 }
@@ -708,18 +708,20 @@ fn protected_bulk_hoster_max_adaptive_concurrency_for_key(
         .jobs
         .iter()
         .filter(|job| protected_bulk_hoster_fairness_key(job).as_deref() == Some(fairness_key))
-        .filter_map(|job| datanodes_accelerated_hoster_concurrency(&state.settings, job))
+        .filter_map(|job| accelerated_hoster_concurrency(&state.settings, job))
         .max()
         .unwrap_or(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
 }
 
-fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {
+fn accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {
     if settings.bulk.hoster_acceleration_mode == BulkHosterAccelerationMode::Off {
         return None;
     }
 
     let source_url = job.resolved_from_url.as_deref().unwrap_or(&job.url);
-    if !crate::hosters::is_datanodes_page_url(source_url) {
+    if !crate::hosters::is_datanodes_page_url(source_url)
+        && !crate::hosters::is_fuckingfast_page_url(source_url)
+    {
         return None;
     }
 
@@ -728,6 +730,17 @@ fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJ
         DownloadPerformanceMode::Balanced => Some(4),
         DownloadPerformanceMode::Fast => Some(8),
     }
+}
+
+fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {
+    let source_url = job.resolved_from_url.as_deref().unwrap_or(&job.url);
+    crate::hosters::is_datanodes_page_url(source_url)
+        .then(|| accelerated_hoster_concurrency(settings, job))
+        .flatten()
+}
+
+fn is_accelerated_hoster_bulk_job(settings: &Settings, job: &DownloadJob) -> bool {
+    is_protected_bulk_hoster_job(job) && accelerated_hoster_concurrency(settings, job).is_some()
 }
 
 fn is_accelerated_datanodes_bulk_job(settings: &Settings, job: &DownloadJob) -> bool {

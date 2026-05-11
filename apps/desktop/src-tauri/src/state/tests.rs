@@ -6124,6 +6124,85 @@ async fn accelerated_datanodes_balanced_stalled_progress_blocks_next_claim() {
 }
 
 #[tokio::test]
+async fn accelerated_fuckingfast_balanced_ramps_after_slow_positive_progress_samples() {
+    let download_dir = test_runtime_dir("bulk-fuckingfast-balanced-slow-progress-ramp");
+    let archive = bulk_archive_info(&download_dir, "bulk_fuckingfast_balanced_slow_progress");
+    let mut active = fuckingfast_bulk_job("job_fuckingfast_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 24 * 1024;
+    active.downloaded_bytes = 512 * 1024;
+    let queued = fuckingfast_bulk_job("job_fuckingfast_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_fuckingfast_1".into());
+        seed_accelerated_hoster_health(
+            &mut runtime,
+            "job_fuckingfast_1",
+            24 * 1024,
+            Duration::from_secs(8),
+            2,
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after slow FuckingFast progress should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_fuckingfast_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_fuckingfast_balanced_stalled_progress_blocks_next_claim() {
+    let download_dir = test_runtime_dir("bulk-fuckingfast-balanced-stalled-progress");
+    let archive = bulk_archive_info(&download_dir, "bulk_fuckingfast_balanced_stalled");
+    let mut active = fuckingfast_bulk_job("job_fuckingfast_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 0;
+    active.downloaded_bytes = 512 * 1024;
+    let queued = fuckingfast_bulk_job("job_fuckingfast_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_fuckingfast_1".into());
+        let now = Instant::now();
+        let job = runtime
+            .job("job_fuckingfast_1")
+            .expect("FuckingFast job should exist");
+        let mut health = BulkHosterWorkerHealth::from_job_with_profile(
+            job,
+            bulk_hoster_worker_profile_for_job(&runtime.settings, job),
+            now - Duration::from_secs(8),
+        );
+        health.mark_transferring(job.downloaded_bytes, now - Duration::from_secs(8));
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_fuckingfast_1".into(), health);
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after stalled FuckingFast progress should work");
+
+    assert!(tasks.is_empty());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next_claim() {
     let download_dir = test_runtime_dir("bulk-datanodes-fast-priority-runway");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_runway");
@@ -6495,6 +6574,54 @@ async fn accelerated_datanodes_workers_are_not_cascade_throttled() {
     assert!(
         protected_decision.is_none(),
         "the protected oldest worker must not throttle itself"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_fuckingfast_workers_are_not_cascade_throttled() {
+    let download_dir = test_runtime_dir("bulk-fuckingfast-priority-throttle-cap");
+    let archive = bulk_archive_info(&download_dir, "bulk_fuckingfast_priority_throttle_cap");
+    let mut older = fuckingfast_bulk_job("job_fuckingfast_1", archive.clone());
+    older.state = JobState::Downloading;
+    older.speed = 48 * 1024;
+    older.downloaded_bytes = 8 * 1024 * 1024;
+    let mut newer = fuckingfast_bulk_job("job_fuckingfast_2", archive);
+    newer.state = JobState::Downloading;
+    newer.speed = 512 * 1024;
+    newer.downloaded_bytes = 2 * 1024 * 1024;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![older, newer]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_fuckingfast_1".into());
+        runtime.active_workers.insert("job_fuckingfast_2".into());
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_fuckingfast_1",
+            1024 * 1024,
+            Duration::from_secs(30),
+            3,
+        );
+        seed_priority_hoster_health(
+            &mut runtime,
+            "job_fuckingfast_2",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+
+    let decision = state
+        .hoster_priority_throttle_decision("job_fuckingfast_2")
+        .await;
+    assert!(
+        decision.is_none(),
+        "accelerated FuckingFast workers should rely on admission control instead of cascade throttling"
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -7669,7 +7796,15 @@ fn bulk_archive_info(download_dir: &Path, id: &str) -> BulkArchiveInfo {
 
 fn protected_hoster_bulk_job(id: &str, archive: BulkArchiveInfo) -> DownloadJob {
     let mut job = download_job(id, JobState::Queued, ResumeSupport::Unknown, 0);
-    job.url = format!("https://fuckingfast.co/{id}");
+    job.url = format!("https://unverified-hoster.example/{id}");
+    job.resolved_from_url = Some(job.url.clone());
+    job.bulk_archive = Some(archive);
+    job
+}
+
+fn fuckingfast_bulk_job(id: &str, archive: BulkArchiveInfo) -> DownloadJob {
+    let mut job = download_job(id, JobState::Queued, ResumeSupport::Unknown, 0);
+    job.url = format!("https://fuckingfast.co/{id}#Game.part.rar");
     job.resolved_from_url = Some(job.url.clone());
     job.bulk_archive = Some(archive);
     job
@@ -7725,6 +7860,43 @@ fn seed_priority_hoster_health(
     let mut health = {
         let job = runtime.job(id).expect("hoster job should exist");
         BulkHosterWorkerHealth::from_job(job, now - transfer_age)
+    };
+    health.mark_transferring(downloaded_bytes, now - transfer_age);
+    let samples = healthy_samples.max(1);
+    for sample_index in 0..samples {
+        downloaded_bytes = downloaded_bytes.saturating_add(speed.max(1));
+        let sample_age = Duration::from_secs((samples - sample_index) as u64);
+        health.update(downloaded_bytes, speed, now - sample_age.min(transfer_age));
+    }
+    runtime
+        .bulk_hoster_worker_health
+        .insert(id.to_string(), health);
+    if let Some(job) = runtime.job_mut(id) {
+        job.state = JobState::Downloading;
+        job.speed = speed;
+        job.downloaded_bytes = downloaded_bytes;
+    }
+}
+
+fn seed_accelerated_hoster_health(
+    runtime: &mut RuntimeState,
+    id: &str,
+    speed: u64,
+    transfer_age: Duration,
+    healthy_samples: u8,
+) {
+    let now = Instant::now();
+    let profile = {
+        let job = runtime.job(id).expect("hoster job should exist");
+        bulk_hoster_worker_profile_for_job(&runtime.settings, job)
+    };
+    let mut downloaded_bytes = runtime
+        .job(id)
+        .expect("hoster job should exist")
+        .downloaded_bytes;
+    let mut health = {
+        let job = runtime.job(id).expect("hoster job should exist");
+        BulkHosterWorkerHealth::from_job_with_profile(job, profile, now - transfer_age)
     };
     health.mark_transferring(downloaded_bytes, now - transfer_age);
     let samples = healthy_samples.max(1);

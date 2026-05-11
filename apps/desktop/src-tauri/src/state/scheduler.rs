@@ -98,7 +98,7 @@ impl SharedState {
                 protected_bulk_hoster_targets.insert(key, target);
             }
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
-            let mut blocked_datanodes_queue_keys: HashSet<String> = HashSet::new();
+            let mut blocked_accelerated_hoster_queue_keys: HashSet<String> = HashSet::new();
             for job in &state.jobs {
                 if scheduled_normal_workers >= available_normal_slots
                     && scheduled_bulk_workers >= available_bulk_slots
@@ -116,14 +116,14 @@ impl SharedState {
                                 .get(&fairness_key)
                                 .cloned()
                                 .unwrap_or_default();
-                            let accelerated_datanodes =
-                                is_accelerated_datanodes_bulk_job(&state.settings, job);
-                            if accelerated_datanodes {
-                                if blocked_datanodes_queue_keys.contains(&fairness_key) {
+                            let accelerated_hoster =
+                                is_accelerated_hoster_bulk_job(&state.settings, job);
+                            if accelerated_hoster {
+                                if blocked_accelerated_hoster_queue_keys.contains(&fairness_key) {
                                     continue;
                                 }
                                 if state.datanodes_priority_defer_until.contains_key(&job.id) {
-                                    blocked_datanodes_queue_keys.insert(fairness_key);
+                                    blocked_accelerated_hoster_queue_keys.insert(fairness_key);
                                     continue;
                                 }
                             }
@@ -141,10 +141,10 @@ impl SharedState {
                             if protected_bulk_hoster_claim_blocked
                                 || fairness_metrics.active_count + scheduled_for_origin
                                     >= protected_bulk_hoster_target
-                                || (accelerated_datanodes && scheduled_for_origin > 0)
+                                || (accelerated_hoster && scheduled_for_origin > 0)
                             {
-                                if accelerated_datanodes {
-                                    blocked_datanodes_queue_keys.insert(fairness_key);
+                                if accelerated_hoster {
+                                    blocked_accelerated_hoster_queue_keys.insert(fairness_key);
                                 }
                                 continue;
                             }
@@ -196,20 +196,20 @@ impl SharedState {
                             now,
                         )
                     });
-                    let accelerated_datanodes =
-                        is_accelerated_datanodes_bulk_job(&settings_for_claim, job);
+                    let accelerated_hoster =
+                        is_accelerated_hoster_bulk_job(&settings_for_claim, job);
                     let _ = job;
                     state.active_workers.insert(task_id);
                     if let Some(health) = hoster_health {
                         state
                             .bulk_hoster_worker_health
                             .insert(task.id.clone(), health);
-                        if accelerated_datanodes {
+                        if accelerated_hoster {
                             state.push_diagnostic_event(
                                 DiagnosticLevel::Info,
                                 "download".into(),
                                 format!(
-                                    "DataNodes priority admitted {} after healthy runway.",
+                                    "Accelerated hoster admitted {} after healthy runway.",
                                     task.id
                                 ),
                                 Some(task.id.clone()),
@@ -393,7 +393,7 @@ fn hoster_priority_throttle_decision_for_state(
     {
         return None;
     }
-    if is_accelerated_datanodes_bulk_job(&state.settings, job) {
+    if is_accelerated_hoster_bulk_job(&state.settings, job) {
         return None;
     }
     let priority_key = protected_bulk_hoster_priority_group_key(job)?;
@@ -512,7 +512,7 @@ fn bulk_hoster_fairness_metrics_by_key(
         if !health.is_healthy(now) {
             metrics.all_healthy = false;
         }
-        if is_accelerated_datanodes_bulk_job(&state.settings, job) {
+        if is_accelerated_hoster_bulk_job(&state.settings, job) {
             datanodes_candidates_by_key
                 .entry(fairness_key)
                 .or_default()

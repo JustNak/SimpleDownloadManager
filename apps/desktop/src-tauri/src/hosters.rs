@@ -673,7 +673,7 @@ pub fn hoster_acceleration_policy(
 ) -> Option<HosterAccelerationPolicy> {
     match hoster_kind_for_url(source_url)? {
         HosterKind::Datanodes => datanodes_hoster_acceleration_policy(source_url, resolved_url),
-        HosterKind::FuckingFast => None,
+        HosterKind::FuckingFast => fuckingfast_hoster_acceleration_policy(source_url, resolved_url),
     }
 }
 
@@ -688,6 +688,29 @@ fn datanodes_hoster_acceleration_policy(
         max_balanced_segments: 4,
         max_fast_segments: 6,
     })
+}
+
+fn fuckingfast_hoster_acceleration_policy(
+    source_url: &str,
+    resolved_url: &str,
+) -> Option<HosterAccelerationPolicy> {
+    if !validate_fuckingfast_direct_url(resolved_url) {
+        return None;
+    }
+    let source_id = fuckingfast_source_id(source_url)?;
+    Some(HosterAccelerationPolicy {
+        backoff_key: format!("hoster:fuckingfast:{source_id}"),
+        max_balanced_segments: 4,
+        max_fast_segments: 6,
+    })
+}
+
+fn fuckingfast_source_id(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url.trim()).ok()?;
+    parsed
+        .path_segments()?
+        .find(|segment| !segment.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn datanodes_download_context_for_source_url(source_url: &str) -> Option<HosterDownloadContext> {
@@ -2002,12 +2025,44 @@ mod tests {
     }
 
     #[test]
-    fn unverified_hosters_remain_single_stream_for_bulk_acceleration() {
-        assert!(hoster_acceleration_policy(
+    fn fuckingfast_direct_urls_have_safe_hoster_acceleration_policy() {
+        let policy = hoster_acceleration_policy(
             "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar",
             "https://dl.fuckingfast.co/dl/token/Game.part01.rar",
         )
+        .expect("validated FuckingFast direct URLs should opt into safe acceleration");
+
+        assert_eq!(policy.backoff_key, "hoster:fuckingfast:ecw0lw398okf");
+        assert_eq!(policy.max_balanced_segments, 4);
+        assert_eq!(policy.max_fast_segments, 6);
+
+        let same_source_with_other_fragment = hoster_acceleration_policy(
+            "https://www.fuckingfast.co/ecw0lw398okf#Other.part01.rar",
+            "https://dl.fuckingfast.co/dl/other-token/Other.part01.rar",
+        )
+        .expect("filename fragments should not affect the FuckingFast backoff key");
+        assert_eq!(
+            same_source_with_other_fragment.backoff_key,
+            "hoster:fuckingfast:ecw0lw398okf"
+        );
+    }
+
+    #[test]
+    fn fuckingfast_acceleration_policy_rejects_invalid_direct_urls() {
+        assert!(hoster_acceleration_policy(
+            "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar",
+            "https://fuckingfast.co/dl/token/Game.part01.rar",
+        )
         .is_none());
+        assert!(hoster_acceleration_policy(
+            "https://fuckingfast.co/ecw0lw398okf#Game.part01.rar",
+            "https://dl.fuckingfast.co/not-dl/token/Game.part01.rar",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unverified_hosters_remain_single_stream_for_bulk_acceleration() {
         assert!(hoster_acceleration_policy(
             "https://example.com/file.bin",
             "https://cdn.example.com/file.bin",

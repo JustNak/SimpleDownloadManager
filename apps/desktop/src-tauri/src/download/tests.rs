@@ -2091,10 +2091,21 @@ fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
 }
 
 #[test]
-fn hoster_managed_bulk_tasks_disallow_segmented_downloads() {
-    let task = http_segment_policy_task(true, Some("https://fuckingfast.co/source"));
+fn unverified_hoster_bulk_tasks_disallow_segmented_downloads() {
+    let task = http_segment_policy_task(true, Some("https://example.com/source"));
 
     assert!(!task_allows_segmented_download(&task));
+}
+
+#[test]
+fn fuckingfast_hoster_bulk_tasks_allow_safe_segmented_downloads() {
+    let mut task = http_segment_policy_task(
+        true,
+        Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar"),
+    );
+    task.url = "https://dl.fuckingfast.co/dl/token/Game.part01.rar".into();
+
+    assert!(task_allows_segmented_download(&task));
 }
 
 #[test]
@@ -2109,7 +2120,7 @@ fn datanodes_hoster_bulk_tasks_allow_safe_segmented_downloads() {
 }
 
 #[test]
-fn hoster_acceleration_off_disallows_datanodes_bulk_segmentation() {
+fn hoster_acceleration_off_disallows_verified_hoster_bulk_segmentation() {
     let mut task = http_segment_policy_task(
         true,
         Some("https://datanodes.to/abc123456789/fg-optional-bonus-content.bin"),
@@ -2118,6 +2129,17 @@ fn hoster_acceleration_off_disallows_datanodes_bulk_segmentation() {
 
     assert!(!task_allows_segmented_download_with_mode(
         &task,
+        BulkHosterAccelerationMode::Off
+    ));
+
+    let mut fuckingfast_task = http_segment_policy_task(
+        true,
+        Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar"),
+    );
+    fuckingfast_task.url = "https://dl.fuckingfast.co/dl/token/Game.part01.rar".into();
+
+    assert!(!task_allows_segmented_download_with_mode(
+        &fuckingfast_task,
         BulkHosterAccelerationMode::Off
     ));
 }
@@ -2326,6 +2348,69 @@ fn datanodes_third_fast_worker_stays_segmented_with_two_segment_floor() {
                     "job_2",
                     SegmentConnectionClass::ProtectedHosterBulk,
                     "https://s1.datanodes.to/d/def/file.bin",
+                    2,
+                ),
+            ],
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn fuckingfast_oldest_balanced_worker_keeps_full_segment_cap() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_1",
+            "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            4,
+            &[],
+        ),
+        Some(4)
+    );
+}
+
+#[test]
+fn fuckingfast_secondary_balanced_workers_start_with_two_segments() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_2",
+            "https://dl.fuckingfast.co/dl/token-b/Game.part02.rar",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            4,
+            &[(
+                "job_1",
+                SegmentConnectionClass::ProtectedHosterBulk,
+                "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
+                4,
+            )],
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn fuckingfast_third_fast_worker_stays_segmented_with_two_segment_floor() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_3",
+            "https://dl.fuckingfast.co/dl/token-c/Game.part03.rar",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
+            6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
+                    6,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://dl.fuckingfast.co/dl/token-b/Game.part02.rar",
                     2,
                 ),
             ],

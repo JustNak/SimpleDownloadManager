@@ -682,7 +682,7 @@ async fn segment_attempt_context_for_task(
             connection_budget: Some(connection_budget),
             policy_cap,
             fair_min_segments: 2,
-            fair_origin_workers: datanodes_fair_origin_workers_for_mode(performance_mode),
+            fair_origin_workers: accelerated_hoster_fair_origin_workers_for_mode(performance_mode),
         });
     }
 
@@ -1338,7 +1338,7 @@ pub(super) fn bulk_slow_stream_recovery_action(
     }
 }
 
-fn datanodes_fair_origin_workers_for_mode(
+fn accelerated_hoster_fair_origin_workers_for_mode(
     performance_mode: DownloadPerformanceMode,
 ) -> Option<usize> {
     match performance_mode {
