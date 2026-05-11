@@ -1,4 +1,5 @@
 use super::*;
+use url::Url;
 
 const BULK_SLOW_RECOVERY_MIN_SIZE: u64 = 32 * 1024 * 1024;
 const BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -10,6 +11,52 @@ const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
 pub(super) enum BulkSlowStreamRecoveryAction {
     Continue,
     Retry { reset_partial: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum SegmentConnectionClass {
+    DirectBulk,
+    ProtectedHosterBulk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SegmentConnectionBudget {
+    pub(super) total: usize,
+    pub(super) per_origin: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SegmentConnectionLease {
+    class: SegmentConnectionClass,
+    origin: String,
+    segments: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HosterWarmupEntry {
+    InFlight,
+    Ready { url: String, expires_at: Instant },
+}
+
+#[derive(Debug)]
+pub(super) struct SegmentConnectionLeaseGuard {
+    job_id: String,
+}
+
+static SEGMENT_CONNECTION_LEASES: OnceLock<StdMutex<HashMap<String, SegmentConnectionLease>>> =
+    OnceLock::new();
+static HOSTER_WARMUP_CACHE: OnceLock<StdMutex<HashMap<String, HosterWarmupEntry>>> =
+    OnceLock::new();
+const HOSTER_WARMUP_TTL: Duration = Duration::from_secs(5 * 60);
+
+impl Drop for SegmentConnectionLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(leases) = SEGMENT_CONNECTION_LEASES.get() {
+            if let Ok(mut leases) = leases.lock() {
+                leases.remove(&self.job_id);
+            }
+        }
+    }
 }
 
 pub(super) async fn run_http_download_attempt(
@@ -103,12 +150,14 @@ async fn run_http_download_attempt_for_url(
         if range_probe_supported {
             if let Some(metadata) = preflight_metadata.as_ref() {
                 if let Some(total_bytes) = metadata.total_bytes {
-                    if let Some(plan) = plan_segmented_ranges_with_budget(
+                    if let Some((plan, _segment_lease)) = reserve_segmented_plan_for_attempt(
+                        task,
+                        effective_url,
+                        segment_attempt,
                         total_bytes,
                         metadata.resume_support,
                         speed_limit,
                         profile,
-                        segment_attempt.segment_budget,
                     ) {
                         match run_segmented_download_attempt(
                             app,
@@ -433,7 +482,9 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SegmentAttemptContext {
     backoff_key: Option<String>,
-    segment_budget: Option<usize>,
+    connection_class: Option<SegmentConnectionClass>,
+    connection_budget: Option<SegmentConnectionBudget>,
+    policy_cap: usize,
 }
 
 impl SegmentAttemptContext {
@@ -460,10 +511,14 @@ async fn segment_attempt_context_for_task(
     performance_mode: DownloadPerformanceMode,
 ) -> Option<SegmentAttemptContext> {
     if task.is_bulk_member && task.resolved_from_url.is_none() {
-        let budget = direct_bulk_segment_budget_for_task(state, task, effective_url).await?;
         return Some(SegmentAttemptContext {
             backoff_key: None,
-            segment_budget: Some(budget),
+            connection_class: Some(SegmentConnectionClass::DirectBulk),
+            connection_budget: Some(SegmentConnectionBudget {
+                total: DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
+                per_origin: DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+            }),
+            policy_cap: usize::MAX,
         });
     }
 
@@ -474,18 +529,23 @@ async fn segment_attempt_context_for_task(
         let source_url = task.resolved_from_url.as_deref()?;
         let policy = crate::hosters::hoster_acceleration_policy(source_url, effective_url)?;
         let policy_cap = hoster_segment_cap_for_mode(&policy, performance_mode);
-        let budget =
-            protected_hoster_bulk_segment_budget_for_task(state, task, effective_url, policy_cap)
-                .await?;
+        let connection_budget = hoster_segment_budget_for_mode(performance_mode)?;
+        if policy_cap < 2 {
+            return None;
+        }
         return Some(SegmentAttemptContext {
             backoff_key: Some(policy.backoff_key),
-            segment_budget: Some(budget),
+            connection_class: Some(SegmentConnectionClass::ProtectedHosterBulk),
+            connection_budget: Some(connection_budget),
+            policy_cap,
         });
     }
 
     Some(SegmentAttemptContext {
         backoff_key: None,
-        segment_budget: None,
+        connection_class: None,
+        connection_budget: None,
+        policy_cap: usize::MAX,
     })
 }
 
@@ -524,60 +584,275 @@ pub(super) fn hoster_segment_cap_for_mode(
     }
 }
 
-async fn direct_bulk_segment_budget_for_task(
-    state: &SharedState,
+fn hoster_segment_budget_for_mode(
+    performance_mode: DownloadPerformanceMode,
+) -> Option<SegmentConnectionBudget> {
+    match performance_mode {
+        DownloadPerformanceMode::Stable => None,
+        DownloadPerformanceMode::Balanced => Some(SegmentConnectionBudget {
+            total: HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            per_origin: HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        }),
+        DownloadPerformanceMode::Fast => Some(SegmentConnectionBudget {
+            total: HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            per_origin: HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        }),
+    }
+}
+
+fn reserve_segmented_plan_for_attempt(
     task: &crate::state::DownloadTask,
     effective_url: &str,
+    attempt: &SegmentAttemptContext,
+    total_bytes: u64,
+    resume_support: ResumeSupport,
+    speed_limit: Option<u64>,
+    profile: DownloadPerformanceProfile,
+) -> Option<(RangePlan, Option<SegmentConnectionLeaseGuard>)> {
+    let Some(class) = attempt.connection_class else {
+        return plan_segmented_ranges_with_budget(
+            total_bytes,
+            resume_support,
+            speed_limit,
+            profile,
+            None,
+        )
+        .map(|plan| (plan, None));
+    };
+
+    let budget = attempt.connection_budget?;
+    let leases = segment_connection_leases();
+    let mut leases = leases
+        .lock()
+        .expect("segment connection lease registry should not be poisoned");
+    let segment_budget = segment_budget_from_leases_locked(
+        &leases,
+        class,
+        &task.id,
+        effective_url,
+        budget,
+        attempt.policy_cap,
+    )?;
+    let plan = plan_segmented_ranges_with_budget(
+        total_bytes,
+        resume_support,
+        speed_limit,
+        profile,
+        Some(segment_budget),
+    )?;
+    let origin =
+        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
+    leases.insert(
+        task.id.clone(),
+        SegmentConnectionLease {
+            class,
+            origin,
+            segments: plan.segments.len(),
+        },
+    );
+
+    Some((
+        plan,
+        Some(SegmentConnectionLeaseGuard {
+            job_id: task.id.clone(),
+        }),
+    ))
+}
+
+#[cfg(test)]
+pub(super) fn segment_budget_from_active_leases(
+    class: SegmentConnectionClass,
+    job_id: &str,
+    effective_url: &str,
+    budget: SegmentConnectionBudget,
+    policy_cap: usize,
 ) -> Option<usize> {
-    if !(task.is_bulk_member && task.resolved_from_url.is_none()) {
+    let leases = segment_connection_leases();
+    let leases = leases
+        .lock()
+        .expect("segment connection lease registry should not be poisoned");
+    segment_budget_from_leases_locked(&leases, class, job_id, effective_url, budget, policy_cap)
+}
+
+fn segment_budget_from_leases_locked(
+    leases: &HashMap<String, SegmentConnectionLease>,
+    class: SegmentConnectionClass,
+    job_id: &str,
+    effective_url: &str,
+    budget: SegmentConnectionBudget,
+    policy_cap: usize,
+) -> Option<usize> {
+    if policy_cap < 2 {
         return None;
     }
 
-    let (active_direct_bulk_workers, active_same_origin_workers) = state
-        .active_direct_bulk_worker_counts(&task.id, effective_url)
-        .await;
-    segment_budget_from_counts(
-        DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
-        DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
-        active_direct_bulk_workers,
-        active_same_origin_workers,
-        usize::MAX,
-    )
-}
+    let target_origin =
+        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
+    let mut used_total = 0_usize;
+    let mut used_origin = 0_usize;
 
-async fn protected_hoster_bulk_segment_budget_for_task(
-    state: &SharedState,
-    task: &crate::state::DownloadTask,
-    effective_url: &str,
-    policy_cap: usize,
-) -> Option<usize> {
-    if !(task.is_bulk_member && task.resolved_from_url.is_some()) || policy_cap < 2 {
-        return None;
+    for (lease_job_id, lease) in leases {
+        if lease_job_id == job_id || lease.class != class {
+            continue;
+        }
+        used_total = used_total.saturating_add(lease.segments);
+        if lease.origin == target_origin {
+            used_origin = used_origin.saturating_add(lease.segments);
+        }
     }
 
-    let (active_hoster_workers, active_same_origin_workers) = state
-        .active_protected_hoster_bulk_worker_counts(&task.id, effective_url)
-        .await;
-    segment_budget_from_counts(
-        HOSTER_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
-        HOSTER_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
-        active_hoster_workers,
-        active_same_origin_workers,
-        policy_cap,
-    )
+    let available_total = budget.total.saturating_sub(used_total);
+    let available_origin = budget.per_origin.saturating_sub(used_origin);
+    let segment_budget = policy_cap.min(available_total).min(available_origin);
+    (segment_budget >= 2).then_some(segment_budget)
 }
 
-pub(super) fn segment_budget_from_counts(
-    total_budget: usize,
-    origin_budget: usize,
-    active_workers: usize,
-    active_same_origin_workers: usize,
-    policy_cap: usize,
-) -> Option<usize> {
-    let total_share = total_budget / active_workers.max(1);
-    let origin_share = origin_budget / active_same_origin_workers.max(1);
-    let budget = policy_cap.min(total_share).min(origin_share);
-    (budget >= 2).then_some(budget)
+fn segment_connection_origin_key(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    Some(format!(
+        "{}://{}:{}",
+        parsed.scheme(),
+        host,
+        parsed.port_or_known_default().unwrap_or(0)
+    ))
+}
+
+fn segment_connection_leases() -> &'static StdMutex<HashMap<String, SegmentConnectionLease>> {
+    SEGMENT_CONNECTION_LEASES.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(super) fn clear_segment_connection_leases_for_tests() {
+    segment_connection_leases()
+        .lock()
+        .expect("segment connection lease registry should not be poisoned")
+        .clear();
+}
+
+#[cfg(test)]
+pub(super) fn register_segment_connection_lease_for_tests(
+    job_id: &str,
+    class: SegmentConnectionClass,
+    effective_url: &str,
+    segments: usize,
+) -> SegmentConnectionLeaseGuard {
+    let origin =
+        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
+    segment_connection_leases()
+        .lock()
+        .expect("segment connection lease registry should not be poisoned")
+        .insert(
+            job_id.to_string(),
+            SegmentConnectionLease {
+                class,
+                origin,
+                segments,
+            },
+        );
+    SegmentConnectionLeaseGuard {
+        job_id: job_id.to_string(),
+    }
+}
+
+pub(super) fn spawn_datanodes_hoster_warmups(candidates: Vec<crate::state::HosterWarmupCandidate>) {
+    for candidate in candidates {
+        let key = hoster_warmup_key(&candidate.job_id, &candidate.source_url);
+        if !mark_hoster_warmup_inflight(&key, Instant::now()) {
+            continue;
+        }
+        tauri::async_runtime::spawn(async move {
+            match crate::hosters::refresh_resolved_hoster_link(&candidate.source_url).await {
+                Ok(outcome) => {
+                    store_warmed_hoster_url(&key, outcome.url, Instant::now() + HOSTER_WARMUP_TTL);
+                }
+                Err(_) => {
+                    clear_hoster_warmup_key(&key);
+                }
+            }
+        });
+    }
+}
+
+fn take_warmed_hoster_url(job_id: &str, source_url: &str, now: Instant) -> Option<String> {
+    let key = hoster_warmup_key(job_id, source_url);
+    let cache = hoster_warmup_cache();
+    let mut cache = cache
+        .lock()
+        .expect("hoster warmup cache should not be poisoned");
+    match cache.remove(&key) {
+        Some(HosterWarmupEntry::Ready { url, expires_at }) if expires_at > now => Some(url),
+        Some(HosterWarmupEntry::InFlight) => {
+            cache.insert(key, HosterWarmupEntry::InFlight);
+            None
+        }
+        _ => None,
+    }
+}
+
+fn mark_hoster_warmup_inflight(key: &str, now: Instant) -> bool {
+    let cache = hoster_warmup_cache();
+    let mut cache = cache
+        .lock()
+        .expect("hoster warmup cache should not be poisoned");
+    match cache.get(key) {
+        Some(HosterWarmupEntry::InFlight) => false,
+        Some(HosterWarmupEntry::Ready { expires_at, .. }) if *expires_at > now => false,
+        _ => {
+            cache.insert(key.to_string(), HosterWarmupEntry::InFlight);
+            true
+        }
+    }
+}
+
+fn store_warmed_hoster_url(key: &str, url: String, expires_at: Instant) {
+    hoster_warmup_cache()
+        .lock()
+        .expect("hoster warmup cache should not be poisoned")
+        .insert(
+            key.to_string(),
+            HosterWarmupEntry::Ready { url, expires_at },
+        );
+}
+
+fn clear_hoster_warmup_key(key: &str) {
+    hoster_warmup_cache()
+        .lock()
+        .expect("hoster warmup cache should not be poisoned")
+        .remove(key);
+}
+
+fn hoster_warmup_cache() -> &'static StdMutex<HashMap<String, HosterWarmupEntry>> {
+    HOSTER_WARMUP_CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn hoster_warmup_key(job_id: &str, source_url: &str) -> String {
+    format!("{job_id}\n{}", source_url.trim())
+}
+
+#[cfg(test)]
+pub(super) fn clear_hoster_warmup_cache_for_tests() {
+    hoster_warmup_cache()
+        .lock()
+        .expect("hoster warmup cache should not be poisoned")
+        .clear();
+}
+
+#[cfg(test)]
+pub(super) fn put_hoster_warmup_for_tests(
+    job_id: &str,
+    source_url: &str,
+    resolved_url: &str,
+    expires_at: Instant,
+) {
+    let key = hoster_warmup_key(job_id, source_url);
+    store_warmed_hoster_url(&key, resolved_url.to_string(), expires_at);
+}
+
+#[cfg(test)]
+pub(super) fn take_warmed_hoster_url_for_tests(job_id: &str, source_url: &str) -> Option<String> {
+    take_warmed_hoster_url(job_id, source_url, Instant::now())
 }
 
 pub(super) fn task_releases_bulk_hoster_fairness(
@@ -594,6 +869,11 @@ async fn refresh_hoster_url_before_attempt(
     task: &crate::state::DownloadTask,
 ) -> Result<Option<String>, DownloadError> {
     if task.is_bulk_member && task.resolved_from_url.is_some() {
+        if let Some(source_url) = task.resolved_from_url.as_deref() {
+            if let Some(warmed_url) = take_warmed_hoster_url(&task.id, source_url, Instant::now()) {
+                return Ok(Some(warmed_url));
+            }
+        }
         state.mark_bulk_hoster_resolving(&task.id).await;
     }
     let result = refresh_hoster_url_for_task(task).await;

@@ -685,8 +685,8 @@ fn datanodes_hoster_acceleration_policy(
     let file_code = datanodes_file_code_from_url(source_url)?;
     Some(HosterAccelerationPolicy {
         backoff_key: format!("hoster:datanodes:{file_code}"),
-        max_balanced_segments: 2,
-        max_fast_segments: 4,
+        max_balanced_segments: 4,
+        max_fast_segments: 6,
     })
 }
 
@@ -1997,8 +1997,8 @@ mod tests {
         .expect("validated DataNodes direct URLs should opt into safe acceleration");
 
         assert_eq!(policy.backoff_key, "hoster:datanodes:abc123456789");
-        assert_eq!(policy.max_balanced_segments, 2);
-        assert_eq!(policy.max_fast_segments, 4);
+        assert_eq!(policy.max_balanced_segments, 4);
+        assert_eq!(policy.max_fast_segments, 6);
     }
 
     #[test]

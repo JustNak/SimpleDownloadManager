@@ -2042,8 +2042,8 @@ fn hoster_acceleration_off_disallows_datanodes_bulk_segmentation() {
 fn hoster_acceleration_caps_segments_by_performance_mode() {
     let policy = crate::hosters::HosterAccelerationPolicy {
         backoff_key: "hoster:datanodes:abc123456789".into(),
-        max_balanced_segments: 2,
-        max_fast_segments: 4,
+        max_balanced_segments: 4,
+        max_fast_segments: 6,
     };
 
     assert_eq!(
@@ -2052,20 +2052,82 @@ fn hoster_acceleration_caps_segments_by_performance_mode() {
     );
     assert_eq!(
         hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Balanced),
-        2
+        4
     );
     assert_eq!(
         hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
-        4
+        6
     );
 }
 
 #[test]
-fn segment_budget_caps_by_total_origin_and_policy_limits() {
-    assert_eq!(segment_budget_from_counts(8, 4, 1, 1, 4), Some(4));
-    assert_eq!(segment_budget_from_counts(8, 4, 3, 1, 4), Some(2));
-    assert_eq!(segment_budget_from_counts(8, 4, 1, 3, 4), None);
-    assert_eq!(segment_budget_from_counts(8, 4, 1, 1, 1), None);
+fn segment_budget_uses_active_connection_leases() {
+    clear_segment_connection_leases_for_tests();
+    let _first = register_segment_connection_lease_for_tests(
+        "job_1",
+        SegmentConnectionClass::ProtectedHosterBulk,
+        "https://s1.datanodes.to/d/abc/file.bin",
+        4,
+    );
+    let _second = register_segment_connection_lease_for_tests(
+        "job_2",
+        SegmentConnectionClass::ProtectedHosterBulk,
+        "https://s2.datanodes.to/d/def/file.bin",
+        4,
+    );
+
+    assert_eq!(
+        segment_budget_from_active_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_3",
+            "https://s1.datanodes.to/d/ghi/file.bin",
+            SegmentConnectionBudget {
+                total: 16,
+                per_origin: 8,
+            },
+            6,
+        ),
+        Some(4)
+    );
+    assert_eq!(
+        segment_budget_from_active_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_4",
+            "https://s3.datanodes.to/d/jkl/file.bin",
+            SegmentConnectionBudget {
+                total: 8,
+                per_origin: 4,
+            },
+            6,
+        ),
+        None
+    );
+}
+
+#[test]
+fn datanodes_warmup_cache_consumes_ready_links_and_drops_expired_links() {
+    clear_hoster_warmup_cache_for_tests();
+    let source_url = "https://datanodes.to/abc123456/Game.part.rar";
+    put_hoster_warmup_for_tests(
+        "job_warm",
+        source_url,
+        "https://s1.datanodes.to/d/abc123456/Game.part.rar",
+        Instant::now() + Duration::from_secs(60),
+    );
+
+    assert_eq!(
+        take_warmed_hoster_url_for_tests("job_warm", source_url).as_deref(),
+        Some("https://s1.datanodes.to/d/abc123456/Game.part.rar")
+    );
+    assert!(take_warmed_hoster_url_for_tests("job_warm", source_url).is_none());
+
+    put_hoster_warmup_for_tests(
+        "job_expired",
+        source_url,
+        "https://s2.datanodes.to/d/abc123456/Game.part.rar",
+        Instant::now() - Duration::from_secs(1),
+    );
+    assert!(take_warmed_hoster_url_for_tests("job_expired", source_url).is_none());
 }
 
 #[test]
@@ -2692,6 +2754,54 @@ async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
     assert_eq!(reloaded.segments[2].downloaded_bytes, 0);
     assert!(!reloaded.segments[2].completed);
     assert!(!segment_path(&temp_path, 0).exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_state_persists_concurrent_writers_without_temp_file_race() {
+    let root = test_download_runtime_dir("segment-concurrent-sidecar");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let validators = EntityValidators::default();
+    prepare_direct_segment_file(&temp_path, plan.total_bytes)
+        .await
+        .unwrap();
+
+    let writer_count = 96;
+    let barrier = Arc::new(tokio::sync::Barrier::new(writer_count));
+    let mut handles = Vec::with_capacity(writer_count);
+
+    for index in 0..writer_count {
+        let barrier = barrier.clone();
+        let temp_path = temp_path.clone();
+        let plan = plan.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let mut state = new_segment_state_for_test(&plan, EntityValidators::default());
+            let segment_index = index % state.segments.len();
+            state.segments[segment_index].downloaded_bytes =
+                (index as u64 % state.segments[segment_index].range.len()).saturating_add(1);
+            persist_segment_state(&temp_path, &state).await
+        }));
+    }
+
+    for handle in handles {
+        handle
+            .await
+            .expect("segment metadata writer should not panic")
+            .expect("segment metadata writer should not race on temp file replacement");
+    }
+
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &validators)
+        .await
+        .expect("final segment metadata should remain readable");
+    assert_eq!(reloaded.total_bytes, plan.total_bytes);
+    assert_eq!(reloaded.segments.len(), plan.segments.len());
+    assert!(
+        !segment_meta_temp_path(&temp_path).exists(),
+        "fixed legacy metadata temp path should not be left behind"
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

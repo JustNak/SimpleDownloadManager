@@ -26,6 +26,12 @@ pub struct DownloadTask {
     pub temp_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HosterWarmupCandidate {
+    pub job_id: String,
+    pub source_url: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BulkArchiveReady {
     pub archive_id: String,

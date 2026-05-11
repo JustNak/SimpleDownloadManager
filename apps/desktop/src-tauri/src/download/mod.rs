@@ -84,8 +84,10 @@ const FAST_TARGET_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
 const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
 const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
-const HOSTER_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 8;
-const HOSTER_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 4;
+const HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
+const HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 32;
+const HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 12;
 const MAX_RETRY_AFTER_DELAY: Duration = Duration::from_secs(60);
 const MAX_RETRY_JITTER: Duration = Duration::from_millis(250);
 const SEGMENT_WORKER_STOP_GRACE: Duration = Duration::from_millis(100);
@@ -120,6 +122,11 @@ pub fn schedule_downloads(app: AppHandle, state: SharedState) {
 
                 for task in tasks {
                     start_download_worker(app.clone(), state.clone(), task);
+                }
+
+                let warmup_candidates = state.datanodes_hoster_warmup_candidates().await;
+                if !warmup_candidates.is_empty() {
+                    spawn_datanodes_hoster_warmups(warmup_candidates);
                 }
             }
             Err(error) => eprintln!("failed to claim queued jobs: {error}"),

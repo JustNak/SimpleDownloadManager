@@ -202,6 +202,36 @@ impl SharedState {
         state.settings.bulk.hoster_acceleration_mode
     }
 
+    pub async fn datanodes_hoster_warmup_candidates(&self) -> Vec<HosterWarmupCandidate> {
+        let state = self.inner.read().await;
+        let Some(limit) = datanodes_hoster_warmup_horizon(&state.settings) else {
+            return Vec::new();
+        };
+
+        state
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.state == JobState::Queued
+                    && !state.active_workers.contains(&job.id)
+                    && is_protected_bulk_hoster_job(job)
+                    && !job
+                        .hoster_preflight
+                        .as_ref()
+                        .is_some_and(|preflight| preflight.status == HosterPreflightStatus::Failed)
+                    && datanodes_accelerated_hoster_concurrency(&state.settings, job).is_some()
+            })
+            .filter_map(|job| {
+                let source_url = job.resolved_from_url.as_ref()?.clone();
+                Some(HosterWarmupCandidate {
+                    job_id: job.id.clone(),
+                    source_url,
+                })
+            })
+            .take(limit)
+            .collect()
+    }
+
     pub async fn active_direct_bulk_worker_counts(
         &self,
         job_id: &str,
