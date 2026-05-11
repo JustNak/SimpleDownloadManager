@@ -6,8 +6,8 @@ use crate::storage::{
     BulkHosterAccelerationMode, BulkHosterFairnessMode, ConnectionState, DesktopSnapshot,
     DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode,
     DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory, HandoffAuth,
-    HandoffAuthHeader, HostRegistrationDiagnostics, HosterPreflightInfo, IntegrityAlgorithm,
-    IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
+    HandoffAuthHeader, HostRegistrationDiagnostics, HosterPreflightInfo, HosterPreflightStatus,
+    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
     ProtectedDownloadAuthScope, QueueSummary, ResumeSupport, Settings, TorrentInfo,
     TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
 };
@@ -46,9 +46,10 @@ pub use types::{
     BackendError, BatchDownloadEntry, BulkArchiveEntry, BulkArchiveReady,
     BulkMemberAutoRestartCandidate, BulkMemberAutoRestartMode, BulkMemberRetryCandidate,
     BulkMemberSlowRecoveryState, DownloadTask, DuplicatePolicy, EnqueueOptions, EnqueueResult,
-    EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation, TorrentRemovalCleanupInfo,
-    TorrentRuntimePhase, TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure,
-    TorrentSessionCacheClearResult, TorrentSessionCacheClearState, WorkerControl,
+    EnqueueStatus, ExternalReseedAttempt, ExternalUsePreparation, HosterWarmupCandidate,
+    TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
+    TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult, TorrentSessionCacheClearState,
+    WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;
@@ -110,6 +111,7 @@ struct RuntimeState {
 
 #[derive(Debug, Clone)]
 struct BulkHosterWorkerHealth {
+    profile: BulkHosterWorkerProfile,
     _claimed_at: Instant,
     resolver_started_at: Option<Instant>,
     transfer_started_at: Option<Instant>,
@@ -129,9 +131,25 @@ enum BulkHosterWorkerPhase {
     Transferring,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BulkHosterWorkerProfile {
+    Conservative,
+    Accelerated { max_concurrency: u32 },
+}
+
 impl BulkHosterWorkerHealth {
+    #[cfg(test)]
     fn from_job(job: &DownloadJob, now: Instant) -> Self {
+        Self::from_job_with_profile(job, BulkHosterWorkerProfile::Conservative, now)
+    }
+
+    fn from_job_with_profile(
+        job: &DownloadJob,
+        profile: BulkHosterWorkerProfile,
+        now: Instant,
+    ) -> Self {
         Self {
+            profile,
             _claimed_at: now,
             resolver_started_at: None,
             transfer_started_at: None,
@@ -191,6 +209,13 @@ impl BulkHosterWorkerHealth {
             return true;
         }
 
+        if matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. }) {
+            if self.recent_healthy_samples(now) {
+                return false;
+            }
+            return true;
+        }
+
         let Some(transfer_started_at) = self.transfer_started_at else {
             return true;
         };
@@ -213,9 +238,7 @@ impl BulkHosterWorkerHealth {
 
     fn is_healthy(&self, now: Instant) -> bool {
         self.phase == BulkHosterWorkerPhase::Transferring
-            && self.transfer_started_at.is_some_and(|started| {
-                now.saturating_duration_since(started) >= BULK_HOSTER_STARTUP_GRACE_WINDOW
-            })
+            && self.profile_allows_healthy_sample_window(now)
             && self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
             && self.healthy_sample_count >= 2
             && self.last_healthy_at.is_some_and(|last| {
@@ -223,6 +246,27 @@ impl BulkHosterWorkerHealth {
                     <= BULK_HOSTER_LOW_SPEED_WINDOW + BULK_HOSTER_HEALTH_SAMPLE_WINDOW
             })
             && now.saturating_duration_since(self.last_progress_at) < BULK_HOSTER_LOW_SPEED_WINDOW
+    }
+
+    fn recent_healthy_samples(&self, now: Instant) -> bool {
+        self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
+            && self.healthy_sample_count >= 2
+            && self.last_healthy_at.is_some_and(|last| {
+                now.saturating_duration_since(last)
+                    <= BULK_HOSTER_LOW_SPEED_WINDOW + BULK_HOSTER_HEALTH_SAMPLE_WINDOW
+            })
+            && now.saturating_duration_since(self.last_progress_at) < BULK_HOSTER_LOW_SPEED_WINDOW
+    }
+
+    fn profile_allows_healthy_sample_window(&self, now: Instant) -> bool {
+        match self.profile {
+            BulkHosterWorkerProfile::Conservative => {
+                self.transfer_started_at.is_some_and(|started| {
+                    now.saturating_duration_since(started) >= BULK_HOSTER_STARTUP_GRACE_WINDOW
+                })
+            }
+            BulkHosterWorkerProfile::Accelerated { .. } => true,
+        }
     }
 }
 
@@ -260,20 +304,21 @@ impl BulkHosterFairnessController {
         *self = Self::default();
     }
 
-    fn target_for_bulk_limit(&self, bulk_slot_limit: u32) -> u32 {
+    fn target_for_bulk_limit(&self, bulk_slot_limit: u32, max_adaptive_concurrency: u32) -> u32 {
         self.target_active
             .max(1)
             .min(bulk_slot_limit.max(1))
-            .min(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
+            .min(max_adaptive_concurrency.max(1))
     }
 
     fn reconcile(
         &mut self,
         metrics: BulkHosterFairnessMetrics,
         bulk_slot_limit: u32,
+        max_adaptive_concurrency: u32,
         now: Instant,
     ) -> Vec<String> {
-        let max_target = bulk_slot_limit.clamp(1, BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY);
+        let max_target = bulk_slot_limit.clamp(1, max_adaptive_concurrency.max(1));
         self.target_active = self.target_active.clamp(1, max_target);
 
         if metrics.active_count == 0 {
@@ -399,6 +444,62 @@ fn protected_bulk_hoster_fairness_key(job: &DownloadJob) -> Option<String> {
     }
 
     download_origin_key(job.resolved_from_url.as_deref().unwrap_or(&job.url))
+}
+
+fn bulk_hoster_worker_profile_for_job(
+    settings: &Settings,
+    job: &DownloadJob,
+) -> BulkHosterWorkerProfile {
+    datanodes_accelerated_hoster_concurrency(settings, job)
+        .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
+        .unwrap_or(BulkHosterWorkerProfile::Conservative)
+}
+
+fn protected_bulk_hoster_max_adaptive_concurrency_for_key(
+    state: &RuntimeState,
+    fairness_key: &str,
+) -> u32 {
+    state
+        .jobs
+        .iter()
+        .filter(|job| protected_bulk_hoster_fairness_key(job).as_deref() == Some(fairness_key))
+        .filter_map(|job| datanodes_accelerated_hoster_concurrency(&state.settings, job))
+        .max()
+        .unwrap_or(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
+}
+
+fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {
+    if settings.bulk.hoster_acceleration_mode == BulkHosterAccelerationMode::Off {
+        return None;
+    }
+
+    let source_url = job.resolved_from_url.as_deref().unwrap_or(&job.url);
+    if !crate::hosters::is_datanodes_page_url(source_url) {
+        return None;
+    }
+
+    match settings.bulk.download_performance_mode {
+        DownloadPerformanceMode::Stable => None,
+        DownloadPerformanceMode::Balanced => Some(4),
+        DownloadPerformanceMode::Fast => Some(8),
+    }
+}
+
+fn datanodes_hoster_warmup_horizon(settings: &Settings) -> Option<usize> {
+    if settings.bulk.hoster_acceleration_mode == BulkHosterAccelerationMode::Off {
+        return None;
+    }
+
+    let mode_limit = match settings.bulk.download_performance_mode {
+        DownloadPerformanceMode::Stable => return None,
+        DownloadPerformanceMode::Balanced => 4,
+        DownloadPerformanceMode::Fast => 8,
+    };
+    Some(
+        (settings.bulk.max_concurrent_downloads.max(1) as usize)
+            .min(mode_limit)
+            .max(1),
+    )
 }
 
 #[cfg(test)]

@@ -1,5 +1,9 @@
 use super::*;
 
+static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    OnceLock::new();
+static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
     match mode {
         DownloadPerformanceMode::Stable => DownloadPerformanceProfile {
@@ -188,7 +192,7 @@ pub(super) async fn run_segmented_download_attempt(
     let reporter_handle = tauri::async_runtime::spawn(report_segmented_progress(
         app.clone(),
         state.clone(),
-        task.id.clone(),
+        task.clone(),
         plan.total_bytes,
         profile,
         progress.clone(),
@@ -564,12 +568,13 @@ pub(super) async fn download_segment_worker(
 pub(super) async fn report_segmented_progress(
     app: AppHandle,
     state: SharedState,
-    job_id: String,
+    task: crate::state::DownloadTask,
     total_bytes: u64,
     profile: DownloadPerformanceProfile,
     progress: Arc<SegmentedProgressCounters>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), DownloadError> {
+    let job_id = task.id.clone();
     let mut rolling_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
     let mut sample_started = Instant::now();
     let mut last_persisted_at = Instant::now();
@@ -617,6 +622,9 @@ pub(super) async fn report_segmented_progress(
             }
         };
         emit_download_update(&app, &snapshot, &job_id);
+        if task_releases_bulk_hoster_fairness(&task, speed) {
+            schedule_downloads(app.clone(), state.clone());
+        }
 
         if stopping {
             break;
@@ -853,20 +861,49 @@ pub(super) async fn persist_segment_state(
 ) -> Result<(), DownloadError> {
     let serialized = serde_json::to_string_pretty(state)
         .map_err(|error| format!("Could not serialize segment metadata: {error}"))?;
+    let lock = segment_metadata_lock(temp_path);
+    let _guard = lock.lock().await;
     let meta_path = segment_meta_path(temp_path);
-    let temp_meta_path = segment_meta_temp_path(temp_path);
+    let temp_meta_path = unique_segment_meta_temp_path(temp_path);
+    let backup_meta_path = segment_meta_backup_path(temp_path);
     fs::write(&temp_meta_path, serialized)
         .await
-        .map_err(|error| disk_error(format!("Could not write segment metadata: {error}")))?;
-    let _ = fs::remove_file(&meta_path).await;
-    fs::rename(&temp_meta_path, &meta_path)
-        .await
-        .map_err(|error| disk_error(format!("Could not replace segment metadata: {error}")))
+        .map_err(|error| {
+            disk_error(format!("Could not write segment metadata sidecar: {error}"))
+        })?;
+
+    let _ = fs::remove_file(&backup_meta_path).await;
+    let had_existing_metadata = match fs::rename(&meta_path, &backup_meta_path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_meta_path).await;
+            return Err(disk_error(format!(
+                "Could not stage segment metadata replacement: {error}"
+            )));
+        }
+    };
+
+    if let Err(error) = fs::rename(&temp_meta_path, &meta_path).await {
+        if had_existing_metadata {
+            let _ = fs::rename(&backup_meta_path, &meta_path).await;
+        }
+        let _ = fs::remove_file(&temp_meta_path).await;
+        return Err(disk_error(format!(
+            "Could not replace segment metadata sidecar: {error}"
+        )));
+    }
+
+    let _ = fs::remove_file(&backup_meta_path).await;
+    cleanup_stale_segment_metadata_temp_files(temp_path).await;
+    Ok(())
 }
 
 pub(super) async fn cleanup_segment_artifacts(temp_path: &Path, segment_count: usize) {
     let _ = fs::remove_file(segment_meta_path(temp_path)).await;
     let _ = fs::remove_file(segment_meta_temp_path(temp_path)).await;
+    let _ = fs::remove_file(segment_meta_backup_path(temp_path)).await;
+    cleanup_stale_segment_metadata_temp_files(temp_path).await;
     cleanup_legacy_segment_files(temp_path, segment_count).await;
 }
 
@@ -880,6 +917,8 @@ pub(super) async fn cleanup_partial_artifacts(temp_path: &Path) {
     let _ = fs::remove_file(temp_path).await;
     let _ = fs::remove_file(segment_meta_path(temp_path)).await;
     let _ = fs::remove_file(segment_meta_temp_path(temp_path)).await;
+    let _ = fs::remove_file(segment_meta_backup_path(temp_path)).await;
+    cleanup_stale_segment_metadata_temp_files(temp_path).await;
 
     let Some(parent) = temp_path.parent() else {
         return;
@@ -913,6 +952,52 @@ pub(super) fn segment_meta_temp_path(temp_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta.tmp", temp_path.display()))
 }
 
+fn unique_segment_meta_temp_path(temp_path: &Path) -> PathBuf {
+    let counter = SEGMENT_METADATA_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    PathBuf::from(format!("{}.meta.{counter}.tmp", temp_path.display()))
+}
+
+fn segment_meta_backup_path(temp_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.meta.bak", temp_path.display()))
+}
+
 pub(super) fn segment_path(temp_path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.seg{index}", temp_path.display()))
+}
+
+fn segment_metadata_lock(temp_path: &Path) -> Arc<Mutex<()>> {
+    let key = temp_path.to_path_buf();
+    let locks = SEGMENT_METADATA_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .expect("segment metadata lock registry should not be poisoned");
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+async fn cleanup_stale_segment_metadata_temp_files(temp_path: &Path) {
+    let Some(parent) = temp_path.parent() else {
+        return;
+    };
+    let Some(file_name) = temp_path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let temp_prefix = format!("{file_name}.meta.");
+
+    let Ok(mut entries) = fs::read_dir(parent).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let should_remove = entry
+            .file_name()
+            .to_str()
+            .map(|name| name.starts_with(&temp_prefix) && name.ends_with(".tmp"))
+            .unwrap_or(false);
+        if should_remove {
+            let _ = fs::remove_file(entry.path()).await;
+        }
+    }
 }

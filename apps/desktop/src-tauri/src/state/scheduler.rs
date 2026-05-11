@@ -48,12 +48,14 @@ impl SharedState {
                     .retain(|key, _| fairness_metrics_by_key.contains_key(key));
                 let mut diagnostics = Vec::new();
                 for (key, metrics) in &fairness_metrics_by_key {
+                    let max_adaptive_concurrency =
+                        protected_bulk_hoster_max_adaptive_concurrency_for_key(&state, key);
                     diagnostics.extend(
                         state
                             .bulk_hoster_fairness
                             .entry(key.clone())
                             .or_default()
-                            .reconcile(*metrics, bulk_slot_limit, now),
+                            .reconcile(*metrics, bulk_slot_limit, max_adaptive_concurrency, now),
                     );
                 }
                 diagnostics
@@ -76,11 +78,16 @@ impl SharedState {
                 .filter_map(protected_bulk_hoster_fairness_key)
                 .chain(fairness_metrics_by_key.keys().cloned())
             {
+                let max_adaptive_concurrency =
+                    protected_bulk_hoster_max_adaptive_concurrency_for_key(&state, &key);
                 let target = match fairness_mode {
                     BulkHosterFairnessMode::Adaptive => state
                         .bulk_hoster_fairness
                         .get(&key)
-                        .map(|controller| controller.target_for_bulk_limit(bulk_slot_limit))
+                        .map(|controller| {
+                            controller
+                                .target_for_bulk_limit(bulk_slot_limit, max_adaptive_concurrency)
+                        })
                         .unwrap_or(1),
                     BulkHosterFairnessMode::Safe => 1,
                     BulkHosterFairnessMode::Off => bulk_slot_limit,
@@ -138,6 +145,7 @@ impl SharedState {
             }
 
             let mut tasks = Vec::new();
+            let settings_for_claim = state.settings.clone();
             for scheduled_id in scheduled_ids {
                 if let Some(job) = state.job_mut(&scheduled_id) {
                     job.state = JobState::Starting;
@@ -158,8 +166,13 @@ impl SharedState {
                         temp_path: PathBuf::from(&job.temp_path),
                     };
                     let task_id = task.id.clone();
-                    let hoster_health = is_protected_bulk_hoster_job(job)
-                        .then(|| BulkHosterWorkerHealth::from_job(job, now));
+                    let hoster_health = is_protected_bulk_hoster_job(job).then(|| {
+                        BulkHosterWorkerHealth::from_job_with_profile(
+                            job,
+                            bulk_hoster_worker_profile_for_job(&settings_for_claim, job),
+                            now,
+                        )
+                    });
                     let _ = job;
                     state.active_workers.insert(task_id);
                     if let Some(health) = hoster_health {

@@ -5426,6 +5426,75 @@ async fn adaptive_bulk_hoster_fairness_ramps_to_four_after_healthy_progress() {
 }
 
 #[tokio::test]
+async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy_progress() {
+    let download_dir = test_runtime_dir("bulk-datanodes-fast-ramp");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_ramp");
+    let jobs = (1..=8)
+        .map(|index| datanodes_bulk_job(&format!("job_datanodes_{index}"), archive.clone()))
+        .collect::<Vec<_>>();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 8;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+    }
+
+    let (_, first_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("initial DataNodes claim should work");
+    assert_eq!(first_tasks.len(), 1);
+    assert_eq!(first_tasks[0].id, "job_datanodes_1");
+
+    for next_index in 2..=8 {
+        let current_id = format!("job_datanodes_{}", next_index - 1);
+        {
+            let mut runtime = state.inner.write().await;
+            seed_recent_healthy_bulk_hoster_health(&mut runtime, &current_id, 512 * 1024);
+        }
+
+        let (_, tasks) = state
+            .claim_schedulable_jobs()
+            .await
+            .expect("accelerated DataNodes claim should ramp");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, format!("job_datanodes_{next_index}"));
+    }
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn datanodes_warmup_candidates_follow_acceleration_mode_and_horizon() {
+    let download_dir = test_runtime_dir("bulk-datanodes-warmup-candidates");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_warmup");
+    let jobs = (1..=10)
+        .map(|index| datanodes_bulk_job(&format!("job_datanodes_{index}"), archive.clone()))
+        .collect::<Vec<_>>();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), jobs);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 12;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+    }
+
+    let candidates = state.datanodes_hoster_warmup_candidates().await;
+    assert_eq!(candidates.len(), 8);
+    assert_eq!(candidates[0].job_id, "job_datanodes_1");
+
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Off;
+    }
+    assert!(state.datanodes_hoster_warmup_candidates().await.is_empty());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn protected_bulk_hoster_health_allows_next_hoster_after_recovery() {
     let download_dir = test_runtime_dir("bulk-hoster-fairness-recovered");
     let archive = bulk_archive_info(&download_dir, "bulk_hoster_recovered");
@@ -6114,6 +6183,18 @@ fn protected_hoster_bulk_job(id: &str, archive: BulkArchiveInfo) -> DownloadJob 
     job
 }
 
+fn datanodes_bulk_job(id: &str, archive: BulkArchiveInfo) -> DownloadJob {
+    let mut job = download_job(id, JobState::Queued, ResumeSupport::Unknown, 0);
+    let file_code = id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    job.url = format!("https://datanodes.to/{file_code}/Game.part.rar");
+    job.resolved_from_url = Some(job.url.clone());
+    job.bulk_archive = Some(archive);
+    job
+}
+
 fn seed_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: u64) {
     let now = Instant::now();
     let job = runtime.job(id).expect("hoster job should exist");
@@ -6135,6 +6216,35 @@ fn seed_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: 
     runtime
         .bulk_hoster_worker_health
         .insert(id.to_string(), health);
+}
+
+fn seed_recent_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: u64) {
+    let now = Instant::now();
+    {
+        let job = runtime.job_mut(id).expect("hoster job should exist");
+        job.state = JobState::Downloading;
+        job.speed = speed;
+        job.downloaded_bytes = job.downloaded_bytes.saturating_add(speed.max(1));
+    }
+    let downloaded_bytes = runtime
+        .job(id)
+        .expect("hoster job should exist")
+        .downloaded_bytes;
+    let health = runtime
+        .bulk_hoster_worker_health
+        .get_mut(id)
+        .expect("claimed hoster job should have health");
+    health.mark_transferring(downloaded_bytes, now - Duration::from_secs(2));
+    health.update(
+        downloaded_bytes.saturating_add(speed.max(1)),
+        speed,
+        now - Duration::from_secs(1),
+    );
+    health.update(
+        downloaded_bytes.saturating_add(speed.max(1).saturating_mul(2)),
+        speed,
+        now,
+    );
 }
 
 fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> SharedState {
