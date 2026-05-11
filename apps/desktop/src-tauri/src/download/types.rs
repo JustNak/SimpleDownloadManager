@@ -149,6 +149,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) stall_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +159,7 @@ pub(super) struct DownloadPerformanceProfile {
     pub(super) target_segment_size: u64,
     pub(super) low_speed_threshold_bytes_per_second: u64,
     pub(super) low_speed_window: Duration,
+    pub(super) bulk_hoster_stall_timeout: Duration,
     pub(super) max_low_speed_retries: u32,
     pub(super) speed_smoothing_alpha: f64,
 }

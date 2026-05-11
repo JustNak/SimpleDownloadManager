@@ -2,7 +2,6 @@ use super::*;
 use url::Url;
 
 const BULK_SLOW_RECOVERY_MIN_SIZE: u64 = 32 * 1024 * 1024;
-const BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const BULK_SLOW_RECOVERY_BALANCED_THRESHOLD: u64 = 64 * 1024;
 const BULK_SLOW_RECOVERY_FAST_THRESHOLD: u64 = 128 * 1024;
 const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
@@ -34,8 +33,9 @@ struct SegmentConnectionLease {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HosterWarmupEntry {
-    InFlight,
+    InFlight { started_at: Instant },
     Ready { url: String, expires_at: Instant },
+    Failed { expires_at: Instant },
 }
 
 #[derive(Debug)]
@@ -48,6 +48,8 @@ static SEGMENT_CONNECTION_LEASES: OnceLock<StdMutex<HashMap<String, SegmentConne
 static HOSTER_WARMUP_CACHE: OnceLock<StdMutex<HashMap<String, HosterWarmupEntry>>> =
     OnceLock::new();
 const HOSTER_WARMUP_TTL: Duration = Duration::from_secs(5 * 60);
+pub(super) const HOSTER_WARMUP_INFLIGHT_TTL: Duration = Duration::from_secs(2 * 60);
+const HOSTER_WARMUP_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 impl Drop for SegmentConnectionLeaseGuard {
     fn drop(&mut self) {
@@ -82,9 +84,11 @@ pub(super) async fn run_http_download_attempt(
                 refreshed_after_failure = true;
                 match refresh_hoster_url_after_failure(state, task, &error).await {
                     Ok(Some(url)) => {
-                        cleanup_partial_artifacts(&task.temp_path).await;
-                        let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
-                        emit_download_update(app, &snapshot, &task.id);
+                        if error.category == FailureCategory::Resume {
+                            cleanup_partial_artifacts(&task.temp_path).await;
+                            let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
+                            emit_download_update(app, &snapshot, &task.id);
+                        }
                         current_url = url;
                     }
                     Ok(None) | Err(_) => return Err(error),
@@ -144,6 +148,13 @@ async fn run_http_download_attempt_for_url(
             }
             None => {
                 segment_attempt.record_rejection(effective_url, Instant::now());
+                record_download_diagnostic(
+                    state,
+                    DiagnosticLevel::Warning,
+                    task,
+                    "Range probe failed; using single-stream fallback for this hoster link.".into(),
+                )
+                .await;
             }
         }
 
@@ -159,6 +170,16 @@ async fn run_http_download_attempt_for_url(
                         speed_limit,
                         profile,
                     ) {
+                        record_download_diagnostic(
+                            state,
+                            DiagnosticLevel::Info,
+                            task,
+                            format!(
+                                "Starting segmented hoster download with {} segments.",
+                                plan.segments.len()
+                            ),
+                        )
+                        .await;
                         match run_segmented_download_attempt(
                             app,
                             state,
@@ -180,16 +201,52 @@ async fn run_http_download_attempt_for_url(
                             }
                             Err(error) => return Err(error),
                         }
+                    } else if segmented_plan_would_fit_without_active_budget(
+                        total_bytes,
+                        metadata.resume_support,
+                        speed_limit,
+                        profile,
+                        segment_attempt.policy_cap,
+                    ) {
+                        record_download_diagnostic(
+                            state,
+                            DiagnosticLevel::Warning,
+                            task,
+                            "Segment budget is full for this hoster; retrying shortly instead of falling back to single-stream."
+                                .into(),
+                        )
+                        .await;
+                        return Err(download_error(
+                            FailureCategory::Network,
+                            "Segment connection budget is temporarily full; retrying shortly."
+                                .into(),
+                            true,
+                        ));
                     }
                 }
             }
         }
 
         if has_segment_state {
+            record_download_diagnostic(
+                state,
+                DiagnosticLevel::Warning,
+                task,
+                "Cleaning incompatible segmented state before single-stream fallback.".into(),
+            )
+            .await;
             cleanup_partial_artifacts(&task.temp_path).await;
             existing_bytes = 0;
         }
     } else if has_segment_state {
+        record_download_diagnostic(
+            state,
+            DiagnosticLevel::Warning,
+            task,
+            "Cleaning segmented state because this attempt cannot use segmented downloading."
+                .into(),
+        )
+        .await;
         cleanup_partial_artifacts(&task.temp_path).await;
         existing_bytes = 0;
     }
@@ -278,6 +335,7 @@ async fn run_http_download_attempt_for_url(
     let mut file = BufWriter::with_capacity(DOWNLOAD_BUFFER_SIZE, file);
 
     let mut stream = response.bytes_stream();
+    let stall_timeout = protected_bulk_hoster_stall_timeout(task, profile);
     let mut downloaded_bytes = existing_bytes;
     let attempt_started = Instant::now();
     let mut attempt_transferred_bytes = 0_u64;
@@ -290,7 +348,31 @@ async fn run_http_download_attempt_for_url(
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = match stall_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    file.flush().await.ok();
+                    record_download_diagnostic(
+                        state,
+                        DiagnosticLevel::Warning,
+                        task,
+                        format!(
+                            "Protected hoster stream received no data for {} seconds; retrying.",
+                            timeout.as_secs()
+                        ),
+                    )
+                    .await;
+                    return Err(bulk_hoster_stall_error(timeout));
+                }
+            },
+            None => stream.next().await,
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
+
         match state.worker_control(&task.id).await {
             WorkerControl::Paused => {
                 file.flush().await.ok();
@@ -485,6 +567,8 @@ struct SegmentAttemptContext {
     connection_class: Option<SegmentConnectionClass>,
     connection_budget: Option<SegmentConnectionBudget>,
     policy_cap: usize,
+    fair_min_segments: usize,
+    fair_origin_workers: Option<usize>,
 }
 
 impl SegmentAttemptContext {
@@ -519,6 +603,8 @@ async fn segment_attempt_context_for_task(
                 per_origin: DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
             }),
             policy_cap: usize::MAX,
+            fair_min_segments: 2,
+            fair_origin_workers: None,
         });
     }
 
@@ -538,6 +624,8 @@ async fn segment_attempt_context_for_task(
             connection_class: Some(SegmentConnectionClass::ProtectedHosterBulk),
             connection_budget: Some(connection_budget),
             policy_cap,
+            fair_min_segments: 2,
+            fair_origin_workers: datanodes_fair_origin_workers_for_mode(performance_mode),
         });
     }
 
@@ -546,6 +634,8 @@ async fn segment_attempt_context_for_task(
         connection_class: None,
         connection_budget: None,
         policy_cap: usize::MAX,
+        fair_min_segments: 2,
+        fair_origin_workers: None,
     })
 }
 
@@ -584,7 +674,7 @@ pub(super) fn hoster_segment_cap_for_mode(
     }
 }
 
-fn hoster_segment_budget_for_mode(
+pub(super) fn hoster_segment_budget_for_mode(
     performance_mode: DownloadPerformanceMode,
 ) -> Option<SegmentConnectionBudget> {
     match performance_mode {
@@ -632,6 +722,8 @@ fn reserve_segmented_plan_for_attempt(
         effective_url,
         budget,
         attempt.policy_cap,
+        attempt.fair_min_segments,
+        attempt.fair_origin_workers,
     )?;
     let plan = plan_segmented_ranges_with_budget(
         total_bytes,
@@ -671,7 +763,33 @@ pub(super) fn segment_budget_from_active_leases(
     let leases = leases
         .lock()
         .expect("segment connection lease registry should not be poisoned");
-    segment_budget_from_leases_locked(&leases, class, job_id, effective_url, budget, policy_cap)
+    segment_budget_from_leases_locked(
+        &leases,
+        class,
+        job_id,
+        effective_url,
+        budget,
+        policy_cap,
+        2,
+        datanodes_fair_origin_workers_for_budget(budget, policy_cap),
+    )
+}
+
+fn segmented_plan_would_fit_without_active_budget(
+    total_bytes: u64,
+    resume_support: ResumeSupport,
+    speed_limit: Option<u64>,
+    profile: DownloadPerformanceProfile,
+    policy_cap: usize,
+) -> bool {
+    plan_segmented_ranges_with_budget(
+        total_bytes,
+        resume_support,
+        speed_limit,
+        profile,
+        Some(policy_cap),
+    )
+    .is_some()
 }
 
 fn segment_budget_from_leases_locked(
@@ -681,6 +799,8 @@ fn segment_budget_from_leases_locked(
     effective_url: &str,
     budget: SegmentConnectionBudget,
     policy_cap: usize,
+    fair_min_segments: usize,
+    fair_origin_workers: Option<usize>,
 ) -> Option<usize> {
     if policy_cap < 2 {
         return None;
@@ -690,6 +810,7 @@ fn segment_budget_from_leases_locked(
         segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
     let mut used_total = 0_usize;
     let mut used_origin = 0_usize;
+    let mut used_origin_workers = 0_usize;
 
     for (lease_job_id, lease) in leases {
         if lease_job_id == job_id || lease.class != class {
@@ -698,13 +819,44 @@ fn segment_budget_from_leases_locked(
         used_total = used_total.saturating_add(lease.segments);
         if lease.origin == target_origin {
             used_origin = used_origin.saturating_add(lease.segments);
+            used_origin_workers = used_origin_workers.saturating_add(1);
         }
     }
 
     let available_total = budget.total.saturating_sub(used_total);
     let available_origin = budget.per_origin.saturating_sub(used_origin);
-    let segment_budget = policy_cap.min(available_total).min(available_origin);
+    let mut segment_budget = policy_cap.min(available_total).min(available_origin);
+    if class == SegmentConnectionClass::ProtectedHosterBulk {
+        if let Some(fair_origin_workers) = fair_origin_workers {
+            let active_origin_workers = used_origin_workers.saturating_add(1);
+            let future_origin_workers = fair_origin_workers.saturating_sub(active_origin_workers);
+            let reserved_for_future =
+                future_origin_workers.saturating_mul(fair_min_segments.max(1));
+            segment_budget =
+                segment_budget.min(available_origin.saturating_sub(reserved_for_future));
+        }
+    }
     (segment_budget >= 2).then_some(segment_budget)
+}
+
+#[cfg(test)]
+fn datanodes_fair_origin_workers_for_budget(
+    budget: SegmentConnectionBudget,
+    policy_cap: usize,
+) -> Option<usize> {
+    match (budget.total, budget.per_origin, policy_cap) {
+        (
+            HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+            4,
+        ) => Some(4),
+        (
+            HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+            6,
+        ) => Some(8),
+        _ => None,
+    }
 }
 
 fn segment_connection_origin_key(raw_url: &str) -> Option<String> {
@@ -756,21 +908,31 @@ pub(super) fn register_segment_connection_lease_for_tests(
     }
 }
 
-pub(super) fn spawn_datanodes_hoster_warmups(candidates: Vec<crate::state::HosterWarmupCandidate>) {
+pub(super) fn spawn_datanodes_hoster_warmups(
+    app: AppHandle,
+    state: SharedState,
+    candidates: Vec<crate::state::HosterWarmupCandidate>,
+) {
     for candidate in candidates {
         let key = hoster_warmup_key(&candidate.job_id, &candidate.source_url);
         if !mark_hoster_warmup_inflight(&key, Instant::now()) {
             continue;
         }
+        let app = app.clone();
+        let state = state.clone();
         tauri::async_runtime::spawn(async move {
             match crate::hosters::refresh_resolved_hoster_link(&candidate.source_url).await {
                 Ok(outcome) => {
                     store_warmed_hoster_url(&key, outcome.url, Instant::now() + HOSTER_WARMUP_TTL);
                 }
                 Err(_) => {
-                    clear_hoster_warmup_key(&key);
+                    store_failed_hoster_warmup(
+                        &key,
+                        Instant::now() + HOSTER_WARMUP_FAILURE_BACKOFF,
+                    );
                 }
             }
+            schedule_downloads(app.clone(), state.clone());
         });
     }
 }
@@ -783,8 +945,14 @@ fn take_warmed_hoster_url(job_id: &str, source_url: &str, now: Instant) -> Optio
         .expect("hoster warmup cache should not be poisoned");
     match cache.remove(&key) {
         Some(HosterWarmupEntry::Ready { url, expires_at }) if expires_at > now => Some(url),
-        Some(HosterWarmupEntry::InFlight) => {
-            cache.insert(key, HosterWarmupEntry::InFlight);
+        Some(HosterWarmupEntry::InFlight { started_at })
+            if now.saturating_duration_since(started_at) < HOSTER_WARMUP_INFLIGHT_TTL =>
+        {
+            cache.insert(key, HosterWarmupEntry::InFlight { started_at });
+            None
+        }
+        Some(HosterWarmupEntry::Failed { expires_at }) if expires_at > now => {
+            cache.insert(key, HosterWarmupEntry::Failed { expires_at });
             None
         }
         _ => None,
@@ -797,10 +965,18 @@ fn mark_hoster_warmup_inflight(key: &str, now: Instant) -> bool {
         .lock()
         .expect("hoster warmup cache should not be poisoned");
     match cache.get(key) {
-        Some(HosterWarmupEntry::InFlight) => false,
+        Some(HosterWarmupEntry::InFlight { started_at })
+            if now.saturating_duration_since(*started_at) < HOSTER_WARMUP_INFLIGHT_TTL =>
+        {
+            false
+        }
         Some(HosterWarmupEntry::Ready { expires_at, .. }) if *expires_at > now => false,
+        Some(HosterWarmupEntry::Failed { expires_at }) if *expires_at > now => false,
         _ => {
-            cache.insert(key.to_string(), HosterWarmupEntry::InFlight);
+            cache.insert(
+                key.to_string(),
+                HosterWarmupEntry::InFlight { started_at: now },
+            );
             true
         }
     }
@@ -816,11 +992,11 @@ fn store_warmed_hoster_url(key: &str, url: String, expires_at: Instant) {
         );
 }
 
-fn clear_hoster_warmup_key(key: &str) {
+fn store_failed_hoster_warmup(key: &str, expires_at: Instant) {
     hoster_warmup_cache()
         .lock()
         .expect("hoster warmup cache should not be poisoned")
-        .remove(key);
+        .insert(key.to_string(), HosterWarmupEntry::Failed { expires_at });
 }
 
 fn hoster_warmup_cache() -> &'static StdMutex<HashMap<String, HosterWarmupEntry>> {
@@ -829,6 +1005,16 @@ fn hoster_warmup_cache() -> &'static StdMutex<HashMap<String, HosterWarmupEntry>
 
 fn hoster_warmup_key(job_id: &str, source_url: &str) -> String {
     format!("{job_id}\n{}", source_url.trim())
+}
+
+#[cfg(test)]
+pub(super) fn hoster_warmup_key_for_tests(job_id: &str, source_url: &str) -> String {
+    hoster_warmup_key(job_id, source_url)
+}
+
+#[cfg(test)]
+pub(super) fn mark_hoster_warmup_inflight_for_tests(key: &str, now: Instant) -> bool {
+    mark_hoster_warmup_inflight(key, now)
 }
 
 #[cfg(test)]
@@ -864,6 +1050,36 @@ pub(super) fn task_releases_bulk_hoster_fairness(
         && speed >= BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD
 }
 
+pub(super) fn protected_bulk_hoster_stall_timeout(
+    task: &crate::state::DownloadTask,
+    profile: DownloadPerformanceProfile,
+) -> Option<Duration> {
+    (task.is_bulk_member && task.resolved_from_url.is_some())
+        .then_some(profile.bulk_hoster_stall_timeout)
+}
+
+pub(super) fn bulk_hoster_stall_error(timeout: Duration) -> DownloadError {
+    download_error(
+        FailureCategory::Network,
+        format!(
+            "Protected hoster stream received no data for {} seconds; retrying the stream.",
+            timeout.as_secs()
+        ),
+        true,
+    )
+}
+
+async fn record_download_diagnostic(
+    state: &SharedState,
+    level: DiagnosticLevel,
+    task: &crate::state::DownloadTask,
+    message: String,
+) {
+    let _ = state
+        .record_diagnostic_event(level, "download", message, Some(task.id.clone()))
+        .await;
+}
+
 async fn refresh_hoster_url_before_attempt(
     state: &SharedState,
     task: &crate::state::DownloadTask,
@@ -871,9 +1087,23 @@ async fn refresh_hoster_url_before_attempt(
     if task.is_bulk_member && task.resolved_from_url.is_some() {
         if let Some(source_url) = task.resolved_from_url.as_deref() {
             if let Some(warmed_url) = take_warmed_hoster_url(&task.id, source_url, Instant::now()) {
+                record_download_diagnostic(
+                    state,
+                    DiagnosticLevel::Info,
+                    task,
+                    "Using warmed DataNodes direct link.".into(),
+                )
+                .await;
                 return Ok(Some(warmed_url));
             }
         }
+        record_download_diagnostic(
+            state,
+            DiagnosticLevel::Info,
+            task,
+            "Resolving protected hoster direct link.".into(),
+        )
+        .await;
         state.mark_bulk_hoster_resolving(&task.id).await;
     }
     let result = refresh_hoster_url_for_task(task).await;
@@ -1034,12 +1264,12 @@ pub(super) fn bulk_slow_stream_recovery_action(
     sample_bytes: u64,
     elapsed: Duration,
     total_bytes: Option<u64>,
-    downloaded_bytes: u64,
+    _downloaded_bytes: u64,
     speed_limit: Option<u64>,
     profile: DownloadPerformanceProfile,
     recovery_state: Option<BulkMemberSlowRecoveryState>,
 ) -> BulkSlowStreamRecoveryAction {
-    let Some(recovery_state) = recovery_state else {
+    let Some(_recovery_state) = recovery_state else {
         return BulkSlowStreamRecoveryAction::Continue;
     };
     let Some(total_bytes) = total_bytes else {
@@ -1058,14 +1288,18 @@ pub(super) fn bulk_slow_stream_recovery_action(
         return BulkSlowStreamRecoveryAction::Continue;
     }
 
-    if recovery_state.retry_attempts >= recovery_state.max_retry_attempts {
-        return BulkSlowStreamRecoveryAction::Retry {
-            reset_partial: false,
-        };
-    }
-
     BulkSlowStreamRecoveryAction::Retry {
-        reset_partial: downloaded_bytes < BULK_SLOW_RECOVERY_RESET_PARTIAL_MAX_BYTES,
+        reset_partial: false,
+    }
+}
+
+fn datanodes_fair_origin_workers_for_mode(
+    performance_mode: DownloadPerformanceMode,
+) -> Option<usize> {
+    match performance_mode {
+        DownloadPerformanceMode::Stable => None,
+        DownloadPerformanceMode::Balanced => Some(4),
+        DownloadPerformanceMode::Fast => Some(8),
     }
 }
 

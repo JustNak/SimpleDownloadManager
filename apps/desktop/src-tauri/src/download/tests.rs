@@ -74,6 +74,40 @@ fn hoster_refresh_retries_expired_links_range_failures_and_early_eof() {
     assert!(!hoster_refresh_error_allows_retry(&integrity));
 }
 
+#[tokio::test]
+async fn download_client_does_not_decode_mislabelled_file_bodies() {
+    let response = "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 3\r\n\r\nbad";
+    let (url, _request_handle) = spawn_one_response_server(response).await;
+    let client = download_client().unwrap();
+
+    let response = send_request(&client, &url, 0, None, None)
+        .await
+        .expect("mislabelled file response should still start");
+    let bytes = response
+        .bytes()
+        .await
+        .expect("download client should stream raw file bytes without decompression");
+
+    assert_eq!(&bytes[..], b"bad");
+}
+
+#[tokio::test]
+async fn response_body_decode_errors_are_retryable_network_failures() {
+    let response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nbad\r\n0\r\n\r\n";
+    let (url, _request_handle) = spawn_one_response_server(response).await;
+    let client = Client::builder().redirect(Policy::none()).build().unwrap();
+    let response = client.get(&url).send().await.unwrap();
+    let error = response
+        .bytes()
+        .await
+        .expect_err("reqwest should reject malformed transfer-encoding bodies");
+
+    let classified = download_stream_error(error);
+
+    assert_eq!(classified.category, FailureCategory::Network);
+    assert!(classified.retryable);
+}
+
 #[test]
 fn hoster_refresh_before_attempt_fails_closed_instead_of_using_source_url() {
     let source = include_str!("http.rs");
@@ -2105,6 +2139,71 @@ fn segment_budget_uses_active_connection_leases() {
 }
 
 #[test]
+fn datanodes_balanced_budget_keeps_four_same_origin_jobs_segmented() {
+    clear_segment_connection_leases_for_tests();
+    let _first = register_segment_connection_lease_for_tests(
+        "job_1",
+        SegmentConnectionClass::ProtectedHosterBulk,
+        "https://s1.datanodes.to/d/abc/file.bin",
+        4,
+    );
+    let _second = register_segment_connection_lease_for_tests(
+        "job_2",
+        SegmentConnectionClass::ProtectedHosterBulk,
+        "https://s1.datanodes.to/d/def/file.bin",
+        4,
+    );
+    let _third = register_segment_connection_lease_for_tests(
+        "job_3",
+        SegmentConnectionClass::ProtectedHosterBulk,
+        "https://s1.datanodes.to/d/ghi/file.bin",
+        4,
+    );
+
+    assert_eq!(
+        segment_budget_from_active_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_4",
+            "https://s1.datanodes.to/d/jkl/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            4,
+        ),
+        Some(4)
+    );
+}
+
+#[test]
+fn stale_inflight_hoster_warmups_can_be_replaced() {
+    clear_hoster_warmup_cache_for_tests();
+    let key = hoster_warmup_key_for_tests("job_warmup", "https://datanodes.to/abc123/file.bin");
+    let now = Instant::now();
+
+    assert!(mark_hoster_warmup_inflight_for_tests(&key, now));
+    assert!(!mark_hoster_warmup_inflight_for_tests(
+        &key,
+        now + HOSTER_WARMUP_INFLIGHT_TTL / 2
+    ));
+    assert!(mark_hoster_warmup_inflight_for_tests(
+        &key,
+        now + HOSTER_WARMUP_INFLIGHT_TTL + Duration::from_secs(1)
+    ));
+}
+
+#[test]
+fn datanodes_warmup_completion_wakes_scheduler() {
+    let source = include_str!("http.rs");
+    let warmup_function = source
+        .split("pub(super) fn spawn_datanodes_hoster_warmups")
+        .nth(1)
+        .expect("DataNodes warmup spawning should exist");
+
+    assert!(
+        warmup_function.contains("schedule_downloads(app.clone(), state.clone())"),
+        "ready or failed DataNodes warmups should wake the scheduler"
+    );
+}
+
+#[test]
 fn datanodes_warmup_cache_consumes_ready_links_and_drops_expired_links() {
     clear_hoster_warmup_cache_for_tests();
     let source_url = "https://datanodes.to/abc123456/Game.part.rar";
@@ -2150,6 +2249,50 @@ fn healthy_hoster_bulk_progress_releases_fairness_scheduler() {
         64 * 1024 - 1
     ));
     assert!(!task_releases_bulk_hoster_fairness(&direct_bulk, 96 * 1024));
+}
+
+#[test]
+fn protected_bulk_hoster_stall_timeout_is_mode_specific() {
+    let hoster_bulk = http_segment_policy_task(true, Some("https://datanodes.to/source"));
+    let direct_bulk = http_segment_policy_task(true, None);
+
+    assert_eq!(
+        protected_bulk_hoster_stall_timeout(
+            &hoster_bulk,
+            performance_profile(DownloadPerformanceMode::Balanced),
+        ),
+        Some(Duration::from_secs(25))
+    );
+    assert_eq!(
+        protected_bulk_hoster_stall_timeout(
+            &hoster_bulk,
+            performance_profile(DownloadPerformanceMode::Fast),
+        ),
+        Some(Duration::from_secs(15))
+    );
+    assert_eq!(
+        protected_bulk_hoster_stall_timeout(
+            &hoster_bulk,
+            performance_profile(DownloadPerformanceMode::Stable),
+        ),
+        Some(Duration::from_secs(90))
+    );
+    assert_eq!(
+        protected_bulk_hoster_stall_timeout(
+            &direct_bulk,
+            performance_profile(DownloadPerformanceMode::Balanced),
+        ),
+        None
+    );
+}
+
+#[test]
+fn protected_bulk_hoster_stall_errors_are_retryable_network_failures() {
+    let error = bulk_hoster_stall_error(Duration::from_secs(25));
+
+    assert_eq!(error.category, FailureCategory::Network);
+    assert!(error.retryable);
+    assert!(error.message.contains("25 seconds"));
 }
 
 #[test]
@@ -2451,7 +2594,7 @@ fn range_backoff_supports_source_keyed_hoster_policies() {
 }
 
 #[test]
-fn large_bulk_member_at_seventeen_kib_per_second_requests_partial_reset_retry() {
+fn large_bulk_member_at_seventeen_kib_per_second_retries_without_partial_reset() {
     let profile = performance_profile(DownloadPerformanceMode::Balanced);
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 0,
@@ -2469,7 +2612,7 @@ fn large_bulk_member_at_seventeen_kib_per_second_requests_partial_reset_retry() 
             Some(recovery_state),
         ),
         BulkSlowStreamRecoveryAction::Retry {
-            reset_partial: true
+            reset_partial: false
         }
     );
 }
@@ -2993,6 +3136,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
         stop: Arc::new(AtomicBool::new(false)),
+        stall_timeout: None,
     };
 
     let outcome = download_segment_worker(context, segment).await.unwrap();
