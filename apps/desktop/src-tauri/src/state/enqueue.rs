@@ -134,75 +134,155 @@ impl SharedState {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let bulk_archive =
-            if let Some(name) = bulk_archive_name.filter(|_| normalized_entries.len() > 1) {
-                let name = normalize_bulk_output_name(&name, bulk_output_kind);
-                let bulk_output_dir = {
-                    let state = self.inner.read().await;
-                    bulk_output_directory_from_settings(&state.settings)
-                };
-                let output_path = prepare_bulk_output_directory(&bulk_output_dir)?.join(&name);
-                if output_path.exists() {
-                    return Err(BackendError {
-                        code: "DESTINATION_EXISTS",
-                        message: format!("Bulk output already exists: {}", output_path.display()),
-                    });
-                }
-                if let Some(existing_name) = reserved_bulk_output_path_conflict(
-                    &self.inner.read().await.jobs,
-                    &output_path,
-                    None,
-                ) {
-                    return Err(BackendError {
-                        code: "DESTINATION_EXISTS",
-                        message: format!(
-                            "Bulk output is already reserved by {existing_name}: {}",
-                            output_path.display()
-                        ),
-                    });
-                }
-                Some(BulkArchiveInfo {
-                    id: format!(
-                        "bulk_{}_{}",
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|duration| duration.as_millis())
-                            .unwrap_or_default(),
-                        normalized_entries.len()
-                    ),
-                    name,
-                    output_kind: bulk_output_kind,
-                    archive_status: BulkArchiveStatus::Pending,
-                    requires_extraction: None,
-                    output_path: Some(output_path.display().to_string()),
-                    error: None,
-                    warning: None,
-                    finalize_total_bytes: None,
-                    finalize_processed_bytes: None,
-                    finalize_mode: None,
-                })
-            } else {
-                None
-            };
+        let bulk_archive_name = bulk_archive_name
+            .filter(|_| normalized_entries.len() > 1)
+            .map(|name| normalize_bulk_output_name(&name, bulk_output_kind));
 
-        let mut results = Vec::with_capacity(normalized_entries.len());
-        for entry in normalized_entries {
-            results.push(
-                self.enqueue_download_with_options(
-                    entry.url,
+        let (results, persisted) = {
+            let mut state = self.inner.write().await;
+            let original_jobs = state.jobs.clone();
+            let original_job_indexes = state.job_indexes.clone();
+            let original_next_job_number = state.next_job_number;
+            let original_diagnostic_events = state.diagnostic_events.clone();
+            let original_active_workers = state.active_workers.clone();
+            let original_hoster_health = state.bulk_hoster_worker_health.clone();
+            let original_hoster_fairness = state.bulk_hoster_fairness.clone();
+            let original_external_reseed_jobs = state.external_reseed_jobs.clone();
+            let mut results = Vec::with_capacity(normalized_entries.len());
+            let mut queued_ids = Vec::new();
+
+            for entry in normalized_entries {
+                match state.enqueue_download_in_memory(
+                    &entry.url,
                     EnqueueOptions {
                         source: source.clone(),
                         filename_hint: entry.filename_hint,
                         transfer_kind: Some(TransferKind::Http),
-                        bulk_archive: bulk_archive.clone(),
+                        bulk_archive: None,
                         start_paused,
                         resolved_from_url: entry.resolved_from_url,
                         hoster_preflight: entry.hoster_preflight,
                         ..Default::default()
                     },
-                )
-                .await?,
-            );
+                ) {
+                    Ok(result) => {
+                        if result.status == EnqueueStatus::Queued {
+                            queued_ids.push(result.job_id.clone());
+                        }
+                        results.push(result);
+                    }
+                    Err(error) => {
+                        state.jobs = original_jobs;
+                        state.job_indexes = original_job_indexes;
+                        state.next_job_number = original_next_job_number;
+                        state.diagnostic_events = original_diagnostic_events;
+                        state.active_workers = original_active_workers;
+                        state.bulk_hoster_worker_health = original_hoster_health;
+                        state.bulk_hoster_fairness = original_hoster_fairness;
+                        state.external_reseed_jobs = original_external_reseed_jobs;
+                        return Err(error);
+                    }
+                }
+            }
+
+            if queued_ids.len() >= 2 {
+                if let Some(name) = bulk_archive_name {
+                    let bulk_output_dir = bulk_output_directory_from_settings(&state.settings);
+                    let output_path = match prepare_bulk_output_directory(&bulk_output_dir) {
+                        Ok(path) => path.join(&name),
+                        Err(error) => {
+                            state.jobs = original_jobs;
+                            state.job_indexes = original_job_indexes;
+                            state.next_job_number = original_next_job_number;
+                            state.diagnostic_events = original_diagnostic_events;
+                            state.active_workers = original_active_workers;
+                            state.bulk_hoster_worker_health = original_hoster_health;
+                            state.bulk_hoster_fairness = original_hoster_fairness;
+                            state.external_reseed_jobs = original_external_reseed_jobs;
+                            return Err(error);
+                        }
+                    };
+                    if output_path.exists() {
+                        state.jobs = original_jobs;
+                        state.job_indexes = original_job_indexes;
+                        state.next_job_number = original_next_job_number;
+                        state.diagnostic_events = original_diagnostic_events;
+                        state.active_workers = original_active_workers;
+                        state.bulk_hoster_worker_health = original_hoster_health;
+                        state.bulk_hoster_fairness = original_hoster_fairness;
+                        state.external_reseed_jobs = original_external_reseed_jobs;
+                        return Err(BackendError {
+                            code: "DESTINATION_EXISTS",
+                            message: format!(
+                                "Bulk output already exists: {}",
+                                output_path.display()
+                            ),
+                        });
+                    }
+                    if let Some(existing_name) =
+                        reserved_bulk_output_path_conflict(&state.jobs, &output_path, None)
+                    {
+                        state.jobs = original_jobs;
+                        state.job_indexes = original_job_indexes;
+                        state.next_job_number = original_next_job_number;
+                        state.diagnostic_events = original_diagnostic_events;
+                        state.active_workers = original_active_workers;
+                        state.bulk_hoster_worker_health = original_hoster_health;
+                        state.bulk_hoster_fairness = original_hoster_fairness;
+                        state.external_reseed_jobs = original_external_reseed_jobs;
+                        return Err(BackendError {
+                            code: "DESTINATION_EXISTS",
+                            message: format!(
+                                "Bulk output is already reserved by {existing_name}: {}",
+                                output_path.display()
+                            ),
+                        });
+                    }
+
+                    let bulk_archive = BulkArchiveInfo {
+                        id: format!(
+                            "bulk_{}_{}",
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|duration| duration.as_millis())
+                                .unwrap_or_default(),
+                            queued_ids.len()
+                        ),
+                        name,
+                        output_kind: bulk_output_kind,
+                        archive_status: BulkArchiveStatus::Pending,
+                        requires_extraction: None,
+                        output_path: Some(output_path.display().to_string()),
+                        error: None,
+                        warning: None,
+                        finalize_total_bytes: None,
+                        finalize_processed_bytes: None,
+                        finalize_mode: None,
+                    };
+                    for job_id in &queued_ids {
+                        if let Some(job) = state.job_mut(job_id) {
+                            job.bulk_archive = Some(bulk_archive.clone());
+                        }
+                    }
+                }
+            } else {
+                for job_id in &queued_ids {
+                    if let Some(job) = state.job_mut(job_id) {
+                        job.bulk_archive = None;
+                    }
+                }
+            }
+
+            let final_snapshot = state.snapshot();
+            for result in &mut results {
+                result.snapshot = final_snapshot.clone();
+            }
+            let persisted = (!queued_ids.is_empty()).then(|| state.persisted());
+            (results, persisted)
+        };
+
+        if let Some(persisted) = persisted {
+            persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
         }
 
         Ok(results)

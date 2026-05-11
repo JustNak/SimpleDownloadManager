@@ -102,7 +102,7 @@ struct RuntimeState {
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
-    bulk_hoster_fairness: BulkHosterFairnessController,
+    bulk_hoster_fairness: HashMap<String, BulkHosterFairnessController>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
@@ -375,6 +375,30 @@ fn is_bulk_member_job(job: &DownloadJob) -> bool {
 
 fn is_protected_bulk_hoster_job(job: &DownloadJob) -> bool {
     is_bulk_member_job(job) && job.resolved_from_url.is_some()
+}
+
+fn is_direct_bulk_http_job(job: &DownloadJob) -> bool {
+    is_bulk_member_job(job) && job.resolved_from_url.is_none()
+}
+
+fn download_origin_key(raw_url: &str) -> Option<String> {
+    let parsed = Url::parse(raw_url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    Some(format!(
+        "{}://{}:{}",
+        parsed.scheme(),
+        host,
+        parsed.port_or_known_default().unwrap_or(0)
+    ))
+}
+
+fn protected_bulk_hoster_fairness_key(job: &DownloadJob) -> Option<String> {
+    if !is_protected_bulk_hoster_job(job) {
+        return None;
+    }
+
+    download_origin_key(job.resolved_from_url.as_deref().unwrap_or(&job.url))
 }
 
 #[cfg(test)]

@@ -1951,6 +1951,29 @@ fn fast_range_plan_uses_target_size_and_caps_at_twelve_segments() {
 }
 
 #[test]
+fn range_plan_respects_segment_connection_budget() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let capped_plan = plan_segmented_ranges_with_budget(
+        1024 * 1024 * 1024,
+        ResumeSupport::Supported,
+        None,
+        profile,
+        Some(8),
+    )
+    .expect("available segment budget should still allow segmented downloading");
+
+    assert_eq!(capped_plan.segments.len(), 8);
+    assert!(plan_segmented_ranges_with_budget(
+        1024 * 1024 * 1024,
+        ResumeSupport::Supported,
+        None,
+        profile,
+        Some(1),
+    )
+    .is_none());
+}
+
+#[test]
 fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
     assert!(plan_segmented_ranges(
         256 * 1024 * 1024,
@@ -2378,7 +2401,7 @@ fn near_complete_bulk_slow_recovery_preserves_partial_file() {
 }
 
 #[test]
-fn exhausted_bulk_slow_recovery_keeps_stream_active() {
+fn exhausted_bulk_slow_recovery_recycles_stream_and_preserves_partial() {
     let profile = performance_profile(DownloadPerformanceMode::Fast);
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 3,
@@ -2395,7 +2418,9 @@ fn exhausted_bulk_slow_recovery_keeps_stream_active() {
             profile,
             Some(recovery_state),
         ),
-        BulkSlowStreamRecoveryAction::WarnAndContinue
+        BulkSlowStreamRecoveryAction::Retry {
+            reset_partial: false
+        }
     );
 }
 
@@ -2577,6 +2602,10 @@ async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
     state.segments[1].downloaded_bytes = 2;
     state.segments[2].downloaded_bytes = 5;
     persist_segment_state(&temp_path, &state).await.unwrap();
+    assert!(
+        !segment_meta_temp_path(&temp_path).exists(),
+        "segment metadata should be finalized with a rename and no stale temp sidecar"
+    );
     tokio::fs::write(segment_path(&temp_path, 0), vec![1_u8; 4])
         .await
         .unwrap();
@@ -2783,6 +2812,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         validators,
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
+        stop: Arc::new(AtomicBool::new(false)),
     };
 
     let outcome = download_segment_worker(context, segment).await.unwrap();
@@ -2822,6 +2852,84 @@ async fn segment_worker_collector_returns_on_first_error() {
             .expect("first worker error should be returned")
             .message,
         "segment failed quickly"
+    );
+}
+
+#[tokio::test]
+async fn segment_worker_collector_signals_stop_before_returning_error() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let peer_observed_stop = Arc::new(AtomicBool::new(false));
+    let mut workers = tokio::task::JoinSet::new();
+    workers.spawn(async {
+        Err(download_error(
+            FailureCategory::Network,
+            "segment failed quickly".into(),
+            true,
+        ))
+    });
+    {
+        let stop = stop.clone();
+        let peer_observed_stop = peer_observed_stop.clone();
+        workers.spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            peer_observed_stop.store(true, Ordering::Relaxed);
+            Ok(DownloadOutcome::Paused)
+        });
+    }
+
+    let (_outcome, error) = await_segment_workers_with_stop(workers, stop.clone()).await;
+
+    assert_eq!(
+        error
+            .expect("first worker error should be returned")
+            .message,
+        "segment failed quickly"
+    );
+    assert!(stop.load(Ordering::Relaxed));
+    assert!(peer_observed_stop.load(Ordering::Relaxed));
+}
+
+#[test]
+fn retry_delay_honors_retry_after_and_applies_stable_jitter() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        reqwest::header::HeaderValue::from_static("120"),
+    );
+
+    assert_eq!(
+        retry_delay_for_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            0,
+            "job_a",
+            "https://example.com/file.bin",
+        ),
+        Duration::from_secs(60)
+    );
+
+    let first = retry_delay_for_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &reqwest::header::HeaderMap::new(),
+        1,
+        "job_a",
+        "https://example.com/file.bin",
+    );
+    let second = retry_delay_for_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &reqwest::header::HeaderMap::new(),
+        1,
+        "job_b",
+        "https://example.com/file.bin",
+    );
+
+    assert!(first >= REQUEST_RETRY_DELAYS[1]);
+    assert!(first <= REQUEST_RETRY_DELAYS[1] + Duration::from_millis(250));
+    assert_ne!(
+        first, second,
+        "bulk retry jitter should be stable but de-synchronized"
     );
 }
 

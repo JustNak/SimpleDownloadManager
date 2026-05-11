@@ -32,23 +32,36 @@ pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerf
     }
 }
 
+#[cfg(test)]
 pub(super) fn plan_segmented_ranges(
     total_bytes: u64,
     resume_support: ResumeSupport,
     speed_limit: Option<u64>,
     profile: DownloadPerformanceProfile,
 ) -> Option<RangePlan> {
+    plan_segmented_ranges_with_budget(total_bytes, resume_support, speed_limit, profile, None)
+}
+
+pub(super) fn plan_segmented_ranges_with_budget(
+    total_bytes: u64,
+    resume_support: ResumeSupport,
+    speed_limit: Option<u64>,
+    profile: DownloadPerformanceProfile,
+    segment_budget: Option<usize>,
+) -> Option<RangePlan> {
+    let max_segments = segment_budget
+        .map(|budget| profile.max_segments.min(budget))
+        .unwrap_or(profile.max_segments);
     if speed_limit.is_some()
         || resume_support != ResumeSupport::Supported
         || total_bytes < profile.min_segmented_size
-        || profile.max_segments < 2
+        || max_segments < 2
     {
         return None;
     }
 
     let target_segment_size = profile.target_segment_size.max(1);
-    let segment_count = profile
-        .max_segments
+    let segment_count = max_segments
         .min(total_bytes.div_ceil(target_segment_size).max(2) as usize)
         .max(2);
     let segment_size = total_bytes / segment_count as u64;
@@ -182,6 +195,7 @@ pub(super) async fn run_segmented_download_attempt(
         reporter_stop.clone(),
     ));
     let metadata = Arc::new(Mutex::new(segment_state));
+    let worker_stop = Arc::new(AtomicBool::new(false));
     let worker_context = SegmentWorkerContext {
         state: state.clone(),
         client: client.clone(),
@@ -194,6 +208,7 @@ pub(super) async fn run_segmented_download_attempt(
         validators: validators.clone(),
         progress: progress.clone(),
         metadata: metadata.clone(),
+        stop: worker_stop.clone(),
     };
 
     let mut handles = tokio::task::JoinSet::new();
@@ -214,7 +229,8 @@ pub(super) async fn run_segmented_download_attempt(
         ));
     }
 
-    let (worker_outcome, mut worker_error) = await_segment_workers(handles).await;
+    let (worker_outcome, mut worker_error) =
+        await_segment_workers_with_stop(handles, worker_stop).await;
 
     reporter_stop.store(true, Ordering::Relaxed);
     match reporter_handle.await {
@@ -273,6 +289,19 @@ pub(super) async fn download_segment_worker(
     let mut last_metadata_persisted_at = Instant::now();
 
     while current_len < segment.range.len() {
+        if context.stop.load(Ordering::Relaxed) {
+            record_segment_progress(
+                &context.temp_path,
+                &context.metadata,
+                segment.index,
+                current_len,
+                false,
+                true,
+            )
+            .await?;
+            return Ok(DownloadOutcome::Paused);
+        }
+
         match context.state.worker_control(&context.job_id).await {
             WorkerControl::Paused => {
                 record_segment_progress(
@@ -319,12 +348,30 @@ pub(super) async fn download_segment_worker(
                 if error.category == FailureCategory::Resume {
                     range_backoffs().record_rejection(&context.url, Instant::now());
                 }
+                record_segment_progress(
+                    &context.temp_path,
+                    &context.metadata,
+                    segment.index,
+                    current_len,
+                    false,
+                    true,
+                )
+                .await?;
                 return Err(error);
             }
         };
 
         if response.status() != StatusCode::PARTIAL_CONTENT {
             range_backoffs().record_rejection(&context.url, Instant::now());
+            record_segment_progress(
+                &context.temp_path,
+                &context.metadata,
+                segment.index,
+                current_len,
+                false,
+                true,
+            )
+            .await?;
             return Err(download_error(
                 FailureCategory::Resume,
                 "The server did not honor a segmented range request.".into(),
@@ -341,6 +388,15 @@ pub(super) async fn download_segment_worker(
 
         if !range_ok {
             range_backoffs().record_rejection(&context.url, Instant::now());
+            record_segment_progress(
+                &context.temp_path,
+                &context.metadata,
+                segment.index,
+                current_len,
+                false,
+                true,
+            )
+            .await?;
             return Err(download_error(
                 FailureCategory::Resume,
                 "The server returned an unexpected Content-Range for a segment.".into(),
@@ -353,6 +409,19 @@ pub(super) async fn download_segment_worker(
         let mut low_speed_started = Instant::now();
 
         while let Some(chunk_result) = stream.next().await {
+            if context.stop.load(Ordering::Relaxed) {
+                record_segment_progress(
+                    &context.temp_path,
+                    &context.metadata,
+                    segment.index,
+                    current_len,
+                    false,
+                    true,
+                )
+                .await?;
+                return Ok(DownloadOutcome::Paused);
+            }
+
             match context.state.worker_control(&context.job_id).await {
                 WorkerControl::Paused => {
                     record_segment_progress(
@@ -471,6 +540,15 @@ pub(super) async fn download_segment_worker(
         }
 
         if low_speed_monitor.retries >= context.profile.max_low_speed_retries {
+            record_segment_progress(
+                &context.temp_path,
+                &context.metadata,
+                segment.index,
+                current_len,
+                false,
+                true,
+            )
+            .await?;
             return Err(download_error(
                 FailureCategory::Network,
                 "A segment stayed below the recovery speed threshold.".into(),
@@ -548,22 +626,33 @@ pub(super) async fn report_segmented_progress(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn await_segment_workers(
+    handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+) -> (DownloadOutcome, Option<DownloadError>) {
+    await_segment_workers_with_stop(handles, Arc::new(AtomicBool::new(false))).await
+}
+
+pub(super) async fn await_segment_workers_with_stop(
     mut handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+    stop: Arc<AtomicBool>,
 ) -> (DownloadOutcome, Option<DownloadError>) {
     while let Some(result) = handles.join_next().await {
         match result {
             Ok(Ok(DownloadOutcome::Completed)) => {}
             Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
+                stop.store(true, Ordering::Relaxed);
                 handles.abort_all();
                 return (outcome, None);
             }
             Ok(Err(error)) => {
-                handles.abort_all();
+                stop.store(true, Ordering::Relaxed);
+                drain_segment_workers_after_stop(&mut handles).await;
                 return (DownloadOutcome::Completed, Some(error));
             }
             Err(error) => {
-                handles.abort_all();
+                stop.store(true, Ordering::Relaxed);
+                drain_segment_workers_after_stop(&mut handles).await;
                 return (
                     DownloadOutcome::Completed,
                     Some(download_error(
@@ -577,6 +666,18 @@ pub(super) async fn await_segment_workers(
     }
 
     (DownloadOutcome::Completed, None)
+}
+
+async fn drain_segment_workers_after_stop(
+    handles: &mut tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+) {
+    let drain = async { while handles.join_next().await.is_some() {} };
+    if tokio::time::timeout(SEGMENT_WORKER_STOP_GRACE, drain)
+        .await
+        .is_err()
+    {
+        handles.abort_all();
+    }
 }
 
 pub(super) async fn load_or_create_segment_state(
@@ -752,13 +853,20 @@ pub(super) async fn persist_segment_state(
 ) -> Result<(), DownloadError> {
     let serialized = serde_json::to_string_pretty(state)
         .map_err(|error| format!("Could not serialize segment metadata: {error}"))?;
-    fs::write(segment_meta_path(temp_path), serialized)
+    let meta_path = segment_meta_path(temp_path);
+    let temp_meta_path = segment_meta_temp_path(temp_path);
+    fs::write(&temp_meta_path, serialized)
         .await
-        .map_err(|error| disk_error(format!("Could not write segment metadata: {error}")))
+        .map_err(|error| disk_error(format!("Could not write segment metadata: {error}")))?;
+    let _ = fs::remove_file(&meta_path).await;
+    fs::rename(&temp_meta_path, &meta_path)
+        .await
+        .map_err(|error| disk_error(format!("Could not replace segment metadata: {error}")))
 }
 
 pub(super) async fn cleanup_segment_artifacts(temp_path: &Path, segment_count: usize) {
     let _ = fs::remove_file(segment_meta_path(temp_path)).await;
+    let _ = fs::remove_file(segment_meta_temp_path(temp_path)).await;
     cleanup_legacy_segment_files(temp_path, segment_count).await;
 }
 
@@ -771,6 +879,7 @@ pub(super) async fn cleanup_legacy_segment_files(temp_path: &Path, segment_count
 pub(super) async fn cleanup_partial_artifacts(temp_path: &Path) {
     let _ = fs::remove_file(temp_path).await;
     let _ = fs::remove_file(segment_meta_path(temp_path)).await;
+    let _ = fs::remove_file(segment_meta_temp_path(temp_path)).await;
 
     let Some(parent) = temp_path.parent() else {
         return;
@@ -798,6 +907,10 @@ pub(super) async fn cleanup_partial_artifacts(temp_path: &Path) {
 
 pub(super) fn segment_meta_path(temp_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta", temp_path.display()))
+}
+
+pub(super) fn segment_meta_temp_path(temp_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.meta.tmp", temp_path.display()))
 }
 
 pub(super) fn segment_path(temp_path: &Path, index: usize) -> PathBuf {

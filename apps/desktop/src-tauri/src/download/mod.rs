@@ -16,15 +16,16 @@ use crate::torrent::{
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
-    HeaderName, HeaderValue, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_RANGE,
-    CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE,
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_DISPOSITION,
+    CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, LOCATION, RANGE, RETRY_AFTER,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -80,6 +81,11 @@ const BALANCED_TARGET_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 const FAST_MIN_SEGMENTED_SIZE: u64 = 16 * 1024 * 1024;
 const FAST_TARGET_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
+const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
+const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const MAX_RETRY_AFTER_DELAY: Duration = Duration::from_secs(60);
+const MAX_RETRY_JITTER: Duration = Duration::from_millis(250);
+const SEGMENT_WORKER_STOP_GRACE: Duration = Duration::from_millis(100);
 const REQUEST_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(2),

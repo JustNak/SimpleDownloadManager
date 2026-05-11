@@ -10,7 +10,6 @@ const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
 pub(super) enum BulkSlowStreamRecoveryAction {
     Continue,
     Retry { reset_partial: bool },
-    WarnAndContinue,
 }
 
 pub(super) async fn run_http_download_attempt(
@@ -98,11 +97,14 @@ async fn run_http_download_attempt_for_url(
         if range_probe_supported {
             if let Some(metadata) = preflight_metadata.as_ref() {
                 if let Some(total_bytes) = metadata.total_bytes {
-                    if let Some(plan) = plan_segmented_ranges(
+                    let segment_budget =
+                        direct_bulk_segment_budget_for_task(state, task, effective_url).await;
+                    if let Some(plan) = plan_segmented_ranges_with_budget(
                         total_bytes,
                         metadata.resume_support,
                         speed_limit,
                         profile,
+                        segment_budget,
                     ) {
                         match run_segmented_download_attempt(
                             app,
@@ -232,7 +234,6 @@ async fn run_http_download_attempt_for_url(
     let mut low_speed_monitor = LowSpeedMonitor::new(profile);
     let mut low_speed_bytes = 0_u64;
     let mut low_speed_started = Instant::now();
-    let mut bulk_slow_recovery_warning_recorded = false;
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
 
@@ -319,19 +320,6 @@ async fn run_http_download_attempt_for_url(
                             .into(),
                         true,
                     ));
-                }
-                BulkSlowStreamRecoveryAction::WarnAndContinue => {
-                    if !bulk_slow_recovery_warning_recorded {
-                        let _ = state
-                            .record_diagnostic_event(
-                                DiagnosticLevel::Warning,
-                                "download",
-                                "Bulk member download speed stayed below the recovery threshold after retries were exhausted; continuing the current stream.",
-                                Some(task.id.clone()),
-                            )
-                            .await;
-                        bulk_slow_recovery_warning_recorded = true;
-                    }
                 }
                 BulkSlowStreamRecoveryAction::Continue => {
                     if low_speed_monitor.observe(
@@ -440,6 +428,26 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
 
 pub(super) fn task_allows_segmented_download(task: &crate::state::DownloadTask) -> bool {
     !(task.is_bulk_member && task.resolved_from_url.is_some())
+}
+
+async fn direct_bulk_segment_budget_for_task(
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    effective_url: &str,
+) -> Option<usize> {
+    if !(task.is_bulk_member && task.resolved_from_url.is_none()) {
+        return None;
+    }
+
+    let (active_direct_bulk_workers, active_same_origin_workers) = state
+        .active_direct_bulk_worker_counts(&task.id, effective_url)
+        .await;
+    let total_share =
+        DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET / active_direct_bulk_workers.max(1);
+    let origin_share =
+        DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET / active_same_origin_workers.max(1);
+
+    Some(total_share.min(origin_share))
 }
 
 pub(super) fn task_releases_bulk_hoster_fairness(
@@ -641,7 +649,9 @@ pub(super) fn bulk_slow_stream_recovery_action(
     }
 
     if recovery_state.retry_attempts >= recovery_state.max_retry_attempts {
-        return BulkSlowStreamRecoveryAction::WarnAndContinue;
+        return BulkSlowStreamRecoveryAction::Retry {
+            reset_partial: false,
+        };
     }
 
     BulkSlowStreamRecoveryAction::Retry {

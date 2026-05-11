@@ -2342,6 +2342,90 @@ async fn enqueue_download_entries_can_start_bulk_batches_paused() {
 }
 
 #[tokio::test]
+async fn bulk_enqueue_results_share_final_batch_snapshot() {
+    let download_dir = test_runtime_dir("enqueue-batch-final-snapshot");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    let results = state
+        .enqueue_download_entries_with_options(
+            bulk_test_entries(),
+            None,
+            Some("Game.zip".into()),
+            true,
+        )
+        .await
+        .expect("bulk batch should enqueue paused");
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.snapshot.jobs.len() == 2));
+    assert!(results
+        .iter()
+        .all(|result| result.snapshot.jobs.iter().all(|job| job
+            .bulk_archive
+            .as_ref()
+            .is_some_and(|archive| archive.name == "Game.zip"))));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn duplicate_reduced_bulk_batch_does_not_create_single_member_archive() {
+    let download_dir = test_runtime_dir("enqueue-batch-duplicate-reduced");
+    let mut existing = download_job("job_existing", JobState::Queued, ResumeSupport::Unknown, 0);
+    existing.url = "https://example.com/Game.part01.rar".into();
+    existing.filename = "Game.part01.rar".into();
+    existing.target_path = download_dir
+        .join("Compressed")
+        .join("Game.part01.rar")
+        .display()
+        .to_string();
+    existing.temp_path = format!("{}.part", existing.target_path);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![existing]);
+    state
+        .save_settings(Settings {
+            download_directory: download_dir.display().to_string(),
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+    std::fs::create_dir_all(download_dir.join("Bulk").join("Game.zip"))
+        .expect("pre-existing bulk output path should not matter for one new member");
+
+    let results = state
+        .enqueue_download_entries_with_options(
+            bulk_test_entries(),
+            None,
+            Some("Game.zip".into()),
+            true,
+        )
+        .await
+        .expect("duplicate-reduced bulk batch should enqueue the new member");
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].status, EnqueueStatus::DuplicateExistingJob);
+    assert_eq!(results[1].status, EnqueueStatus::Queued);
+    let snapshot = &results[1].snapshot;
+    let new_job = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == results[1].job_id)
+        .expect("queued member should be in the final snapshot");
+    assert!(
+        new_job.bulk_archive.is_none(),
+        "one newly queued member should not reserve a bulk archive"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn enqueue_download_entries_defaults_omitted_bulk_output_kind_to_folder() {
     let download_dir = test_runtime_dir("enqueue-batch-default-folder-output-kind");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
@@ -2546,7 +2630,20 @@ async fn enqueue_bulk_archive_freezes_output_path_and_rejects_reserved_duplicate
 
     let error = state
         .enqueue_download_entries_with_bulk_options(
-            bulk_test_entries(),
+            vec![
+                BatchDownloadEntry {
+                    url: "https://example.com/Other.part01.rar".into(),
+                    filename_hint: None,
+                    resolved_from_url: None,
+                    hoster_preflight: None,
+                },
+                BatchDownloadEntry {
+                    url: "https://example.com/Other.part02.rar".into(),
+                    filename_hint: None,
+                    resolved_from_url: None,
+                    hoster_preflight: None,
+                },
+            ],
             None,
             Some("Bundle".into()),
             true,
@@ -5074,6 +5171,55 @@ async fn protected_bulk_hoster_claim_holds_back_next_hoster_but_allows_direct_bu
 }
 
 #[tokio::test]
+async fn adaptive_hoster_fairness_isolated_by_origin_and_allows_direct_bulk() {
+    let download_dir = test_runtime_dir("bulk-hoster-fairness-per-origin");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_per_origin");
+    let mut ff_first = protected_hoster_bulk_job("job_ff_first", archive.clone());
+    ff_first.url = "https://fuckingfast.co/first".into();
+    ff_first.resolved_from_url = Some(ff_first.url.clone());
+    let mut ff_second = protected_hoster_bulk_job("job_ff_second", archive.clone());
+    ff_second.url = "https://www.fuckingfast.co/second".into();
+    ff_second.resolved_from_url = Some(ff_second.url.clone());
+    let mut datanodes = protected_hoster_bulk_job("job_datanodes", archive.clone());
+    datanodes.url = "https://datanodes.to/61nni6me5p0n/Game.part02.rar".into();
+    datanodes.resolved_from_url = Some(datanodes.url.clone());
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    direct_bulk.url = "https://cdn.example.com/Game.part03.rar".into();
+    direct_bulk.bulk_archive = Some(archive);
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![ff_first, ff_second, datanodes, direct_bulk],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 4;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        task_ids,
+        vec!["job_ff_first", "job_datanodes", "job_direct_bulk"]
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn safe_hoster_fairness_keeps_one_active_protected_hoster() {
     let download_dir = test_runtime_dir("bulk-hoster-safe-mode");
     let archive = bulk_archive_info(&download_dir, "bulk_hoster_safe");
@@ -5317,10 +5463,20 @@ async fn adaptive_bulk_hoster_fairness_downshifts_after_aggregate_speed_collapse
         runtime.settings.max_concurrent_downloads = 4;
         runtime.settings.bulk.max_concurrent_downloads = 4;
         let now = Instant::now();
-        runtime.bulk_hoster_fairness.target_active = 4;
-        runtime.bulk_hoster_fairness.aggregate_baseline_speed = Some(512 * 1024);
-        runtime.bulk_hoster_fairness.degraded_since =
-            Some(now - BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW - Duration::from_secs(1));
+        let fairness_key =
+            protected_bulk_hoster_fairness_key(runtime.job("job_hoster_1").unwrap()).unwrap();
+        runtime.bulk_hoster_fairness.insert(
+            fairness_key,
+            BulkHosterFairnessController {
+                target_active: 4,
+                aggregate_baseline_speed: Some(512 * 1024),
+                degraded_since: Some(
+                    now - BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW - Duration::from_secs(1),
+                ),
+                cooldown_until: None,
+                last_freeze_reported_at: None,
+            },
+        );
         for id in ["job_hoster_1", "job_hoster_2", "job_hoster_3"] {
             runtime.active_workers.insert(id.into());
             seed_healthy_bulk_hoster_health(&mut runtime, id, 96 * 1024);
@@ -5334,7 +5490,16 @@ async fn adaptive_bulk_hoster_fairness_downshifts_after_aggregate_speed_collapse
 
     assert!(tasks.is_empty());
     let runtime = state.inner.read().await;
-    assert_eq!(runtime.bulk_hoster_fairness.target_active, 3);
+    let fairness_key =
+        protected_bulk_hoster_fairness_key(runtime.job("job_hoster_1").unwrap()).unwrap();
+    assert_eq!(
+        runtime
+            .bulk_hoster_fairness
+            .get(&fairness_key)
+            .unwrap()
+            .target_active,
+        3
+    );
     for id in ["job_hoster_1", "job_hoster_2", "job_hoster_3"] {
         assert!(runtime.active_workers.contains(id));
     }
@@ -5891,7 +6056,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         job_indexes,
         active_workers: HashSet::new(),
         bulk_hoster_worker_health: HashMap::new(),
-        bulk_hoster_fairness: BulkHosterFairnessController::default(),
+        bulk_hoster_fairness: HashMap::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
         last_progress_persist_at: None,

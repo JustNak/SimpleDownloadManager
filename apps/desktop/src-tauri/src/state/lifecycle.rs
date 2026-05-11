@@ -65,7 +65,7 @@ impl SharedState {
                 job_indexes,
                 active_workers: HashSet::new(),
                 bulk_hoster_worker_health: HashMap::new(),
-                bulk_hoster_fairness: BulkHosterFairnessController::default(),
+                bulk_hoster_fairness: HashMap::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
                 last_progress_persist_at: None,
@@ -92,7 +92,7 @@ impl SharedState {
                 job_indexes,
                 active_workers: HashSet::new(),
                 bulk_hoster_worker_health: HashMap::new(),
-                bulk_hoster_fairness: BulkHosterFairnessController::default(),
+                bulk_hoster_fairness: HashMap::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
                 last_progress_persist_at: None,
@@ -195,6 +195,50 @@ impl SharedState {
         } else {
             state.settings.download_performance_mode
         }
+    }
+
+    pub async fn active_direct_bulk_worker_counts(
+        &self,
+        job_id: &str,
+        effective_url: &str,
+    ) -> (usize, usize) {
+        let state = self.inner.read().await;
+        let target_origin = download_origin_key(effective_url);
+        let mut total = 0_usize;
+        let mut same_origin = 0_usize;
+
+        for active_id in &state.active_workers {
+            let Some(job) = state.job(active_id) else {
+                continue;
+            };
+            if !is_direct_bulk_http_job(job)
+                || !matches!(job.state, JobState::Starting | JobState::Downloading)
+            {
+                continue;
+            }
+
+            total += 1;
+            if target_origin
+                .as_ref()
+                .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
+            {
+                same_origin += 1;
+            }
+        }
+
+        if !state.active_workers.contains(job_id) {
+            if let Some(job) = state.job(job_id).filter(|job| is_direct_bulk_http_job(job)) {
+                total += 1;
+                if target_origin
+                    .as_ref()
+                    .is_some_and(|origin| download_origin_key(&job.url).as_ref() == Some(origin))
+                {
+                    same_origin += 1;
+                }
+            }
+        }
+
+        (total, same_origin)
     }
 
     pub async fn extension_integration_settings(&self) -> ExtensionIntegrationSettings {
