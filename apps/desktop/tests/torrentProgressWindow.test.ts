@@ -45,8 +45,8 @@ assert.match(torrentSource, /Retry[\s\S]*retryJob\(job\.id\)/, 'failed torrent a
 assert.match(torrentSource, /Open[\s\S]*openJobFile\(job\.id\)/, 'completed torrent actions should keep Open behavior');
 assert.match(torrentSource, /Open[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed torrent Open should close the popup after a successful action');
 assert.match(torrentSource, /Show[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed torrent Show should close the popup after a successful action');
-assert.match(torrentSource, /Confirm(?: cancel)?[\s\S]*popup\.onCancelClick/, 'torrent popup should keep two-click Cancel behavior');
-assert.match(sharedPopupSource, /cancelJob\(activeJobId\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed torrent Cancel should close through the shared popup lifecycle');
+assert.match(torrentSource, /Confirm delete[\s\S]*popup\.onCancelClick/, 'torrent popup should make the confirmed cancel state destructive');
+assert.match(sharedPopupSource, /cancelJob\(activeJobId,\s*\{\s*deleteFromDisk:\s*true\s*\}\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed torrent Cancel should delete files from disk and close through the shared popup lifecycle');
 assert.match(torrentSource, /isCanceled\(job\)[\s\S]*Action\('Close'/, 'canceled torrent progress should expose a safe Close fallback');
 assert.doesNotMatch(torrentSource, /<span className="text-muted-foreground">[>>]<\/span>/, 'torrent detail rows should not render decorative chevrons');
 assert.doesNotMatch(torrentSource, /(?<!\{)#[0-9a-fA-F]{3,8}\b|teal|cyan|emerald/, 'torrent popup should use existing theme tokens instead of hardcoded custom colors');

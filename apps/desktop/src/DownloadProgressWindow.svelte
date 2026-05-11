@@ -141,16 +141,16 @@
       <div class="mt-auto flex justify-end gap-2 border-t border-border pt-2">
         {#if isActiveProgressJob(job)}
           {@render Action('Pause', Pause, isBusy, () => void runAction(() => pauseJob(job.id)))}
-          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
         {/if}
         {#if job.state === JobState.Paused}
           {@render Action('Resume', Play, isBusy, () => void runAction(() => resumeJob(job.id)), 'primary')}
-          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
         {/if}
         {#if job.state === JobState.Failed}
           {@render Action('Retry', RotateCw, isBusy, () => void runAction(() => retryJob(job.id)), 'primary')}
           {#if canSwapFailedDownloadToBrowser(job)}{@render Action('Swap', ExternalLink, isBusy, () => void runAction(() => swapFailedDownloadToBrowser(job.id), { closeOnSuccess: true }))}{/if}
-          {@render Action(isConfirmingCancel ? 'Confirm' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
+          {@render Action(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, isBusy, onCancelClick, isConfirmingCancel ? 'confirm' : 'cancel')}
         {/if}
         {#if job.state === JobState.Completed}
           {@render Action('Show', FolderOpen, isBusy, () => void runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}

@@ -66,7 +66,7 @@ assert.match(batchSource, /Review links/, 'bulk progress popup should show the p
 assert.match(batchSource, /deleteJobs/, 'bulk progress popup should let the initial review state cancel the queued batch');
 assert.match(batchSource, /function startBulkDownload\(\)[\s\S]*resumeJobs/, 'bulk progress popup should start paused bulk jobs only after user confirmation');
 assert.match(bulkFooterSource, /<div class="mt-3 flex min-h-\[45px\] shrink-0 items-center justify-between gap-3 border-t border-border pt-3">/, 'bulk footer should split left cancel actions from right primary actions');
-assert.match(bulkFooterSource, /<div class="flex justify-start">[\s\S]*bulkUiState === 'review' \|\| bulkUiState === 'downloading'[\s\S]*ActionButton\(isConfirmingCancel \? 'Confirm' : 'Cancel'/, 'bulk footer should render Cancel/Confirm in the left footer slot');
+assert.match(bulkFooterSource, /<div class="flex justify-start">[\s\S]*bulkUiState === 'review' \|\| bulkUiState === 'downloading'[\s\S]*ActionButton\(isConfirmingCancel \? 'Confirm delete' : 'Cancel'/, 'bulk footer should render Cancel/Confirm delete in the left footer slot');
 assert.match(bulkFooterSource, /<div class="flex justify-end gap-3">[\s\S]*bulkUiState === 'review'[\s\S]*ActionButton\('Start'/, 'review footer should render Start in the right footer slot');
 assert.match(bulkFooterSource, /<div class="flex justify-end gap-3">[\s\S]*bulkUiState === 'downloading'[\s\S]*ActionButton\(canPause \? 'Pause' : 'Resume'/, 'downloading footer should render Pause/Resume in the right footer slot');
 assert.doesNotMatch(batchSource, /isBulkReviewPhase[\s\S]{0,260}Pause all/, 'review footer should not show Pause all');
@@ -86,7 +86,8 @@ assert.match(batchSource, /bulkReviewStartSelection/, 'bulk Start should partiti
 assert.match(batchSource, /deleteJobs\(selection\.excludedJobs\.map\(\(job\) => job\.id\), false\)/, 'bulk Start should remove unchecked review rows without deleting files from disk');
 assert.match(batchSource, /bulkCancelConfirmPlan/, 'bulk Cancel confirmation should use the tested bulk cleanup plan');
 assert.doesNotMatch(batchSource, /deleteJobs\(plan\.deleteJobIds,\s*true\)/, 'bulk Cancel confirmation should not delete popup batch members from disk');
-assert.match(batchSource, /closeOnSuccess:\s*plan\.closeOnSuccess/, 'successful bulk Cancel confirmation should close the popup after cancellation');
+assert.match(batchSource, /cancelJobs\(plan\.deleteJobIds,\s*\{\s*deleteFromDisk:\s*plan\.deleteFromDisk\s*\}\)/, 'bulk Cancel confirmation should ask the cancel command to delete visible batch files');
+assert.match(batchSource, /closeOnSuccess:\s*plan\.closeOnSuccess/, 'successful bulk Cancel confirmation should close the popup after scheduling cancellation and disk cleanup');
 assert.match(batchSource, /bulkUiState === 'canceled'[\s\S]*ActionButton\('Close'/, 'canceled bulk popup should expose only Close in the footer');
 assert.match(batchSource, /canBulkCancel/, 'bulk downloading Cancel should remain available when popup jobs can be canceled');
 assert.match(batchSource, /isBusy \|\| !canBulkCancel/, 'bulk downloading Cancel should disable only when no popup jobs can be canceled');

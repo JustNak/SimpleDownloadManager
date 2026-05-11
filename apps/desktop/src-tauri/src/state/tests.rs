@@ -4912,6 +4912,258 @@ async fn cancel_jobs_marks_many_jobs_without_waiting_for_active_worker_release()
 }
 
 #[tokio::test]
+async fn cancel_jobs_for_delete_cancels_unfinished_but_preserves_completed_until_cleanup() {
+    let download_dir = test_runtime_dir("cancel-delete-preserves-completed");
+    let active_temp = download_dir.join("active.zip.part");
+    let failed_temp = download_dir.join("failed.zip.part");
+    let completed_target = download_dir.join("completed.zip");
+    std::fs::write(&active_temp, b"active partial").unwrap();
+    std::fs::write(&failed_temp, b"failed partial").unwrap();
+    std::fs::write(&completed_target, b"complete").unwrap();
+
+    let archive = bulk_archive_info(&download_dir, "bulk_cancel_delete");
+    let mut active = protected_hoster_bulk_job("job_active", archive);
+    active.state = JobState::Downloading;
+    active.downloaded_bytes = 64;
+    active.progress = 64.0;
+    active.temp_path = active_temp.display().to_string();
+    let mut failed = download_job("job_failed", JobState::Failed, ResumeSupport::Unknown, 25);
+    failed.temp_path = failed_temp.display().to_string();
+    failed.error = Some("network failed".into());
+    let mut completed = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    completed.target_path = completed_target.display().to_string();
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active, failed, completed],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_active".into());
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_active", 96 * 1024);
+    }
+    state
+        .handoff_auth
+        .write()
+        .await
+        .insert("job_active".into(), HandoffAuth { headers: vec![] });
+
+    let ids = vec![
+        "job_active".to_string(),
+        "job_failed".to_string(),
+        "job_completed".to_string(),
+    ];
+    let snapshot = tokio::time::timeout(
+        Duration::from_millis(100),
+        state.cancel_jobs_for_delete(&ids),
+    )
+    .await
+    .expect("destructive cancel should not wait for active file handles")
+    .expect("destructive cancel should succeed");
+
+    let active_snapshot = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_active")
+        .unwrap();
+    let failed_snapshot = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_failed")
+        .unwrap();
+    let completed_snapshot = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_completed")
+        .unwrap();
+    assert_eq!(active_snapshot.state, JobState::Canceled);
+    assert_eq!(failed_snapshot.state, JobState::Canceled);
+    assert_eq!(completed_snapshot.state, JobState::Completed);
+    assert!(
+        completed_target.exists(),
+        "cleanup finalizer deletes completed files later"
+    );
+    assert!(state
+        .inner
+        .read()
+        .await
+        .active_workers
+        .contains("job_active"));
+    assert!(!state.has_handoff_auth("job_active").await);
+
+    let runtime = state.inner.read().await;
+    assert!(!runtime.bulk_hoster_worker_health.contains_key("job_active"));
+    drop(runtime);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_canceled_jobs_after_release_removes_active_and_completed_bulk_files() {
+    let download_dir = test_runtime_dir("cancel-delete-after-release");
+    let active_temp = download_dir.join("active.zip.part");
+    let completed_target = download_dir.join("completed.part001.rar");
+    let archive_output = download_dir.join("Bulk").join("Game");
+    std::fs::write(&active_temp, b"active partial").unwrap();
+    std::fs::write(&completed_target, b"complete").unwrap();
+    std::fs::create_dir_all(&archive_output).unwrap();
+    std::fs::write(archive_output.join("payload.bin"), b"archive output").unwrap();
+
+    let archive = BulkArchiveInfo {
+        archive_status: BulkArchiveStatus::Completed,
+        output_path: Some(archive_output.display().to_string()),
+        ..bulk_archive_info(&download_dir, "bulk_cancel_delete_cleanup")
+    };
+    let mut active = download_job(
+        "job_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    active.temp_path = active_temp.display().to_string();
+    let mut completed = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    completed.target_path = completed_target.display().to_string();
+    completed.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, completed]);
+    {
+        state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .insert("job_active".into());
+    }
+
+    let ids = vec!["job_active".to_string(), "job_completed".to_string()];
+    state
+        .cancel_jobs_for_delete(&ids)
+        .await
+        .expect("destructive cancel should mark active job canceled");
+
+    let release_state = state.clone();
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_flag = released.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .remove("job_active");
+        release_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let snapshot = state
+        .delete_canceled_jobs_after_release(&ids)
+        .await
+        .expect("cleanup finalizer should remove canceled and completed requested jobs");
+
+    assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(snapshot.jobs.is_empty());
+    assert!(!active_temp.exists());
+    assert!(!completed_target.exists());
+    assert!(!archive_output.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_canceled_torrent_after_release_waits_before_payload_cleanup() {
+    let download_dir = test_runtime_dir("cancel-delete-torrent-waits");
+    let target_path = download_dir.join("torrent-a634dc94");
+    let temp_path = download_dir.join(".torrent-state").join("job_1");
+    std::fs::create_dir_all(&target_path).unwrap();
+    std::fs::write(target_path.join("payload.bin"), b"payload").unwrap();
+    std::fs::create_dir_all(&temp_path).unwrap();
+    let mut canceled_job = download_job("job_1", JobState::Canceled, ResumeSupport::Unsupported, 0);
+    canceled_job.transfer_kind = TransferKind::Torrent;
+    canceled_job.torrent = Some(TorrentInfo::default());
+    canceled_job.target_path = target_path.display().to_string();
+    canceled_job.temp_path = temp_path.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![canceled_job]);
+    {
+        state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .insert("job_1".into());
+    }
+
+    let release_state = state.clone();
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release_flag = released.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        release_state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .remove("job_1");
+        release_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let snapshot = state
+        .delete_canceled_jobs_after_release(&["job_1".to_string()])
+        .await
+        .expect("torrent cleanup should wait for release and then delete payload");
+
+    assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(snapshot.jobs.is_empty());
+    assert!(!target_path.exists());
+    assert!(!temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn cancel_delete_cleanup_failure_keeps_canceled_row_with_diagnostic() {
+    let download_dir = test_runtime_dir("cancel-delete-cleanup-failure");
+    let mut job = download_job("job_locked", JobState::Queued, ResumeSupport::Unknown, 0);
+    job.target_path = "\0".to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    let ids = vec!["job_locked".to_string()];
+    state
+        .cancel_jobs_for_delete(&ids)
+        .await
+        .expect("cancel should succeed before cleanup");
+
+    let snapshot = state
+        .delete_canceled_jobs_after_release(&ids)
+        .await
+        .expect("cleanup errors should be recorded instead of failing the finalizer");
+
+    let remaining = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_locked")
+        .unwrap();
+    assert_eq!(remaining.state, JobState::Canceled);
+    let runtime = state.inner.read().await;
+    assert!(runtime.diagnostic_events.iter().any(|event| {
+        event.level == DiagnosticLevel::Warning
+            && event.job_id.as_deref() == Some("job_locked")
+            && event
+                .message
+                .contains("Could not delete canceled download files")
+    }));
+    drop(runtime);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_reseed() {
     let download_dir = test_runtime_dir("delete-paused-seeding-torrent");
     let target_path = download_dir.join("seeded-output");
