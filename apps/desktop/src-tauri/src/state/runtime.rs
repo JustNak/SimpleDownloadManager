@@ -250,6 +250,11 @@ impl RuntimeState {
             }
         }
     }
+
+    pub(super) fn defer_datanodes_priority_job_until(&mut self, id: &str, until: Instant) {
+        self.datanodes_priority_defer_until
+            .insert(id.to_string(), until);
+    }
 }
 
 pub(super) fn job_indexes_for(jobs: &[DownloadJob]) -> HashMap<String, usize> {

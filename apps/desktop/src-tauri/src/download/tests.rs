@@ -2096,22 +2096,8 @@ fn hoster_acceleration_caps_segments_by_performance_mode() {
 
 #[test]
 fn segment_budget_uses_active_connection_leases() {
-    clear_segment_connection_leases_for_tests();
-    let _first = register_segment_connection_lease_for_tests(
-        "job_1",
-        SegmentConnectionClass::ProtectedHosterBulk,
-        "https://s1.datanodes.to/d/abc/file.bin",
-        4,
-    );
-    let _second = register_segment_connection_lease_for_tests(
-        "job_2",
-        SegmentConnectionClass::ProtectedHosterBulk,
-        "https://s2.datanodes.to/d/def/file.bin",
-        4,
-    );
-
     assert_eq!(
-        segment_budget_from_active_leases(
+        segment_budget_from_test_leases(
             SegmentConnectionClass::ProtectedHosterBulk,
             "job_3",
             "https://s1.datanodes.to/d/ghi/file.bin",
@@ -2120,11 +2106,25 @@ fn segment_budget_uses_active_connection_leases() {
                 per_origin: 8,
             },
             6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/abc/file.bin",
+                    4,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s2.datanodes.to/d/def/file.bin",
+                    4,
+                ),
+            ],
         ),
         Some(4)
     );
     assert_eq!(
-        segment_budget_from_active_leases(
+        segment_budget_from_test_leases(
             SegmentConnectionClass::ProtectedHosterBulk,
             "job_4",
             "https://s3.datanodes.to/d/jkl/file.bin",
@@ -2133,42 +2133,126 @@ fn segment_budget_uses_active_connection_leases() {
                 per_origin: 4,
             },
             6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/abc/file.bin",
+                    4,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s2.datanodes.to/d/def/file.bin",
+                    4,
+                ),
+            ],
         ),
         None
     );
 }
 
 #[test]
-fn datanodes_balanced_budget_keeps_four_same_origin_jobs_segmented() {
-    clear_segment_connection_leases_for_tests();
-    let _first = register_segment_connection_lease_for_tests(
-        "job_1",
-        SegmentConnectionClass::ProtectedHosterBulk,
-        "https://s1.datanodes.to/d/abc/file.bin",
-        4,
-    );
-    let _second = register_segment_connection_lease_for_tests(
-        "job_2",
-        SegmentConnectionClass::ProtectedHosterBulk,
-        "https://s1.datanodes.to/d/def/file.bin",
-        4,
-    );
-    let _third = register_segment_connection_lease_for_tests(
-        "job_3",
-        SegmentConnectionClass::ProtectedHosterBulk,
-        "https://s1.datanodes.to/d/ghi/file.bin",
-        4,
-    );
-
+fn datanodes_balanced_budget_keeps_four_same_origin_jobs_segmented_with_two_segment_floor() {
     assert_eq!(
-        segment_budget_from_active_leases(
+        segment_budget_from_test_leases(
             SegmentConnectionClass::ProtectedHosterBulk,
             "job_4",
             "https://s1.datanodes.to/d/jkl/file.bin",
             hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
             4,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/abc/file.bin",
+                    4,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/def/file.bin",
+                    2,
+                ),
+                (
+                    "job_3",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/ghi/file.bin",
+                    2,
+                ),
+            ],
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn datanodes_oldest_balanced_worker_keeps_full_segment_cap() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_1",
+            "https://s1.datanodes.to/d/abc/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            4,
+            &[],
         ),
         Some(4)
+    );
+}
+
+#[test]
+fn datanodes_secondary_balanced_workers_start_with_two_segments() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_2",
+            "https://s1.datanodes.to/d/def/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            4,
+            &[(
+                "job_1",
+                SegmentConnectionClass::ProtectedHosterBulk,
+                "https://s1.datanodes.to/d/abc/file.bin",
+                4,
+            )],
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn datanodes_oldest_fast_worker_keeps_full_segment_cap() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_1",
+            "https://s1.datanodes.to/d/abc/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
+            6,
+            &[],
+        ),
+        Some(6)
+    );
+}
+
+#[test]
+fn datanodes_secondary_fast_workers_start_with_two_segments() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_2",
+            "https://s1.datanodes.to/d/def/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
+            6,
+            &[(
+                "job_1",
+                SegmentConnectionClass::ProtectedHosterBulk,
+                "https://s1.datanodes.to/d/abc/file.bin",
+                6,
+            )],
+        ),
+        Some(2)
     );
 }
 
@@ -2293,6 +2377,32 @@ fn protected_bulk_hoster_stall_errors_are_retryable_network_failures() {
     assert_eq!(error.category, FailureCategory::Network);
     assert!(error.retryable);
     assert!(error.message.contains("25 seconds"));
+}
+
+#[test]
+fn single_stream_hoster_loop_can_return_deferred_for_datanodes_priority() {
+    let source = include_str!("http.rs");
+    let single_stream = source
+        .split("async fn run_http_download_attempt_for_url")
+        .nth(1)
+        .expect("HTTP download attempt function should exist");
+
+    assert!(single_stream.contains("datanodes_priority_defer_decision"));
+    assert!(single_stream.contains("defer_active_datanodes_priority_worker"));
+    assert!(single_stream.contains("DownloadOutcome::Deferred"));
+}
+
+#[test]
+fn segmented_hoster_progress_can_defer_youngest_datanodes_worker() {
+    let source = include_str!("segmented.rs");
+    let reporter = source
+        .split("async fn report_segmented_progress")
+        .nth(1)
+        .expect("segmented progress reporter should exist");
+
+    assert!(reporter.contains("datanodes_priority_defer_decision"));
+    assert!(source.contains("defer_active_datanodes_priority_worker"));
+    assert!(source.contains("DownloadOutcome::Deferred"));
 }
 
 #[test]

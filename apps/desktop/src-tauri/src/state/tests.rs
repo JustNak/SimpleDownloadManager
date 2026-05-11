@@ -5480,7 +5480,13 @@ async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy
         let current_id = format!("job_datanodes_{}", next_index - 1);
         {
             let mut runtime = state.inner.write().await;
-            seed_recent_healthy_bulk_hoster_health(&mut runtime, &current_id, 512 * 1024);
+            seed_accelerated_datanodes_health(
+                &mut runtime,
+                &current_id,
+                512 * 1024,
+                Duration::from_secs(5),
+                3,
+            );
         }
 
         let (_, tasks) = state
@@ -5490,6 +5496,314 @@ async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, format!("job_datanodes_{next_index}"));
     }
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_datanodes_balanced_requires_priority_runway_before_next_claim() {
+    let download_dir = test_runtime_dir("bulk-datanodes-balanced-priority-runway");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_balanced_runway");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 512 * 1024;
+    active.downloaded_bytes = 4 * 1024 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(7),
+            3,
+        );
+    }
+
+    let (_, early_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming during runway should work");
+    assert!(early_tasks.is_empty());
+
+    {
+        let mut runtime = state.inner.write().await;
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+    let (_, ready_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after runway should work");
+    assert_eq!(ready_tasks.len(), 1);
+    assert_eq!(ready_tasks[0].id, "job_datanodes_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next_claim() {
+    let download_dir = test_runtime_dir("bulk-datanodes-fast-priority-runway");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_runway");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 512 * 1024;
+    active.downloaded_bytes = 4 * 1024 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 8;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(4),
+            3,
+        );
+    }
+
+    let (_, early_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming during fast runway should work");
+    assert!(early_tasks.is_empty());
+
+    {
+        let mut runtime = state.inner.write().await;
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(5),
+            3,
+        );
+    }
+    let (_, ready_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after fast runway should work");
+    assert_eq!(ready_tasks.len(), 1);
+    assert_eq!(ready_tasks[0].id, "job_datanodes_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn datanodes_priority_defer_cooldown_skips_then_releases_queued_job() {
+    let download_dir = test_runtime_dir("bulk-datanodes-priority-cooldown");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_cooldown");
+    let queued = datanodes_bulk_job("job_datanodes_deferred", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.defer_datanodes_priority_job_until(
+            "job_datanodes_deferred",
+            Instant::now() + DATANODES_PRIORITY_BALANCED_DEFER_COOLDOWN,
+        );
+    }
+
+    let (_, skipped_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming during priority cooldown should work");
+    assert!(skipped_tasks.is_empty());
+
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.defer_datanodes_priority_job_until(
+            "job_datanodes_deferred",
+            Instant::now() - Duration::from_secs(1),
+        );
+    }
+    let (_, released_tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after priority cooldown should work");
+    assert_eq!(released_tasks.len(), 1);
+    assert_eq!(released_tasks[0].id, "job_datanodes_deferred");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn datanodes_oldest_priority_pressure_blocks_new_hoster_but_allows_direct_bulk() {
+    let download_dir = test_runtime_dir("bulk-datanodes-priority-pressure");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_pressure");
+    let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    older.state = JobState::Downloading;
+    older.speed = 48 * 1024;
+    older.downloaded_bytes = 8 * 1024 * 1024;
+    let mut newer = datanodes_bulk_job("job_datanodes_2", archive.clone());
+    newer.state = JobState::Downloading;
+    newer.speed = 512 * 1024;
+    newer.downloaded_bytes = 2 * 1024 * 1024;
+    let queued_hoster = datanodes_bulk_job("job_datanodes_3", archive.clone());
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Supported,
+        0,
+    );
+    direct_bulk.url = "https://cdn.example.com/direct.bin".into();
+    direct_bulk.bulk_archive = Some(archive);
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![older, newer, queued_hoster, direct_bulk],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 1;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        runtime.active_workers.insert("job_datanodes_2".into());
+        seed_pressured_older_datanodes_health(&mut runtime, "job_datanodes_1");
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_2",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming under priority pressure should work");
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(task_ids, vec!["job_direct_bulk"]);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn youngest_datanodes_worker_defers_without_losing_partial_or_retry_state() {
+    let download_dir = test_runtime_dir("bulk-datanodes-priority-defer-preserve");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_defer");
+    let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    older.state = JobState::Downloading;
+    older.speed = 48 * 1024;
+    older.downloaded_bytes = 8 * 1024 * 1024;
+    let mut younger = datanodes_bulk_job("job_datanodes_2", archive);
+    younger.state = JobState::Downloading;
+    younger.speed = 512 * 1024;
+    younger.downloaded_bytes = 2 * 1024 * 1024;
+    younger.progress = 50.0;
+    younger.retry_attempts = 2;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![older, younger]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        runtime.active_workers.insert("job_datanodes_2".into());
+        seed_pressured_older_datanodes_health(&mut runtime, "job_datanodes_1");
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_2",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+
+    let decision = state
+        .datanodes_priority_defer_decision("job_datanodes_2")
+        .await
+        .expect("youngest worker should yield to protect older worker");
+    let snapshot = state
+        .defer_active_datanodes_priority_worker("job_datanodes_2", &decision)
+        .await
+        .expect("defer should persist")
+        .expect("defer should produce snapshot");
+
+    let deferred = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_datanodes_2")
+        .expect("deferred job should remain in snapshot");
+    assert_eq!(deferred.state, JobState::Queued);
+    assert_eq!(deferred.downloaded_bytes, 2 * 1024 * 1024 + 512 * 1024 * 3);
+    assert_eq!(deferred.retry_attempts, 2);
+    assert!(deferred.error.is_none());
+    assert!(deferred.failure_category.is_none());
+
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_datanodes_2"));
+    assert!(runtime
+        .datanodes_priority_defer_until
+        .contains_key("job_datanodes_2"));
+    assert!(runtime.diagnostic_events.iter().any(|event| event
+        .message
+        .contains("DataNodes priority deferred job_datanodes_2 to protect job_datanodes_1")));
+    drop(runtime);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn older_datanodes_worker_does_not_defer_when_it_is_protected() {
+    let download_dir = test_runtime_dir("bulk-datanodes-priority-defer-older");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_defer_older");
+    let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    older.state = JobState::Downloading;
+    older.speed = 48 * 1024;
+    older.downloaded_bytes = 8 * 1024 * 1024;
+    let mut younger = datanodes_bulk_job("job_datanodes_2", archive);
+    younger.state = JobState::Downloading;
+    younger.speed = 512 * 1024;
+    younger.downloaded_bytes = 2 * 1024 * 1024;
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![older, younger]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        runtime.active_workers.insert("job_datanodes_2".into());
+        seed_pressured_older_datanodes_health(&mut runtime, "job_datanodes_1");
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_2",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
+    }
+
+    assert!(state
+        .datanodes_priority_defer_decision("job_datanodes_1")
+        .await
+        .is_none());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -5511,18 +5825,13 @@ async fn accelerated_datanodes_transient_zero_sample_does_not_freeze_claims() {
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
-        let health = {
-            let job = runtime.job("job_datanodes_1").unwrap();
-            BulkHosterWorkerHealth::from_job_with_profile(
-                job,
-                BulkHosterWorkerProfile::Accelerated { max_concurrency: 4 },
-                Instant::now(),
-            )
-        };
-        runtime
-            .bulk_hoster_worker_health
-            .insert("job_datanodes_1".into(), health);
-        seed_recent_healthy_bulk_hoster_health(&mut runtime, "job_datanodes_1", 512 * 1024);
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(8),
+            3,
+        );
         let downloaded = runtime.job("job_datanodes_1").unwrap().downloaded_bytes;
         runtime.update_bulk_hoster_worker_health("job_datanodes_1", downloaded, 0, Instant::now());
     }
@@ -5534,6 +5843,44 @@ async fn accelerated_datanodes_transient_zero_sample_does_not_freeze_claims() {
 
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].id, "job_datanodes_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_datanodes_transient_zero_before_runway_still_blocks_claims() {
+    let download_dir = test_runtime_dir("bulk-datanodes-transient-zero-before-runway");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_transient_zero_before");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.downloaded_bytes = 4 * 1024 * 1024;
+    active.speed = 512 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            512 * 1024,
+            Duration::from_secs(7),
+            3,
+        );
+        let downloaded = runtime.job("job_datanodes_1").unwrap().downloaded_bytes;
+        runtime.update_bulk_hoster_worker_health("job_datanodes_1", downloaded, 0, Instant::now());
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("accelerated DataNodes claim should respect runway after zero sample");
+
+    assert!(tasks.is_empty());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -6225,6 +6572,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         active_workers: HashSet::new(),
         bulk_hoster_worker_health: HashMap::new(),
         bulk_hoster_fairness: HashMap::new(),
+        datanodes_priority_defer_until: HashMap::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,
         last_progress_persist_at: None,
@@ -6290,33 +6638,80 @@ fn seed_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: 
         .insert(id.to_string(), health);
 }
 
-fn seed_recent_healthy_bulk_hoster_health(runtime: &mut RuntimeState, id: &str, speed: u64) {
+fn seed_accelerated_datanodes_health(
+    runtime: &mut RuntimeState,
+    id: &str,
+    speed: u64,
+    transfer_age: Duration,
+    healthy_samples: u8,
+) {
     let now = Instant::now();
-    {
-        let job = runtime.job_mut(id).expect("hoster job should exist");
+    let profile = datanodes_accelerated_hoster_concurrency(
+        &runtime.settings,
+        runtime.job(id).expect("DataNodes job should exist"),
+    )
+    .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
+    .expect("DataNodes job should be accelerated");
+    let mut downloaded_bytes = runtime
+        .job(id)
+        .expect("DataNodes job should exist")
+        .downloaded_bytes;
+    let mut health = {
+        let job = runtime.job(id).expect("DataNodes job should exist");
+        BulkHosterWorkerHealth::from_job_with_profile(job, profile, now - transfer_age)
+    };
+    health.mark_transferring(downloaded_bytes, now - transfer_age);
+    let samples = healthy_samples.max(1);
+    for sample_index in 0..samples {
+        downloaded_bytes = downloaded_bytes.saturating_add(speed.max(1));
+        let sample_age = Duration::from_secs((samples - sample_index) as u64);
+        health.update(downloaded_bytes, speed, now - sample_age.min(transfer_age));
+    }
+    runtime
+        .bulk_hoster_worker_health
+        .insert(id.to_string(), health);
+    if let Some(job) = runtime.job_mut(id) {
         job.state = JobState::Downloading;
         job.speed = speed;
-        job.downloaded_bytes = job.downloaded_bytes.saturating_add(speed.max(1));
+        job.downloaded_bytes = downloaded_bytes;
     }
-    let downloaded_bytes = runtime
+}
+
+fn seed_pressured_older_datanodes_health(runtime: &mut RuntimeState, id: &str) {
+    let now = Instant::now();
+    let profile = datanodes_accelerated_hoster_concurrency(
+        &runtime.settings,
+        runtime.job(id).expect("DataNodes job should exist"),
+    )
+    .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
+    .expect("DataNodes job should be accelerated");
+    let mut downloaded_bytes = runtime
         .job(id)
-        .expect("hoster job should exist")
+        .expect("DataNodes job should exist")
         .downloaded_bytes;
-    let health = runtime
+    let mut health = {
+        let job = runtime.job(id).expect("DataNodes job should exist");
+        BulkHosterWorkerHealth::from_job_with_profile(job, profile, now - Duration::from_secs(30))
+    };
+    health.mark_transferring(downloaded_bytes, now - Duration::from_secs(30));
+    downloaded_bytes = downloaded_bytes.saturating_add(1024 * 1024);
+    health.update(downloaded_bytes, 1024 * 1024, now - Duration::from_secs(20));
+    downloaded_bytes = downloaded_bytes.saturating_add(96 * 1024);
+    health.update(
+        downloaded_bytes,
+        48 * 1024,
+        now - DATANODES_PRIORITY_PRESSURE_WINDOW - Duration::from_secs(1),
+    );
+    downloaded_bytes = downloaded_bytes.saturating_add(48 * 1024);
+    health.update(downloaded_bytes, 48 * 1024, now);
+    runtime
         .bulk_hoster_worker_health
-        .get_mut(id)
-        .expect("claimed hoster job should have health");
-    health.mark_transferring(downloaded_bytes, now - Duration::from_secs(2));
-    health.update(
-        downloaded_bytes.saturating_add(speed.max(1)),
-        speed,
-        now - Duration::from_secs(1),
-    );
-    health.update(
-        downloaded_bytes.saturating_add(speed.max(1).saturating_mul(2)),
-        speed,
-        now,
-    );
+        .insert(id.to_string(), health);
+    if let Some(job) = runtime.job_mut(id) {
+        job.state = JobState::Downloading;
+        job.speed = 48 * 1024;
+        job.downloaded_bytes = downloaded_bytes;
+    }
 }
 
 fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> SharedState {
