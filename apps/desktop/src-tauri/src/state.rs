@@ -79,6 +79,7 @@ const DATANODES_PRIORITY_FAST_RUNWAY: Duration = Duration::from_secs(5);
 const DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND: u64 = 128 * 1024;
 const DATANODES_PRIORITY_BASELINE_SPEED_PERCENT: u64 = 75;
 const DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES: u8 = 3;
+const DATANODES_PRIORITY_REQUIRED_PROGRESS_SAMPLES: u8 = 2;
 const HOSTER_PRIORITY_CAP_REPORT_CHANGE_PERCENT: u64 = 25;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
@@ -137,6 +138,7 @@ struct BulkHosterWorkerHealth {
     priority_pressure_since: Option<Instant>,
     priority_pressure_active: bool,
     priority_recovery_sample_count: u8,
+    accelerated_progress_sample_count: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +182,7 @@ impl BulkHosterWorkerHealth {
             priority_pressure_since: None,
             priority_pressure_active: false,
             priority_recovery_sample_count: 0,
+            accelerated_progress_sample_count: 0,
         }
     }
 
@@ -202,6 +205,7 @@ impl BulkHosterWorkerHealth {
         self.priority_pressure_since = None;
         self.priority_pressure_active = false;
         self.priority_recovery_sample_count = 0;
+        self.accelerated_progress_sample_count = 0;
     }
 
     fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
@@ -210,7 +214,20 @@ impl BulkHosterWorkerHealth {
         }
         let progressed = downloaded_bytes > self.last_downloaded_bytes;
         if progressed {
+            if now.saturating_duration_since(self.last_progress_at)
+                > BULK_HOSTER_LOW_SPEED_WINDOW + BULK_HOSTER_HEALTH_SAMPLE_WINDOW
+            {
+                self.accelerated_progress_sample_count = 0;
+            }
             self.last_progress_at = now;
+            if matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. }) {
+                self.accelerated_progress_sample_count =
+                    self.accelerated_progress_sample_count.saturating_add(1);
+            }
+        } else if now.saturating_duration_since(self.last_progress_at)
+            >= BULK_HOSTER_LOW_SPEED_WINDOW
+        {
+            self.accelerated_progress_sample_count = 0;
         }
         self.last_downloaded_bytes = downloaded_bytes;
         self.last_reported_speed = speed;
@@ -330,10 +347,15 @@ impl BulkHosterWorkerHealth {
         let Some(transfer_started_at) = self.transfer_started_at else {
             return false;
         };
-        self.healthy_sample_count >= DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES
-            && now.saturating_duration_since(transfer_started_at)
-                >= datanodes_priority_runway(max_concurrency)
-            && self.recent_healthy_samples(now)
+        if now.saturating_duration_since(transfer_started_at)
+            < datanodes_priority_runway(max_concurrency)
+        {
+            return false;
+        }
+
+        (self.healthy_sample_count >= DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES
+            && self.recent_healthy_samples(now))
+            || self.accelerated_recent_progress_samples(now)
     }
 
     fn accelerated_transient_low_ready(&self, now: Instant) -> bool {
@@ -405,6 +427,13 @@ impl BulkHosterWorkerHealth {
             && self.low_speed_since.is_some_and(|since| {
                 now.saturating_duration_since(since) <= BULK_HOSTER_TRANSIENT_LOW_SAMPLE_GRACE
             })
+    }
+
+    fn accelerated_recent_progress_samples(&self, now: Instant) -> bool {
+        matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. })
+            && self.accelerated_progress_sample_count
+                >= DATANODES_PRIORITY_REQUIRED_PROGRESS_SAMPLES
+            && now.saturating_duration_since(self.last_progress_at) < BULK_HOSTER_LOW_SPEED_WINDOW
     }
 
     fn recent_healthy_progress(&self, now: Instant) -> bool {

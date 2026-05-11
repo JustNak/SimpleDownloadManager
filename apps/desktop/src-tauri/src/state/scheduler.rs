@@ -393,6 +393,9 @@ fn hoster_priority_throttle_decision_for_state(
     {
         return None;
     }
+    if is_accelerated_datanodes_bulk_job(&state.settings, job) {
+        return None;
+    }
     let priority_key = protected_bulk_hoster_priority_group_key(job)?;
     let mut candidates = state
         .active_workers

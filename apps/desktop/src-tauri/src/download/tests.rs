@@ -2307,6 +2307,34 @@ fn datanodes_secondary_fast_workers_start_with_two_segments() {
 }
 
 #[test]
+fn datanodes_third_fast_worker_stays_segmented_with_two_segment_floor() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_3",
+            "https://s1.datanodes.to/d/ghi/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
+            6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/abc/file.bin",
+                    6,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::ProtectedHosterBulk,
+                    "https://s1.datanodes.to/d/def/file.bin",
+                    2,
+                ),
+            ],
+        ),
+        Some(2)
+    );
+}
+
+#[test]
 fn stale_inflight_hoster_warmups_can_be_replaced() {
     clear_hoster_warmup_cache_for_tests();
     let key = hoster_warmup_key_for_tests("job_warmup", "https://datanodes.to/abc123/file.bin");

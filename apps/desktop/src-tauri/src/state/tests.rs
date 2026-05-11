@@ -6037,6 +6037,93 @@ async fn accelerated_datanodes_balanced_requires_priority_runway_before_next_cla
 }
 
 #[tokio::test]
+async fn accelerated_datanodes_balanced_ramps_after_slow_positive_progress_samples() {
+    let download_dir = test_runtime_dir("bulk-datanodes-balanced-slow-progress-ramp");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_balanced_slow_progress");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 24 * 1024;
+    active.downloaded_bytes = 512 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        seed_accelerated_datanodes_health(
+            &mut runtime,
+            "job_datanodes_1",
+            24 * 1024,
+            Duration::from_secs(8),
+            2,
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after slow DataNodes progress should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_datanodes_2");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_datanodes_balanced_stalled_progress_blocks_next_claim() {
+    let download_dir = test_runtime_dir("bulk-datanodes-balanced-stalled-progress");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_balanced_stalled");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.speed = 0;
+    active.downloaded_bytes = 512 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        let now = Instant::now();
+        let profile = datanodes_accelerated_hoster_concurrency(
+            &runtime.settings,
+            runtime
+                .job("job_datanodes_1")
+                .expect("DataNodes job should exist"),
+        )
+        .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
+        .expect("DataNodes job should be accelerated");
+        let job = runtime
+            .job("job_datanodes_1")
+            .expect("DataNodes job should exist");
+        let mut health = BulkHosterWorkerHealth::from_job_with_profile(
+            job,
+            profile,
+            now - Duration::from_secs(8),
+        );
+        health.mark_transferring(job.downloaded_bytes, now - Duration::from_secs(8));
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_datanodes_1".into(), health);
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming after stalled DataNodes progress should work");
+
+    assert!(tasks.is_empty());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next_claim() {
     let download_dir = test_runtime_dir("bulk-datanodes-fast-priority-runway");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_runway");
@@ -6364,7 +6451,7 @@ async fn datanodes_priority_pressure_blocks_same_key_warmup_candidates() {
 }
 
 #[tokio::test]
-async fn hoster_priority_throttle_caps_newer_workers_instead_of_deferring_them() {
+async fn accelerated_datanodes_workers_are_not_cascade_throttled() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-cap");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_throttle_cap");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -6396,13 +6483,11 @@ async fn hoster_priority_throttle_caps_newer_workers_instead_of_deferring_them()
 
     let decision = state
         .hoster_priority_throttle_decision("job_datanodes_2")
-        .await
-        .expect("newer worker should be throttled to protect the older worker");
-    assert_eq!(decision.protected_job_id, "job_datanodes_1");
-    assert_eq!(decision.target_speed, 768 * 1024);
-    assert_eq!(decision.baseline_speed, 1024 * 1024);
-    assert_eq!(decision.reference_bytes_per_second, 48 * 1024);
-    assert_eq!(decision.cap_bytes_per_second, 24 * 1024);
+        .await;
+    assert!(
+        decision.is_none(),
+        "accelerated DataNodes workers should rely on admission control instead of cascade throttling"
+    );
 
     let protected_decision = state
         .hoster_priority_throttle_decision("job_datanodes_1")
@@ -6662,7 +6747,7 @@ async fn hoster_priority_cascade_is_disabled_when_hoster_fairness_is_off() {
 }
 
 #[tokio::test]
-async fn hoster_priority_throttle_uses_live_speed_before_older_worker_baseline() {
+async fn accelerated_datanodes_without_baseline_are_not_cascade_throttled() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-no-baseline");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_no_baseline");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -6699,16 +6784,17 @@ async fn hoster_priority_throttle_uses_live_speed_before_older_worker_baseline()
 
     let decision = state
         .hoster_priority_throttle_decision("job_datanodes_2")
-        .await
-        .expect("newer workers should use a nonzero live speed before baseline exists");
-    assert_eq!(decision.reference_bytes_per_second, 32 * 1024);
-    assert_eq!(decision.cap_bytes_per_second, 16 * 1024);
+        .await;
+    assert!(
+        decision.is_none(),
+        "accelerated DataNodes workers should not be capped even before a baseline exists"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
 #[tokio::test]
-async fn hoster_priority_throttle_keeps_cascade_after_older_worker_recovers() {
+async fn accelerated_datanodes_stay_uncapped_after_older_worker_recovers() {
     let download_dir = test_runtime_dir("bulk-datanodes-priority-throttle-release");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_priority_throttle_release");
     let mut older = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -6758,8 +6844,8 @@ async fn hoster_priority_throttle_keeps_cascade_after_older_worker_recovers() {
         state
             .hoster_priority_throttle_decision("job_datanodes_2")
             .await
-            .is_some(),
-        "newer workers should remain capped by the cascade after partial recovery"
+            .is_none(),
+        "accelerated DataNodes workers should stay uncapped during partial recovery"
     );
 
     {
@@ -6783,10 +6869,11 @@ async fn hoster_priority_throttle_keeps_cascade_after_older_worker_recovers() {
 
     let decision = state
         .hoster_priority_throttle_decision("job_datanodes_2")
-        .await
-        .expect("cascade caps should remain while multiple same-group workers are active");
-    assert_eq!(decision.reference_bytes_per_second, 900 * 1024);
-    assert_eq!(decision.cap_bytes_per_second, 450 * 1024);
+        .await;
+    assert!(
+        decision.is_none(),
+        "accelerated DataNodes workers should stay uncapped after older worker recovery"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
