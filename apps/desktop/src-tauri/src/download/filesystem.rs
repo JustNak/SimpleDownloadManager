@@ -398,6 +398,21 @@ pub(super) fn throttle_delay_for_limit(
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct DynamicThrottleState {
+    limit: Option<u64>,
+    started: Option<Instant>,
+    transferred_bytes: u64,
+}
+
+impl DynamicThrottleState {
+    pub(super) fn clear(&mut self) {
+        self.limit = None;
+        self.started = None;
+        self.transferred_bytes = 0;
+    }
+}
+
 pub(super) async fn throttle_download(
     state: &SharedState,
     job_id: &str,
@@ -416,4 +431,34 @@ pub(super) async fn throttle_download(
     }
 
     WorkerControl::Continue
+}
+
+pub(super) async fn throttle_download_with_dynamic_limit(
+    state: &SharedState,
+    job_id: &str,
+    throttle: &Mutex<DynamicThrottleState>,
+    bytes_per_second: u64,
+    chunk_len: u64,
+) -> WorkerControl {
+    let (transferred_bytes, started) = {
+        let mut throttle = throttle.lock().await;
+        if throttle.limit != Some(bytes_per_second) || throttle.started.is_none() {
+            throttle.limit = Some(bytes_per_second);
+            throttle.started = Some(Instant::now());
+            throttle.transferred_bytes = 0;
+        }
+        throttle.transferred_bytes = throttle.transferred_bytes.saturating_add(chunk_len);
+        (
+            throttle.transferred_bytes,
+            throttle
+                .started
+                .expect("dynamic throttle should be started"),
+        )
+    };
+
+    throttle_download(state, job_id, bytes_per_second, transferred_bytes, started).await
+}
+
+pub(super) async fn clear_dynamic_throttle(throttle: &Mutex<DynamicThrottleState>) {
+    throttle.lock().await.clear();
 }

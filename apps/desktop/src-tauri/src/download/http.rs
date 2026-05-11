@@ -361,6 +361,7 @@ async fn run_http_download_attempt_for_url(
     let mut low_speed_started = Instant::now();
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
+    let priority_throttle = Mutex::new(DynamicThrottleState::default());
 
     loop {
         let chunk_result = match stall_timeout {
@@ -440,6 +441,29 @@ async fn run_http_download_attempt_for_url(
                 WorkerControl::Continue => {}
             }
         }
+        if let Some(decision) = state.datanodes_priority_throttle_decision(&task.id).await {
+            match throttle_download_with_dynamic_limit(
+                state,
+                &task.id,
+                &priority_throttle,
+                decision.cap_bytes_per_second,
+                chunk_len,
+            )
+            .await
+            {
+                WorkerControl::Paused => {
+                    file.flush().await.ok();
+                    return Ok(DownloadOutcome::Paused);
+                }
+                WorkerControl::Canceled | WorkerControl::Missing => {
+                    file.flush().await.ok();
+                    return Ok(DownloadOutcome::Canceled);
+                }
+                WorkerControl::Continue => {}
+            }
+        } else {
+            clear_dynamic_throttle(&priority_throttle).await;
+        }
 
         let elapsed = sample_started.elapsed();
 
@@ -506,20 +530,6 @@ async fn run_http_download_attempt_for_url(
             emit_download_update(app, &snapshot, &task.id);
             if task_releases_bulk_hoster_fairness(task, speed) {
                 schedule_downloads(app.clone(), state.clone());
-            }
-            if let Some(decision) = state.datanodes_priority_defer_decision(&task.id).await {
-                file.flush().await.map_err(|error| {
-                    disk_error(format!(
-                        "Could not flush download before DataNodes priority defer: {error}"
-                    ))
-                })?;
-                if let Some(snapshot) = state
-                    .defer_active_datanodes_priority_worker(&task.id, &decision)
-                    .await?
-                {
-                    emit_snapshot(app, &snapshot);
-                }
-                return Ok(DownloadOutcome::Deferred);
             }
             last_emitted_bytes = downloaded_bytes;
             if should_persist {

@@ -98,6 +98,7 @@ impl SharedState {
                 protected_bulk_hoster_targets.insert(key, target);
             }
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
+            let mut blocked_datanodes_queue_keys: HashSet<String> = HashSet::new();
             for job in &state.jobs {
                 if scheduled_normal_workers >= available_normal_slots
                     && scheduled_bulk_workers >= available_bulk_slots
@@ -115,10 +116,16 @@ impl SharedState {
                                 .get(&fairness_key)
                                 .cloned()
                                 .unwrap_or_default();
-                            if is_accelerated_datanodes_bulk_job(&state.settings, job)
-                                && state.datanodes_priority_defer_until.contains_key(&job.id)
-                            {
-                                continue;
+                            let accelerated_datanodes =
+                                is_accelerated_datanodes_bulk_job(&state.settings, job);
+                            if accelerated_datanodes {
+                                if blocked_datanodes_queue_keys.contains(&fairness_key) {
+                                    continue;
+                                }
+                                if state.datanodes_priority_defer_until.contains_key(&job.id) {
+                                    blocked_datanodes_queue_keys.insert(fairness_key);
+                                    continue;
+                                }
                             }
                             let protected_bulk_hoster_claim_blocked = fairness_mode
                                 != BulkHosterFairnessMode::Off
@@ -134,7 +141,11 @@ impl SharedState {
                             if protected_bulk_hoster_claim_blocked
                                 || fairness_metrics.active_count + scheduled_for_origin
                                     >= protected_bulk_hoster_target
+                                || (accelerated_datanodes && scheduled_for_origin > 0)
                             {
+                                if accelerated_datanodes {
+                                    blocked_datanodes_queue_keys.insert(fairness_key);
+                                }
                                 continue;
                             }
                             *scheduled_protected_bulk_hoster_workers
@@ -244,62 +255,152 @@ impl SharedState {
         }
     }
 
-    pub(crate) async fn datanodes_priority_defer_decision(
+    pub(crate) async fn datanodes_priority_throttle_decision(
         &self,
         id: &str,
-    ) -> Option<DataNodesPriorityPressure> {
-        let state = self.inner.read().await;
-        let job = state.job(id)?;
-        if !state.active_workers.contains(id)
-            || !matches!(job.state, JobState::Starting | JobState::Downloading)
-            || !is_accelerated_datanodes_bulk_job(&state.settings, job)
-        {
-            return None;
-        }
-        let fairness_key = protected_bulk_hoster_fairness_key(job)?;
+    ) -> Option<DataNodesPriorityThrottleDecision> {
+        let mut state = self.inner.write().await;
         let now = Instant::now();
-        let mut candidates = state
-            .active_workers
-            .iter()
-            .filter_map(|active_id| {
-                let active_job = state.job(active_id)?;
-                if !matches!(active_job.state, JobState::Starting | JobState::Downloading)
-                    || protected_bulk_hoster_fairness_key(active_job).as_deref()
-                        != Some(fairness_key.as_str())
-                    || !is_accelerated_datanodes_bulk_job(&state.settings, active_job)
-                {
-                    return None;
+        let decision = datanodes_priority_throttle_decision_for_state(&state, id, now);
+        match decision.as_ref() {
+            Some(decision) => {
+                let should_report = state
+                    .datanodes_priority_cap_reports
+                    .get(id)
+                    .map(|report| datanodes_priority_cap_report_changed(report, decision))
+                    .unwrap_or(true);
+                if should_report {
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "download".into(),
+                        format!(
+                            "DataNodes priority capped {id} to {} B/s to protect {} at {} B/s; target {} B/s, average {} B/s, peak {} B/s.",
+                            decision.cap_bytes_per_second,
+                            decision.protected_job_id,
+                            decision.current_speed,
+                            decision.target_speed,
+                            decision.baseline_speed,
+                            decision.peak_speed
+                        ),
+                        Some(id.into()),
+                    );
                 }
-                let health = state.bulk_hoster_worker_health.get(active_id)?;
-                Some((
-                    active_id.clone(),
-                    health.priority_started_at(),
-                    health.datanodes_priority_pressure(now),
-                ))
-            })
-            .collect::<Vec<_>>();
-        if candidates.len() < 2 {
-            return None;
+                state.datanodes_priority_cap_reports.insert(
+                    id.to_string(),
+                    DataNodesPriorityCapReport {
+                        protected_job_id: decision.protected_job_id.clone(),
+                        cap_bytes_per_second: decision.cap_bytes_per_second,
+                    },
+                );
+            }
+            None => {
+                if let Some(report) = state.datanodes_priority_cap_reports.remove(id) {
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "download".into(),
+                        format!(
+                            "DataNodes priority released cap for {id}; protected worker {} recovered or left the active set.",
+                            report.protected_job_id
+                        ),
+                        Some(id.into()),
+                    );
+                }
+            }
         }
-        candidates.sort_by_key(|(_, started_at, _)| *started_at);
-        if candidates
-            .last()
-            .map(|(candidate_id, _, _)| candidate_id.as_str())
-            != Some(id)
-        {
-            return None;
-        }
-        candidates
-            .iter()
-            .take(candidates.len().saturating_sub(1))
-            .find_map(|(older_job_id, _, pressure)| {
-                pressure.map(|sample| DataNodesPriorityPressure {
-                    older_job_id: older_job_id.clone(),
-                    current_speed: sample.current_speed,
-                    peak_speed: sample.peak_speed,
-                })
-            })
+        decision
     }
+}
+
+fn datanodes_priority_cap_report_changed(
+    report: &DataNodesPriorityCapReport,
+    decision: &DataNodesPriorityThrottleDecision,
+) -> bool {
+    if report.protected_job_id != decision.protected_job_id {
+        return true;
+    }
+    let old_cap = report.cap_bytes_per_second.max(1);
+    let delta = old_cap.abs_diff(decision.cap_bytes_per_second);
+    delta.saturating_mul(100)
+        >= old_cap.saturating_mul(DATANODES_PRIORITY_CAP_REPORT_CHANGE_PERCENT)
+}
+
+fn datanodes_priority_throttle_decision_for_state(
+    state: &RuntimeState,
+    id: &str,
+    now: Instant,
+) -> Option<DataNodesPriorityThrottleDecision> {
+    #[derive(Clone)]
+    struct Candidate {
+        id: String,
+        started_at: Instant,
+        pressure: Option<DataNodesPriorityPressureSample>,
+    }
+
+    let job = state.job(id)?;
+    if !state.active_workers.contains(id)
+        || !matches!(job.state, JobState::Starting | JobState::Downloading)
+        || !is_accelerated_datanodes_bulk_job(&state.settings, job)
+    {
+        return None;
+    }
+    let fairness_key = protected_bulk_hoster_fairness_key(job)?;
+    let mut candidates = state
+        .active_workers
+        .iter()
+        .filter_map(|active_id| {
+            let active_job = state.job(active_id)?;
+            if !matches!(active_job.state, JobState::Starting | JobState::Downloading)
+                || protected_bulk_hoster_fairness_key(active_job).as_deref()
+                    != Some(fairness_key.as_str())
+                || !is_accelerated_datanodes_bulk_job(&state.settings, active_job)
+            {
+                return None;
+            }
+            let health = state.bulk_hoster_worker_health.get(active_id)?;
+            Some(Candidate {
+                id: active_id.clone(),
+                started_at: health.priority_started_at(),
+                pressure: health.datanodes_priority_pressure(now),
+            })
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() < 2 {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        left.started_at
+            .cmp(&right.started_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let current_index = candidates.iter().position(|candidate| candidate.id == id)?;
+    let (protected_index, pressure) = candidates
+        .iter()
+        .take(current_index)
+        .enumerate()
+        .find_map(|(index, candidate)| candidate.pressure.map(|pressure| (index, pressure)))?;
+    let protected = &candidates[protected_index];
+    let newer_count = candidates
+        .iter()
+        .filter(|candidate| candidate.started_at > protected.started_at)
+        .count()
+        .max(1);
+    let newer_total_budget = DATANODES_PRIORITY_MIN_NEWER_CAP_BYTES_PER_SECOND
+        .saturating_mul(newer_count as u64)
+        .max(
+            pressure
+                .baseline_speed
+                .saturating_mul(DATANODES_PRIORITY_NEWER_BUDGET_PERCENT)
+                / 100,
+        );
+    let cap_bytes_per_second = newer_total_budget / newer_count as u64;
+    Some(DataNodesPriorityThrottleDecision {
+        protected_job_id: protected.id.clone(),
+        current_speed: pressure.current_speed,
+        peak_speed: pressure.peak_speed,
+        baseline_speed: pressure.baseline_speed,
+        target_speed: pressure.target_speed,
+        cap_bytes_per_second,
+    })
 }
 
 fn bulk_hoster_fairness_metrics_by_key(
@@ -378,6 +479,8 @@ fn bulk_hoster_fairness_metrics_by_key(
                 older_job_id: candidate.id.clone(),
                 current_speed: pressure.current_speed,
                 peak_speed: pressure.peak_speed,
+                baseline_speed: pressure.baseline_speed,
+                target_speed: pressure.target_speed,
             });
             break;
         }

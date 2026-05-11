@@ -2380,29 +2380,30 @@ fn protected_bulk_hoster_stall_errors_are_retryable_network_failures() {
 }
 
 #[test]
-fn single_stream_hoster_loop_can_return_deferred_for_datanodes_priority() {
+fn single_stream_hoster_loop_uses_priority_throttle_without_deferring() {
     let source = include_str!("http.rs");
     let single_stream = source
         .split("async fn run_http_download_attempt_for_url")
         .nth(1)
         .expect("HTTP download attempt function should exist");
 
-    assert!(single_stream.contains("datanodes_priority_defer_decision"));
-    assert!(single_stream.contains("defer_active_datanodes_priority_worker"));
-    assert!(single_stream.contains("DownloadOutcome::Deferred"));
+    assert!(single_stream.contains("datanodes_priority_throttle_decision"));
+    assert!(single_stream.contains("throttle_download_with_dynamic_limit"));
+    assert!(!single_stream.contains("DownloadOutcome::Deferred"));
 }
 
 #[test]
-fn segmented_hoster_progress_can_defer_youngest_datanodes_worker() {
+fn segmented_hoster_workers_use_aggregate_priority_throttle_without_deferring() {
     let source = include_str!("segmented.rs");
-    let reporter = source
-        .split("async fn report_segmented_progress")
+    let worker = source
+        .split("pub(super) async fn download_segment_worker")
         .nth(1)
-        .expect("segmented progress reporter should exist");
+        .expect("segmented worker should exist");
 
-    assert!(reporter.contains("datanodes_priority_defer_decision"));
-    assert!(source.contains("defer_active_datanodes_priority_worker"));
-    assert!(source.contains("DownloadOutcome::Deferred"));
+    assert!(worker.contains("datanodes_priority_throttle_decision"));
+    assert!(worker.contains("throttle_download_with_dynamic_limit"));
+    assert!(source.contains("priority_throttle"));
+    assert!(!source.contains("DownloadOutcome::Deferred"));
 }
 
 #[test]
@@ -3246,6 +3247,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
         stop: Arc::new(AtomicBool::new(false)),
+        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         stall_timeout: None,
     };
 

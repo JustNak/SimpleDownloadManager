@@ -215,8 +215,10 @@ impl RuntimeState {
 
     pub(super) fn clear_bulk_hoster_worker_health(&mut self, id: &str) {
         self.bulk_hoster_worker_health.remove(id);
+        self.datanodes_priority_cap_reports.remove(id);
         if self.bulk_hoster_worker_health.is_empty() {
             self.bulk_hoster_fairness.clear();
+            self.datanodes_priority_cap_reports.clear();
         }
     }
 
@@ -251,6 +253,7 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn defer_datanodes_priority_job_until(&mut self, id: &str, until: Instant) {
         self.datanodes_priority_defer_until
             .insert(id.to_string(), until);

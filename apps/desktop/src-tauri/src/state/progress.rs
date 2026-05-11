@@ -553,50 +553,6 @@ impl SharedState {
         Ok(snapshot)
     }
 
-    pub(crate) async fn defer_active_datanodes_priority_worker(
-        &self,
-        id: &str,
-        pressure: &DataNodesPriorityPressure,
-    ) -> Result<Option<DesktopSnapshot>, String> {
-        let (snapshot, persisted) = {
-            let mut state = self.inner.write().await;
-            let eligible = state.job(id).is_some_and(|job| {
-                state.active_workers.contains(id)
-                    && is_accelerated_datanodes_bulk_job(&state.settings, job)
-            });
-            if !eligible {
-                return Ok(None);
-            }
-            let Some(cooldown) = datanodes_priority_defer_cooldown(&state.settings) else {
-                return Ok(None);
-            };
-            state.active_workers.remove(id);
-            state.clear_bulk_hoster_worker_health(id);
-            state.defer_datanodes_priority_job_until(id, Instant::now() + cooldown);
-            let Some(job) = state.job_mut(id) else {
-                return Ok(None);
-            };
-            job.state = JobState::Queued;
-            job.speed = 0;
-            job.eta = 0;
-            job.error = None;
-            job.failure_category = None;
-            state.push_diagnostic_event(
-                DiagnosticLevel::Warning,
-                "download".into(),
-                format!(
-                    "DataNodes priority deferred {id} to protect {} at {} B/s after peak {} B/s.",
-                    pressure.older_job_id, pressure.current_speed, pressure.peak_speed
-                ),
-                Some(id.into()),
-            );
-            (state.snapshot(), state.persisted())
-        };
-
-        persist_state(&self.storage_path, &persisted)?;
-        Ok(Some(snapshot))
-    }
-
     pub async fn resolve_openable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
         let (path, transfer_kind, job_state) = {
             let state = self.inner.read().await;

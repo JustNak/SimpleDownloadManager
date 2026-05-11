@@ -67,6 +67,7 @@ impl SharedState {
                 bulk_hoster_worker_health: HashMap::new(),
                 bulk_hoster_fairness: HashMap::new(),
                 datanodes_priority_defer_until: HashMap::new(),
+                datanodes_priority_cap_reports: HashMap::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
                 last_progress_persist_at: None,
@@ -95,6 +96,7 @@ impl SharedState {
                 bulk_hoster_worker_health: HashMap::new(),
                 bulk_hoster_fairness: HashMap::new(),
                 datanodes_priority_defer_until: HashMap::new(),
+                datanodes_priority_cap_reports: HashMap::new(),
                 external_reseed_jobs: HashSet::new(),
                 last_host_contact: None,
                 last_progress_persist_at: None,
@@ -209,6 +211,21 @@ impl SharedState {
         let Some(limit) = datanodes_hoster_warmup_horizon(&state.settings) else {
             return Vec::new();
         };
+        let now = Instant::now();
+        let priority_blocked_keys = state
+            .active_workers
+            .iter()
+            .filter_map(|id| {
+                let job = state.job(id)?;
+                if !is_accelerated_datanodes_bulk_job(&state.settings, job) {
+                    return None;
+                }
+                let health = state.bulk_hoster_worker_health.get(id)?;
+                health
+                    .datanodes_priority_pressure(now)
+                    .and_then(|_| protected_bulk_hoster_fairness_key(job))
+            })
+            .collect::<HashSet<_>>();
 
         state
             .jobs
@@ -222,6 +239,9 @@ impl SharedState {
                         .as_ref()
                         .is_some_and(|preflight| preflight.status == HosterPreflightStatus::Failed)
                     && datanodes_accelerated_hoster_concurrency(&state.settings, job).is_some()
+                    && protected_bulk_hoster_fairness_key(job)
+                        .map(|key| !priority_blocked_keys.contains(&key))
+                        .unwrap_or(true)
             })
             .filter_map(|job| {
                 let source_url = job.resolved_from_url.as_ref()?.clone();
