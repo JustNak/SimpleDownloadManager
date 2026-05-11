@@ -199,7 +199,14 @@ pub(super) async fn send_download_request(
                 let status = response.status();
 
                 if should_retry_status(status) && next_retry < REQUEST_RETRY_DELAYS.len() {
-                    tokio::time::sleep(REQUEST_RETRY_DELAYS[next_retry]).await;
+                    let delay = retry_delay_for_response(
+                        status,
+                        response.headers(),
+                        next_retry,
+                        range_header.as_deref().unwrap_or("request"),
+                        &current_url,
+                    );
+                    tokio::time::sleep(delay).await;
                     next_retry += 1;
                     continue;
                 }
@@ -208,7 +215,12 @@ pub(super) async fn send_download_request(
             }
             Err(error) => {
                 if should_retry_error(&error) && next_retry < REQUEST_RETRY_DELAYS.len() {
-                    tokio::time::sleep(REQUEST_RETRY_DELAYS[next_retry]).await;
+                    let delay = retry_delay_for_attempt_with_jitter(
+                        next_retry,
+                        range_header.as_deref().unwrap_or("request"),
+                        &current_url,
+                    );
+                    tokio::time::sleep(delay).await;
                     next_retry += 1;
                     continue;
                 }

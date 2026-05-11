@@ -148,6 +148,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) validators: EntityValidators,
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
+    pub(super) stop: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]

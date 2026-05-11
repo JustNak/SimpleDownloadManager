@@ -332,6 +332,49 @@ pub(super) fn retry_delay_for_attempt(attempt: usize) -> Duration {
         .unwrap_or_else(|| *REQUEST_RETRY_DELAYS.last().unwrap())
 }
 
+pub(super) fn retry_delay_for_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    attempt: usize,
+    job_id: &str,
+    url: &str,
+) -> Duration {
+    if should_retry_status(status) {
+        if let Some(delay) = retry_after_delay(headers) {
+            return delay.min(MAX_RETRY_AFTER_DELAY);
+        }
+    }
+
+    retry_delay_for_attempt_with_jitter(attempt, job_id, url)
+}
+
+pub(super) fn retry_delay_for_attempt_with_jitter(
+    attempt: usize,
+    job_id: &str,
+    url: &str,
+) -> Duration {
+    retry_delay_for_attempt(attempt) + stable_retry_jitter(attempt, job_id, url)
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let seconds = value.parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+fn stable_retry_jitter(attempt: usize, job_id: &str, url: &str) -> Duration {
+    let mut hasher = DefaultHasher::new();
+    attempt.hash(&mut hasher);
+    job_id.hash(&mut hasher);
+    url.hash(&mut hasher);
+    let checksum = job_id
+        .bytes()
+        .chain(url.bytes())
+        .fold(0_u64, |acc, byte| acc.wrapping_add(byte as u64));
+    let jitter_window = MAX_RETRY_JITTER.as_millis() as u64 + 1;
+    Duration::from_millis((hasher.finish().wrapping_add(checksum)) % jitter_window)
+}
+
 pub(super) fn throttle_delay_for_limit(
     bytes_per_second: u64,
     transferred_bytes: u64,
