@@ -73,6 +73,14 @@ const BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW: Duration = Duration::from_secs(2
 const BULK_HOSTER_FAIRNESS_COOLDOWN_WINDOW: Duration = Duration::from_secs(30);
 const BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY: u32 = 4;
 const BULK_HOSTER_AGGREGATE_DEGRADATION_PERCENT: u64 = 35;
+const DATANODES_PRIORITY_PRESSURE_WINDOW: Duration = Duration::from_secs(6);
+const DATANODES_PRIORITY_BALANCED_RUNWAY: Duration = Duration::from_secs(8);
+const DATANODES_PRIORITY_FAST_RUNWAY: Duration = Duration::from_secs(5);
+const DATANODES_PRIORITY_BALANCED_DEFER_COOLDOWN: Duration = Duration::from_secs(20);
+const DATANODES_PRIORITY_FAST_DEFER_COOLDOWN: Duration = Duration::from_secs(15);
+const DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND: u64 = 128 * 1024;
+const DATANODES_PRIORITY_PEAK_SPEED_PERCENT: u64 = 45;
+const DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES: u8 = 3;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -105,6 +113,7 @@ struct RuntimeState {
     active_workers: HashSet<String>,
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
     bulk_hoster_fairness: HashMap<String, BulkHosterFairnessController>,
+    datanodes_priority_defer_until: HashMap<String, Instant>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
@@ -113,7 +122,7 @@ struct RuntimeState {
 #[derive(Debug, Clone)]
 struct BulkHosterWorkerHealth {
     profile: BulkHosterWorkerProfile,
-    _claimed_at: Instant,
+    claimed_at: Instant,
     resolver_started_at: Option<Instant>,
     transfer_started_at: Option<Instant>,
     phase: BulkHosterWorkerPhase,
@@ -123,6 +132,8 @@ struct BulkHosterWorkerHealth {
     low_speed_since: Option<Instant>,
     healthy_sample_count: u8,
     last_healthy_at: Option<Instant>,
+    priority_peak_speed: u64,
+    priority_drop_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +162,7 @@ impl BulkHosterWorkerHealth {
     ) -> Self {
         Self {
             profile,
-            _claimed_at: now,
+            claimed_at: now,
             resolver_started_at: None,
             transfer_started_at: None,
             phase: BulkHosterWorkerPhase::Claimed,
@@ -161,6 +172,8 @@ impl BulkHosterWorkerHealth {
             low_speed_since: None,
             healthy_sample_count: 0,
             last_healthy_at: None,
+            priority_peak_speed: job.speed,
+            priority_drop_since: None,
         }
     }
 
@@ -180,6 +193,7 @@ impl BulkHosterWorkerHealth {
         self.low_speed_since = Some(now);
         self.healthy_sample_count = 0;
         self.last_healthy_at = None;
+        self.priority_drop_since = None;
     }
 
     fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
@@ -192,6 +206,7 @@ impl BulkHosterWorkerHealth {
         }
         self.last_downloaded_bytes = downloaded_bytes;
         self.last_reported_speed = speed;
+        self.priority_peak_speed = self.priority_peak_speed.max(speed);
 
         if speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND {
             let low_speed_since = *self.low_speed_since.get_or_insert(now);
@@ -207,6 +222,15 @@ impl BulkHosterWorkerHealth {
                 self.last_healthy_at = Some(now);
             }
         }
+
+        if self.priority_peak_speed >= DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND {
+            let priority_floor = datanodes_priority_pressure_floor(self.priority_peak_speed);
+            if speed < priority_floor {
+                self.priority_drop_since.get_or_insert(now);
+            } else {
+                self.priority_drop_since = None;
+            }
+        }
     }
 
     fn blocks_bulk_hoster_claim(&self, now: Instant) -> bool {
@@ -215,7 +239,7 @@ impl BulkHosterWorkerHealth {
         }
 
         if matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. }) {
-            if self.recent_healthy_samples(now) || self.transient_low_sample_after_health(now) {
+            if self.accelerated_claim_ready(now) || self.accelerated_transient_low_ready(now) {
                 return false;
             }
             return true;
@@ -244,7 +268,60 @@ impl BulkHosterWorkerHealth {
     fn is_healthy(&self, now: Instant) -> bool {
         self.phase == BulkHosterWorkerPhase::Transferring
             && self.profile_allows_healthy_sample_window(now)
-            && (self.recent_healthy_samples(now) || self.transient_low_sample_after_health(now))
+            && (self.accelerated_claim_ready(now)
+                || self.recent_healthy_samples(now)
+                || self.accelerated_transient_low_ready(now)
+                || (!matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. })
+                    && self.transient_low_sample_after_health(now)))
+    }
+
+    fn priority_started_at(&self) -> Instant {
+        self.transfer_started_at
+            .or(self.resolver_started_at)
+            .unwrap_or(self.claimed_at)
+    }
+
+    fn accelerated_claim_ready(&self, now: Instant) -> bool {
+        let BulkHosterWorkerProfile::Accelerated { max_concurrency } = self.profile else {
+            return self.recent_healthy_samples(now);
+        };
+        let Some(transfer_started_at) = self.transfer_started_at else {
+            return false;
+        };
+        self.healthy_sample_count >= DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES
+            && now.saturating_duration_since(transfer_started_at)
+                >= datanodes_priority_runway(max_concurrency)
+            && self.recent_healthy_samples(now)
+    }
+
+    fn accelerated_transient_low_ready(&self, now: Instant) -> bool {
+        let BulkHosterWorkerProfile::Accelerated { max_concurrency } = self.profile else {
+            return self.transient_low_sample_after_health(now);
+        };
+        let Some(transfer_started_at) = self.transfer_started_at else {
+            return false;
+        };
+        self.healthy_sample_count >= DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES
+            && now.saturating_duration_since(transfer_started_at)
+                >= datanodes_priority_runway(max_concurrency)
+            && self.transient_low_sample_after_health(now)
+    }
+
+    fn datanodes_priority_pressure(&self, now: Instant) -> Option<DataNodesPriorityPressureSample> {
+        let BulkHosterWorkerProfile::Accelerated { .. } = self.profile else {
+            return None;
+        };
+        if self.priority_peak_speed < DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND {
+            return None;
+        }
+        let drop_since = self.priority_drop_since?;
+        if now.saturating_duration_since(drop_since) < DATANODES_PRIORITY_PRESSURE_WINDOW {
+            return None;
+        }
+        Some(DataNodesPriorityPressureSample {
+            current_speed: self.last_reported_speed,
+            peak_speed: self.priority_peak_speed,
+        })
     }
 
     fn recent_healthy_samples(&self, now: Instant) -> bool {
@@ -303,12 +380,26 @@ impl Default for BulkHosterFairnessController {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct BulkHosterFairnessMetrics {
     active_count: u32,
     aggregate_speed: u64,
     all_healthy: bool,
     has_blocking_worker: bool,
+    priority_pressure: Option<DataNodesPriorityPressure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DataNodesPriorityPressure {
+    pub older_job_id: String,
+    pub current_speed: u64,
+    pub peak_speed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DataNodesPriorityPressureSample {
+    current_speed: u64,
+    peak_speed: u64,
 }
 
 impl BulkHosterFairnessController {
@@ -325,7 +416,7 @@ impl BulkHosterFairnessController {
 
     fn reconcile(
         &mut self,
-        metrics: BulkHosterFairnessMetrics,
+        metrics: &BulkHosterFairnessMetrics,
         bulk_slot_limit: u32,
         max_adaptive_concurrency: u32,
         now: Instant,
@@ -385,10 +476,17 @@ impl BulkHosterFairnessController {
             };
             if should_report_freeze {
                 self.last_freeze_reported_at = Some(now);
-                diagnostics.push(
-                    "Adaptive fairness froze protected bulk hoster claims while an active hoster row is warming up or slow."
-                        .into(),
-                );
+                if let Some(pressure) = metrics.priority_pressure.as_ref() {
+                    diagnostics.push(format!(
+                        "DataNodes priority blocked newer hoster claims to protect {} at {} B/s after peak {} B/s.",
+                        pressure.older_job_id, pressure.current_speed, pressure.peak_speed
+                    ));
+                } else {
+                    diagnostics.push(
+                        "Adaptive fairness froze protected bulk hoster claims while an active hoster row is warming up or slow."
+                            .into(),
+                    );
+                }
             }
             return diagnostics;
         }
@@ -495,6 +593,32 @@ fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJ
         DownloadPerformanceMode::Balanced => Some(4),
         DownloadPerformanceMode::Fast => Some(8),
     }
+}
+
+fn is_accelerated_datanodes_bulk_job(settings: &Settings, job: &DownloadJob) -> bool {
+    is_protected_bulk_hoster_job(job)
+        && datanodes_accelerated_hoster_concurrency(settings, job).is_some()
+}
+
+fn datanodes_priority_runway(max_concurrency: u32) -> Duration {
+    if max_concurrency >= 8 {
+        DATANODES_PRIORITY_FAST_RUNWAY
+    } else {
+        DATANODES_PRIORITY_BALANCED_RUNWAY
+    }
+}
+
+fn datanodes_priority_defer_cooldown(settings: &Settings) -> Option<Duration> {
+    match settings.bulk.download_performance_mode {
+        DownloadPerformanceMode::Stable => None,
+        DownloadPerformanceMode::Balanced => Some(DATANODES_PRIORITY_BALANCED_DEFER_COOLDOWN),
+        DownloadPerformanceMode::Fast => Some(DATANODES_PRIORITY_FAST_DEFER_COOLDOWN),
+    }
+}
+
+fn datanodes_priority_pressure_floor(peak_speed: u64) -> u64 {
+    DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND
+        .max(peak_speed.saturating_mul(DATANODES_PRIORITY_PEAK_SPEED_PERCENT) / 100)
 }
 
 fn datanodes_hoster_warmup_horizon(settings: &Settings) -> Option<usize> {

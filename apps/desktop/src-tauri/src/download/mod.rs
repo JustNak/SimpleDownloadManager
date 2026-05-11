@@ -1,7 +1,8 @@
 use crate::commands::{emit_download_update, emit_snapshot};
 use crate::state::{
     should_stop_seeding, BulkArchiveReady, BulkMemberAutoRestartMode, BulkMemberSlowRecoveryState,
-    ExternalReseedAttempt, SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
+    DataNodesPriorityPressure, ExternalReseedAttempt, SharedState, TorrentRuntimePhase,
+    TorrentRuntimeSnapshot, WorkerControl,
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode,
@@ -406,6 +407,7 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
 
         match run_download(&app, &state, &task).await {
             Ok(DownloadOutcome::Completed) => {}
+            Ok(DownloadOutcome::Deferred) => {}
             Ok(DownloadOutcome::Paused) | Ok(DownloadOutcome::Canceled) => {
                 if let Ok(snapshot) = state.finish_interrupted_job(&task.id).await {
                     emit_snapshot(&app, &snapshot);

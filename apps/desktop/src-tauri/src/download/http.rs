@@ -161,15 +161,29 @@ async fn run_http_download_attempt_for_url(
         if range_probe_supported {
             if let Some(metadata) = preflight_metadata.as_ref() {
                 if let Some(total_bytes) = metadata.total_bytes {
-                    if let Some((plan, _segment_lease)) = reserve_segmented_plan_for_attempt(
-                        task,
-                        effective_url,
-                        segment_attempt,
-                        total_bytes,
-                        metadata.resume_support,
-                        speed_limit,
-                        profile,
-                    ) {
+                    if let Some((plan, _segment_lease, secondary_hoster_worker)) =
+                        reserve_segmented_plan_for_attempt(
+                            task,
+                            effective_url,
+                            segment_attempt,
+                            total_bytes,
+                            metadata.resume_support,
+                            speed_limit,
+                            profile,
+                        )
+                    {
+                        if secondary_hoster_worker {
+                            record_download_diagnostic(
+                                state,
+                                DiagnosticLevel::Info,
+                                task,
+                                format!(
+                                    "DataNodes priority capped secondary segmented worker to {} segments.",
+                                    plan.segments.len()
+                                ),
+                            )
+                            .await;
+                        }
                         record_download_diagnostic(
                             state,
                             DiagnosticLevel::Info,
@@ -493,6 +507,20 @@ async fn run_http_download_attempt_for_url(
             if task_releases_bulk_hoster_fairness(task, speed) {
                 schedule_downloads(app.clone(), state.clone());
             }
+            if let Some(decision) = state.datanodes_priority_defer_decision(&task.id).await {
+                file.flush().await.map_err(|error| {
+                    disk_error(format!(
+                        "Could not flush download before DataNodes priority defer: {error}"
+                    ))
+                })?;
+                if let Some(snapshot) = state
+                    .defer_active_datanodes_priority_worker(&task.id, &decision)
+                    .await?
+                {
+                    emit_snapshot(app, &snapshot);
+                }
+                return Ok(DownloadOutcome::Deferred);
+            }
             last_emitted_bytes = downloaded_bytes;
             if should_persist {
                 last_persisted_at = Instant::now();
@@ -698,7 +726,7 @@ fn reserve_segmented_plan_for_attempt(
     resume_support: ResumeSupport,
     speed_limit: Option<u64>,
     profile: DownloadPerformanceProfile,
-) -> Option<(RangePlan, Option<SegmentConnectionLeaseGuard>)> {
+) -> Option<(RangePlan, Option<SegmentConnectionLeaseGuard>, bool)> {
     let Some(class) = attempt.connection_class else {
         return plan_segmented_ranges_with_budget(
             total_bytes,
@@ -707,7 +735,7 @@ fn reserve_segmented_plan_for_attempt(
             profile,
             None,
         )
-        .map(|plan| (plan, None));
+        .map(|plan| (plan, None, false));
     };
 
     let budget = attempt.connection_budget?;
@@ -715,6 +743,13 @@ fn reserve_segmented_plan_for_attempt(
     let mut leases = leases
         .lock()
         .expect("segment connection lease registry should not be poisoned");
+    let target_origin =
+        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
+    let secondary_hoster_worker = class == SegmentConnectionClass::ProtectedHosterBulk
+        && attempt.fair_origin_workers.is_some()
+        && leases.iter().any(|(lease_job_id, lease)| {
+            lease_job_id != &task.id && lease.class == class && lease.origin == target_origin
+        });
     let segment_budget = segment_budget_from_leases_locked(
         &leases,
         class,
@@ -732,13 +767,11 @@ fn reserve_segmented_plan_for_attempt(
         profile,
         Some(segment_budget),
     )?;
-    let origin =
-        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
     leases.insert(
         task.id.clone(),
         SegmentConnectionLease {
             class,
-            origin,
+            origin: target_origin,
             segments: plan.segments.len(),
         },
     );
@@ -748,21 +781,34 @@ fn reserve_segmented_plan_for_attempt(
         Some(SegmentConnectionLeaseGuard {
             job_id: task.id.clone(),
         }),
+        secondary_hoster_worker,
     ))
 }
 
 #[cfg(test)]
-pub(super) fn segment_budget_from_active_leases(
+pub(super) fn segment_budget_from_test_leases(
     class: SegmentConnectionClass,
     job_id: &str,
     effective_url: &str,
     budget: SegmentConnectionBudget,
     policy_cap: usize,
+    leases: &[(&str, SegmentConnectionClass, &str, usize)],
 ) -> Option<usize> {
-    let leases = segment_connection_leases();
     let leases = leases
-        .lock()
-        .expect("segment connection lease registry should not be poisoned");
+        .iter()
+        .map(|(lease_job_id, lease_class, lease_url, segments)| {
+            let origin = segment_connection_origin_key(lease_url)
+                .unwrap_or_else(|| (*lease_url).to_string());
+            (
+                (*lease_job_id).to_string(),
+                SegmentConnectionLease {
+                    class: *lease_class,
+                    origin,
+                    segments: *segments,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
     segment_budget_from_leases_locked(
         &leases,
         class,
@@ -834,6 +880,9 @@ fn segment_budget_from_leases_locked(
                 future_origin_workers.saturating_mul(fair_min_segments.max(1));
             segment_budget =
                 segment_budget.min(available_origin.saturating_sub(reserved_for_future));
+            if used_origin_workers > 0 {
+                segment_budget = segment_budget.min(fair_min_segments.max(1));
+            }
         }
     }
     (segment_budget >= 2).then_some(segment_budget)
@@ -873,39 +922,6 @@ fn segment_connection_origin_key(raw_url: &str) -> Option<String> {
 
 fn segment_connection_leases() -> &'static StdMutex<HashMap<String, SegmentConnectionLease>> {
     SEGMENT_CONNECTION_LEASES.get_or_init(|| StdMutex::new(HashMap::new()))
-}
-
-#[cfg(test)]
-pub(super) fn clear_segment_connection_leases_for_tests() {
-    segment_connection_leases()
-        .lock()
-        .expect("segment connection lease registry should not be poisoned")
-        .clear();
-}
-
-#[cfg(test)]
-pub(super) fn register_segment_connection_lease_for_tests(
-    job_id: &str,
-    class: SegmentConnectionClass,
-    effective_url: &str,
-    segments: usize,
-) -> SegmentConnectionLeaseGuard {
-    let origin =
-        segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string());
-    segment_connection_leases()
-        .lock()
-        .expect("segment connection lease registry should not be poisoned")
-        .insert(
-            job_id.to_string(),
-            SegmentConnectionLease {
-                class,
-                origin,
-                segments,
-            },
-        );
-    SegmentConnectionLeaseGuard {
-        job_id: job_id.to_string(),
-    }
 }
 
 pub(super) fn spawn_datanodes_hoster_warmups(

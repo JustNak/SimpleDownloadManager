@@ -5,6 +5,7 @@ pub(super) enum DownloadOutcome {
     Completed,
     Paused,
     Canceled,
+    Deferred,
 }
 
 #[derive(Debug)]

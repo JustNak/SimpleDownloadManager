@@ -55,7 +55,7 @@ impl SharedState {
                             .bulk_hoster_fairness
                             .entry(key.clone())
                             .or_default()
-                            .reconcile(*metrics, bulk_slot_limit, max_adaptive_concurrency, now),
+                            .reconcile(metrics, bulk_slot_limit, max_adaptive_concurrency, now),
                     );
                 }
                 diagnostics
@@ -71,6 +71,9 @@ impl SharedState {
                     None,
                 );
             }
+            state
+                .datanodes_priority_defer_until
+                .retain(|_, until| *until > now);
             let mut protected_bulk_hoster_targets = HashMap::new();
             for key in state
                 .jobs
@@ -110,8 +113,13 @@ impl SharedState {
                         if let Some(fairness_key) = protected_bulk_hoster_fairness_key(job) {
                             let fairness_metrics = fairness_metrics_by_key
                                 .get(&fairness_key)
-                                .copied()
+                                .cloned()
                                 .unwrap_or_default();
+                            if is_accelerated_datanodes_bulk_job(&state.settings, job)
+                                && state.datanodes_priority_defer_until.contains_key(&job.id)
+                            {
+                                continue;
+                            }
                             let protected_bulk_hoster_claim_blocked = fairness_mode
                                 != BulkHosterFairnessMode::Off
                                 && fairness_metrics.has_blocking_worker;
@@ -173,12 +181,25 @@ impl SharedState {
                             now,
                         )
                     });
+                    let accelerated_datanodes =
+                        is_accelerated_datanodes_bulk_job(&settings_for_claim, job);
                     let _ = job;
                     state.active_workers.insert(task_id);
                     if let Some(health) = hoster_health {
                         state
                             .bulk_hoster_worker_health
                             .insert(task.id.clone(), health);
+                        if accelerated_datanodes {
+                            state.push_diagnostic_event(
+                                DiagnosticLevel::Info,
+                                "download".into(),
+                                format!(
+                                    "DataNodes priority admitted {} after healthy runway.",
+                                    task.id
+                                ),
+                                Some(task.id.clone()),
+                            );
+                        }
                     }
                     state.push_diagnostic_event(
                         DiagnosticLevel::Info,
@@ -222,13 +243,79 @@ impl SharedState {
             _ => WorkerControl::Continue,
         }
     }
+
+    pub(crate) async fn datanodes_priority_defer_decision(
+        &self,
+        id: &str,
+    ) -> Option<DataNodesPriorityPressure> {
+        let state = self.inner.read().await;
+        let job = state.job(id)?;
+        if !state.active_workers.contains(id)
+            || !matches!(job.state, JobState::Starting | JobState::Downloading)
+            || !is_accelerated_datanodes_bulk_job(&state.settings, job)
+        {
+            return None;
+        }
+        let fairness_key = protected_bulk_hoster_fairness_key(job)?;
+        let now = Instant::now();
+        let mut candidates = state
+            .active_workers
+            .iter()
+            .filter_map(|active_id| {
+                let active_job = state.job(active_id)?;
+                if !matches!(active_job.state, JobState::Starting | JobState::Downloading)
+                    || protected_bulk_hoster_fairness_key(active_job).as_deref()
+                        != Some(fairness_key.as_str())
+                    || !is_accelerated_datanodes_bulk_job(&state.settings, active_job)
+                {
+                    return None;
+                }
+                let health = state.bulk_hoster_worker_health.get(active_id)?;
+                Some((
+                    active_id.clone(),
+                    health.priority_started_at(),
+                    health.datanodes_priority_pressure(now),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() < 2 {
+            return None;
+        }
+        candidates.sort_by_key(|(_, started_at, _)| *started_at);
+        if candidates
+            .last()
+            .map(|(candidate_id, _, _)| candidate_id.as_str())
+            != Some(id)
+        {
+            return None;
+        }
+        candidates
+            .iter()
+            .take(candidates.len().saturating_sub(1))
+            .find_map(|(older_job_id, _, pressure)| {
+                pressure.map(|sample| DataNodesPriorityPressure {
+                    older_job_id: older_job_id.clone(),
+                    current_speed: sample.current_speed,
+                    peak_speed: sample.peak_speed,
+                })
+            })
+    }
 }
 
 fn bulk_hoster_fairness_metrics_by_key(
     state: &RuntimeState,
     now: Instant,
 ) -> HashMap<String, BulkHosterFairnessMetrics> {
+    #[derive(Clone)]
+    struct DatanodesPriorityCandidate {
+        id: String,
+        started_at: Instant,
+        pressure: Option<DataNodesPriorityPressureSample>,
+    }
+
     let mut metrics_by_key = HashMap::new();
+    let mut datanodes_candidates_by_key: HashMap<String, Vec<DatanodesPriorityCandidate>> =
+        HashMap::new();
 
     for id in &state.active_workers {
         let Some(job) = state.job(id) else {
@@ -244,12 +331,13 @@ fn bulk_hoster_fairness_metrics_by_key(
         let Some(health) = state.bulk_hoster_worker_health.get(id) else {
             continue;
         };
-        let metrics = metrics_by_key
-            .entry(fairness_key)
-            .or_insert(BulkHosterFairnessMetrics {
-                all_healthy: true,
-                ..Default::default()
-            });
+        let metrics =
+            metrics_by_key
+                .entry(fairness_key.clone())
+                .or_insert(BulkHosterFairnessMetrics {
+                    all_healthy: true,
+                    ..Default::default()
+                });
         metrics.active_count = metrics.active_count.saturating_add(1);
         metrics.aggregate_speed = metrics
             .aggregate_speed
@@ -259,6 +347,39 @@ fn bulk_hoster_fairness_metrics_by_key(
         }
         if !health.is_healthy(now) {
             metrics.all_healthy = false;
+        }
+        if is_accelerated_datanodes_bulk_job(&state.settings, job) {
+            datanodes_candidates_by_key
+                .entry(fairness_key)
+                .or_default()
+                .push(DatanodesPriorityCandidate {
+                    id: id.clone(),
+                    started_at: health.priority_started_at(),
+                    pressure: health.datanodes_priority_pressure(now),
+                });
+        }
+    }
+
+    for (fairness_key, mut candidates) in datanodes_candidates_by_key {
+        if candidates.len() < 2 {
+            continue;
+        }
+        candidates.sort_by_key(|candidate| candidate.started_at);
+        let Some(metrics) = metrics_by_key.get_mut(&fairness_key) else {
+            continue;
+        };
+        for candidate in candidates.iter().take(candidates.len().saturating_sub(1)) {
+            let Some(pressure) = candidate.pressure else {
+                continue;
+            };
+            metrics.has_blocking_worker = true;
+            metrics.all_healthy = false;
+            metrics.priority_pressure = Some(DataNodesPriorityPressure {
+                older_job_id: candidate.id.clone(),
+                current_speed: pressure.current_speed,
+                peak_speed: pressure.peak_speed,
+            });
+            break;
         }
     }
 
