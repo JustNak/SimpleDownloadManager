@@ -5,7 +5,6 @@ pub(super) enum DownloadOutcome {
     Completed,
     Paused,
     Canceled,
-    Deferred,
 }
 
 #[derive(Debug)]
@@ -150,6 +149,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) priority_throttle: Arc<Mutex<DynamicThrottleState>>,
     pub(super) stall_timeout: Option<Duration>,
 }
 

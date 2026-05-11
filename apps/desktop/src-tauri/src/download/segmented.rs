@@ -192,9 +192,9 @@ pub(super) async fn run_segmented_download_attempt(
         initial_segment_bytes.clone(),
     ));
     let reporter_stop = Arc::new(AtomicBool::new(false));
-    let priority_deferred = Arc::new(Mutex::new(None));
     let metadata = Arc::new(Mutex::new(segment_state));
     let worker_stop = Arc::new(AtomicBool::new(false));
+    let priority_throttle = Arc::new(Mutex::new(DynamicThrottleState::default()));
     let reporter_handle = tauri::async_runtime::spawn(report_segmented_progress(
         app.clone(),
         state.clone(),
@@ -203,8 +203,6 @@ pub(super) async fn run_segmented_download_attempt(
         profile,
         progress.clone(),
         reporter_stop.clone(),
-        worker_stop.clone(),
-        priority_deferred.clone(),
     ));
     let worker_context = SegmentWorkerContext {
         state: state.clone(),
@@ -219,6 +217,7 @@ pub(super) async fn run_segmented_download_attempt(
         progress: progress.clone(),
         metadata: metadata.clone(),
         stop: worker_stop.clone(),
+        priority_throttle,
         stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
     };
 
@@ -260,16 +259,6 @@ pub(super) async fn run_segmented_download_attempt(
 
     if let Some(error) = worker_error {
         return Err(error);
-    }
-
-    if let Some(decision) = priority_deferred.lock().await.clone() {
-        if let Some(snapshot) = state
-            .defer_active_datanodes_priority_worker(&task.id, &decision)
-            .await?
-        {
-            emit_snapshot(app, &snapshot);
-        }
-        return Ok(DownloadOutcome::Deferred);
     }
 
     if worker_outcome != DownloadOutcome::Completed {
@@ -537,6 +526,49 @@ pub(super) async fn download_segment_worker(
                 .progress
                 .store_segment_bytes(segment.index, current_len);
             context.progress.add_sample_bytes(chunk_len);
+            if let Some(decision) = context
+                .state
+                .datanodes_priority_throttle_decision(&context.job_id)
+                .await
+            {
+                match throttle_download_with_dynamic_limit(
+                    &context.state,
+                    &context.job_id,
+                    &context.priority_throttle,
+                    decision.cap_bytes_per_second,
+                    chunk_len,
+                )
+                .await
+                {
+                    WorkerControl::Paused => {
+                        record_segment_progress(
+                            &context.temp_path,
+                            &context.metadata,
+                            segment.index,
+                            current_len,
+                            false,
+                            true,
+                        )
+                        .await?;
+                        return Ok(DownloadOutcome::Paused);
+                    }
+                    WorkerControl::Canceled | WorkerControl::Missing => {
+                        record_segment_progress(
+                            &context.temp_path,
+                            &context.metadata,
+                            segment.index,
+                            current_len,
+                            false,
+                            true,
+                        )
+                        .await?;
+                        return Ok(DownloadOutcome::Canceled);
+                    }
+                    WorkerControl::Continue => {}
+                }
+            } else {
+                clear_dynamic_throttle(&context.priority_throttle).await;
+            }
 
             let should_persist_metadata =
                 last_metadata_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
@@ -612,8 +644,6 @@ pub(super) async fn report_segmented_progress(
     profile: DownloadPerformanceProfile,
     progress: Arc<SegmentedProgressCounters>,
     stop: Arc<AtomicBool>,
-    worker_stop: Arc<AtomicBool>,
-    priority_deferred: Arc<Mutex<Option<DataNodesPriorityPressure>>>,
 ) -> Result<(), DownloadError> {
     let job_id = task.id.clone();
     let mut rolling_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
@@ -666,11 +696,6 @@ pub(super) async fn report_segmented_progress(
         if task_releases_bulk_hoster_fairness(&task, speed) {
             schedule_downloads(app.clone(), state.clone());
         }
-        if let Some(decision) = state.datanodes_priority_defer_decision(&job_id).await {
-            *priority_deferred.lock().await = Some(decision);
-            worker_stop.store(true, Ordering::Relaxed);
-            break;
-        }
 
         if stopping {
             break;
@@ -694,11 +719,7 @@ pub(super) async fn await_segment_workers_with_stop(
     while let Some(result) = handles.join_next().await {
         match result {
             Ok(Ok(DownloadOutcome::Completed)) => {}
-            Ok(Ok(
-                outcome @ (DownloadOutcome::Paused
-                | DownloadOutcome::Canceled
-                | DownloadOutcome::Deferred),
-            )) => {
+            Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
                 stop.store(true, Ordering::Relaxed);
                 handles.abort_all();
                 return (outcome, None);

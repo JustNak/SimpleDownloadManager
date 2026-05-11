@@ -76,11 +76,12 @@ const BULK_HOSTER_AGGREGATE_DEGRADATION_PERCENT: u64 = 35;
 const DATANODES_PRIORITY_PRESSURE_WINDOW: Duration = Duration::from_secs(6);
 const DATANODES_PRIORITY_BALANCED_RUNWAY: Duration = Duration::from_secs(8);
 const DATANODES_PRIORITY_FAST_RUNWAY: Duration = Duration::from_secs(5);
-const DATANODES_PRIORITY_BALANCED_DEFER_COOLDOWN: Duration = Duration::from_secs(20);
-const DATANODES_PRIORITY_FAST_DEFER_COOLDOWN: Duration = Duration::from_secs(15);
 const DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND: u64 = 128 * 1024;
-const DATANODES_PRIORITY_PEAK_SPEED_PERCENT: u64 = 45;
+const DATANODES_PRIORITY_BASELINE_SPEED_PERCENT: u64 = 75;
+const DATANODES_PRIORITY_NEWER_BUDGET_PERCENT: u64 = 25;
+const DATANODES_PRIORITY_MIN_NEWER_CAP_BYTES_PER_SECOND: u64 = 64 * 1024;
 const DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES: u8 = 3;
+const DATANODES_PRIORITY_CAP_REPORT_CHANGE_PERCENT: u64 = 25;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
     "Program",
@@ -114,6 +115,7 @@ struct RuntimeState {
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
     bulk_hoster_fairness: HashMap<String, BulkHosterFairnessController>,
     datanodes_priority_defer_until: HashMap<String, Instant>,
+    datanodes_priority_cap_reports: HashMap<String, DataNodesPriorityCapReport>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
@@ -133,7 +135,10 @@ struct BulkHosterWorkerHealth {
     healthy_sample_count: u8,
     last_healthy_at: Option<Instant>,
     priority_peak_speed: u64,
-    priority_drop_since: Option<Instant>,
+    priority_baseline_speed: Option<u64>,
+    priority_pressure_since: Option<Instant>,
+    priority_pressure_active: bool,
+    priority_recovery_sample_count: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +178,10 @@ impl BulkHosterWorkerHealth {
             healthy_sample_count: 0,
             last_healthy_at: None,
             priority_peak_speed: job.speed,
-            priority_drop_since: None,
+            priority_baseline_speed: None,
+            priority_pressure_since: None,
+            priority_pressure_active: false,
+            priority_recovery_sample_count: 0,
         }
     }
 
@@ -193,7 +201,9 @@ impl BulkHosterWorkerHealth {
         self.low_speed_since = Some(now);
         self.healthy_sample_count = 0;
         self.last_healthy_at = None;
-        self.priority_drop_since = None;
+        self.priority_pressure_since = None;
+        self.priority_pressure_active = false;
+        self.priority_recovery_sample_count = 0;
     }
 
     fn update(&mut self, downloaded_bytes: u64, speed: u64, now: Instant) {
@@ -223,12 +233,46 @@ impl BulkHosterWorkerHealth {
             }
         }
 
-        if self.priority_peak_speed >= DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND {
-            let priority_floor = datanodes_priority_pressure_floor(self.priority_peak_speed);
-            if speed < priority_floor {
-                self.priority_drop_since.get_or_insert(now);
+        let priority_target = self
+            .priority_baseline_speed
+            .map(datanodes_priority_pressure_floor)
+            .unwrap_or(DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND);
+        if progressed && speed >= priority_target {
+            self.priority_baseline_speed = Some(
+                self.priority_baseline_speed
+                    .map(|average| {
+                        average
+                            .saturating_mul(3)
+                            .saturating_add(speed)
+                            .saturating_div(4)
+                    })
+                    .unwrap_or(speed),
+            );
+        }
+
+        if let Some(baseline_speed) = self.priority_baseline_speed {
+            let priority_target = datanodes_priority_pressure_floor(baseline_speed);
+            if speed < priority_target {
+                self.priority_pressure_since.get_or_insert(now);
+                self.priority_recovery_sample_count = 0;
+                if self.priority_pressure_since.is_some_and(|since| {
+                    now.saturating_duration_since(since) >= DATANODES_PRIORITY_PRESSURE_WINDOW
+                }) {
+                    self.priority_pressure_active = true;
+                }
+            } else if self.priority_pressure_active {
+                self.priority_recovery_sample_count =
+                    self.priority_recovery_sample_count.saturating_add(1);
+                if self.priority_recovery_sample_count
+                    >= DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES
+                {
+                    self.priority_pressure_since = None;
+                    self.priority_pressure_active = false;
+                    self.priority_recovery_sample_count = 0;
+                }
             } else {
-                self.priority_drop_since = None;
+                self.priority_pressure_since = None;
+                self.priority_recovery_sample_count = 0;
             }
         }
     }
@@ -311,16 +355,19 @@ impl BulkHosterWorkerHealth {
         let BulkHosterWorkerProfile::Accelerated { .. } = self.profile else {
             return None;
         };
-        if self.priority_peak_speed < DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND {
+        let baseline_speed = self.priority_baseline_speed?;
+        let pressure_since = self.priority_pressure_since?;
+        if !self.priority_pressure_active
+            && now.saturating_duration_since(pressure_since) < DATANODES_PRIORITY_PRESSURE_WINDOW
+        {
             return None;
         }
-        let drop_since = self.priority_drop_since?;
-        if now.saturating_duration_since(drop_since) < DATANODES_PRIORITY_PRESSURE_WINDOW {
-            return None;
-        }
+        let target_speed = datanodes_priority_pressure_floor(baseline_speed);
         Some(DataNodesPriorityPressureSample {
             current_speed: self.last_reported_speed,
             peak_speed: self.priority_peak_speed,
+            baseline_speed,
+            target_speed,
         })
     }
 
@@ -394,12 +441,32 @@ pub(crate) struct DataNodesPriorityPressure {
     pub older_job_id: String,
     pub current_speed: u64,
     pub peak_speed: u64,
+    pub baseline_speed: u64,
+    pub target_speed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DataNodesPriorityThrottleDecision {
+    pub protected_job_id: String,
+    pub current_speed: u64,
+    pub peak_speed: u64,
+    pub baseline_speed: u64,
+    pub target_speed: u64,
+    pub cap_bytes_per_second: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DataNodesPriorityPressureSample {
     current_speed: u64,
     peak_speed: u64,
+    baseline_speed: u64,
+    target_speed: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DataNodesPriorityCapReport {
+    protected_job_id: String,
+    cap_bytes_per_second: u64,
 }
 
 impl BulkHosterFairnessController {
@@ -608,17 +675,9 @@ fn datanodes_priority_runway(max_concurrency: u32) -> Duration {
     }
 }
 
-fn datanodes_priority_defer_cooldown(settings: &Settings) -> Option<Duration> {
-    match settings.bulk.download_performance_mode {
-        DownloadPerformanceMode::Stable => None,
-        DownloadPerformanceMode::Balanced => Some(DATANODES_PRIORITY_BALANCED_DEFER_COOLDOWN),
-        DownloadPerformanceMode::Fast => Some(DATANODES_PRIORITY_FAST_DEFER_COOLDOWN),
-    }
-}
-
 fn datanodes_priority_pressure_floor(peak_speed: u64) -> u64 {
     DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND
-        .max(peak_speed.saturating_mul(DATANODES_PRIORITY_PEAK_SPEED_PERCENT) / 100)
+        .max(peak_speed.saturating_mul(DATANODES_PRIORITY_BASELINE_SPEED_PERCENT) / 100)
 }
 
 fn datanodes_hoster_warmup_horizon(settings: &Settings) -> Option<usize> {
