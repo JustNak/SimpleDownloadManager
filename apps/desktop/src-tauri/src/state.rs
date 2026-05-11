@@ -68,6 +68,7 @@ const BULK_HOSTER_STARTUP_GRACE_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_LOW_SPEED_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND: u64 = 64 * 1024;
 const BULK_HOSTER_HEALTH_SAMPLE_WINDOW: Duration = Duration::from_secs(1);
+const BULK_HOSTER_TRANSIENT_LOW_SAMPLE_GRACE: Duration = Duration::from_secs(3);
 const BULK_HOSTER_AGGREGATE_DEGRADATION_WINDOW: Duration = Duration::from_secs(20);
 const BULK_HOSTER_FAIRNESS_COOLDOWN_WINDOW: Duration = Duration::from_secs(30);
 const BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY: u32 = 4;
@@ -193,8 +194,12 @@ impl BulkHosterWorkerHealth {
         self.last_reported_speed = speed;
 
         if speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND {
-            self.low_speed_since.get_or_insert(now);
-            self.healthy_sample_count = 0;
+            let low_speed_since = *self.low_speed_since.get_or_insert(now);
+            if now.saturating_duration_since(low_speed_since)
+                > BULK_HOSTER_TRANSIENT_LOW_SAMPLE_GRACE
+            {
+                self.healthy_sample_count = 0;
+            }
         } else {
             self.low_speed_since = None;
             if progressed {
@@ -210,7 +215,7 @@ impl BulkHosterWorkerHealth {
         }
 
         if matches!(self.profile, BulkHosterWorkerProfile::Accelerated { .. }) {
-            if self.recent_healthy_samples(now) {
+            if self.recent_healthy_samples(now) || self.transient_low_sample_after_health(now) {
                 return false;
             }
             return true;
@@ -239,17 +244,24 @@ impl BulkHosterWorkerHealth {
     fn is_healthy(&self, now: Instant) -> bool {
         self.phase == BulkHosterWorkerPhase::Transferring
             && self.profile_allows_healthy_sample_window(now)
-            && self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
-            && self.healthy_sample_count >= 2
-            && self.last_healthy_at.is_some_and(|last| {
-                now.saturating_duration_since(last)
-                    <= BULK_HOSTER_LOW_SPEED_WINDOW + BULK_HOSTER_HEALTH_SAMPLE_WINDOW
-            })
-            && now.saturating_duration_since(self.last_progress_at) < BULK_HOSTER_LOW_SPEED_WINDOW
+            && (self.recent_healthy_samples(now) || self.transient_low_sample_after_health(now))
     }
 
     fn recent_healthy_samples(&self, now: Instant) -> bool {
         self.last_reported_speed >= BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
+            && self.recent_healthy_progress(now)
+    }
+
+    fn transient_low_sample_after_health(&self, now: Instant) -> bool {
+        self.last_reported_speed < BULK_HOSTER_HEALTH_FLOOR_BYTES_PER_SECOND
+            && self.recent_healthy_progress(now)
+            && self.low_speed_since.is_some_and(|since| {
+                now.saturating_duration_since(since) <= BULK_HOSTER_TRANSIENT_LOW_SAMPLE_GRACE
+            })
+    }
+
+    fn recent_healthy_progress(&self, now: Instant) -> bool {
+        self.phase == BulkHosterWorkerPhase::Transferring
             && self.healthy_sample_count >= 2
             && self.last_healthy_at.is_some_and(|last| {
                 now.saturating_duration_since(last)

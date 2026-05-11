@@ -84,10 +84,10 @@ const FAST_TARGET_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
 const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
 const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
-const HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
-const HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
-const HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 32;
-const HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 12;
+const HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 24;
+const HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
+const HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 48;
+const HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 24;
 const MAX_RETRY_AFTER_DELAY: Duration = Duration::from_secs(60);
 const MAX_RETRY_JITTER: Duration = Duration::from_millis(250);
 const SEGMENT_WORKER_STOP_GRACE: Duration = Duration::from_millis(100);
@@ -126,7 +126,7 @@ pub fn schedule_downloads(app: AppHandle, state: SharedState) {
 
                 let warmup_candidates = state.datanodes_hoster_warmup_candidates().await;
                 if !warmup_candidates.is_empty() {
-                    spawn_datanodes_hoster_warmups(warmup_candidates);
+                    spawn_datanodes_hoster_warmups(app.clone(), state.clone(), warmup_candidates);
                 }
             }
             Err(error) => eprintln!("failed to claim queued jobs: {error}"),
@@ -621,7 +621,12 @@ async fn run_download(
                 retry_attempts += 1;
                 let snapshot = state.record_retry_attempt(&task.id, retry_attempts).await?;
                 emit_snapshot(app, &snapshot);
-                tokio::time::sleep(retry_delay_for_attempt((retry_attempts - 1) as usize)).await;
+                tokio::time::sleep(retry_delay_for_attempt_with_jitter(
+                    (retry_attempts - 1) as usize,
+                    &task.id,
+                    &task.url,
+                ))
+                .await;
             }
             Err(error) => return Err(error),
         }

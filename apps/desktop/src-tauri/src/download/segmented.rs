@@ -12,6 +12,7 @@ pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerf
             target_segment_size: u64::MAX,
             low_speed_threshold_bytes_per_second: 4 * 1024,
             low_speed_window: Duration::from_secs(30),
+            bulk_hoster_stall_timeout: Duration::from_secs(90),
             max_low_speed_retries: 2,
             speed_smoothing_alpha: 0.25,
         },
@@ -21,6 +22,7 @@ pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerf
             target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
             low_speed_threshold_bytes_per_second: 8 * 1024,
             low_speed_window: Duration::from_secs(20),
+            bulk_hoster_stall_timeout: Duration::from_secs(25),
             max_low_speed_retries: 2,
             speed_smoothing_alpha: 0.25,
         },
@@ -30,6 +32,7 @@ pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerf
             target_segment_size: FAST_TARGET_SEGMENT_SIZE,
             low_speed_threshold_bytes_per_second: 16 * 1024,
             low_speed_window: Duration::from_secs(15),
+            bulk_hoster_stall_timeout: Duration::from_secs(15),
             max_low_speed_retries: 3,
             speed_smoothing_alpha: 0.25,
         },
@@ -213,6 +216,7 @@ pub(super) async fn run_segmented_download_attempt(
         progress: progress.clone(),
         metadata: metadata.clone(),
         stop: worker_stop.clone(),
+        stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
     };
 
     let mut handles = tokio::task::JoinSet::new();
@@ -412,7 +416,29 @@ pub(super) async fn download_segment_worker(
         let mut low_speed_bytes = 0_u64;
         let mut low_speed_started = Instant::now();
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let chunk_result = match context.stall_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, stream.next()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        record_segment_progress(
+                            &context.temp_path,
+                            &context.metadata,
+                            segment.index,
+                            current_len,
+                            false,
+                            true,
+                        )
+                        .await?;
+                        return Err(bulk_hoster_stall_error(timeout));
+                    }
+                },
+                None => stream.next().await,
+            };
+            let Some(chunk_result) = chunk_result else {
+                break;
+            };
+
             if context.stop.load(Ordering::Relaxed) {
                 record_segment_progress(
                     &context.temp_path,

@@ -848,7 +848,7 @@ pub(super) fn bulk_member_auto_restart_mode(
         return None;
     }
 
-    if failure_category == FailureCategory::Resume || job.auto_restart_attempts > 0 {
+    if failure_category == FailureCategory::Resume {
         Some(BulkMemberAutoRestartMode::ResetPartial)
     } else {
         Some(BulkMemberAutoRestartMode::PreservePartial)

@@ -253,7 +253,11 @@ pub(super) fn should_retry_status(status: StatusCode) -> bool {
 }
 
 pub(super) fn should_retry_error(error: &reqwest::Error) -> bool {
-    error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_request()
+        || error.is_body()
+        || error.is_decode()
 }
 
 pub(super) fn download_error(

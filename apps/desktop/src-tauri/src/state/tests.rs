@@ -3980,8 +3980,8 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
 }
 
 #[tokio::test]
-async fn bulk_member_auto_restart_candidate_resets_after_preserved_attempt() {
-    let download_dir = test_runtime_dir("bulk-auto-restart-reset-after-preserve");
+async fn bulk_member_auto_restart_candidate_preserves_after_preserved_attempt() {
+    let download_dir = test_runtime_dir("bulk-auto-restart-preserve-after-preserve");
     let archive = bulk_archive_info(&download_dir, "bulk_auto_reset_after_preserve");
     let mut job = download_job(
         "job_auto",
@@ -4014,7 +4014,7 @@ async fn bulk_member_auto_restart_candidate_resets_after_preserved_attempt() {
 
     assert_eq!(candidate.attempt, 2);
     assert_eq!(candidate.max_attempts, 3);
-    assert_eq!(candidate.mode, BulkMemberAutoRestartMode::ResetPartial);
+    assert_eq!(candidate.mode, BulkMemberAutoRestartMode::PreservePartial);
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -4461,6 +4461,34 @@ async fn auto_restart_bulk_member_preserves_partial_state_and_clears_hoster_heal
             && event.message.contains("attempt 1/4")
             && event.message.contains("network")
     }));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn repeated_network_bulk_auto_restart_preserves_partial_state() {
+    let download_dir = test_runtime_dir("bulk-auto-restart-mode-preserve-repeat");
+    let archive = bulk_archive_info(&download_dir, "bulk_auto_preserve_repeat");
+    let mut job = download_job(
+        "job_auto_preserve_repeat",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.bulk_archive = Some(archive);
+    job.downloaded_bytes = 128 * 1024 * 1024;
+    job.total_bytes = 500 * 1024 * 1024;
+    job.auto_restart_attempts = 2;
+
+    assert_eq!(
+        bulk_member_auto_restart_mode(
+            &job,
+            FailureCategory::Network,
+            "Download failed: error decoding response body",
+            true,
+        ),
+        Some(BulkMemberAutoRestartMode::PreservePartial)
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -5462,6 +5490,50 @@ async fn accelerated_datanodes_fairness_ramps_to_fast_limit_after_recent_healthy
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, format!("job_datanodes_{next_index}"));
     }
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn accelerated_datanodes_transient_zero_sample_does_not_freeze_claims() {
+    let download_dir = test_runtime_dir("bulk-datanodes-transient-zero-sample");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_transient_zero");
+    let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    active.state = JobState::Downloading;
+    active.downloaded_bytes = 4 * 1024 * 1024;
+    active.speed = 512 * 1024;
+    let queued = datanodes_bulk_job("job_datanodes_2", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
+        runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+        runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
+        runtime.active_workers.insert("job_datanodes_1".into());
+        let health = {
+            let job = runtime.job("job_datanodes_1").unwrap();
+            BulkHosterWorkerHealth::from_job_with_profile(
+                job,
+                BulkHosterWorkerProfile::Accelerated { max_concurrency: 4 },
+                Instant::now(),
+            )
+        };
+        runtime
+            .bulk_hoster_worker_health
+            .insert("job_datanodes_1".into(), health);
+        seed_recent_healthy_bulk_hoster_health(&mut runtime, "job_datanodes_1", 512 * 1024);
+        let downloaded = runtime.job("job_datanodes_1").unwrap().downloaded_bytes;
+        runtime.update_bulk_hoster_worker_health("job_datanodes_1", downloaded, 0, Instant::now());
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("accelerated DataNodes claim should tolerate one zero sample");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_datanodes_2");
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
