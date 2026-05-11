@@ -85,7 +85,7 @@
   const canPause = $derived(jobs.some(isPausable));
   const canResume = $derived(jobs.some(isResumable));
   const canCancel = $derived(jobs.some(isCancelable));
-  const canBulkCancelDelete = $derived(jobs.length > 0);
+  const canBulkCancel = $derived(jobs.some(isBulkCancelTarget));
   const virtualBatchQueue = $derived(getVirtualQueueWindow({
     totalCount: jobs.length,
     rowSize: 'large',
@@ -370,7 +370,6 @@
         if (plan.cancelJobIds.length > 0) {
           await cancelJobs(plan.cancelJobIds);
         }
-        await deleteJobs(plan.deleteJobIds, true);
       },
       { closeOnSuccess: plan.closeOnSuccess },
     );
@@ -386,6 +385,10 @@
 
   function isCancelable(job: DownloadJob) {
     return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused].includes(job.state);
+  }
+
+  function isBulkCancelTarget(job: DownloadJob) {
+    return [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused, JobState.Failed].includes(job.state);
   }
 
   function statusText(job: DownloadJob) {
@@ -440,6 +443,7 @@
 
   function phaseClass(phase: BulkPhase | BulkUiState | BulkFinalizingStepId | null) {
     if (phase === 'failed') return 'text-destructive';
+    if (phase === 'canceled') return 'text-muted-foreground';
     if (phase === 'ready') return 'text-success';
     if (phase === 'extracting' || phase === 'uncompressing' || phase === 'combining' || phase === 'creating_folder' || phase === 'compressing' || phase === 'finalizing') {
       return 'text-warning';
@@ -794,7 +798,7 @@
   <div class="mt-3 flex min-h-[45px] shrink-0 items-center justify-between gap-3 border-t border-border pt-3">
     <div class="flex justify-start">
       {#if bulkUiState === 'review' || bulkUiState === 'downloading'}
-        {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, bulkUiState === 'downloading' ? isBusy || !canBulkCancelDelete : isBusy, isConfirmingCancel ? 'confirm' : 'cancel')}
+        {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canBulkCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
       {/if}
     </div>
     <div class="flex justify-end gap-3">
@@ -808,6 +812,8 @@
         {#if failedArchive}
           {@render ActionButton('Retry folder', RotateCcw, () => retryFailedBulkArchive(failedArchive.id), isBusy || !failedRetrySelection.canRetry, 'primary')}
         {/if}
+        {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
+      {:else if bulkUiState === 'canceled'}
         {@render ActionButton('Close', X, () => void currentWindow?.close(), isBusy)}
       {/if}
     </div>

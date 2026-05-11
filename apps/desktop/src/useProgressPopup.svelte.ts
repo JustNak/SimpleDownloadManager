@@ -128,7 +128,7 @@ export function useProgressPopup(): ProgressPopupState {
         isConfirmingCancel = true;
         return;
       }
-      void runAction(() => cancelJob(activeJobId));
+      void runAction(() => cancelJob(activeJobId), { closeOnSuccess: true });
     },
     onClose: () => {
       void currentWindow?.close();

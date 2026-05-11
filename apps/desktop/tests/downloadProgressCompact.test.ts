@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const progressSource = readFileSync(new URL('../src/DownloadProgressWindow.svelte', import.meta.url), 'utf8');
+const sharedPopupSource = readFileSync(new URL('../src/useProgressPopup.svelte.ts', import.meta.url), 'utf8');
 const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
 
@@ -17,8 +18,9 @@ assert.match(progressSource, /#if isActiveProgressJob\(job\)[\s\S]*Action\('Paus
 assert.match(progressSource, /#if job\.state === JobState\.Paused[\s\S]*Action\('Resume'[\s\S]*Action\(isConfirmingCancel \? 'Confirm' : 'Cancel'[\s\S]*#if job\.state === JobState\.Failed/, 'paused download progress should expose only Resume and Cancel controls');
 assert.match(progressSource, /#if job\.state === JobState\.Completed[\s\S]*Action\('Show'[\s\S]*revealJobInFolder\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}[\s\S]*Action\('Open'[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download progress should expose Show and Open, both closing the popup after success');
 assert.doesNotMatch(progressSource, /Action\('Reveal'/, 'normal download progress popup should label completed reveal as Show, not Reveal');
-assert.doesNotMatch(progressSource, /Action\('Close'/, 'normal download progress footer should not expose a redundant Close action');
+assert.match(progressSource, /job\.state === JobState\.Canceled[\s\S]*Action\('Close'/, 'canceled download progress should expose a safe Close fallback');
 assert.match(progressSource, /Action\('Open'[\s\S]*openJobFile\(job\.id\);[\s\S]*\{ closeOnSuccess: true \}/, 'completed download Open should close the popup after a successful action');
+assert.match(sharedPopupSource, /cancelJob\(activeJobId\)[\s\S]*closeOnSuccess:\s*true/, 'confirmed progress Cancel should close the popup after successful cancellation');
 assert.match(progressSource, /type ActionVariant = 'default' \| 'primary' \| 'cancel' \| 'confirm'/, 'download progress actions should use explicit variants for cancel confirmation states');
 assert.match(progressSource, /isConfirmingCancel \? 'confirm' : 'cancel'/, 'download progress cancel button should switch to a confirm variant on the second click');
 assert.match(progressSource, /case 'cancel':[\s\S]*border-destructive bg-destructive text-destructive-foreground[\s\S]*cursor-pointer/, 'download progress Cancel should be a red button with white text and an action cursor');

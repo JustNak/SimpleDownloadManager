@@ -107,61 +107,86 @@ impl SharedState {
     }
 
     pub async fn cancel_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let temp_to_remove = {
-            let state = self.inner.read().await;
-            let job = state
-                .jobs
-                .iter()
-                .find(|job| job.id == id)
-                .ok_or_else(|| BackendError {
-                    code: "INTERNAL_ERROR",
-                    message: "Job not found.".into(),
-                })?;
+        self.cancel_jobs(&[id.to_string()]).await
+    }
 
-            if state.active_workers.contains(id) {
-                None
-            } else {
-                Some(PathBuf::from(&job.temp_path))
-            }
-        };
+    pub async fn cancel_jobs(&self, ids: &[String]) -> Result<DesktopSnapshot, BackendError> {
+        if ids.is_empty() {
+            return Ok(self.snapshot().await);
+        }
 
-        if let Some(temp_path) = temp_to_remove {
+        let temp_paths_to_remove =
+            {
+                let state = self.inner.read().await;
+                let mut temp_paths = Vec::new();
+                for id in ids {
+                    let job = state.jobs.iter().find(|job| job.id == *id).ok_or_else(|| {
+                        BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        }
+                    })?;
+
+                    if !state.active_workers.contains(id) {
+                        temp_paths.push(PathBuf::from(&job.temp_path));
+                    }
+                }
+                temp_paths
+            };
+
+        for temp_path in temp_paths_to_remove {
             let _ = remove_path_if_exists(&temp_path);
         }
 
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            state.external_reseed_jobs.remove(id);
-            let (event_message, clear_hoster_health) = {
-                let job = find_job_mut(&mut state.jobs, id)?;
-                let clear_hoster_health = is_protected_bulk_hoster_job(job);
-                job.state = JobState::Canceled;
-                job.progress = 0.0;
-                job.total_bytes = 0;
-                job.downloaded_bytes = 0;
-                job.speed = 0;
-                job.eta = 0;
-                job.error = None;
-                job.failure_category = None;
-                job.retry_attempts = 0;
-                job.auto_restart_attempts = 0;
-                reset_integrity_for_retry(job);
-                (format!("Canceled {}", job.filename), clear_hoster_health)
-            };
-            if clear_hoster_health {
-                state.clear_bulk_hoster_worker_health(id);
+            for id in ids {
+                state.external_reseed_jobs.remove(id);
+                let job_index =
+                    state
+                        .jobs
+                        .iter()
+                        .position(|job| job.id == *id)
+                        .ok_or_else(|| BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        })?;
+                let (event_message, clear_hoster_health) = {
+                    let job = &mut state.jobs[job_index];
+                    let clear_hoster_health = is_protected_bulk_hoster_job(job);
+                    job.state = JobState::Canceled;
+                    job.progress = 0.0;
+                    job.total_bytes = 0;
+                    job.downloaded_bytes = 0;
+                    job.speed = 0;
+                    job.eta = 0;
+                    job.error = None;
+                    job.failure_category = None;
+                    job.retry_attempts = 0;
+                    job.auto_restart_attempts = 0;
+                    reset_integrity_for_retry(job);
+                    (format!("Canceled {}", job.filename), clear_hoster_health)
+                };
+                if clear_hoster_health {
+                    state.clear_bulk_hoster_worker_health(id);
+                }
+                state.push_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download".into(),
+                    event_message,
+                    Some(id.clone()),
+                );
             }
-            state.push_diagnostic_event(
-                DiagnosticLevel::Info,
-                "download".into(),
-                event_message,
-                Some(id.into()),
-            );
             (state.snapshot(), state.persisted())
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
-        self.clear_handoff_auth(id).await;
+        {
+            let mut handoff_auth = self.handoff_auth.write().await;
+            for id in ids {
+                handoff_auth.remove(id);
+            }
+        }
         Ok(snapshot)
     }
 

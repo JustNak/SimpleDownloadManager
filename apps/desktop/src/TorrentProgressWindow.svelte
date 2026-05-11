@@ -162,6 +162,10 @@
     return job.state === JobState.Failed;
   }
 
+  function isCanceled(job: DownloadJob) {
+    return job.state === JobState.Canceled;
+  }
+
   function cancelActionVariant(isConfirming: boolean): TorrentActionVariant {
     return isConfirming ? 'confirm' : 'cancel';
   }
@@ -289,7 +293,7 @@
         {#if isActive(job) || isPaused(job)}
           {@render Action(popup.isConfirmingCancel ? 'Confirm' : 'Cancel', X, popup.onCancelClick, cancelActionVariant(popup.isConfirmingCancel))}
         {/if}
-        {#if isCompleted(job) || isFailed(job)}
+        {#if isCompleted(job) || isFailed(job) || isCanceled(job)}
           {@render Action('Close', X, popup.onClose)}
         {/if}
       </div>

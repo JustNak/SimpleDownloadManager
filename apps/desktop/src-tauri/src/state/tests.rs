@@ -4834,6 +4834,84 @@ async fn delete_canceled_active_job_waits_for_worker_release_before_disk_cleanup
 }
 
 #[tokio::test]
+async fn cancel_jobs_marks_many_jobs_without_waiting_for_active_worker_release() {
+    let download_dir = test_runtime_dir("cancel-jobs-batch-active");
+    let active_temp = download_dir.join("active.zip.part");
+    let queued_temp = download_dir.join("queued.zip.part");
+    std::fs::write(&active_temp, b"active partial").unwrap();
+    std::fs::write(&queued_temp, b"queued partial").unwrap();
+
+    let archive = bulk_archive_info(&download_dir, "bulk_cancel_batch");
+    let mut active = protected_hoster_bulk_job("job_active", archive);
+    active.state = JobState::Downloading;
+    active.downloaded_bytes = 64;
+    active.progress = 64.0;
+    active.temp_path = active_temp.display().to_string();
+    let mut queued = download_job("job_queued", JobState::Queued, ResumeSupport::Unknown, 0);
+    queued.temp_path = queued_temp.display().to_string();
+    let completed = download_job(
+        "job_completed",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    );
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active, queued, completed],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_active".into());
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_active", 96 * 1024);
+    }
+    state
+        .handoff_auth
+        .write()
+        .await
+        .insert("job_active".into(), HandoffAuth { headers: vec![] });
+
+    let ids = vec!["job_active".to_string(), "job_queued".to_string()];
+    let snapshot = tokio::time::timeout(Duration::from_millis(100), state.cancel_jobs(&ids))
+        .await
+        .expect("batch cancel should not wait for active worker file handles")
+        .expect("batch cancel should succeed");
+
+    let active_snapshot = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_active")
+        .expect("active job should remain visible");
+    assert_eq!(active_snapshot.state, JobState::Canceled);
+    assert_eq!(active_snapshot.downloaded_bytes, 0);
+    assert_eq!(active_snapshot.progress, 0.0);
+    assert!(
+        active_temp.exists(),
+        "active worker owns cleanup until it exits"
+    );
+    assert!(
+        !queued_temp.exists(),
+        "inactive queued temp artifact should be removed during cancel"
+    );
+    assert_eq!(
+        snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == "job_completed")
+            .unwrap()
+            .state,
+        JobState::Completed
+    );
+
+    let runtime = state.inner.read().await;
+    assert!(runtime.active_workers.contains("job_active"));
+    assert!(!runtime.bulk_hoster_worker_health.contains_key("job_active"));
+    drop(runtime);
+    assert!(!state.has_handoff_auth("job_active").await);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_reseed() {
     let download_dir = test_runtime_dir("delete-paused-seeding-torrent");
     let target_path = download_dir.join("seeded-output");
