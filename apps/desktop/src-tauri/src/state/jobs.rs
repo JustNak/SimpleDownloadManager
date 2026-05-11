@@ -110,6 +110,85 @@ impl SharedState {
         self.cancel_jobs(&[id.to_string()]).await
     }
 
+    pub async fn cancel_jobs_for_delete(
+        &self,
+        ids: &[String],
+    ) -> Result<DesktopSnapshot, BackendError> {
+        if ids.is_empty() {
+            return Ok(self.snapshot().await);
+        }
+
+        let temp_paths_to_remove =
+            {
+                let state = self.inner.read().await;
+                let mut temp_paths = Vec::new();
+                for id in ids {
+                    let job = state.jobs.iter().find(|job| job.id == *id).ok_or_else(|| {
+                        BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        }
+                    })?;
+
+                    if !state.active_workers.contains(id) && is_cancel_delete_cancel_target(job) {
+                        temp_paths.push(PathBuf::from(&job.temp_path));
+                    }
+                }
+                temp_paths
+            };
+
+        for temp_path in temp_paths_to_remove {
+            let _ = remove_path_if_exists(&temp_path);
+        }
+
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            for id in ids {
+                state.external_reseed_jobs.remove(id);
+                let job_index =
+                    state
+                        .jobs
+                        .iter()
+                        .position(|job| job.id == *id)
+                        .ok_or_else(|| BackendError {
+                            code: "INTERNAL_ERROR",
+                            message: "Job not found.".into(),
+                        })?;
+                let (event_message, should_push_event) = {
+                    let job = &mut state.jobs[job_index];
+                    if is_cancel_delete_cancel_target(job) {
+                        mark_job_canceled(job);
+                        (
+                            Some(format!("Canceled {} for disk cleanup", job.filename)),
+                            true,
+                        )
+                    } else {
+                        (None, false)
+                    }
+                };
+                state.clear_bulk_hoster_worker_health(id);
+                if should_push_event {
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "download".into(),
+                        event_message.unwrap_or_default(),
+                        Some(id.clone()),
+                    );
+                }
+            }
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        {
+            let mut handoff_auth = self.handoff_auth.write().await;
+            for id in ids {
+                handoff_auth.remove(id);
+            }
+        }
+        Ok(snapshot)
+    }
+
     pub async fn cancel_jobs(&self, ids: &[String]) -> Result<DesktopSnapshot, BackendError> {
         if ids.is_empty() {
             return Ok(self.snapshot().await);
@@ -154,17 +233,7 @@ impl SharedState {
                 let (event_message, clear_hoster_health) = {
                     let job = &mut state.jobs[job_index];
                     let clear_hoster_health = is_protected_bulk_hoster_job(job);
-                    job.state = JobState::Canceled;
-                    job.progress = 0.0;
-                    job.total_bytes = 0;
-                    job.downloaded_bytes = 0;
-                    job.speed = 0;
-                    job.eta = 0;
-                    job.error = None;
-                    job.failure_category = None;
-                    job.retry_attempts = 0;
-                    job.auto_restart_attempts = 0;
-                    reset_integrity_for_retry(job);
+                    mark_job_canceled(job);
                     (format!("Canceled {}", job.filename), clear_hoster_health)
                 };
                 if clear_hoster_health {
@@ -629,6 +698,73 @@ impl SharedState {
         self.remove_job(id).await
     }
 
+    pub async fn delete_canceled_jobs_after_release(
+        &self,
+        ids: &[String],
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let mut snapshot = self.snapshot().await;
+        for id in ids {
+            match self.delete_canceled_job_after_release(id).await {
+                Ok(next_snapshot) => snapshot = next_snapshot,
+                Err(error) => {
+                    snapshot = self
+                        .record_cancel_delete_cleanup_failure(id, error.message)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(snapshot)
+    }
+
+    async fn delete_canceled_job_after_release(
+        &self,
+        id: &str,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let should_wait = {
+            let state = self.inner.read().await;
+            let Some(_) = state.jobs.iter().find(|job| job.id == id) else {
+                return Ok(state.snapshot());
+            };
+            state.active_workers.contains(id)
+        };
+
+        if should_wait {
+            self.wait_for_active_worker_release(
+                id,
+                "Canceled download files are still being released. Use Delete from disk again in a moment.",
+            )
+            .await?;
+        }
+
+        self.delete_job(id, true).await
+    }
+
+    async fn record_cancel_delete_cleanup_failure(
+        &self,
+        id: &str,
+        message: String,
+    ) -> Result<DesktopSnapshot, BackendError> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            if let Some(job) = state.job_mut(id) {
+                mark_job_canceled(job);
+                job.error = Some(format!("Could not delete files from disk: {message}"));
+                job.failure_category = Some(FailureCategory::Disk);
+            }
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                format!("Could not delete canceled download files: {message}"),
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        Ok(snapshot)
+    }
+
     async fn wait_for_disk_delete_release(&self, id: &str) -> Result<(), BackendError> {
         let (wait_for_canceled_worker, wait_for_paused_torrent) = {
             let state = self.inner.read().await;
@@ -931,6 +1067,32 @@ pub(super) fn is_pending_http_bulk_member(job: &DownloadJob) -> bool {
             .bulk_archive
             .as_ref()
             .is_some_and(|archive| archive.archive_status == BulkArchiveStatus::Pending)
+}
+
+fn is_cancel_delete_cancel_target(job: &DownloadJob) -> bool {
+    matches!(
+        job.state,
+        JobState::Queued
+            | JobState::Starting
+            | JobState::Downloading
+            | JobState::Seeding
+            | JobState::Paused
+            | JobState::Failed
+    )
+}
+
+fn mark_job_canceled(job: &mut DownloadJob) {
+    job.state = JobState::Canceled;
+    job.progress = 0.0;
+    job.total_bytes = 0;
+    job.downloaded_bytes = 0;
+    job.speed = 0;
+    job.eta = 0;
+    job.error = None;
+    job.failure_category = None;
+    job.retry_attempts = 0;
+    job.auto_restart_attempts = 0;
+    reset_integrity_for_retry(job);
 }
 
 pub(super) fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {

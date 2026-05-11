@@ -367,8 +367,8 @@
     const plan = bulkCancelConfirmPlan(jobs, bulkUiState);
     void runAction(
       async () => {
-        if (plan.cancelJobIds.length > 0) {
-          await cancelJobs(plan.cancelJobIds);
+        if (plan.deleteJobIds.length > 0) {
+          await cancelJobs(plan.deleteJobIds, { deleteFromDisk: plan.deleteFromDisk });
         }
       },
       { closeOnSuccess: plan.closeOnSuccess },
@@ -798,7 +798,7 @@
   <div class="mt-3 flex min-h-[45px] shrink-0 items-center justify-between gap-3 border-t border-border pt-3">
     <div class="flex justify-start">
       {#if bulkUiState === 'review' || bulkUiState === 'downloading'}
-        {@render ActionButton(isConfirmingCancel ? 'Confirm' : 'Cancel', X, onBulkCancelClick, isBusy || !canBulkCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
+        {@render ActionButton(isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, onBulkCancelClick, isBusy || !canBulkCancel, isConfirmingCancel ? 'confirm' : 'cancel')}
       {/if}
     </div>
     <div class="flex justify-end gap-3">

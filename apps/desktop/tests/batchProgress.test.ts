@@ -255,9 +255,11 @@ assert.deepEqual(
   ], 'review'),
   {
     cancelJobIds: ['job_1', 'job_2'],
+    deleteJobIds: ['job_1', 'job_2'],
+    deleteFromDisk: true,
     closeOnSuccess: true,
   },
-  'confirming bulk cancel in review should cancel queued and paused rows without deleting them from disk',
+  'confirming bulk cancel in review should cancel queued and paused rows and delete the visible batch from disk',
 );
 
 assert.deepEqual(
@@ -269,9 +271,11 @@ assert.deepEqual(
   ], 'downloading'),
   {
     cancelJobIds: ['job_2', 'job_3'],
+    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
+    deleteFromDisk: true,
     closeOnSuccess: true,
   },
-  'confirming bulk cancel while downloading should cancel unfinished members and skip completed or already canceled rows',
+  'confirming bulk cancel while downloading should cancel unfinished members and delete every visible row',
 );
 
 assert.deepEqual(
@@ -284,9 +288,11 @@ assert.deepEqual(
   ], 'downloading'),
   {
     cancelJobIds: ['job_1', 'job_2', 'job_3', 'job_4'],
+    deleteJobIds: ['job_1', 'job_2', 'job_3', 'job_4', 'job_5'],
+    deleteFromDisk: true,
     closeOnSuccess: true,
   },
-  'mixed active and completed bulk batches should cancel unfinished rows without deleting completed output',
+  'mixed active and completed bulk batches should cancel unfinished rows and delete completed output',
 );
 
 assert.equal(

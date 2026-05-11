@@ -24,6 +24,12 @@ assert.match(
 
 assert.doesNotMatch(
   appSource,
+  /async function handleCancel[\s\S]*deleteFromDisk:\s*true[\s\S]*async function handleRetry/,
+  'main queue cancel handling should remain stop-only and not delete files from disk',
+);
+
+assert.doesNotMatch(
+  appSource,
   /Promise\.all\(actionableIds\.map\(\(jobId\) => action\(jobId\)\)\)/,
   'main queue bulk actions should not fan out one IPC call per member',
 );

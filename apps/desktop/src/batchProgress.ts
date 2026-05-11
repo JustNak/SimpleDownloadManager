@@ -30,6 +30,8 @@ export interface BulkFailedRetrySelection {
 
 export interface BulkCancelConfirmPlan {
   cancelJobIds: string[];
+  deleteJobIds: string[];
+  deleteFromDisk: boolean;
   closeOnSuccess: boolean;
 }
 
@@ -213,9 +215,14 @@ export function bulkCancelConfirmPlan(
   const cancelJobIds = state === 'review' || state === 'downloading'
     ? jobs.filter(isCancelableBulkCancelJob).map((job) => job.id).filter(Boolean)
     : [];
+  const deleteJobIds = state === 'review' || state === 'downloading'
+    ? jobs.map((job) => job.id).filter(Boolean)
+    : [];
 
   return {
     cancelJobIds,
+    deleteJobIds,
+    deleteFromDisk: deleteJobIds.length > 0,
     closeOnSuccess: state === 'review' || state === 'downloading',
   };
 }

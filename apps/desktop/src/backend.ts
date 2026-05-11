@@ -176,15 +176,19 @@ export async function resumeAllJobs(): Promise<void> {
   await invokeCommand('resume_all_jobs');
 }
 
-export async function cancelJob(id: string): Promise<void> {
+export interface CancelOptions {
+  deleteFromDisk?: boolean;
+}
+
+export async function cancelJob(id: string, options: CancelOptions = {}): Promise<void> {
   if (!isTauriRuntime()) {
     (await loadPreviewBackend()).cancelMockJob(id);
     return;
   }
-  await invokeCommand('cancel_job', { id });
+  await invokeCommand('cancel_job', { id, deleteFromDisk: options.deleteFromDisk === true });
 }
 
-export async function cancelJobs(ids: string[]): Promise<void> {
+export async function cancelJobs(ids: string[], options: CancelOptions = {}): Promise<void> {
   const uniqueIds = [...new Set(ids)].filter(Boolean);
   if (uniqueIds.length === 0) return;
 
@@ -193,7 +197,7 @@ export async function cancelJobs(ids: string[]): Promise<void> {
     return;
   }
 
-  await invokeCommand('cancel_jobs', { ids: uniqueIds });
+  await invokeCommand('cancel_jobs', { ids: uniqueIds, deleteFromDisk: options.deleteFromDisk === true });
 }
 
 export async function retryJob(id: string): Promise<void> {

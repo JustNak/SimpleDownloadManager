@@ -807,9 +807,21 @@ pub async fn cancel_job(
     app: AppHandle,
     state: State<'_, SharedState>,
     id: String,
+    delete_from_disk: Option<bool>,
 ) -> Result<(), String> {
-    let snapshot = state.cancel_job(&id).await.map_err(|error| error.message)?;
+    let delete_from_disk = delete_from_disk.unwrap_or(false);
+    let snapshot = if delete_from_disk {
+        state
+            .cancel_jobs_for_delete(&[id.clone()])
+            .await
+            .map_err(|error| error.message)?
+    } else {
+        state.cancel_job(&id).await.map_err(|error| error.message)?
+    };
     emit_snapshot(&app, &snapshot);
+    if delete_from_disk {
+        schedule_cancel_delete_cleanup(app.clone(), state.inner().clone(), vec![id]);
+    }
     schedule_downloads(app, state.inner().clone());
     Ok(())
 }
@@ -819,18 +831,47 @@ pub async fn cancel_jobs(
     app: AppHandle,
     state: State<'_, SharedState>,
     ids: Vec<String>,
+    delete_from_disk: Option<bool>,
 ) -> Result<(), String> {
     let ids = normalized_job_ids(ids);
     if ids.is_empty() {
         return Ok(());
     }
 
-    let snapshot = state
-        .cancel_jobs(&ids)
-        .await
-        .map_err(|error| error.message)?;
+    let delete_from_disk = delete_from_disk.unwrap_or(false);
+    let snapshot = if delete_from_disk {
+        state
+            .cancel_jobs_for_delete(&ids)
+            .await
+            .map_err(|error| error.message)?
+    } else {
+        state
+            .cancel_jobs(&ids)
+            .await
+            .map_err(|error| error.message)?
+    };
     emit_snapshot(&app, &snapshot);
+    if delete_from_disk {
+        schedule_cancel_delete_cleanup(app.clone(), state.inner().clone(), ids);
+    }
     Ok(())
+}
+
+fn schedule_cancel_delete_cleanup(app: AppHandle, state: SharedState, ids: Vec<String>) {
+    tauri::async_runtime::spawn(async move {
+        match state.delete_canceled_jobs_after_release(&ids).await {
+            Ok(snapshot) => {
+                emit_snapshot(&app, &snapshot);
+                schedule_downloads(app, state);
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to finalize canceled disk cleanup: {}",
+                    error.message
+                );
+            }
+        }
+    });
 }
 
 #[tauri::command]

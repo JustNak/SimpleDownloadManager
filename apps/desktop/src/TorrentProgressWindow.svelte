@@ -291,7 +291,7 @@
           {@render Action('Show', FolderOpen, () => void popup.runAction(async () => { await revealJobInFolder(job.id); }, { closeOnSuccess: true }))}
         {/if}
         {#if isActive(job) || isPaused(job)}
-          {@render Action(popup.isConfirmingCancel ? 'Confirm' : 'Cancel', X, popup.onCancelClick, cancelActionVariant(popup.isConfirmingCancel))}
+          {@render Action(popup.isConfirmingCancel ? 'Confirm delete' : 'Cancel', X, popup.onCancelClick, cancelActionVariant(popup.isConfirmingCancel))}
         {/if}
         {#if isCompleted(job) || isFailed(job) || isCanceled(job)}
           {@render Action('Close', X, popup.onClose)}
