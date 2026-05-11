@@ -2059,6 +2059,83 @@ fn range_plan_respects_segment_connection_budget() {
 }
 
 #[test]
+fn dynamic_segment_queue_splits_largest_pending_ranges_before_claim() {
+    let mut state = SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 64,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: vec![SegmentProgress {
+            index: 0,
+            range: ByteRange { start: 0, end: 63 },
+            downloaded_bytes: 0,
+            completed: false,
+        }],
+    };
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_tests(&mut state, &mut active, 4, 8)
+        .expect("dynamic queue should claim a segment");
+
+    assert_eq!(claimed.range, ByteRange { start: 0, end: 15 });
+    assert!(active.contains(&claimed.index));
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range)
+            .collect::<Vec<_>>(),
+        vec![
+            ByteRange { start: 0, end: 15 },
+            ByteRange { start: 16, end: 31 },
+            ByteRange { start: 32, end: 47 },
+            ByteRange { start: 48, end: 63 },
+        ]
+    );
+}
+
+#[test]
+fn dynamic_segment_queue_does_not_reassign_completed_spans() {
+    let mut state = SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 64,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: vec![
+            SegmentProgress {
+                index: 0,
+                range: ByteRange { start: 0, end: 15 },
+                downloaded_bytes: 16,
+                completed: true,
+            },
+            SegmentProgress {
+                index: 1,
+                range: ByteRange { start: 16, end: 63 },
+                downloaded_bytes: 0,
+                completed: false,
+            },
+        ],
+    };
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_tests(&mut state, &mut active, 4, 8)
+        .expect("dynamic queue should claim unfinished work");
+
+    assert_ne!(claimed.index, 0);
+    assert!(claimed.range.start >= 16);
+    assert!(state.segments[0].completed);
+    assert_eq!(state.segments[0].downloaded_bytes, 16);
+}
+
+#[test]
 fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
     assert!(plan_segmented_ranges(
         256 * 1024 * 1024,
@@ -2216,6 +2293,61 @@ fn segment_budget_uses_active_connection_leases() {
                     "job_2",
                     SegmentConnectionClass::ProtectedHosterBulk,
                     "https://s2.datanodes.to/d/def/file.bin",
+                    4,
+                ),
+            ],
+        ),
+        None
+    );
+}
+
+#[test]
+fn normal_download_segment_budget_limits_same_origin_connections() {
+    let budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Balanced)
+        .expect("balanced normal downloads should use brokered segment budgets");
+
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::Normal,
+            "job_3",
+            "https://cdn.example.com/third.bin",
+            budget,
+            6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::Normal,
+                    "https://cdn.example.com/first.bin",
+                    4,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::Normal,
+                    "https://cdn.example.com/second.bin",
+                    2,
+                ),
+            ],
+        ),
+        Some(2)
+    );
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::Normal,
+            "job_4",
+            "https://cdn.example.com/fourth.bin",
+            budget,
+            6,
+            &[
+                (
+                    "job_1",
+                    SegmentConnectionClass::Normal,
+                    "https://cdn.example.com/first.bin",
+                    4,
+                ),
+                (
+                    "job_2",
+                    SegmentConnectionClass::Normal,
+                    "https://cdn.example.com/second.bin",
                     4,
                 ),
             ],
@@ -3099,6 +3231,39 @@ fn segmented_progress_counters_track_totals_without_shared_mutex() {
     assert_eq!(counters.drain_sample_bytes(), 0);
 }
 
+#[test]
+fn segmented_progress_initial_bytes_are_index_aligned_after_dynamic_splits() {
+    let segments = vec![
+        SegmentProgress {
+            index: 0,
+            range: ByteRange { start: 0, end: 15 },
+            downloaded_bytes: 10,
+            completed: false,
+        },
+        SegmentProgress {
+            index: 2,
+            range: ByteRange { start: 16, end: 31 },
+            downloaded_bytes: 4,
+            completed: false,
+        },
+        SegmentProgress {
+            index: 1,
+            range: ByteRange { start: 32, end: 47 },
+            downloaded_bytes: 8,
+            completed: false,
+        },
+    ];
+
+    let counters = SegmentedProgressCounters::new(segment_existing_lengths_by_index(
+        Path::new("unused"),
+        &segments,
+    ));
+
+    assert_eq!(counters.total_downloaded(), 22);
+    counters.store_segment_bytes(1, 12);
+    assert_eq!(counters.total_downloaded(), 26);
+}
+
 #[tokio::test]
 async fn direct_segment_writer_writes_into_partial_file_without_segment_artifacts() {
     let root = test_download_runtime_dir("direct-segment-writer");
@@ -3384,8 +3549,14 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         completed: false,
     };
     let mut stored = SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
         total_bytes: 12,
         validators: validators.clone(),
+        effective_url: Some(url.clone()),
+        target_path: Some(root.join("download.bin").display().to_string()),
+        temp_path: Some(temp_path.display().to_string()),
+        last_verified_file_len: 12,
+        retry_generation: 0,
         segments: vec![segment.clone()],
     };
     prepare_direct_segment_file(&temp_path, 12).await.unwrap();
@@ -3568,8 +3739,14 @@ fn new_segment_state_for_test(
     validators: EntityValidators,
 ) -> SegmentedDownloadState {
     SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
         total_bytes: plan.total_bytes,
         validators,
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
         segments: plan
             .segments
             .iter()

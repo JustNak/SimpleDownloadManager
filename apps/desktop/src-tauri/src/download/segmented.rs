@@ -3,6 +3,8 @@ use super::*;
 static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     OnceLock::new();
 static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
+const DYNAMIC_SEGMENT_QUEUE_MULTIPLIER: usize = 2;
+const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
 
 pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
     match mode {
@@ -148,6 +150,194 @@ pub(super) fn merge_preflight_metadata(
     }
 }
 
+fn dynamic_segment_queue_depth(worker_count: usize) -> usize {
+    worker_count
+        .saturating_mul(DYNAMIC_SEGMENT_QUEUE_MULTIPLIER)
+        .max(worker_count)
+        .max(1)
+}
+
+fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
+    (profile.target_segment_size / 4)
+        .max(DYNAMIC_SEGMENT_MIN_SPLIT_SIZE)
+        .max(1)
+}
+
+fn segment_remaining_bytes(segment: &SegmentProgress) -> u64 {
+    if segment.completed {
+        return 0;
+    }
+
+    segment.range.len().saturating_sub(segment.downloaded_bytes)
+}
+
+fn pending_segment_count(state: &SegmentedDownloadState, active: &HashSet<usize>) -> usize {
+    state
+        .segments
+        .iter()
+        .filter(|segment| !active.contains(&segment.index) && segment_remaining_bytes(segment) > 0)
+        .count()
+}
+
+fn largest_pending_segment_position(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+    min_remaining_bytes: u64,
+) -> Option<usize> {
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (position, segment) in state.segments.iter().enumerate() {
+        if active.contains(&segment.index) {
+            continue;
+        }
+        let remaining = segment_remaining_bytes(segment);
+        if remaining < min_remaining_bytes {
+            continue;
+        }
+        let key = (remaining, u64::MAX.saturating_sub(segment.range.start));
+        if best
+            .map(|(_, best_remaining, best_start_key)| {
+                key.0 > best_remaining || (key.0 == best_remaining && key.1 > best_start_key)
+            })
+            .unwrap_or(true)
+        {
+            best = Some((position, key.0, key.1));
+        }
+    }
+
+    best.map(|(position, _, _)| position)
+}
+
+fn split_largest_pending_segment(
+    state: &mut SegmentedDownloadState,
+    active: &HashSet<usize>,
+    min_split_size: u64,
+) -> bool {
+    let min_split_size = min_split_size.max(1);
+    let Some(position) =
+        largest_pending_segment_position(state, active, min_split_size.saturating_mul(2))
+    else {
+        return false;
+    };
+
+    let segment = state.segments[position].clone();
+    let remaining_start = segment
+        .range
+        .start
+        .saturating_add(segment.downloaded_bytes.min(segment.range.len()));
+    let remaining = segment_remaining_bytes(&segment);
+    let first_remaining = remaining / 2;
+    if first_remaining < min_split_size
+        || remaining.saturating_sub(first_remaining) < min_split_size
+    {
+        return false;
+    }
+
+    let split_end = remaining_start
+        .saturating_add(first_remaining)
+        .saturating_sub(1);
+    if split_end >= segment.range.end {
+        return false;
+    }
+
+    let next_index = state
+        .segments
+        .iter()
+        .map(|segment| segment.index)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    state.segments[position].range.end = split_end;
+    state.segments[position].completed = false;
+    state.segments.push(SegmentProgress {
+        index: next_index,
+        range: ByteRange {
+            start: split_end.saturating_add(1),
+            end: segment.range.end,
+        },
+        downloaded_bytes: 0,
+        completed: false,
+    });
+    state.segments.sort_by_key(|segment| segment.range.start);
+    state.retry_generation = state.retry_generation.saturating_add(1);
+    true
+}
+
+fn fill_dynamic_segment_queue(
+    state: &mut SegmentedDownloadState,
+    active: &HashSet<usize>,
+    target_depth: usize,
+    min_split_size: u64,
+) -> bool {
+    let mut changed = false;
+    while pending_segment_count(state, active) < target_depth {
+        if !split_largest_pending_segment(state, active, min_split_size) {
+            break;
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn claim_largest_dynamic_segment(
+    state: &mut SegmentedDownloadState,
+    active: &mut HashSet<usize>,
+    target_depth: usize,
+    min_split_size: u64,
+) -> (Option<SegmentProgress>, bool) {
+    let changed = fill_dynamic_segment_queue(state, active, target_depth, min_split_size);
+    let Some(position) = largest_pending_segment_position(state, active, 1) else {
+        return (None, changed);
+    };
+
+    let segment = state.segments[position].clone();
+    active.insert(segment.index);
+    (Some(segment), changed)
+}
+
+#[cfg(test)]
+pub(super) fn claim_largest_dynamic_segment_for_tests(
+    state: &mut SegmentedDownloadState,
+    active: &mut HashSet<usize>,
+    target_depth: usize,
+    min_split_size: u64,
+) -> Option<SegmentProgress> {
+    claim_largest_dynamic_segment(state, active, target_depth, min_split_size).0
+}
+
+async fn claim_dynamic_segment_work(
+    temp_path: &Path,
+    metadata: &Arc<Mutex<SegmentedDownloadState>>,
+    active: &Arc<Mutex<HashSet<usize>>>,
+    target_depth: usize,
+    min_split_size: u64,
+) -> Result<Option<SegmentProgress>, DownloadError> {
+    let mut active = active.lock().await;
+    let mut metadata = metadata.lock().await;
+    let (segment, changed) =
+        claim_largest_dynamic_segment(&mut metadata, &mut active, target_depth, min_split_size);
+    if changed {
+        persist_segment_state(temp_path, &metadata).await?;
+    }
+
+    Ok(segment)
+}
+
+async fn release_dynamic_segment_work(active: &Arc<Mutex<HashSet<usize>>>, segment_index: usize) {
+    active.lock().await.remove(&segment_index);
+}
+
+fn update_segment_recovery_metadata(
+    state: &mut SegmentedDownloadState,
+    effective_url: &str,
+    target_path: &Path,
+    temp_path: &Path,
+) {
+    state.schema_version = default_segment_state_schema_version();
+    state.effective_url = Some(effective_url.to_string());
+    state.target_path = Some(target_path.display().to_string());
+    state.temp_path = Some(temp_path.display().to_string());
+}
+
 pub(super) fn segmented_error_allows_single_stream_fallback(error: &DownloadError) -> bool {
     error.category == FailureCategory::Resume
 }
@@ -166,15 +356,24 @@ pub(super) async fn run_segmented_download_attempt(
 ) -> Result<DownloadOutcome, DownloadError> {
     let mut segment_state =
         load_or_create_segment_state(&task.temp_path, &plan, &validators).await?;
+    update_segment_recovery_metadata(
+        &mut segment_state,
+        &effective_url,
+        &task.target_path,
+        &task.temp_path,
+    );
     refresh_segment_completion_from_disk(&task.temp_path, &mut segment_state).await;
+    fill_dynamic_segment_queue(
+        &mut segment_state,
+        &HashSet::new(),
+        dynamic_segment_queue_depth(plan.segments.len()),
+        dynamic_segment_min_split_size(profile),
+    );
     persist_segment_state(&task.temp_path, &segment_state).await?;
     prepare_direct_segment_file(&task.temp_path, plan.total_bytes).await?;
 
-    let initial_segment_bytes = segment_state
-        .segments
-        .iter()
-        .map(|segment| segment_existing_len(&task.temp_path, segment))
-        .collect::<Vec<_>>();
+    let initial_segment_bytes =
+        segment_existing_lengths_by_index(&task.temp_path, &segment_state.segments);
     let initial_downloaded = initial_segment_bytes.iter().sum::<u64>();
 
     let snapshot = state
@@ -194,6 +393,7 @@ pub(super) async fn run_segmented_download_attempt(
     let reporter_stop = Arc::new(AtomicBool::new(false));
     let metadata = Arc::new(Mutex::new(segment_state));
     let worker_stop = Arc::new(AtomicBool::new(false));
+    let active_segments = Arc::new(Mutex::new(HashSet::new()));
     let priority_throttle = Arc::new(Mutex::new(DynamicThrottleState::default()));
     let reporter_handle = tauri::async_runtime::spawn(report_segmented_progress(
         app.clone(),
@@ -222,20 +422,15 @@ pub(super) async fn run_segmented_download_attempt(
     };
 
     let mut handles = tokio::task::JoinSet::new();
-    for segment in plan.segments.iter().copied().enumerate() {
-        let (index, range) = segment;
-        if initial_segment_bytes[index] >= range.len() {
-            continue;
-        }
-
-        handles.spawn(download_segment_worker(
+    let worker_count = plan.segments.len().max(1);
+    let queue_depth = dynamic_segment_queue_depth(worker_count);
+    let min_split_size = dynamic_segment_min_split_size(profile);
+    for _ in 0..worker_count {
+        handles.spawn(download_dynamic_segment_worker(
             worker_context.clone(),
-            SegmentProgress {
-                index,
-                range,
-                downloaded_bytes: 0,
-                completed: false,
-            },
+            active_segments.clone(),
+            queue_depth,
+            min_split_size,
         ));
     }
 
@@ -287,6 +482,43 @@ pub(super) async fn run_segmented_download_attempt(
         .map_err(disk_error)?;
     complete_http_download(app, state, task, plan.total_bytes, &final_path).await?;
     Ok(DownloadOutcome::Completed)
+}
+
+pub(super) async fn download_dynamic_segment_worker(
+    context: SegmentWorkerContext,
+    active_segments: Arc<Mutex<HashSet<usize>>>,
+    queue_depth: usize,
+    min_split_size: u64,
+) -> Result<DownloadOutcome, DownloadError> {
+    loop {
+        if context.stop.load(Ordering::Relaxed) {
+            return Ok(DownloadOutcome::Paused);
+        }
+
+        let Some(segment) = claim_dynamic_segment_work(
+            &context.temp_path,
+            &context.metadata,
+            &active_segments,
+            queue_depth,
+            min_split_size,
+        )
+        .await?
+        else {
+            return Ok(DownloadOutcome::Completed);
+        };
+        let segment_index = segment.index;
+        let outcome = download_segment_worker(context.clone(), segment).await;
+
+        if !matches!(&outcome, Ok(DownloadOutcome::Completed)) {
+            context.stop.store(true, Ordering::Relaxed);
+        }
+        release_dynamic_segment_work(&active_segments, segment_index).await;
+
+        match outcome? {
+            DownloadOutcome::Completed => {}
+            outcome => return Ok(outcome),
+        }
+    }
 }
 
 pub(super) async fn download_segment_worker(
@@ -807,15 +1039,11 @@ pub(super) async fn load_or_create_segment_state(
     let meta_path = segment_meta_path(temp_path);
     if let Ok(raw) = fs::read_to_string(&meta_path).await {
         if let Ok(state) = serde_json::from_str::<SegmentedDownloadState>(&raw) {
-            let same_plan = state.total_bytes == plan.total_bytes
-                && state.segments.len() == plan.segments.len()
-                && state
-                    .segments
-                    .iter()
-                    .zip(plan.segments.iter())
-                    .all(|(stored, planned)| stored.range == *planned);
-            if same_plan && !state.validators.conflicts_with(validators) {
+            if segment_state_compatible_with_plan(&state, plan)
+                && !state.validators.conflicts_with(validators)
+            {
                 let mut state = state;
+                state.schema_version = default_segment_state_schema_version();
                 state.validators = state.validators.reconcile_with(validators);
                 return Ok(state);
             }
@@ -824,8 +1052,14 @@ pub(super) async fn load_or_create_segment_state(
 
     cleanup_partial_artifacts(temp_path).await;
     Ok(SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
         total_bytes: plan.total_bytes,
         validators: validators.clone(),
+        effective_url: None,
+        target_path: None,
+        temp_path: Some(temp_path.display().to_string()),
+        last_verified_file_len: 0,
+        retry_generation: 0,
         segments: plan
             .segments
             .iter()
@@ -839,6 +1073,30 @@ pub(super) async fn load_or_create_segment_state(
             })
             .collect(),
     })
+}
+
+fn segment_state_compatible_with_plan(state: &SegmentedDownloadState, plan: &RangePlan) -> bool {
+    state.total_bytes == plan.total_bytes
+        && !state.segments.is_empty()
+        && segments_cover_total_bytes(&state.segments, plan.total_bytes)
+}
+
+fn segments_cover_total_bytes(segments: &[SegmentProgress], total_bytes: u64) -> bool {
+    let mut ranges = segments
+        .iter()
+        .map(|segment| segment.range)
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
+    let mut next_start = 0_u64;
+    for range in ranges {
+        if range.start != next_start || range.end < range.start || range.end >= total_bytes {
+            return false;
+        }
+        next_start = range.end.saturating_add(1);
+    }
+
+    next_start == total_bytes
 }
 
 pub(super) async fn prepare_direct_segment_file(
@@ -899,6 +1157,7 @@ pub(super) async fn refresh_segment_completion_from_disk(
     state: &mut SegmentedDownloadState,
 ) {
     let partial_exists = temp_path.exists();
+    state.last_verified_file_len = metadata_len(temp_path).await.unwrap_or(0);
     for segment in &mut state.segments {
         let expected_len = segment.range.len();
         if !partial_exists || segment.downloaded_bytes > expected_len {
@@ -918,6 +1177,25 @@ pub(super) async fn refresh_segment_completion_from_disk(
 
 pub(super) fn segment_existing_len(_temp_path: &Path, segment: &SegmentProgress) -> u64 {
     segment.downloaded_bytes.min(segment.range.len())
+}
+
+pub(super) fn segment_existing_lengths_by_index(
+    temp_path: &Path,
+    segments: &[SegmentProgress],
+) -> Vec<u64> {
+    let mut lengths = vec![
+        0;
+        segments
+            .iter()
+            .map(|segment| segment.index)
+            .max()
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(0)
+    ];
+    for segment in segments {
+        lengths[segment.index] = segment_existing_len(temp_path, segment);
+    }
+    lengths
 }
 
 pub(super) async fn mark_segment_completed(
@@ -946,21 +1224,17 @@ pub(super) async fn record_segment_progress(
     completed: bool,
     persist: bool,
 ) -> Result<(), DownloadError> {
-    let state = {
-        let mut metadata = metadata.lock().await;
-        if let Some(segment) = metadata
-            .segments
-            .iter_mut()
-            .find(|segment| segment.index == segment_index)
-        {
-            segment.downloaded_bytes = downloaded_bytes.min(segment.range.len());
-            segment.completed = completed || segment.downloaded_bytes == segment.range.len();
-        }
-        metadata.clone()
-    };
-
+    let mut metadata = metadata.lock().await;
+    if let Some(segment) = metadata
+        .segments
+        .iter_mut()
+        .find(|segment| segment.index == segment_index)
+    {
+        segment.downloaded_bytes = downloaded_bytes.min(segment.range.len());
+        segment.completed = completed || segment.downloaded_bytes == segment.range.len();
+    }
     if persist {
-        persist_segment_state(temp_path, &state).await?;
+        persist_segment_state(temp_path, &metadata).await?;
     }
 
     Ok(())

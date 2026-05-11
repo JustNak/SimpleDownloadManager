@@ -5,6 +5,10 @@ const BULK_SLOW_RECOVERY_MIN_SIZE: u64 = 32 * 1024 * 1024;
 const BULK_SLOW_RECOVERY_BALANCED_THRESHOLD: u64 = 64 * 1024;
 const BULK_SLOW_RECOVERY_FAST_THRESHOLD: u64 = 128 * 1024;
 const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
+const NORMAL_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 18;
+const NORMAL_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const NORMAL_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 36;
+const NORMAL_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BulkSlowStreamRecoveryAction {
@@ -14,6 +18,7 @@ pub(super) enum BulkSlowStreamRecoveryAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum SegmentConnectionClass {
+    Normal,
     DirectBulk,
     ProtectedHosterBulk,
 }
@@ -222,20 +227,30 @@ async fn run_http_download_attempt_for_url(
                         profile,
                         segment_attempt.policy_cap,
                     ) {
+                        if segment_attempt.retry_when_budget_full || has_segment_state {
+                            record_download_diagnostic(
+                                state,
+                                DiagnosticLevel::Warning,
+                                task,
+                                "Segment budget is full; keeping segmented state and retrying shortly instead of falling back to single-stream."
+                                    .into(),
+                            )
+                            .await;
+                            return Err(download_error(
+                                FailureCategory::Network,
+                                "Segment connection budget is temporarily full; retrying shortly."
+                                    .into(),
+                                true,
+                            ));
+                        }
                         record_download_diagnostic(
                             state,
-                            DiagnosticLevel::Warning,
+                            DiagnosticLevel::Info,
                             task,
-                            "Segment budget is full for this hoster; retrying shortly instead of falling back to single-stream."
+                            "Segment connection budget is full; using single-stream fallback for this normal download."
                                 .into(),
                         )
                         .await;
-                        return Err(download_error(
-                            FailureCategory::Network,
-                            "Segment connection budget is temporarily full; retrying shortly."
-                                .into(),
-                            true,
-                        ));
                     }
                 }
             }
@@ -626,6 +641,7 @@ struct SegmentAttemptContext {
     policy_cap: usize,
     fair_min_segments: usize,
     fair_origin_workers: Option<usize>,
+    retry_when_budget_full: bool,
 }
 
 impl SegmentAttemptContext {
@@ -662,6 +678,7 @@ async fn segment_attempt_context_for_task(
             policy_cap: usize::MAX,
             fair_min_segments: 2,
             fair_origin_workers: None,
+            retry_when_budget_full: true,
         });
     }
 
@@ -683,16 +700,18 @@ async fn segment_attempt_context_for_task(
             policy_cap,
             fair_min_segments: 2,
             fair_origin_workers: accelerated_hoster_fair_origin_workers_for_mode(performance_mode),
+            retry_when_budget_full: true,
         });
     }
 
     Some(SegmentAttemptContext {
         backoff_key: None,
-        connection_class: None,
-        connection_budget: None,
+        connection_class: Some(SegmentConnectionClass::Normal),
+        connection_budget: normal_segment_budget_for_mode(performance_mode),
         policy_cap: usize::MAX,
         fair_min_segments: 2,
         fair_origin_workers: None,
+        retry_when_budget_full: false,
     })
 }
 
@@ -743,6 +762,22 @@ pub(super) fn hoster_segment_budget_for_mode(
         DownloadPerformanceMode::Fast => Some(SegmentConnectionBudget {
             total: HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
             per_origin: HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        }),
+    }
+}
+
+pub(super) fn normal_segment_budget_for_mode(
+    performance_mode: DownloadPerformanceMode,
+) -> Option<SegmentConnectionBudget> {
+    match performance_mode {
+        DownloadPerformanceMode::Stable => None,
+        DownloadPerformanceMode::Balanced => Some(SegmentConnectionBudget {
+            total: NORMAL_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            per_origin: NORMAL_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+        }),
+        DownloadPerformanceMode::Fast => Some(SegmentConnectionBudget {
+            total: NORMAL_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            per_origin: NORMAL_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
         }),
     }
 }

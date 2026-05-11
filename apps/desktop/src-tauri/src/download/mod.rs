@@ -24,7 +24,7 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::SeekFrom;

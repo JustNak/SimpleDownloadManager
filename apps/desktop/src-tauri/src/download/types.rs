@@ -55,10 +55,26 @@ pub(super) struct SegmentProgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SegmentedDownloadState {
+    #[serde(default = "default_segment_state_schema_version")]
+    pub(super) schema_version: u32,
     pub(super) total_bytes: u64,
     #[serde(default)]
     pub(super) validators: EntityValidators,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) effective_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) temp_path: Option<String>,
+    #[serde(default)]
+    pub(super) last_verified_file_len: u64,
+    #[serde(default)]
+    pub(super) retry_generation: u32,
     pub(super) segments: Vec<SegmentProgress>,
+}
+
+pub(super) fn default_segment_state_schema_version() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,21 +117,26 @@ impl EntityValidators {
 }
 
 pub(super) struct SegmentedProgressCounters {
-    pub(super) segment_bytes: Vec<AtomicU64>,
+    pub(super) segment_bytes: StdMutex<Vec<AtomicU64>>,
     pub(super) sample_bytes: AtomicU64,
 }
 
 impl SegmentedProgressCounters {
     pub(super) fn new(segment_bytes: Vec<u64>) -> Self {
         Self {
-            segment_bytes: segment_bytes.into_iter().map(AtomicU64::new).collect(),
+            segment_bytes: StdMutex::new(segment_bytes.into_iter().map(AtomicU64::new).collect()),
             sample_bytes: AtomicU64::new(0),
         }
     }
 
     pub(super) fn store_segment_bytes(&self, segment_index: usize, bytes: u64) {
-        if let Some(segment_bytes) = self.segment_bytes.get(segment_index) {
-            segment_bytes.store(bytes, Ordering::Relaxed);
+        if let Ok(mut segment_bytes) = self.segment_bytes.lock() {
+            while segment_bytes.len() <= segment_index {
+                segment_bytes.push(AtomicU64::new(0));
+            }
+            if let Some(segment_bytes) = segment_bytes.get(segment_index) {
+                segment_bytes.store(bytes, Ordering::Relaxed);
+            }
         }
     }
 
@@ -129,9 +150,14 @@ impl SegmentedProgressCounters {
 
     pub(super) fn total_downloaded(&self) -> u64 {
         self.segment_bytes
-            .iter()
-            .map(|bytes| bytes.load(Ordering::Relaxed))
-            .sum()
+            .lock()
+            .map(|segment_bytes| {
+                segment_bytes
+                    .iter()
+                    .map(|bytes| bytes.load(Ordering::Relaxed))
+                    .sum()
+            })
+            .unwrap_or(0)
     }
 }
 
