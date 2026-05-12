@@ -1607,7 +1607,7 @@ async fn open_missing_torrent_directory_returns_action_error() {
 }
 
 #[tokio::test]
-async fn reveal_interrupted_job_returns_existing_partial_file() {
+async fn reveal_interrupted_job_returns_parent_instead_of_partial_file() {
     let download_dir = test_runtime_dir("reveal-partial-existing");
     let target_path = download_dir.join("file.zip");
     let temp_path = download_dir.join("file.zip.part");
@@ -1619,9 +1619,9 @@ async fn reveal_interrupted_job_returns_existing_partial_file() {
 
     let resolved = state.resolve_revealable_path("job_22").await.unwrap();
 
-    assert_eq!(resolved, temp_path);
+    assert_eq!(resolved, download_dir);
 
-    let _ = std::fs::remove_dir_all(download_dir);
+    let _ = std::fs::remove_dir_all(resolved);
 }
 
 #[tokio::test]
@@ -3160,6 +3160,36 @@ fn restart_reset_clears_partial_progress_and_failure_metadata() {
     assert_eq!(job.auto_restart_attempts, 0);
 }
 
+#[tokio::test]
+async fn restart_job_removes_partial_file_and_segment_metadata() {
+    let download_dir = test_runtime_dir("restart-removes-segment-metadata");
+    let target_path = download_dir.join("file.zip");
+    let temp_path = download_dir.join("file.zip.part");
+    let meta_path = PathBuf::from(format!("{}.meta", temp_path.display()));
+    std::fs::write(&temp_path, b"partial").unwrap();
+    std::fs::write(&meta_path, b"{\"segments\":[]}").unwrap();
+
+    let mut job = download_job(
+        "job_restart_meta",
+        JobState::Failed,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.target_path = target_path.display().to_string();
+    job.temp_path = temp_path.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    state
+        .restart_job("job_restart_meta")
+        .await
+        .expect("restart should queue the job from zero");
+
+    assert!(!temp_path.exists());
+    assert!(!meta_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
     let mut job = DownloadJob {
@@ -3932,39 +3962,43 @@ async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_membe
             FailureCategory::Network,
             "Download failed: operation timed out",
             true,
-            BulkMemberAutoRestartMode::PreservePartial,
+            Some(BulkMemberAutoRestartMode::PreservePartial),
         ),
         (
             FailureCategory::Server,
             "Download request failed with HTTP 503 Service Unavailable.",
             true,
-            BulkMemberAutoRestartMode::PreservePartial,
+            Some(BulkMemberAutoRestartMode::PreservePartial),
         ),
         (
             FailureCategory::Http,
             "Download request failed with HTTP 403 Forbidden.",
             false,
-            BulkMemberAutoRestartMode::PreservePartial,
+            Some(BulkMemberAutoRestartMode::PreservePartial),
         ),
         (
             FailureCategory::Resume,
             "The remote server rejected the resume request.",
             false,
-            BulkMemberAutoRestartMode::ResetPartial,
+            None,
         ),
     ] {
         let candidate = state
             .bulk_member_auto_restart_candidate("job_auto", category, message, retryable)
             .await
-            .expect("candidate lookup should succeed")
-            .expect("transient pending HTTP bulk member should be eligible");
-        assert_eq!(candidate.attempt, 1);
-        assert_eq!(candidate.max_attempts, 5);
-        assert_eq!(candidate.mode, expected_mode);
+            .expect("candidate lookup should succeed");
         assert_eq!(
-            candidate.resolved_from_url.as_deref(),
-            Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar")
+            candidate.as_ref().map(|candidate| candidate.mode),
+            expected_mode
         );
+        if let Some(candidate) = candidate {
+            assert_eq!(candidate.attempt, 1);
+            assert_eq!(candidate.max_attempts, 5);
+            assert_eq!(
+                candidate.resolved_from_url.as_deref(),
+                Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar")
+            );
+        }
     }
 
     assert!(state
@@ -4669,11 +4703,13 @@ async fn bulk_member_retry_candidates_reject_nonfailed_nonhttp_and_nonpending_ar
 }
 
 #[tokio::test]
-async fn retry_bulk_member_resets_partial_state_and_preserves_bulk_identity() {
-    let download_dir = test_runtime_dir("bulk-member-manual-retry-reset");
+async fn retry_bulk_member_preserves_partial_state_and_bulk_identity() {
+    let download_dir = test_runtime_dir("bulk-member-manual-retry-preserve");
     let target_path = download_dir.join("Game.part01.rar");
     let temp_path = download_dir.join("Game.part01.rar.part");
+    let meta_path = PathBuf::from(format!("{}.meta", temp_path.display()));
     std::fs::write(&temp_path, b"partial").unwrap();
+    std::fs::write(&meta_path, b"{\"segments\":[]}").unwrap();
 
     let bulk_archive = BulkArchiveInfo {
         id: "bulk_manual_retry".into(),
@@ -4702,6 +4738,9 @@ async fn retry_bulk_member_resets_partial_state_and_preserves_bulk_identity() {
     job.failure_category = Some(FailureCategory::Http);
     job.retry_attempts = 3;
     job.auto_restart_attempts = 4;
+    job.downloaded_bytes = 512;
+    job.total_bytes = 1024;
+    job.progress = 50.0;
     job.resolved_from_url = Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar".into());
     job.bulk_archive = Some(bulk_archive.clone());
 
@@ -4712,7 +4751,7 @@ async fn retry_bulk_member_resets_partial_state_and_preserves_bulk_identity() {
             "https://dl.fuckingfast.co/dl/new-token".into(),
         )
         .await
-        .expect("manual bulk member retry should reset and queue the member");
+        .expect("manual bulk member retry should preserve partial state and queue the member");
 
     let retried = snapshot
         .jobs
@@ -4723,20 +4762,21 @@ async fn retry_bulk_member_resets_partial_state_and_preserves_bulk_identity() {
     assert_eq!(retried.url, "https://dl.fuckingfast.co/dl/new-token");
     assert_eq!(retried.filename, "Game.part01.rar");
     assert_eq!(retried.target_path, target_path.display().to_string());
-    assert_eq!(retried.progress, 0.0);
-    assert_eq!(retried.total_bytes, 0);
-    assert_eq!(retried.downloaded_bytes, 0);
+    assert_eq!(retried.progress, 50.0);
+    assert_eq!(retried.total_bytes, 1024);
+    assert_eq!(retried.downloaded_bytes, 512);
     assert_eq!(retried.error, None);
     assert_eq!(retried.failure_category, None);
-    assert_eq!(retried.resume_support, ResumeSupport::Unknown);
+    assert_eq!(retried.resume_support, ResumeSupport::Supported);
     assert_eq!(retried.retry_attempts, 0);
-    assert_eq!(retried.auto_restart_attempts, 0);
+    assert_eq!(retried.auto_restart_attempts, 4);
     assert_eq!(
         retried.resolved_from_url.as_deref(),
         Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar")
     );
     assert_eq!(retried.bulk_archive.as_ref(), Some(&bulk_archive));
-    assert!(!temp_path.exists());
+    assert!(temp_path.exists());
+    assert!(meta_path.exists());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -5727,6 +5767,140 @@ async fn adaptive_hoster_fairness_isolated_by_origin_and_allows_direct_bulk() {
         task_ids,
         vec!["job_ff_first", "job_datanodes", "job_direct_bulk"]
     );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn scheduler_deferred_hoster_blocks_same_origin_but_allows_other_origin_and_direct_bulk() {
+    let download_dir = test_runtime_dir("bulk-hoster-admission-defer");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_admission_defer");
+    let mut deferred = datanodes_bulk_job("job_datanodes_1", archive.clone());
+    deferred.url = "https://datanodes.to/shared123/Game.part01.rar".into();
+    deferred.resolved_from_url = Some(deferred.url.clone());
+    let mut same_origin = datanodes_bulk_job("job_datanodes_2", archive.clone());
+    same_origin.url = "https://datanodes.to/shared456/Game.part02.rar".into();
+    same_origin.resolved_from_url = Some(same_origin.url.clone());
+    let other_origin = fuckingfast_bulk_job("job_fuckingfast_1", archive.clone());
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    direct_bulk.url = "https://cdn.example.com/Game.part03.rar".into();
+    direct_bulk.bulk_archive = Some(archive);
+
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![deferred, same_origin, other_origin, direct_bulk],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 4;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.download_admission_defers.insert(
+            "job_datanodes_1".into(),
+            DownloadAdmissionDefer {
+                until: Instant::now() + Duration::from_secs(30),
+                reason: "segment connection budget is full".into(),
+            },
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(task_ids, vec!["job_fuckingfast_1", "job_direct_bulk"]);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn scheduler_reclaims_job_after_admission_defer_expires() {
+    let download_dir = test_runtime_dir("bulk-hoster-admission-defer-expired");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_admission_defer_expired");
+    let job = datanodes_bulk_job("job_datanodes_1", archive);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 1;
+        runtime.download_admission_defers.insert(
+            "job_datanodes_1".into(),
+            DownloadAdmissionDefer {
+                until: Instant::now() - Duration::from_secs(1),
+                reason: "expired segment connection budget wait".into(),
+            },
+        );
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "job_datanodes_1");
+    assert!(!state
+        .inner
+        .read()
+        .await
+        .download_admission_defers
+        .contains_key("job_datanodes_1"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn defer_active_job_releases_worker_and_records_bounded_defer() {
+    let download_dir = test_runtime_dir("bulk-admission-defer-active-job");
+    let mut job = download_job(
+        "job_direct_bulk",
+        JobState::Starting,
+        ResumeSupport::Supported,
+        25,
+    );
+    job.bulk_archive = Some(bulk_archive_info(&download_dir, "bulk_admission_defer"));
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.active_workers.insert("job_direct_bulk".into());
+    }
+
+    let snapshot = state
+        .defer_active_job(
+            "job_direct_bulk",
+            "segment connection budget is full".into(),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("active job should be deferred");
+
+    let deferred_job = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_direct_bulk")
+        .expect("job should remain in snapshot");
+    assert_eq!(deferred_job.state, JobState::Queued);
+    assert_eq!(deferred_job.speed, 0);
+    let runtime = state.inner.read().await;
+    assert!(!runtime.active_workers.contains("job_direct_bulk"));
+    let defer = runtime
+        .download_admission_defers
+        .get("job_direct_bulk")
+        .expect("defer should be tracked");
+    assert!(defer.until > Instant::now());
+    assert!(defer.reason.contains("segment connection budget"));
+    assert!(runtime
+        .diagnostic_events
+        .iter()
+        .any(|event| event.message.contains("segment connection budget")));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -7915,6 +8089,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         bulk_hoster_worker_health: HashMap::new(),
         bulk_hoster_fairness: HashMap::new(),
         datanodes_priority_defer_until: HashMap::new(),
+        download_admission_defers: HashMap::new(),
         hoster_priority_cap_reports: HashMap::new(),
         external_reseed_jobs: HashSet::new(),
         last_host_contact: None,

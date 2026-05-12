@@ -81,6 +81,7 @@ const DATANODES_PRIORITY_MIN_SPEED_BYTES_PER_SECOND: u64 = 128 * 1024;
 const DATANODES_PRIORITY_BASELINE_SPEED_PERCENT: u64 = 75;
 const DATANODES_PRIORITY_REQUIRED_HEALTHY_SAMPLES: u8 = 3;
 const DATANODES_PRIORITY_REQUIRED_PROGRESS_SAMPLES: u8 = 2;
+const DOWNLOAD_ADMISSION_DEFER_MAX: Duration = Duration::from_secs(30);
 const HOSTER_PRIORITY_CAP_REPORT_CHANGE_PERCENT: u64 = 25;
 const DOWNLOAD_CATEGORY_FOLDERS: [&str; 7] = [
     "Document",
@@ -115,10 +116,17 @@ struct RuntimeState {
     bulk_hoster_worker_health: HashMap<String, BulkHosterWorkerHealth>,
     bulk_hoster_fairness: HashMap<String, BulkHosterFairnessController>,
     datanodes_priority_defer_until: HashMap<String, Instant>,
+    download_admission_defers: HashMap<String, DownloadAdmissionDefer>,
     hoster_priority_cap_reports: HashMap<String, HosterPriorityCapReport>,
     external_reseed_jobs: HashSet<String>,
     last_host_contact: Option<Instant>,
     last_progress_persist_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadAdmissionDefer {
+    until: Instant,
+    reason: String,
 }
 
 #[derive(Debug, Clone)]

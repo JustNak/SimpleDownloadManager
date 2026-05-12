@@ -1,7 +1,9 @@
 import type { DownloadJob } from './types';
 
 export function shouldOpenJobFileOnDoubleClick(job: DownloadJob, button: number): boolean {
-  return button === 0 && Boolean(job.targetPath?.trim());
+  return button === 0
+    && Boolean(job.targetPath?.trim())
+    && (job.state === 'completed' || job.state === 'seeding');
 }
 
 export function isJobArtifactMissing(job: DownloadJob): boolean {

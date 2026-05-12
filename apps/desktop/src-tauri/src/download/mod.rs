@@ -406,6 +406,8 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
             WorkerControl::Canceled
         );
 
+        let mut deferred_delay = None;
+        let mut clear_handoff_auth = true;
         match run_download(&app, &state, &task).await {
             Ok(DownloadOutcome::Completed) => {}
             Ok(DownloadOutcome::Paused) | Ok(DownloadOutcome::Canceled) => {
@@ -421,6 +423,10 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
                 {
                     cleanup_partial_artifacts(&task.temp_path).await;
                 }
+            }
+            Ok(DownloadOutcome::Deferred(delay)) => {
+                deferred_delay = Some(delay);
+                clear_handoff_auth = false;
             }
             Err(error) => {
                 if let Ok(Some(snapshot)) = state
@@ -504,7 +510,17 @@ fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state:
             }
         }
 
-        state.clear_handoff_auth(&task.id).await;
+        if clear_handoff_auth {
+            state.clear_handoff_auth(&task.id).await;
+        }
+        if let Some(delay) = deferred_delay {
+            let deferred_app = app.clone();
+            let deferred_state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(delay).await;
+                schedule_downloads(deferred_app, deferred_state);
+            });
+        }
         schedule_downloads(app, state);
     });
 }

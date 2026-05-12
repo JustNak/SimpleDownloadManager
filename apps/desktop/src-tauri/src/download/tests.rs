@@ -2357,6 +2357,26 @@ fn normal_download_segment_budget_limits_same_origin_connections() {
 }
 
 #[test]
+fn segment_budget_wait_action_defers_bulk_admissions_and_preserves_active_segment_state() {
+    assert_eq!(
+        DownloadAdmission::direct_bulk().segment_budget_wait_action(false),
+        SegmentBudgetWaitAction::Defer
+    );
+    assert_eq!(
+        DownloadAdmission::protected_hoster_bulk().segment_budget_wait_action(false),
+        SegmentBudgetWaitAction::Defer
+    );
+    assert_eq!(
+        DownloadAdmission::normal().segment_budget_wait_action(false),
+        SegmentBudgetWaitAction::FallbackSingleStream
+    );
+    assert_eq!(
+        DownloadAdmission::normal().segment_budget_wait_action(true),
+        SegmentBudgetWaitAction::Defer
+    );
+}
+
+#[test]
 fn datanodes_balanced_budget_keeps_four_same_origin_jobs_segmented_with_two_segment_floor() {
     assert_eq!(
         segment_budget_from_test_leases(
@@ -2675,18 +2695,19 @@ fn protected_bulk_hoster_stall_errors_are_retryable_network_failures() {
 }
 
 #[test]
-fn single_stream_hoster_loop_uses_priority_throttle_without_deferring() {
+fn http_attempt_defers_segment_budget_waits_without_deferring_priority_throttle() {
     let source = include_str!("http.rs");
-    let single_stream = source
+    let attempt = source
         .split("async fn run_http_download_attempt_for_url")
         .nth(1)
         .expect("HTTP download attempt function should exist");
 
-    assert!(single_stream.contains("hoster_priority_throttle_decision"));
-    assert!(single_stream.contains("throttle_download_with_dynamic_limit"));
-    assert!(single_stream.contains("priority_throttle_limited"));
-    assert!(single_stream.contains("speed_limit.is_some() || priority_throttle_limited"));
-    assert!(!single_stream.contains("DownloadOutcome::Deferred"));
+    assert!(attempt.contains("hoster_priority_throttle_decision"));
+    assert!(attempt.contains("throttle_download_with_dynamic_limit"));
+    assert!(attempt.contains("priority_throttle_limited"));
+    assert!(attempt.contains("speed_limit.is_some() || priority_throttle_limited"));
+    assert!(attempt.contains("segment_budget_wait_action"));
+    assert!(attempt.contains("DownloadOutcome::Deferred"));
 }
 
 #[test]
@@ -2701,7 +2722,7 @@ fn segmented_hoster_workers_use_aggregate_priority_throttle_without_deferring() 
     assert!(worker.contains("throttle_download_with_dynamic_limit"));
     assert!(worker.contains("priority_throttle_limited"));
     assert!(source.contains("priority_throttle"));
-    assert!(!source.contains("DownloadOutcome::Deferred"));
+    assert!(!source.contains("return Ok(DownloadOutcome::Deferred"));
 }
 
 #[test]
@@ -3435,7 +3456,53 @@ async fn segment_state_preserves_progress_when_validators_match() {
 }
 
 #[tokio::test]
-async fn segment_state_resets_progress_when_validators_change() {
+async fn missing_segment_metadata_preserves_preallocated_partial_and_requires_restart() {
+    let root = test_download_runtime_dir("segment-missing-metadata-preserve");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let validators = EntityValidators::default();
+    tokio::fs::write(&temp_path, vec![0_u8; plan.total_bytes as usize])
+        .await
+        .unwrap();
+
+    let error = load_or_create_segment_state(&temp_path, &plan, &validators)
+        .await
+        .expect_err("missing segment metadata with an existing partial should not reset progress");
+
+    assert_eq!(error.category, FailureCategory::Resume);
+    assert!(error.message.contains("Resume metadata is missing"));
+    assert!(temp_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn corrupt_segment_metadata_preserves_preallocated_partial_and_requires_restart() {
+    let root = test_download_runtime_dir("segment-corrupt-metadata-preserve");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let validators = EntityValidators::default();
+    tokio::fs::write(&temp_path, vec![0_u8; plan.total_bytes as usize])
+        .await
+        .unwrap();
+    tokio::fs::write(segment_meta_path(&temp_path), b"not json")
+        .await
+        .unwrap();
+
+    let error = load_or_create_segment_state(&temp_path, &plan, &validators)
+        .await
+        .expect_err("corrupt segment metadata with an existing partial should not reset progress");
+
+    assert_eq!(error.category, FailureCategory::Resume);
+    assert!(error.message.contains("Resume metadata is missing"));
+    assert!(temp_path.exists());
+    assert!(segment_meta_path(&temp_path).exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_state_preserves_partial_and_requires_restart_when_validators_change() {
     let root = test_download_runtime_dir("segment-validator-changed");
     let temp_path = root.join("download.bin.part");
     let plan = three_segment_test_plan();
@@ -3455,16 +3522,14 @@ async fn segment_state_resets_progress_when_validators_change() {
         etag: Some("\"new\"".into()),
         last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
     };
-    let reloaded = load_or_create_segment_state(&temp_path, &plan, &next_validators)
+    let error = load_or_create_segment_state(&temp_path, &plan, &next_validators)
         .await
-        .unwrap();
+        .expect_err("validator conflicts with an existing partial should require restart");
 
-    assert_eq!(reloaded.validators, next_validators);
-    assert!(reloaded
-        .segments
-        .iter()
-        .all(|segment| { segment.downloaded_bytes == 0 && !segment.completed }));
-    assert!(!temp_path.exists());
+    assert_eq!(error.category, FailureCategory::Resume);
+    assert!(error.message.contains("Resume metadata is missing"));
+    assert!(temp_path.exists());
+    assert!(segment_meta_path(&temp_path).exists());
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }

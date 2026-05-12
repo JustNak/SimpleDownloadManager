@@ -39,6 +39,12 @@ assert.equal(
 );
 
 assert.equal(
+  shouldOpenJobFileOnDoubleClick({ ...completedJob, state: 'downloading' } as typeof completedJob, 0),
+  false,
+  'double click should not open unfinished partial downloads',
+);
+
+assert.equal(
   isJobArtifactMissing({ ...completedJob, artifactExists: false } as typeof completedJob),
   true,
   'completed jobs with a missing artifact should be treated as missing',

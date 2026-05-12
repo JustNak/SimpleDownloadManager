@@ -309,7 +309,7 @@ impl SharedState {
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 ensure_not_removing(job)?;
-                remove_file_if_exists(Path::new(&job.temp_path)).map_err(internal_error)?;
+                remove_partial_artifacts(Path::new(&job.temp_path)).map_err(internal_error)?;
                 reset_job_for_restart(job);
                 format!("Restart queued for {}", job.filename)
             };
@@ -401,7 +401,7 @@ impl SharedState {
                         queue_job_for_preserved_bulk_recovery(job);
                     }
                     BulkMemberAutoRestartMode::ResetPartial => {
-                        remove_file_if_exists(Path::new(&job.temp_path))?;
+                        remove_partial_artifacts(Path::new(&job.temp_path))?;
                         reset_job_for_restart(job);
                     }
                 }
@@ -500,8 +500,7 @@ impl SharedState {
                     return Err("Only failed pending HTTP bulk members can be retried.".into());
                 }
 
-                remove_file_if_exists(Path::new(&job.temp_path))?;
-                reset_job_for_restart(job);
+                queue_job_for_preserved_bulk_recovery(job);
                 job.url = resolved_url;
                 format!("Retry queued for bulk member {}", job.filename)
             };
@@ -1204,10 +1203,10 @@ pub(super) fn bulk_member_auto_restart_mode(
     }
 
     if failure_category == FailureCategory::Resume {
-        Some(BulkMemberAutoRestartMode::ResetPartial)
-    } else {
-        Some(BulkMemberAutoRestartMode::PreservePartial)
+        return None;
     }
+
+    Some(BulkMemberAutoRestartMode::PreservePartial)
 }
 
 fn bulk_member_auto_restart_failure_is_transient(
@@ -1305,6 +1304,42 @@ fn push_unique_cleanup_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
     }
+}
+
+fn remove_partial_artifacts(temp_path: &Path) -> Result<(), String> {
+    remove_file_if_exists(temp_path)?;
+    remove_file_if_exists(&PathBuf::from(format!("{}.meta", temp_path.display())))?;
+    remove_file_if_exists(&PathBuf::from(format!("{}.meta.tmp", temp_path.display())))?;
+    remove_file_if_exists(&PathBuf::from(format!("{}.meta.bak", temp_path.display())))?;
+
+    let Some(parent) = temp_path.parent() else {
+        return Ok(());
+    };
+    if !parent.exists() {
+        return Ok(());
+    }
+    let Some(file_name) = temp_path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(());
+    };
+    let segment_prefix = format!("{file_name}.seg");
+    let metadata_temp_prefix = format!("{file_name}.meta.");
+
+    for entry in std::fs::read_dir(parent)
+        .map_err(|error| format!("Could not inspect partial download sidecars: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Could not inspect partial download sidecar: {error}"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.starts_with(&segment_prefix)
+            || (name.starts_with(&metadata_temp_prefix) && name.ends_with(".tmp"))
+        {
+            remove_file_if_exists(&entry.path())?;
+        }
+    }
+
+    Ok(())
 }
 
 fn remove_destructive_cleanup_paths(paths: &[PathBuf]) -> Result<(), String> {

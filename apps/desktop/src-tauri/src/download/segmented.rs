@@ -5,6 +5,8 @@ static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>
 static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DYNAMIC_SEGMENT_QUEUE_MULTIPLIER: usize = 2;
 const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
+const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
+    "Resume metadata is missing or no longer matches this partial download. Use Restart to download from zero.";
 
 pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
     match mode {
@@ -688,6 +690,9 @@ pub(super) async fn download_segment_worker(
                 StreamItemWait::Interrupted(DownloadOutcome::Completed) => unreachable!(
                     "stream control cannot produce a completed outcome while waiting for chunks"
                 ),
+                StreamItemWait::Interrupted(DownloadOutcome::Deferred(_)) => unreachable!(
+                    "stream control cannot produce a deferred outcome while waiting for chunks"
+                ),
                 StreamItemWait::Stalled => {
                     let timeout = context
                         .stall_timeout
@@ -991,7 +996,11 @@ pub(super) async fn await_segment_workers_with_stop(
     while let Some(result) = handles.join_next().await {
         match result {
             Ok(Ok(DownloadOutcome::Completed)) => {}
-            Ok(Ok(outcome @ (DownloadOutcome::Paused | DownloadOutcome::Canceled))) => {
+            Ok(Ok(
+                outcome @ (DownloadOutcome::Paused
+                | DownloadOutcome::Canceled
+                | DownloadOutcome::Deferred(_)),
+            )) => {
                 stop.store(true, Ordering::Relaxed);
                 handles.abort_all();
                 return (outcome, None);
@@ -1037,17 +1046,25 @@ pub(super) async fn load_or_create_segment_state(
     validators: &EntityValidators,
 ) -> Result<SegmentedDownloadState, DownloadError> {
     let meta_path = segment_meta_path(temp_path);
+    let partial_exists = temp_path.exists();
     if let Ok(raw) = fs::read_to_string(&meta_path).await {
-        if let Ok(state) = serde_json::from_str::<SegmentedDownloadState>(&raw) {
-            if segment_state_compatible_with_plan(&state, plan)
-                && !state.validators.conflicts_with(validators)
+        match serde_json::from_str::<SegmentedDownloadState>(&raw) {
+            Ok(state)
+                if segment_state_compatible_with_plan(&state, plan)
+                    && !state.validators.conflicts_with(validators) =>
             {
                 let mut state = state;
                 state.schema_version = default_segment_state_schema_version();
                 state.validators = state.validators.reconcile_with(validators);
                 return Ok(state);
             }
+            _ if partial_exists => {
+                return Err(segmented_resume_metadata_required_error());
+            }
+            _ => {}
         }
+    } else if partial_exists {
+        return Err(segmented_resume_metadata_required_error());
     }
 
     cleanup_partial_artifacts(temp_path).await;
@@ -1073,6 +1090,14 @@ pub(super) async fn load_or_create_segment_state(
             })
             .collect(),
     })
+}
+
+pub(super) fn segmented_resume_metadata_required_error() -> DownloadError {
+    download_error(
+        FailureCategory::Resume,
+        SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE.into(),
+        false,
+    )
 }
 
 fn segment_state_compatible_with_plan(state: &SegmentedDownloadState, plan: &RangePlan) -> bool {

@@ -125,6 +125,58 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn defer_active_job(
+        &self,
+        id: &str,
+        reason: String,
+        delay: Duration,
+    ) -> Result<DesktopSnapshot, String> {
+        let delay = delay.min(DOWNLOAD_ADMISSION_DEFER_MAX);
+        let now = Instant::now();
+        let until = now + delay;
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            if state.job(id).is_none() {
+                return Err("Job not found.".into());
+            }
+            let active_worker_count = state.active_workers.len();
+            state.remove_active_worker(id);
+            let event_message = {
+                let job = state
+                    .job_mut(id)
+                    .expect("job existence was checked before releasing worker");
+
+                job.state = JobState::Queued;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = None;
+                job.failure_category = None;
+                format!(
+                    "Deferred {} for {} seconds: {reason} (active workers before release: {active_worker_count})",
+                    job.filename,
+                    delay.as_secs().max(1)
+                )
+            };
+            state.download_admission_defers.insert(
+                id.to_string(),
+                DownloadAdmissionDefer {
+                    until,
+                    reason: reason.clone(),
+                },
+            );
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
     pub async fn update_job_progress(
         &self,
         id: &str,
@@ -592,7 +644,7 @@ impl SharedState {
     }
 
     pub async fn resolve_revealable_path(&self, id: &str) -> Result<PathBuf, BackendError> {
-        let (job_state, target_path, temp_path) = {
+        let (job_state, transfer_kind, target_path) = {
             let state = self.inner.read().await;
             let job = state.job(id).ok_or_else(|| BackendError {
                 code: "INTERNAL_ERROR",
@@ -607,17 +659,18 @@ impl SharedState {
 
             (
                 job.state,
+                job.transfer_kind,
                 PathBuf::from(&job.target_path),
-                PathBuf::from(&job.temp_path),
             )
         };
 
-        if target_path.exists() {
-            return Ok(target_path);
-        }
+        let finalized_artifact_state = matches!(job_state, JobState::Completed | JobState::Seeding)
+            || (transfer_kind == TransferKind::Torrent
+                && job_state == JobState::Paused
+                && target_path.exists());
 
-        if temp_path.exists() {
-            return Ok(temp_path);
+        if finalized_artifact_state && target_path.exists() {
+            return Ok(target_path);
         }
 
         if job_state == JobState::Completed {

@@ -80,6 +80,7 @@ impl SharedState {
             state
                 .datanodes_priority_defer_until
                 .retain(|_, until| *until > now);
+            state.retain_active_download_admission_defers(now);
             let mut protected_bulk_hoster_targets = HashMap::new();
             for key in state
                 .jobs
@@ -122,6 +123,8 @@ impl SharedState {
             let scheduler_job_order = scheduler_job_indexes(&state);
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
             let mut blocked_accelerated_hoster_queue_keys: HashSet<String> = HashSet::new();
+            let mut blocked_admission_hoster_queue_keys: HashSet<String> = HashSet::new();
+            let mut admission_defer_diagnostics = Vec::new();
             for job_index in scheduler_job_order {
                 let job = &state.jobs[job_index];
                 if scheduled_normal_workers >= available_normal_slots
@@ -131,11 +134,28 @@ impl SharedState {
                 }
 
                 if job.state == JobState::Queued && !state.active_workers.contains(&job.id) {
+                    let admission_defer = state.download_admission_defers.get(&job.id);
+                    let admission_deferred = admission_defer.is_some();
                     if is_bulk_member_job(job) {
                         if scheduled_bulk_workers >= available_bulk_slots {
                             continue;
                         }
                         if let Some(fairness_key) = protected_bulk_hoster_fairness_key(job) {
+                            if blocked_admission_hoster_queue_keys.contains(&fairness_key) {
+                                continue;
+                            }
+                            if admission_deferred {
+                                if let Some(defer) = admission_defer {
+                                    admission_defer_diagnostics.push(format!(
+                                        "Scheduler kept {} queued for {} seconds: {}",
+                                        job.id,
+                                        defer.until.saturating_duration_since(now).as_secs().max(1),
+                                        defer.reason
+                                    ));
+                                }
+                                blocked_admission_hoster_queue_keys.insert(fairness_key);
+                                continue;
+                            }
                             let fairness_metrics = fairness_metrics_by_key
                                 .get(&fairness_key)
                                 .cloned()
@@ -189,10 +209,31 @@ impl SharedState {
                             *scheduled_protected_bulk_hoster_workers
                                 .entry(fairness_key)
                                 .or_default() += 1;
+                        } else if admission_deferred {
+                            if let Some(defer) = admission_defer {
+                                admission_defer_diagnostics.push(format!(
+                                    "Scheduler kept {} queued for {} seconds: {}",
+                                    job.id,
+                                    defer.until.saturating_duration_since(now).as_secs().max(1),
+                                    defer.reason
+                                ));
+                            }
+                            continue;
                         }
                         scheduled_bulk_workers += 1;
                     } else {
                         if scheduled_normal_workers >= available_normal_slots {
+                            continue;
+                        }
+                        if admission_deferred {
+                            if let Some(defer) = admission_defer {
+                                admission_defer_diagnostics.push(format!(
+                                    "Scheduler kept {} queued for {} seconds: {}",
+                                    job.id,
+                                    defer.until.saturating_duration_since(now).as_secs().max(1),
+                                    defer.reason
+                                ));
+                            }
                             continue;
                         }
                         scheduled_normal_workers += 1;
@@ -200,10 +241,21 @@ impl SharedState {
                     scheduled_ids.push(job.id.clone());
                 }
             }
+            if scheduled_ids.is_empty() {
+                for message in admission_defer_diagnostics.into_iter().take(3) {
+                    state.push_diagnostic_event(
+                        DiagnosticLevel::Info,
+                        "download".into(),
+                        message,
+                        None,
+                    );
+                }
+            }
 
             let mut tasks = Vec::new();
             let settings_for_claim = state.settings.clone();
             for scheduled_id in scheduled_ids {
+                state.download_admission_defers.remove(&scheduled_id);
                 if let Some(job) = state.job_mut(&scheduled_id) {
                     job.state = JobState::Starting;
                     job.speed = 0;

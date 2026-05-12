@@ -9,6 +9,7 @@ const NORMAL_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 18;
 const NORMAL_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
 const NORMAL_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 36;
 const NORMAL_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
+const SEGMENT_BUDGET_ADMISSION_DEFER: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BulkSlowStreamRecoveryAction {
@@ -90,9 +91,9 @@ pub(super) async fn run_http_download_attempt(
                 match refresh_hoster_url_after_failure(state, task, &error).await {
                     Ok(Some(url)) => {
                         if error.category == FailureCategory::Resume {
-                            cleanup_partial_artifacts(&task.temp_path).await;
-                            let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
-                            emit_download_update(app, &snapshot, &task.id);
+                            if metadata_len(&task.temp_path).await.unwrap_or(0) > 0 {
+                                return Err(segmented_resume_metadata_required_error());
+                            }
                         }
                         current_url = url;
                     }
@@ -131,6 +132,17 @@ async fn run_http_download_attempt_for_url(
         preflight_download(&client, effective_url, request_auth.as_ref()).await;
 
     let has_segment_state = segment_meta_path(&task.temp_path).exists();
+    if existing_bytes > 0 && !has_segment_state && segment_attempt.is_some() {
+        if preflight_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.total_bytes)
+            .is_some_and(|total_bytes| {
+                existing_bytes >= total_bytes && total_bytes >= profile.min_segmented_size
+            })
+        {
+            return Err(segmented_resume_metadata_required_error());
+        }
+    }
     let can_try_segmented = segment_attempt.is_some()
         && (existing_bytes == 0 || has_segment_state)
         && speed_limit.is_none()
@@ -214,6 +226,11 @@ async fn run_http_download_attempt_for_url(
                         {
                             Ok(outcome) => return Ok(outcome),
                             Err(error) if segmented_error_allows_single_stream_fallback(&error) => {
+                                if has_segment_state
+                                    || metadata_len(&task.temp_path).await.unwrap_or(0) > 0
+                                {
+                                    return Err(segmented_resume_metadata_required_error());
+                                }
                                 segment_attempt.record_rejection(effective_url, Instant::now());
                                 cleanup_partial_artifacts(&task.temp_path).await;
                                 existing_bytes = 0;
@@ -227,36 +244,65 @@ async fn run_http_download_attempt_for_url(
                         profile,
                         segment_attempt.policy_cap,
                     ) {
-                        if segment_attempt.retry_when_budget_full || has_segment_state {
-                            record_download_diagnostic(
-                                state,
-                                DiagnosticLevel::Warning,
-                                task,
-                                "Segment budget is full; keeping segmented state and retrying shortly instead of falling back to single-stream."
-                                    .into(),
-                            )
-                            .await;
-                            return Err(download_error(
-                                FailureCategory::Network,
-                                "Segment connection budget is temporarily full; retrying shortly."
-                                    .into(),
-                                true,
-                            ));
+                        match segment_attempt
+                            .admission
+                            .segment_budget_wait_action(has_segment_state)
+                        {
+                            SegmentBudgetWaitAction::Defer => {
+                                let requested_chunks =
+                                    segment_attempt.policy_cap.min(profile.max_segments);
+                                let host_key = segment_attempt
+                                    .backoff_key
+                                    .clone()
+                                    .or_else(|| segment_connection_origin_key(effective_url))
+                                    .unwrap_or_else(|| effective_url.to_string());
+                                let reason = format!(
+                                    "Segment connection budget is full for {} admission; host key: {host_key}; class: {:?}; policy mode: {:?}; requested chunks: {}; retrying after {} seconds without occupying a worker slot.",
+                                    segment_attempt.admission.label(),
+                                    segment_attempt.connection_class,
+                                    performance_mode,
+                                    requested_chunks,
+                                    SEGMENT_BUDGET_ADMISSION_DEFER.as_secs()
+                                );
+                                record_download_diagnostic(
+                                    state,
+                                    DiagnosticLevel::Warning,
+                                    task,
+                                    reason.clone(),
+                                )
+                                .await;
+                                let snapshot = state
+                                    .defer_active_job(
+                                        &task.id,
+                                        reason,
+                                        SEGMENT_BUDGET_ADMISSION_DEFER,
+                                    )
+                                    .await?;
+                                emit_download_update(app, &snapshot, &task.id);
+                                return Ok(DownloadOutcome::Deferred(
+                                    SEGMENT_BUDGET_ADMISSION_DEFER,
+                                ));
+                            }
+                            SegmentBudgetWaitAction::FallbackSingleStream => {
+                                record_download_diagnostic(
+                                    state,
+                                    DiagnosticLevel::Info,
+                                    task,
+                                    "Segment connection budget is full; using single-stream fallback for this normal download."
+                                        .into(),
+                                )
+                                .await;
+                            }
                         }
-                        record_download_diagnostic(
-                            state,
-                            DiagnosticLevel::Info,
-                            task,
-                            "Segment connection budget is full; using single-stream fallback for this normal download."
-                                .into(),
-                        )
-                        .await;
                     }
                 }
             }
         }
 
         if has_segment_state {
+            if metadata_len(&task.temp_path).await.unwrap_or(0) > 0 {
+                return Err(segmented_resume_metadata_required_error());
+            }
             record_download_diagnostic(
                 state,
                 DiagnosticLevel::Warning,
@@ -268,6 +314,9 @@ async fn run_http_download_attempt_for_url(
             existing_bytes = 0;
         }
     } else if has_segment_state {
+        if metadata_len(&task.temp_path).await.unwrap_or(0) > 0 {
+            return Err(segmented_resume_metadata_required_error());
+        }
         record_download_diagnostic(
             state,
             DiagnosticLevel::Warning,
@@ -399,6 +448,9 @@ async fn run_http_download_attempt_for_url(
             }
             StreamItemWait::Interrupted(DownloadOutcome::Completed) => unreachable!(
                 "stream control cannot produce a completed outcome while waiting for chunks"
+            ),
+            StreamItemWait::Interrupted(DownloadOutcome::Deferred(_)) => unreachable!(
+                "stream control cannot produce a deferred outcome while waiting for chunks"
             ),
             StreamItemWait::Stalled => {
                 let timeout = stall_timeout.expect("stall wait can only stall when configured");
@@ -633,15 +685,72 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
     (!auth.headers.is_empty()).then_some(auth)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SegmentBudgetWaitAction {
+    Defer,
+    FallbackSingleStream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadAdmissionKind {
+    Normal,
+    DirectBulk,
+    ProtectedHosterBulk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DownloadAdmission {
+    kind: DownloadAdmissionKind,
+}
+
+impl DownloadAdmission {
+    pub(super) fn normal() -> Self {
+        Self {
+            kind: DownloadAdmissionKind::Normal,
+        }
+    }
+
+    pub(super) fn direct_bulk() -> Self {
+        Self {
+            kind: DownloadAdmissionKind::DirectBulk,
+        }
+    }
+
+    pub(super) fn protected_hoster_bulk() -> Self {
+        Self {
+            kind: DownloadAdmissionKind::ProtectedHosterBulk,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self.kind {
+            DownloadAdmissionKind::Normal => "normal",
+            DownloadAdmissionKind::DirectBulk => "direct bulk",
+            DownloadAdmissionKind::ProtectedHosterBulk => "protected hoster bulk",
+        }
+    }
+
+    pub(super) fn segment_budget_wait_action(
+        self,
+        has_segment_state: bool,
+    ) -> SegmentBudgetWaitAction {
+        if has_segment_state || self.kind != DownloadAdmissionKind::Normal {
+            SegmentBudgetWaitAction::Defer
+        } else {
+            SegmentBudgetWaitAction::FallbackSingleStream
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SegmentAttemptContext {
+    admission: DownloadAdmission,
     backoff_key: Option<String>,
     connection_class: Option<SegmentConnectionClass>,
     connection_budget: Option<SegmentConnectionBudget>,
     policy_cap: usize,
     fair_min_segments: usize,
     fair_origin_workers: Option<usize>,
-    retry_when_budget_full: bool,
 }
 
 impl SegmentAttemptContext {
@@ -669,6 +778,7 @@ async fn segment_attempt_context_for_task(
 ) -> Option<SegmentAttemptContext> {
     if task.is_bulk_member && task.resolved_from_url.is_none() {
         return Some(SegmentAttemptContext {
+            admission: DownloadAdmission::direct_bulk(),
             backoff_key: None,
             connection_class: Some(SegmentConnectionClass::DirectBulk),
             connection_budget: Some(SegmentConnectionBudget {
@@ -678,7 +788,6 @@ async fn segment_attempt_context_for_task(
             policy_cap: usize::MAX,
             fair_min_segments: 2,
             fair_origin_workers: None,
-            retry_when_budget_full: true,
         });
     }
 
@@ -694,24 +803,24 @@ async fn segment_attempt_context_for_task(
             return None;
         }
         return Some(SegmentAttemptContext {
+            admission: DownloadAdmission::protected_hoster_bulk(),
             backoff_key: Some(policy.backoff_key),
             connection_class: Some(SegmentConnectionClass::ProtectedHosterBulk),
             connection_budget: Some(connection_budget),
             policy_cap,
             fair_min_segments: 2,
             fair_origin_workers: accelerated_hoster_fair_origin_workers_for_mode(performance_mode),
-            retry_when_budget_full: true,
         });
     }
 
     Some(SegmentAttemptContext {
+        admission: DownloadAdmission::normal(),
         backoff_key: None,
         connection_class: Some(SegmentConnectionClass::Normal),
         connection_budget: normal_segment_budget_for_mode(performance_mode),
         policy_cap: usize::MAX,
         fair_min_segments: 2,
         fair_origin_workers: None,
-        retry_when_budget_full: false,
     })
 }
 

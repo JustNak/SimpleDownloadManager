@@ -837,6 +837,11 @@
     return isBulkAggregateJob(job) && job.bulkRetryableMemberCount > 0;
   }
 
+  function canOpenJobFile(job: QueueDisplayJob): boolean {
+    return Boolean(job.targetPath?.trim())
+      && (job.state === JobState.Completed || job.state === JobState.Seeding);
+  }
+
   function canOpenSelectedDeletePrompt(job: QueueDisplayJob): boolean {
     if (isRemoving(job)) return false;
     return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
@@ -1298,9 +1303,10 @@
       {#if canCancel}{@render MenuItem(X, 'Cancel', () => onCancel(job.id), false, isActionPending(job))}{/if}
     {/if}
   {:else}
-    {@render MenuItem(FileText, 'Open File', () => onOpen(job.id))}
+    {#if canOpenJobFile(job)}{@render MenuItem(FileText, 'Open File', () => onOpen(job.id))}{/if}
     {@render MenuItem(FolderOpen, 'Open Folder', () => onReveal(job.id))}
     {#if canShowProgressPopup(job)}{@render MenuItem(ExternalLink, 'Show Popup', () => onShowPopup(job.id))}{/if}
+    {#if canRetry}{@render MenuItem(RotateCw, 'Retry', () => onRetry(job.id))}{/if}
     {#if canRetry}{@render MenuItem(RotateCcw, 'Restart', () => onRestart(job.id))}{/if}
     {#if job.state === JobState.Paused}{@render MenuItem(Play, 'Resume', () => onResume(job.id), false, isActionPending(job))}{/if}
     {#if isActive(job)}{@render MenuItem(Pause, 'Pause', () => onPause(job.id), false, isActionPending(job))}{/if}

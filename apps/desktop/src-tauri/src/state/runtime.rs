@@ -54,6 +54,7 @@ impl RuntimeState {
         }
         self.bulk_hoster_worker_health.clear();
         self.bulk_hoster_fairness.clear();
+        self.download_admission_defers.clear();
     }
 
     pub(super) fn resume_all_jobs(&mut self) {
@@ -75,6 +76,7 @@ impl RuntimeState {
         }
         self.bulk_hoster_worker_health.clear();
         self.bulk_hoster_fairness.clear();
+        self.download_admission_defers.clear();
     }
 
     #[cfg(test)]
@@ -212,7 +214,13 @@ impl RuntimeState {
 
     pub(super) fn remove_active_worker(&mut self, id: &str) {
         self.active_workers.remove(id);
+        self.download_admission_defers.remove(id);
         self.clear_bulk_hoster_worker_health(id);
+    }
+
+    pub(super) fn retain_active_download_admission_defers(&mut self, now: Instant) {
+        self.download_admission_defers
+            .retain(|_, defer| defer.until > now);
     }
 
     pub(super) fn clear_bulk_hoster_worker_health(&mut self, id: &str) {
