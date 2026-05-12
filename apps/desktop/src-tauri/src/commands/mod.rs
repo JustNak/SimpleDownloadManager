@@ -483,7 +483,7 @@ pub async fn export_diagnostics_report(
     state: State<'_, SharedState>,
 ) -> Result<Option<String>, String> {
     let host_registration = gather_host_registration_diagnostics()?;
-    let diagnostics = state.diagnostics_snapshot(host_registration).await;
+    let diagnostics = state.diagnostics_export(host_registration).await;
     let report = serde_json::to_string_pretty(&diagnostics)
         .map_err(|error| format!("Could not serialize diagnostics report: {error}"))?;
 

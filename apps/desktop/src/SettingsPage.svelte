@@ -658,7 +658,7 @@
     </div>
 
     <div>
-      <div class="mb-3 text-sm font-semibold text-foreground">Recent Events</div>
+      <div class="mb-3 text-sm font-semibold text-foreground">Recent Events (latest 500)</div>
       {#if recentDiagnosticEvents.length}
         <div class="max-h-56 overflow-auto rounded-md border border-border/55 bg-zinc-950 font-mono shadow-inner">
           {#each recentDiagnosticEvents as event}
