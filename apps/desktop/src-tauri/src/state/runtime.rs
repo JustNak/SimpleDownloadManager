@@ -8,13 +8,16 @@ impl RuntimeState {
         message: String,
         job_id: Option<String>,
     ) {
-        self.diagnostic_events.push(DiagnosticEvent {
+        let event = DiagnosticEvent {
             timestamp: current_unix_timestamp_millis(),
             level,
             category,
             message,
             job_id,
-        });
+        };
+
+        self.diagnostic_events.push(event.clone());
+        let _ = self.diagnostic_event_store.append(&event);
 
         trim_diagnostic_events(&mut self.diagnostic_events);
     }
@@ -37,7 +40,7 @@ impl RuntimeState {
                 .collect(),
             settings: self.settings.clone(),
             main_window: self.main_window.clone(),
-            diagnostic_events: self.diagnostic_events.clone(),
+            diagnostic_events: Vec::new(),
         }
     }
 

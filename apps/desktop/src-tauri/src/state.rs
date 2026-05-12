@@ -4,12 +4,13 @@ use crate::storage::{
     load_persisted_state, normalize_bulk_settings_for_download_directory, persist_state,
     BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus, BulkFinalizeMode,
     BulkHosterAccelerationMode, BulkHosterFairnessMode, ConnectionState, DesktopSnapshot,
-    DiagnosticEvent, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode,
-    DownloadPrompt, DownloadSource, ExtensionIntegrationSettings, FailureCategory, HandoffAuth,
-    HandoffAuthHeader, HostRegistrationDiagnostics, HosterPreflightInfo, HosterPreflightStatus,
-    IntegrityAlgorithm, IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    ProtectedDownloadAuthScope, QueueSummary, RemovalState, ResumeSupport, Settings, TorrentInfo,
-    TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
+    DiagnosticEvent, DiagnosticLevel, DiagnosticsExport, DiagnosticsSnapshot, DownloadJob,
+    DownloadPerformanceMode, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
+    FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
+    HosterPreflightInfo, HosterPreflightStatus, IntegrityAlgorithm, IntegrityCheck,
+    IntegrityStatus, JobState, MainWindowState, PersistedState, ProtectedDownloadAuthScope,
+    QueueSummary, RemovalState, ResumeSupport, Settings, TorrentInfo, TorrentJobDiagnostics,
+    TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
 
+mod diagnostics;
 mod enqueue;
 mod jobs;
 mod lifecycle;
@@ -29,6 +31,7 @@ mod scheduler;
 mod settings;
 mod torrent;
 mod types;
+use diagnostics::*;
 use jobs::*;
 use paths::*;
 #[cfg(test)]
@@ -54,7 +57,7 @@ pub use types::{
 
 const MAX_URL_LENGTH: usize = 2048;
 const SHA256_HEX_LENGTH: usize = 64;
-const DIAGNOSTIC_EVENT_LIMIT: usize = 100;
+const DIAGNOSTIC_EVENT_LIMIT: usize = 500;
 const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
 const MIN_TORRENT_FORWARDING_PORT: u32 = 1024;
 const MAX_TORRENT_FORWARDING_PORT: u32 = 65_534;
@@ -110,6 +113,7 @@ struct RuntimeState {
     settings: Settings,
     main_window: Option<MainWindowState>,
     diagnostic_events: Vec<DiagnosticEvent>,
+    diagnostic_event_store: Arc<DiagnosticEventStore>,
     next_job_number: u64,
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
@@ -652,6 +656,7 @@ impl BulkHosterFairnessController {
 pub struct SharedState {
     inner: Arc<RwLock<RuntimeState>>,
     storage_path: Arc<PathBuf>,
+    diagnostic_event_store: Arc<DiagnosticEventStore>,
     handoff_auth: Arc<RwLock<HashMap<String, HandoffAuth>>>,
 }
 

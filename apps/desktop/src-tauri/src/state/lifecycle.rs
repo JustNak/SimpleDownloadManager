@@ -19,6 +19,9 @@ impl SharedState {
 
         let storage_path = base_dir.join("state.json");
         let storage_exists = storage_path.exists();
+        let diagnostic_event_store = Arc::new(DiagnosticEventStore::new(
+            diagnostic_event_log_path_for(&storage_path),
+        ));
         let mut persisted = load_persisted_state(&storage_path)?;
 
         if should_reset_download_directory(
@@ -45,7 +48,24 @@ impl SharedState {
         std::fs::create_dir_all(&persisted.settings.bulk.output_directory)
             .map_err(|error| format!("Could not create bulk download directory: {error}"))?;
 
-        let mut diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
+        let legacy_diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
+        let file_diagnostic_events = diagnostic_event_store
+            .recent_events(DIAGNOSTIC_EVENT_LIMIT)
+            .unwrap_or_default();
+        let mut diagnostic_events = if legacy_diagnostic_events.is_empty() {
+            file_diagnostic_events
+        } else if diagnostic_event_store
+            .migrate_legacy_events(legacy_diagnostic_events.clone())
+            .is_ok()
+        {
+            diagnostic_event_store
+                .recent_events(DIAGNOSTIC_EVENT_LIMIT)
+                .unwrap_or(legacy_diagnostic_events)
+        } else {
+            let mut events = file_diagnostic_events;
+            events.extend(legacy_diagnostic_events);
+            normalize_diagnostic_events(events)
+        };
         let jobs = persisted
             .jobs
             .into_iter()
@@ -55,7 +75,7 @@ impl SharedState {
                 let filename = job.filename.clone();
                 let normalized = normalize_job(job, &persisted.settings);
                 if was_removing {
-                    diagnostic_events.push(DiagnosticEvent {
+                    let event = DiagnosticEvent {
                         timestamp: current_unix_timestamp_millis(),
                         level: DiagnosticLevel::Warning,
                         category: "download".into(),
@@ -63,7 +83,9 @@ impl SharedState {
                             "Disk cleanup for {filename} was interrupted by app shutdown"
                         ),
                         job_id: Some(job_id),
-                    });
+                    };
+                    diagnostic_events.push(event.clone());
+                    let _ = diagnostic_event_store.append(&event);
                 }
                 normalized
             })
@@ -79,6 +101,7 @@ impl SharedState {
                 settings: persisted.settings,
                 main_window: persisted.main_window,
                 diagnostic_events,
+                diagnostic_event_store: Arc::clone(&diagnostic_event_store),
                 next_job_number,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -92,6 +115,7 @@ impl SharedState {
                 last_progress_persist_at: None,
             })),
             storage_path: Arc::new(storage_path),
+            diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
         };
 
@@ -102,6 +126,9 @@ impl SharedState {
     #[cfg(test)]
     pub(crate) fn for_tests(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Self {
         let job_indexes = job_indexes_for(&jobs);
+        let diagnostic_event_store = Arc::new(DiagnosticEventStore::new(
+            diagnostic_event_log_path_for(&storage_path),
+        ));
         Self {
             inner: Arc::new(RwLock::new(RuntimeState {
                 connection_state: ConnectionState::Connected,
@@ -109,6 +136,7 @@ impl SharedState {
                 settings: Settings::default(),
                 main_window: None,
                 diagnostic_events: Vec::new(),
+                diagnostic_event_store: Arc::clone(&diagnostic_event_store),
                 next_job_number: 99,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -122,6 +150,7 @@ impl SharedState {
                 last_progress_persist_at: None,
             })),
             storage_path: Arc::new(storage_path),
+            diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -410,6 +439,22 @@ impl SharedState {
         }
     }
 
+    pub async fn diagnostics_export(
+        &self,
+        host_registration: HostRegistrationDiagnostics,
+    ) -> DiagnosticsExport {
+        let snapshot = self.diagnostics_snapshot(host_registration).await;
+        let event_history = self.diagnostic_event_history().await.unwrap_or_default();
+        DiagnosticsExport {
+            snapshot,
+            event_history,
+        }
+    }
+
+    pub async fn diagnostic_event_history(&self) -> Result<Vec<DiagnosticEvent>, String> {
+        self.diagnostic_event_store.retained_events()
+    }
+
     pub async fn record_diagnostic_event(
         &self,
         level: DiagnosticLevel,
@@ -417,13 +462,12 @@ impl SharedState {
         message: impl Into<String>,
         job_id: Option<String>,
     ) -> Result<(), String> {
-        let persisted = {
+        {
             let mut state = self.inner.write().await;
             state.push_diagnostic_event(level, category.into(), message.into(), job_id);
-            state.persisted()
-        };
+        }
 
-        persist_state(&self.storage_path, &persisted)
+        Ok(())
     }
 
     pub fn app_data_dir(&self) -> PathBuf {

@@ -704,6 +704,14 @@ pub struct DiagnosticsSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiagnosticsExport {
+    #[serde(flatten)]
+    pub snapshot: DiagnosticsSnapshot,
+    pub event_history: Vec<DiagnosticEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TorrentJobDiagnostics {
     pub job_id: String,
     pub filename: String,
