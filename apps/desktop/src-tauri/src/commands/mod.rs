@@ -813,7 +813,7 @@ pub async fn cancel_job(
     let delete_from_disk = delete_from_disk.unwrap_or(false);
     if delete_from_disk {
         let prepared = state
-            .cancel_jobs_for_delete(&[id.clone()])
+            .cancel_jobs_for_delete(std::slice::from_ref(&id))
             .await
             .map_err(|error| error.message)?;
         emit_snapshot(&app, &prepared.snapshot);

@@ -581,6 +581,52 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn pause_job_after_retry_exhaustion(
+        &self,
+        id: &str,
+        message: impl Into<String>,
+        failure_category: FailureCategory,
+    ) -> Result<DesktopSnapshot, String> {
+        let message = message.into();
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            state.remove_active_worker(id);
+            state.external_reseed_jobs.remove(id);
+            let event_message = {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
+                };
+
+                job.state = JobState::Paused;
+                job.speed = 0;
+                job.eta = 0;
+                job.error = Some(message.clone());
+                job.failure_category = Some(failure_category);
+                format!("Paused {} after retry exhaustion: {message}", job.filename)
+            };
+            state.push_diagnostic_event(
+                DiagnosticLevel::Warning,
+                "download".into(),
+                event_message,
+                Some(id.into()),
+            );
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    pub async fn has_recoverable_partial_download(&self, id: &str) -> bool {
+        let state = self.inner.read().await;
+        state.job(id).is_some_and(|job| {
+            job.transfer_kind == TransferKind::Http
+                && job.downloaded_bytes > 0
+                && job.resume_support != ResumeSupport::Unsupported
+                && !matches!(job.state, JobState::Completed | JobState::Canceled)
+        })
+    }
+
     pub async fn finish_interrupted_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
