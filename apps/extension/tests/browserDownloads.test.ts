@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import type { ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
   browserDownloadUrl,
+  browserDownloadTransferKind,
   classifyBrowserDownloadHandoffResolution,
   cancelBrowserDownloadForDesktopPrompt,
   createBrowserDownloadHandoffMetadata,
@@ -106,6 +107,21 @@ async function main() {
     ),
     true,
     '.torrent downloads should still be handed off as torrent jobs',
+  );
+  assert.equal(
+    browserDownloadTransferKind({ url: 'https://example.com/file.torrent' }),
+    'torrent',
+    '.torrent URLs should be classified as torrent handoffs',
+  );
+  assert.equal(
+    browserDownloadTransferKind({ url: 'https://example.com/download?id=123', filename: 'C:\\Users\\Me\\linux.iso.torrent' }),
+    'torrent',
+    '.torrent filenames should be classified as torrent handoffs even when the URL is opaque',
+  );
+  assert.equal(
+    browserDownloadTransferKind({ url: 'https://example.com/file.zip', filename: 'file.zip' }),
+    undefined,
+    'normal HTTP downloads should not carry explicit transfer metadata',
   );
   assert.equal(
     shouldHandleBrowserDownload(

@@ -11,7 +11,7 @@
 
   type ActionVariant = 'default' | 'primary' | 'cancel' | 'confirm';
 
-  const popup = useProgressPopup();
+  const popup = useProgressPopup({ expectedTransferKind: 'http' });
 
   interface ProgressViewProps {
     job: DownloadJob;

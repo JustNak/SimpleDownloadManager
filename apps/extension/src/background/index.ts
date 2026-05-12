@@ -2,6 +2,7 @@ import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings
 import browser from './browser';
 import {
   browserDownloadUrl,
+  browserDownloadTransferKind,
   classifyBrowserDownloadHandoffResolution,
   createBrowserDownloadHandoffMetadata,
   createBrowserDownloadBypassState,
@@ -406,6 +407,11 @@ async function handOffBrowserDownload(
   const handoffAuth = takeCapturedHandoffAuth(handoffDetails, settings);
 
   const metadata = createBrowserDownloadHandoffMetadata(item, handoffAuth);
+  const transferKind = browserDownloadTransferKind(item);
+
+  if (transferKind === 'torrent') {
+    return enqueueDownload(url, source, { ...metadata, transferKind });
+  }
 
   if (settings.downloadHandoffMode === 'auto') {
     return enqueueDownload(url, source, metadata);

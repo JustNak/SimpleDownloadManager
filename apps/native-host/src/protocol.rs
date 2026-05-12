@@ -49,6 +49,13 @@ pub struct HandoffAuth {
     pub headers: Vec<HandoffAuthHeader>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferKind {
+    Http,
+    Torrent,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnqueueDownloadPayload {
     pub url: String,
@@ -59,6 +66,8 @@ pub struct EnqueueDownloadPayload {
     pub total_bytes: Option<u64>,
     #[serde(rename = "handoffAuth")]
     pub handoff_auth: Option<HandoffAuth>,
+    #[serde(rename = "transferKind")]
+    pub transfer_kind: Option<TransferKind>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -71,6 +80,8 @@ pub struct PromptDownloadPayload {
     pub total_bytes: Option<u64>,
     #[serde(rename = "handoffAuth")]
     pub handoff_auth: Option<HandoffAuth>,
+    #[serde(rename = "transferKind")]
+    pub transfer_kind: Option<TransferKind>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -583,7 +594,8 @@ mod tests {
                     "extensionVersion": "0.3.52"
                 },
                 "suggestedFilename": "guide.pdf",
-                "totalBytes": 4096
+                "totalBytes": 4096,
+                "transferKind": "torrent"
             }),
         );
 
@@ -591,6 +603,7 @@ mod tests {
 
         assert_eq!(payload.suggested_filename.as_deref(), Some("guide.pdf"));
         assert_eq!(payload.total_bytes, Some(4096));
+        assert_eq!(payload.transfer_kind, Some(TransferKind::Torrent));
     }
 
     #[test]

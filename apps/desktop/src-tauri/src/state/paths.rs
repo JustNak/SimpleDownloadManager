@@ -155,6 +155,14 @@ pub(super) fn transfer_kind_for_url(url: &str) -> TransferKind {
     }
 }
 
+pub(super) fn transfer_kind_for_filename_hint(filename_hint: Option<&str>) -> Option<TransferKind> {
+    let filename_hint = filename_hint?;
+    let decoded = percent_decode_str(filename_hint).decode_utf8_lossy();
+    let normalized = decoded.trim().replace('\\', "/");
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    path_has_torrent_extension(Path::new(basename)).then_some(TransferKind::Torrent)
+}
+
 pub(super) fn url_path_has_torrent_extension(url: &Url) -> bool {
     url.path_segments()
         .and_then(|mut segments| segments.next_back())

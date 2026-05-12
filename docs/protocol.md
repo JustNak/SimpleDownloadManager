@@ -96,7 +96,8 @@ URL handling is intentionally narrow:
 
 - Manual/context-menu/popup requests accept `http:`, `https:`, and `magnet:` URLs.
 - Browser download interception uses `http:`/`https:` download items and hands `.torrent` URLs or filenames to the desktop app as torrent jobs.
-- The envelope version stays `1`; torrent handoff uses the existing `url` field.
+- Torrent browser handoffs include optional `transferKind: "torrent"` metadata so opaque download URLs with `.torrent` filenames bypass the normal download prompt and use the torrent progress popup.
+- The envelope version stays `1`; `transferKind` is optional for backward compatibility.
 
 Torrent lifecycle behavior:
 

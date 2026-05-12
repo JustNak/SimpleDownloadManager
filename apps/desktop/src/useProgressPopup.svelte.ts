@@ -12,7 +12,7 @@ import {
   type ProgressSample,
 } from './downloadProgressMetrics';
 import { runPopupAction } from './popupActions';
-import type { DownloadJob, Settings } from './types';
+import type { DownloadJob, Settings, TransferKind } from './types';
 
 export type PopupActionRunner = (
   action: () => Promise<void>,
@@ -31,7 +31,11 @@ export interface ProgressPopupState {
   onClose: () => void;
 }
 
-export function useProgressPopup(): ProgressPopupState {
+export interface UseProgressPopupOptions {
+  expectedTransferKind: TransferKind;
+}
+
+export function useProgressPopup({ expectedTransferKind }: UseProgressPopupOptions): ProgressPopupState {
   let job = $state<DownloadJob | null>(null);
   let isBusy = $state(false);
   let isConfirmingCancel = $state(false);
@@ -51,9 +55,12 @@ export function useProgressPopup(): ProgressPopupState {
     };
     const applySnapshotJob = (snapshot: Awaited<ReturnType<typeof getProgressJobSnapshot>>) => {
       const nextJob = snapshot.job;
-      if (nextJob) {
-        progressSamples = recordProgressSample(progressSamples, nextJob);
+      if (!nextJob || nextJob.id !== jobId || nextJob.transferKind !== expectedTransferKind) {
+        progressSamples = [];
+        job = null;
+        return;
       }
+      progressSamples = recordProgressSample(progressSamples, nextJob);
       job = nextJob;
     };
 

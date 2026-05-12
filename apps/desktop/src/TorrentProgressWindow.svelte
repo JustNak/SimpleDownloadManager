@@ -52,7 +52,7 @@
   type MetricTone = 'default' | 'primary' | 'warning' | 'success';
   type TorrentActionVariant = 'default' | 'primary' | 'cancel' | 'confirm';
 
-  const popup = useProgressPopup();
+  const popup = useProgressPopup({ expectedTransferKind: 'torrent' });
   const segmentCount = 42;
 
   function completedSegments(progress: number) {

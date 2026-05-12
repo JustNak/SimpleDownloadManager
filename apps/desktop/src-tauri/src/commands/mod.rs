@@ -17,9 +17,8 @@ use crate::storage::{
     HosterPreflightStatus, JobState, Settings, TransferKind,
 };
 use crate::windows::{
-    close_download_prompt_window, focus_job_in_main_window_async, progress_window_label,
-    show_batch_progress_window, show_download_prompt_window,
-    show_progress_window_for_transfer_kind, torrent_progress_window_label, DOWNLOAD_PROMPT_WINDOW,
+    close_download_prompt_window, focus_job_in_main_window_async, show_batch_progress_window,
+    show_download_prompt_window, show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
 };
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -349,14 +348,7 @@ fn emit_progress_job_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
             continue;
         }
 
-        let job = snapshot
-            .jobs
-            .iter()
-            .find(|job| {
-                progress_window_label(&job.id).as_str() == label.as_str()
-                    || torrent_progress_window_label(&job.id).as_str() == label.as_str()
-            })
-            .cloned();
+        let job = progress_job_for_window_label(snapshot, label);
         let payload = ProgressJobSnapshot {
             job,
             settings: snapshot.settings.clone(),
@@ -391,6 +383,26 @@ fn emit_batch_progress_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
 
 fn is_progress_window_label(label: &str) -> bool {
     label.starts_with("download-progress-") || label.starts_with("torrent-progress-")
+}
+
+fn progress_job_for_window_label(snapshot: &DesktopSnapshot, label: &str) -> Option<DownloadJob> {
+    if let Some(job_id) = label.strip_prefix("download-progress-") {
+        return snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id && job.transfer_kind == TransferKind::Http)
+            .cloned();
+    }
+
+    if let Some(job_id) = label.strip_prefix("torrent-progress-") {
+        return snapshot
+            .jobs
+            .iter()
+            .find(|job| job.id == job_id && job.transfer_kind == TransferKind::Torrent)
+            .cloned();
+    }
+
+    None
 }
 
 fn filter_batch_jobs(
@@ -1300,7 +1312,7 @@ pub async fn open_progress_window(
         .iter()
         .find(|job| job.id == id)
         .map(|job| job.transfer_kind)
-        .unwrap_or_default();
+        .ok_or_else(|| "Download job is no longer available.".to_string())?;
     show_progress_window_for_transfer_kind(&app, &id, transfer_kind)
 }
 

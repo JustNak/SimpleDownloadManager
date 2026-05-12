@@ -45,6 +45,7 @@ export type AppResponseType =
 export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type AppearanceTheme = 'light' | 'dark' | 'oled_dark' | 'system';
+export type TransferKind = 'http' | 'torrent';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -92,6 +93,7 @@ export interface EnqueueDownloadPayload {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
+  transferKind?: TransferKind;
 }
 
 export interface PromptDownloadPayload {
@@ -100,12 +102,14 @@ export interface PromptDownloadPayload {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
+  transferKind?: TransferKind;
 }
 
 export interface DownloadRequestMetadata {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
+  transferKind?: TransferKind;
 }
 
 export interface OpenAppPayload {
@@ -435,6 +439,10 @@ function normalizeTotalBytes(totalBytes: number | undefined): number | undefined
     : undefined;
 }
 
+function normalizeTransferKind(transferKind: TransferKind | undefined): TransferKind | undefined {
+  return transferKind === 'http' || transferKind === 'torrent' ? transferKind : undefined;
+}
+
 export function createPingRequest(requestId = createRequestId()): RequestEnvelope<'ping', EmptyPayload> {
   return {
     protocolVersion: PROTOCOL_VERSION,
@@ -480,6 +488,7 @@ export function createEnqueueDownloadRequest(
   const totalBytes = normalizeTotalBytes(normalizedMetadata.totalBytes);
   const suggestedFilename = trimMetadata(normalizedMetadata.suggestedFilename);
   const sanitizedAuth = sanitizeHandoffAuth(normalizedMetadata.handoffAuth);
+  const transferKind = normalizeTransferKind(normalizedMetadata.transferKind);
   return {
     ok: true,
     value: {
@@ -492,6 +501,7 @@ export function createEnqueueDownloadRequest(
         suggestedFilename,
         totalBytes,
         ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
+        ...(transferKind ? { transferKind } : {}),
       },
     },
   };
@@ -511,6 +521,7 @@ export function createPromptDownloadRequest(
   const totalBytes = normalizeTotalBytes(metadata.totalBytes);
 
   const sanitizedAuth = sanitizeHandoffAuth(metadata.handoffAuth);
+  const transferKind = normalizeTransferKind(metadata.transferKind);
   return {
     ok: true,
     value: {
@@ -523,6 +534,7 @@ export function createPromptDownloadRequest(
         suggestedFilename: trimMetadata(metadata.suggestedFilename),
         totalBytes,
         ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
+        ...(transferKind ? { transferKind } : {}),
       },
     },
   };

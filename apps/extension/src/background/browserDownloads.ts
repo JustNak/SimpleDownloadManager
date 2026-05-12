@@ -4,6 +4,7 @@ import {
   type ExtensionIntegrationSettings,
   type HandoffAuth,
   type HostToExtensionResponse,
+  type TransferKind,
 } from '@myapp/protocol';
 
 export type BrowserDownloadFilenameSuggestion = {
@@ -85,6 +86,7 @@ export type BrowserDownloadHandoffMetadata = {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
+  transferKind?: TransferKind;
 };
 
 type BrowserDownloadBypassUrlEntry = {
@@ -208,6 +210,11 @@ export function shouldHandleBrowserDownload(
     && !isHostExcluded(url, settings.excludedHosts)
     && !isBrowserExtensionPackage(url, item.filename)
     && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, item.filename, settings.ignoredFileExtensions));
+}
+
+export function browserDownloadTransferKind(item: BrowserDownloadPolicyItem): TransferKind | undefined {
+  const url = browserDownloadUrl(item) ?? item.finalUrl ?? item.url;
+  return isTorrentUrl(url) || isTorrentFilename(item.filename) ? 'torrent' : undefined;
 }
 
 export function firefoxWebRequestDownloadCandidate(

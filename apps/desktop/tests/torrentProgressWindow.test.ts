@@ -2,21 +2,32 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 
 const torrentProgressUrl = new URL('../src/TorrentProgressWindow.svelte', import.meta.url);
+const downloadProgressUrl = new URL('../src/DownloadProgressWindow.svelte', import.meta.url);
 const sharedPopupUrl = new URL('../src/useProgressPopup.svelte.ts', import.meta.url);
 
 assert.ok(existsSync(sharedPopupUrl), 'progress popup lifecycle should be extracted into useProgressPopup.svelte.ts');
 assert.ok(existsSync(torrentProgressUrl), 'torrent progress UI should live in a dedicated TorrentProgressWindow.svelte file');
+assert.ok(existsSync(downloadProgressUrl), 'download progress UI should live in a dedicated DownloadProgressWindow.svelte file');
 
 const torrentSource = readFileSync(torrentProgressUrl, 'utf8');
+const downloadSource = readFileSync(downloadProgressUrl, 'utf8');
 const sharedPopupSource = readFileSync(sharedPopupUrl, 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
+const torrentWindowFunction = windowsSource.slice(
+  windowsSource.indexOf('pub fn show_torrent_progress_window'),
+  windowsSource.indexOf('pub fn show_progress_window_for_transfer_kind'),
+);
 const capabilitySource = readFileSync(new URL('../src-tauri/capabilities/popups.json', import.meta.url), 'utf8');
 
 assert.match(mainSource, /windowMode === 'torrent-progress'[\s\S]*import\('\.\/TorrentProgressWindow\.svelte'\)/, 'main route should lazily mount TorrentProgressWindow for ?window=torrent-progress');
+assert.match(torrentSource, /useProgressPopup\(\{\s*expectedTransferKind:\s*'torrent'\s*\}\)/, 'torrent popup should reject non-torrent progress snapshots');
+assert.match(downloadSource, /useProgressPopup\(\{\s*expectedTransferKind:\s*'http'\s*\}\)/, 'download popup should reject torrent progress snapshots');
+assert.match(sharedPopupSource, /expectedTransferKind[\s\S]*nextJob\.transferKind !== expectedTransferKind[\s\S]*job = null/, 'shared progress popup lifecycle should clear mismatched transfer-kind snapshots');
 assert.match(backendPreviewSource, /job\.transferKind === 'torrent'[\s\S]*\?window=torrent-progress&jobId=\$\{encodeURIComponent\(id\)\}[\s\S]*torrent-progress-\$\{id\}[\s\S]*width=720,height=520/, 'browser fallback openProgressWindow should route torrent jobs to a 720x520 torrent popup');
 assert.match(windowsSource, /const TORRENT_PROGRESS_WINDOW_PREFIX: &str = "torrent-progress-";[\s\S]*show_torrent_progress_window[\s\S]*index\.html\?window=torrent-progress&jobId=\{job_id\}[\s\S]*torrent_progress_window_geometry/, 'native windows should define a dedicated torrent progress popup route and prefix');
+assert.doesNotMatch(torrentWindowFunction, /current_download_prompt_position|last_download_prompt_position|progress_window_position/, 'torrent progress windows should not position themselves from the download prompt');
 assert.match(windowsSource, /fn torrent_progress_window_geometry\(\) -> PopupWindowGeometry \{[\s\S]*width:\s*720\.0,[\s\S]*height:\s*520\.0,[\s\S]*min_width:\s*720\.0,[\s\S]*min_height:\s*520\.0,/, 'torrent progress native geometry should match the approved larger popup size');
 assert.match(capabilitySource, /"torrent-progress-\*"/, 'Tauri capabilities should allow the torrent progress popup label');
 

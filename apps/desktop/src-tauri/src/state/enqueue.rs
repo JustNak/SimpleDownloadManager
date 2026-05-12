@@ -378,7 +378,9 @@ impl RuntimeState {
         let explicit_transfer_kind = options.transfer_kind;
         let url = normalize_download_input(url, explicit_transfer_kind)?;
         options.expected_sha256 = normalize_expected_sha256(options.expected_sha256)?;
-        let inferred_transfer_kind = transfer_kind_for_url(&url);
+        let inferred_transfer_kind =
+            transfer_kind_for_filename_hint(options.filename_hint.as_deref())
+                .unwrap_or_else(|| transfer_kind_for_url(&url));
         let transfer_kind = explicit_transfer_kind.unwrap_or(inferred_transfer_kind);
         if transfer_kind != inferred_transfer_kind {
             return Err(BackendError {

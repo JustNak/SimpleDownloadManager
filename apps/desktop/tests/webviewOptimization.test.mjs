@@ -77,5 +77,7 @@ for (const command of ['pause_jobs', 'resume_jobs', 'cancel_jobs', 'delete_jobs'
 assert.match(commandsSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');
 assert.match(commandsSource, /DOWNLOADS_UPDATE_BATCH_EVENT/, 'commands should define a batched download update event');
 assert.match(commandsSource, /emit_popup_snapshots\(app,\s*snapshot\)/, 'snapshot emission should fan out targeted popup payloads');
+assert.match(commandsSource, /fn progress_job_for_window_label[\s\S]*strip_prefix\("download-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Http[\s\S]*strip_prefix\("torrent-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Torrent/, 'single progress popup snapshots should be scoped by label family and transfer kind');
+assert.doesNotMatch(commandsSource, /progress_window_label\(&job\.id\)[\s\S]*\|\|[\s\S]*torrent_progress_window_label\(&job\.id\)/, 'download and torrent progress labels should not share an OR-matched snapshot lookup');
 assert.doesNotMatch(downloadSource, /powershell\.exe|Compress-Archive/, 'bulk archive creation should not shell out to PowerShell');
 assert.doesNotMatch(runtimeStateSource, /\.map\(add_artifact_existence\)|Path::new\(&job\.target_path\)\.exists\(\)/, 'full snapshots should not probe completed artifacts on disk');

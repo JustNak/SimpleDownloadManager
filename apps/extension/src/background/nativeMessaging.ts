@@ -11,7 +11,6 @@ import {
   type EnqueueDownloadPayload,
   type ErrorCode,
   type ExtensionIntegrationSettings,
-  type HandoffAuth,
   type HostToExtensionResponse,
   type RequestSource,
 } from '@myapp/protocol';
@@ -130,7 +129,7 @@ export async function enqueueDownload(
 export async function promptDownload(
   url: string,
   source: Omit<RequestSource, 'browser'>,
-  metadata: { suggestedFilename?: string; totalBytes?: number; handoffAuth?: HandoffAuth } = {},
+  metadata: DownloadRequestMetadata = {},
 ): Promise<HostToExtensionResponse> {
   const request = createPromptDownloadRequest(url, { ...source, browser: detectBrowser() }, metadata);
   if (!request.ok) {

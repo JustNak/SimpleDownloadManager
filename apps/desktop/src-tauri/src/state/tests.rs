@@ -2156,6 +2156,53 @@ fn enqueue_download_in_memory_creates_torrent_job_for_local_file() {
 }
 
 #[test]
+fn enqueue_download_in_memory_accepts_torrent_filename_hint_for_browser_handoff() {
+    let download_dir = test_runtime_dir("enqueue-torrent-filename-hint");
+    let torrent_dir = download_dir.join("Torrent");
+    let mut state = runtime_state_with_jobs(Vec::new());
+    state.settings.download_directory = download_dir.display().to_string();
+    state.settings.torrent.download_directory = torrent_dir.display().to_string();
+
+    let result = state
+        .enqueue_download_in_memory(
+            "https://example.com/download?id=opaque",
+            EnqueueOptions {
+                source: Some(DownloadSource {
+                    entry_point: "browser_download".into(),
+                    browser: "firefox".into(),
+                    extension_version: "0.3.52".into(),
+                    page_url: None,
+                    page_title: None,
+                    referrer: None,
+                    incognito: Some(false),
+                }),
+                filename_hint: Some("linux.iso.torrent".into()),
+                transfer_kind: Some(TransferKind::Torrent),
+                ..Default::default()
+            },
+        )
+        .expect("browser handoff should accept explicit torrent metadata from filename");
+
+    let job = result
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == result.job_id)
+        .expect("queued torrent job");
+    assert_eq!(job.transfer_kind, TransferKind::Torrent);
+    assert_eq!(job.filename, "linux.iso.torrent");
+    assert_eq!(
+        PathBuf::from(&job.target_path)
+            .parent()
+            .map(Path::to_path_buf),
+        Some(torrent_dir.clone())
+    );
+    assert!(job.temp_path.contains(".torrent-state"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
 fn enqueue_download_rejects_mismatched_explicit_transfer_kind() {
     let download_dir = test_runtime_dir("enqueue-torrent-mismatch");
     let mut state = runtime_state_with_jobs(Vec::new());

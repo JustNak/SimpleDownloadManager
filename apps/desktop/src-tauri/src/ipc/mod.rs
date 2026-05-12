@@ -9,7 +9,7 @@ use crate::state::{
 use crate::storage::{
     AppearanceSettings, ConnectionState, DiagnosticLevel, DownloadSource,
     ExtensionIntegrationSettings, HandoffAuth, HostRegistrationDiagnostics, HostRegistrationEntry,
-    HostRegistrationStatus, QueueSummary,
+    HostRegistrationStatus, QueueSummary, TransferKind,
 };
 use crate::windows::{
     focus_job_in_main_window_async, focus_main_window_async, show_download_prompt_window,
@@ -104,6 +104,7 @@ struct EnqueuePayload {
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
+    transfer_kind: Option<TransferKind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +115,7 @@ struct PromptDownloadPayload {
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
+    transfer_kind: Option<TransferKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +536,25 @@ async fn handle_request(
                 }
             };
             let source: DownloadSource = payload.source.into();
+            let transfer_kind = handoff_transfer_kind(
+                payload.transfer_kind,
+                &payload.url,
+                payload.suggested_filename.as_deref(),
+            );
+
+            if transfer_kind == TransferKind::Torrent {
+                return enqueue_handoff_download(
+                    &app,
+                    state,
+                    request.request_id,
+                    payload.url,
+                    source,
+                    payload.suggested_filename,
+                    payload.handoff_auth,
+                    transfer_kind,
+                )
+                .await;
+            }
 
             let prompt = match state
                 .prepare_download_prompt(
@@ -574,7 +595,27 @@ async fn handle_request(
             };
 
             let source: DownloadSource = payload.source.into();
-            if source.entry_point == "browser_download" {
+            let transfer_kind = handoff_transfer_kind(
+                payload.transfer_kind,
+                &payload.url,
+                payload.suggested_filename.as_deref(),
+            );
+
+            if transfer_kind == TransferKind::Torrent {
+                return enqueue_handoff_download(
+                    &app,
+                    state,
+                    request.request_id,
+                    payload.url,
+                    source,
+                    payload.suggested_filename,
+                    payload.handoff_auth,
+                    transfer_kind,
+                )
+                .await;
+            }
+
+            if source.entry_point == "browser_download" && transfer_kind == TransferKind::Http {
                 let prompt = match state
                     .prepare_download_prompt(
                         request.request_id.clone(),
@@ -621,6 +662,7 @@ async fn handle_request(
                         source: Some(source),
                         filename_hint: payload.suggested_filename,
                         handoff_auth: payload.handoff_auth,
+                        transfer_kind: Some(transfer_kind),
                         ..Default::default()
                     },
                 )
@@ -1474,6 +1516,95 @@ fn map_backend_error(request_id: String, error: BackendError) -> HostResponse {
     HostResponse::error(request_id, message_type, error.code, error.message)
 }
 
+fn handoff_transfer_kind(
+    explicit_transfer_kind: Option<TransferKind>,
+    url: &str,
+    suggested_filename: Option<&str>,
+) -> TransferKind {
+    explicit_transfer_kind.unwrap_or_else(|| {
+        if handoff_url_is_torrent(url) || suggested_filename_is_torrent(suggested_filename) {
+            TransferKind::Torrent
+        } else {
+            TransferKind::Http
+        }
+    })
+}
+
+fn handoff_url_is_torrent(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url.trim()) else {
+        return false;
+    };
+
+    if parsed.scheme() == "magnet" {
+        return true;
+    }
+
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .is_some_and(|segment| segment.to_ascii_lowercase().ends_with(".torrent"))
+}
+
+fn suggested_filename_is_torrent(suggested_filename: Option<&str>) -> bool {
+    let Some(suggested_filename) = suggested_filename else {
+        return false;
+    };
+    let normalized = suggested_filename.trim().replace('\\', "/");
+    normalized
+        .rsplit('/')
+        .next()
+        .is_some_and(|filename| filename.to_ascii_lowercase().ends_with(".torrent"))
+}
+
+async fn enqueue_handoff_download(
+    app: &AppHandle,
+    state: SharedState,
+    request_id: String,
+    url: String,
+    source: DownloadSource,
+    filename_hint: Option<String>,
+    handoff_auth: Option<HandoffAuth>,
+    transfer_kind: TransferKind,
+) -> HostResponse {
+    if let Err(error) =
+        probe_browser_download_access(&state, &source, &url, handoff_auth.as_ref()).await
+    {
+        return map_backend_error(request_id, error);
+    }
+
+    match state
+        .enqueue_download_with_options(
+            url,
+            EnqueueOptions {
+                source: Some(source),
+                filename_hint,
+                handoff_auth,
+                transfer_kind: Some(transfer_kind),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            let show_progress =
+                transfer_kind == TransferKind::Torrent && state.show_progress_after_handoff().await;
+            let host_snapshot = state.register_host_contact().await;
+            emit_snapshot(app, &result.snapshot);
+            emit_snapshot(app, &host_snapshot);
+            if result.status == EnqueueStatus::Queued {
+                if show_progress {
+                    let _ =
+                        show_progress_window_for_transfer_kind(app, &result.job_id, transfer_kind);
+                }
+                schedule_downloads(app.clone(), state);
+            }
+            HostResponse::enqueue_result(request_id, result)
+        }
+        Err(error) => map_backend_error(request_id, error),
+    }
+}
+
 fn should_register_host_contact_before_response(message_type: &str) -> bool {
     matches!(message_type, "prompt_download")
 }
@@ -1616,6 +1747,34 @@ mod tests {
         assert!(!super::should_register_host_contact_before_response(
             "enqueue_download"
         ));
+    }
+
+    #[test]
+    fn handoff_transfer_kind_uses_explicit_url_or_filename_torrent_signals() {
+        assert_eq!(
+            super::handoff_transfer_kind(
+                None,
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                None,
+            ),
+            TransferKind::Torrent
+        );
+        assert_eq!(
+            super::handoff_transfer_kind(
+                None,
+                "https://example.com/download?id=opaque",
+                Some(r"C:\Users\Me\linux.iso.torrent"),
+            ),
+            TransferKind::Torrent
+        );
+        assert_eq!(
+            super::handoff_transfer_kind(
+                Some(TransferKind::Http),
+                "https://example.com/file.torrent",
+                None,
+            ),
+            TransferKind::Http
+        );
     }
 
     #[test]

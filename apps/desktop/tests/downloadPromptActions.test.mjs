@@ -37,7 +37,9 @@ assert.match(promptSource, /class="flex min-h-0 flex-1 flex-col overflow-hidden 
 assert.match(promptSource, /class="mt-auto flex min-h-\[38px\] shrink-0 items-center justify-between gap-2 border-t border-border pt-2"/, 'download prompt action bar should keep a predictable compact height');
 assert.match(promptSource, /#snippet MetaValue[\s\S]*min-w-0 truncate/, 'prompt metadata values should be min-width constrained and truncated');
 assert.match(promptSource, /title=\{duplicateLabel\}/, 'duplicate prompt filename should preserve its full value in a tooltip while compact');
-assert.match(ipcSource, /"enqueue_download"[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/, 'auto enqueue handoffs should reroute detected duplicates through the prompt flow');
+assert.match(ipcSource, /"enqueue_download"[\s\S]*handoff_transfer_kind\([\s\S]*if source\.entry_point == "browser_download" && transfer_kind == TransferKind::Http[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/, 'HTTP auto enqueue handoffs should still reroute detected duplicates through the prompt flow');
+assert.match(ipcSource, /"prompt_download"[\s\S]*handoff_transfer_kind\([\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent prompt handoffs should bypass the download prompt and enqueue directly');
+assert.match(ipcSource, /"enqueue_download"[\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent enqueue handoffs should bypass duplicate prompt routing');
 
 for (const [name, source] of progressSources) {
   assert.doesNotMatch(source, />\s*Swap\s*</, `${name} UI should not render a Swap button`);

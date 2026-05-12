@@ -144,14 +144,11 @@ pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(),
         return show_existing_popup_window(&window, torrent_progress_window_geometry());
     }
 
-    let open_progress_windows = open_progress_popup_count(app);
-    let prompt_position =
-        current_download_prompt_position(app).or_else(last_download_prompt_position);
     let url = format!("index.html?window=torrent-progress&jobId={job_id}");
     let geometry = torrent_progress_window_geometry();
     let policy = progress_window_policy();
 
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Torrent session")
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(geometry.min_width, geometry.min_height)
@@ -160,16 +157,8 @@ pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(),
         .minimizable(policy.minimizable)
         .maximizable(false)
         .decorations(false)
-        .always_on_top(policy.always_on_top);
-
-    let builder =
-        if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
-            builder.position(position.x, position.y)
-        } else {
-            builder.center()
-        };
-
-    builder
+        .always_on_top(policy.always_on_top)
+        .center()
         .build()
         .map(|_| ())
         .map_err(|error| error.to_string())
