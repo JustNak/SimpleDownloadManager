@@ -8,38 +8,54 @@ const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
     "Resume metadata is missing or no longer matches this partial download. Use Restart to download from zero.";
 
-pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
-    match mode {
-        DownloadPerformanceMode::Stable => DownloadPerformanceProfile {
-            max_segments: 1,
-            min_segmented_size: u64::MAX,
-            target_segment_size: u64::MAX,
-            low_speed_threshold_bytes_per_second: 4 * 1024,
-            low_speed_window: Duration::from_secs(30),
-            bulk_hoster_stall_timeout: Duration::from_secs(90),
-            max_low_speed_retries: 2,
-            speed_smoothing_alpha: 0.25,
-        },
-        DownloadPerformanceMode::Balanced => DownloadPerformanceProfile {
-            max_segments: 6,
-            min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
-            target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
-            low_speed_threshold_bytes_per_second: 8 * 1024,
-            low_speed_window: Duration::from_secs(20),
-            bulk_hoster_stall_timeout: Duration::from_secs(25),
-            max_low_speed_retries: 2,
-            speed_smoothing_alpha: 0.25,
-        },
-        DownloadPerformanceMode::Fast => DownloadPerformanceProfile {
-            max_segments: 12,
-            min_segmented_size: FAST_MIN_SEGMENTED_SIZE,
-            target_segment_size: FAST_TARGET_SEGMENT_SIZE,
-            low_speed_threshold_bytes_per_second: 16 * 1024,
-            low_speed_window: Duration::from_secs(15),
-            bulk_hoster_stall_timeout: Duration::from_secs(15),
-            max_low_speed_retries: 3,
-            speed_smoothing_alpha: 0.25,
-        },
+struct SegmentJournal {
+    temp_path: PathBuf,
+}
+
+impl SegmentJournal {
+    fn new(temp_path: &Path) -> Self {
+        Self {
+            temp_path: temp_path.to_path_buf(),
+        }
+    }
+
+    async fn load_recoverable_state(
+        &self,
+        plan: &RangePlan,
+        validators: &EntityValidators,
+    ) -> Result<Option<SegmentedDownloadState>, DownloadError> {
+        if let Some(state) = self
+            .load_state_from(&segment_meta_path(&self.temp_path))
+            .await?
+        {
+            if let Some(state) = reconcile_segment_state(state, plan, validators) {
+                return Ok(Some(state));
+            }
+        }
+
+        let Some(state) = self
+            .load_state_from(&segment_meta_backup_path(&self.temp_path))
+            .await?
+            .and_then(|state| reconcile_segment_state(state, plan, validators))
+        else {
+            return Ok(None);
+        };
+
+        persist_segment_state(&self.temp_path, &state).await?;
+        Ok(Some(state))
+    }
+
+    async fn load_state_from(
+        &self,
+        path: &Path,
+    ) -> Result<Option<SegmentedDownloadState>, DownloadError> {
+        match fs::read_to_string(path).await {
+            Ok(raw) => Ok(serde_json::from_str::<SegmentedDownloadState>(&raw).ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(disk_error(format!(
+                "Could not read segment metadata sidecar: {error}"
+            ))),
+        }
     }
 }
 
@@ -1045,25 +1061,12 @@ pub(super) async fn load_or_create_segment_state(
     plan: &RangePlan,
     validators: &EntityValidators,
 ) -> Result<SegmentedDownloadState, DownloadError> {
-    let meta_path = segment_meta_path(temp_path);
     let partial_exists = temp_path.exists();
-    if let Ok(raw) = fs::read_to_string(&meta_path).await {
-        match serde_json::from_str::<SegmentedDownloadState>(&raw) {
-            Ok(state)
-                if segment_state_compatible_with_plan(&state, plan)
-                    && !state.validators.conflicts_with(validators) =>
-            {
-                let mut state = state;
-                state.schema_version = default_segment_state_schema_version();
-                state.validators = state.validators.reconcile_with(validators);
-                return Ok(state);
-            }
-            _ if partial_exists => {
-                return Err(segmented_resume_metadata_required_error());
-            }
-            _ => {}
-        }
-    } else if partial_exists {
+    let journal = SegmentJournal::new(temp_path);
+    if let Some(state) = journal.load_recoverable_state(plan, validators).await? {
+        return Ok(state);
+    }
+    if partial_exists {
         return Err(segmented_resume_metadata_required_error());
     }
 
@@ -1090,6 +1093,22 @@ pub(super) async fn load_or_create_segment_state(
             })
             .collect(),
     })
+}
+
+fn reconcile_segment_state(
+    mut state: SegmentedDownloadState,
+    plan: &RangePlan,
+    validators: &EntityValidators,
+) -> Option<SegmentedDownloadState> {
+    if !segment_state_compatible_with_plan(&state, plan)
+        || state.validators.conflicts_with(validators)
+    {
+        return None;
+    }
+
+    state.schema_version = default_segment_state_schema_version();
+    state.validators = state.validators.reconcile_with(validators);
+    Some(state)
 }
 
 pub(super) fn segmented_resume_metadata_required_error() -> DownloadError {

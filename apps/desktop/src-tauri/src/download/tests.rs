@@ -7,6 +7,9 @@ use std::future::pending;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[path = "tests/recovery.rs"]
+mod recovery;
+
 fn torrent_runtime_update(
     uploaded_bytes: u64,
     downloaded_bytes: u64,

@@ -44,7 +44,9 @@ mod client;
 mod filesystem;
 mod http;
 mod notifications;
+mod policy;
 mod segmented;
+mod stream;
 mod torrent;
 mod types;
 
@@ -53,7 +55,9 @@ use client::*;
 use filesystem::*;
 use http::*;
 use notifications::*;
+use policy::*;
 use segmented::*;
+use stream::*;
 use torrent::*;
 use types::*;
 
@@ -635,18 +639,36 @@ async fn run_download(
     loop {
         match run_transfer_attempt(app, state, task).await {
             Ok(outcome) => return Ok(outcome),
-            Err(error) if error.retryable && retry_attempts < max_retry_attempts => {
-                retry_attempts += 1;
-                let snapshot = state.record_retry_attempt(&task.id, retry_attempts).await?;
-                emit_snapshot(app, &snapshot);
-                tokio::time::sleep(retry_delay_for_attempt_with_jitter(
-                    (retry_attempts - 1) as usize,
-                    &task.id,
-                    &task.url,
-                ))
-                .await;
+            Err(error) => {
+                let has_valid_partial = state.has_recoverable_partial_download(&task.id).await;
+                match retry_decision_for_attempt_error(
+                    &error,
+                    retry_attempts,
+                    max_retry_attempts,
+                    has_valid_partial,
+                ) {
+                    RetryDecision::Retry => {
+                        retry_attempts += 1;
+                        let snapshot = state.record_retry_attempt(&task.id, retry_attempts).await?;
+                        emit_snapshot(app, &snapshot);
+                        tokio::time::sleep(retry_delay_for_attempt_with_jitter(
+                            (retry_attempts - 1) as usize,
+                            &task.id,
+                            &task.url,
+                        ))
+                        .await;
+                    }
+                    RetryDecision::PauseRecoverably => {
+                        let message = recoverable_retry_pause_message(&error, retry_attempts);
+                        let snapshot = state
+                            .pause_job_after_retry_exhaustion(&task.id, message, error.category)
+                            .await?;
+                        emit_snapshot(app, &snapshot);
+                        return Ok(DownloadOutcome::Paused);
+                    }
+                    RetryDecision::Fail => return Err(error),
+                }
             }
-            Err(error) => return Err(error),
         }
     }
 }
