@@ -1,0 +1,9 @@
+{
+  "metadataTimeMs": 12000,
+  "firstByteTimeMs": 24000,
+  "averageDownloadBps3m": 3000000,
+  "longestZeroBpsStallMs": 8000,
+  "connectedPeers": 20,
+  "seeds": 20,
+  "notes": "Manual qBittorrent observation for the same legal/user-authorized magnet."
+}

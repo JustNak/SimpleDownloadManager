@@ -9,5 +9,7 @@ pub mod sidecars;
 pub mod state;
 pub mod storage;
 pub mod torrent;
+#[cfg(any(test, debug_assertions))]
+pub mod torrent_bench;
 pub mod updates;
 pub mod windows;
