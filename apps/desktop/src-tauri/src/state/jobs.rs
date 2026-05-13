@@ -18,6 +18,8 @@ impl SharedState {
                     job.state = JobState::Paused;
                     job.speed = 0;
                     job.eta = 0;
+                    job.active_segments = None;
+                    job.planned_segments = None;
                     (
                         Some(format!("Paused {}", job.filename)),
                         is_protected_bulk_hoster_job(job),
@@ -63,6 +65,8 @@ impl SharedState {
                     job.auto_restart_attempts = 0;
                     job.speed = 0;
                     job.eta = 0;
+                    job.active_segments = None;
+                    job.planned_segments = None;
                     reset_integrity_for_retry(job);
                     Some(format!("Resumed {}", job.filename))
                 } else {
@@ -1158,6 +1162,8 @@ pub(super) fn reset_job_for_restart(job: &mut DownloadJob) {
     job.downloaded_bytes = 0;
     job.speed = 0;
     job.eta = 0;
+    job.active_segments = None;
+    job.planned_segments = None;
     job.error = None;
     job.failure_category = None;
     job.resume_support = ResumeSupport::Unknown;
@@ -1174,6 +1180,8 @@ fn queue_job_for_preserved_bulk_recovery(job: &mut DownloadJob) {
     job.removal_state = None;
     job.speed = 0;
     job.eta = 0;
+    job.active_segments = None;
+    job.planned_segments = None;
     job.error = None;
     job.failure_category = None;
     job.retry_attempts = 0;
@@ -1356,6 +1364,8 @@ fn mark_job_canceled(job: &mut DownloadJob) {
     job.downloaded_bytes = 0;
     job.speed = 0;
     job.eta = 0;
+    job.active_segments = None;
+    job.planned_segments = None;
     job.error = None;
     job.failure_category = None;
     job.retry_attempts = 0;

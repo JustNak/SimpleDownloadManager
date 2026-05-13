@@ -175,13 +175,18 @@ pub(super) struct SegmentWorkerContext {
     pub(super) validators: EntityValidators,
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
+    pub(super) metadata_persisted_at: Arc<Mutex<Instant>>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) control_signal: WorkerControlSignal,
+    pub(super) ramp_blocked: Arc<AtomicBool>,
     pub(super) priority_throttle: Arc<Mutex<DynamicThrottleState>>,
+    pub(super) priority_throttle_enabled: bool,
     pub(super) stall_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DownloadPerformanceProfile {
+    pub(super) initial_segments: usize,
     pub(super) max_segments: usize,
     pub(super) min_segmented_size: u64,
     pub(super) target_segment_size: u64,
@@ -190,6 +195,8 @@ pub(super) struct DownloadPerformanceProfile {
     pub(super) bulk_hoster_stall_timeout: Duration,
     pub(super) max_low_speed_retries: u32,
     pub(super) speed_smoothing_alpha: f64,
+    pub(super) adaptive_ramp_step: usize,
+    pub(super) adaptive_ramp_interval: Duration,
 }
 
 #[derive(Debug)]
@@ -286,236 +293,6 @@ impl LowSpeedMonitor {
             LowSpeedDecision::Continue
         }
     }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct TorrentLowThroughputMonitor {
-    pub(super) slow_since: Option<Instant>,
-    pub(super) last_reported_at: Option<Instant>,
-}
-
-impl TorrentLowThroughputMonitor {
-    pub(super) fn should_report(&mut self, update: &TorrentRuntimeSnapshot, now: Instant) -> bool {
-        if !is_torrent_low_throughput_sample(update) {
-            self.slow_since = None;
-            return false;
-        }
-
-        let slow_since = *self.slow_since.get_or_insert(now);
-        if now.duration_since(slow_since) < TORRENT_LOW_THROUGHPUT_REPORT_WINDOW {
-            return false;
-        }
-
-        if self.last_reported_at.is_some_and(|reported_at| {
-            now.duration_since(reported_at) < TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL
-        }) {
-            return false;
-        }
-
-        self.last_reported_at = Some(now);
-        true
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TorrentRestoreWatchdogDecision {
-    Continue,
-    Recheck,
-    Stalled,
-}
-
-#[derive(Debug)]
-pub(super) struct TorrentRestoreWatchdog {
-    pub(super) idle_since: Instant,
-    pub(super) recheck_attempted: bool,
-}
-
-impl TorrentRestoreWatchdog {
-    pub(super) fn new(now: Instant) -> Self {
-        Self {
-            idle_since: now,
-            recheck_attempted: false,
-        }
-    }
-
-    pub(super) fn observe(
-        &mut self,
-        update: &TorrentRuntimeSnapshot,
-        now: Instant,
-    ) -> TorrentRestoreWatchdogDecision {
-        if torrent_restore_has_validation_signal(update) {
-            self.idle_since = now;
-            return TorrentRestoreWatchdogDecision::Continue;
-        }
-
-        let idle_for = now.duration_since(self.idle_since);
-        if !self.recheck_attempted && idle_for >= TORRENT_RESTORE_RECHECK_IDLE_WINDOW {
-            self.recheck_attempted = true;
-            self.idle_since = now;
-            return TorrentRestoreWatchdogDecision::Recheck;
-        }
-
-        if self.recheck_attempted && idle_for >= TORRENT_RESTORE_STALLED_IDLE_WINDOW {
-            return TorrentRestoreWatchdogDecision::Stalled;
-        }
-
-        TorrentRestoreWatchdogDecision::Continue
-    }
-}
-
-pub(super) fn torrent_restore_has_validation_signal(update: &TorrentRuntimeSnapshot) -> bool {
-    update.finished || update.total_bytes > 0 || update.downloaded_bytes > 0
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TorrentPeerConnectionWatchdogDecision {
-    Continue,
-    Report,
-    RefreshPeers,
-    ReaddTorrent,
-}
-
-#[derive(Debug)]
-pub(super) struct TorrentPeerConnectionWatchdog {
-    pub(super) mode: TorrentPeerConnectionWatchdogMode,
-    pub(super) unhealthy_since: Option<Instant>,
-    pub(super) last_reported_at: Option<Instant>,
-    pub(super) refreshed: bool,
-    pub(super) readded: bool,
-}
-
-impl TorrentPeerConnectionWatchdog {
-    pub(super) fn new(mode: TorrentPeerConnectionWatchdogMode, now: Instant) -> Self {
-        Self {
-            mode,
-            unhealthy_since: Some(now),
-            last_reported_at: None,
-            refreshed: false,
-            readded: false,
-        }
-    }
-
-    pub(super) fn observe(
-        &mut self,
-        update: &TorrentRuntimeSnapshot,
-        now: Instant,
-    ) -> TorrentPeerConnectionWatchdogDecision {
-        if !is_torrent_low_throughput_sample(update) {
-            self.unhealthy_since = None;
-            return TorrentPeerConnectionWatchdogDecision::Continue;
-        }
-
-        let unhealthy_since = *self.unhealthy_since.get_or_insert(now);
-        if now.duration_since(unhealthy_since) < TORRENT_PEER_WATCHDOG_WINDOW {
-            return TorrentPeerConnectionWatchdogDecision::Continue;
-        }
-
-        if matches!(self.mode, TorrentPeerConnectionWatchdogMode::Experimental) {
-            if !self.refreshed {
-                self.refreshed = true;
-                self.unhealthy_since = Some(now);
-                return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
-            }
-            if !self.readded {
-                self.readded = true;
-                self.unhealthy_since = Some(now);
-                return TorrentPeerConnectionWatchdogDecision::ReaddTorrent;
-            }
-        }
-
-        if self.last_reported_at.is_some_and(|reported_at| {
-            now.duration_since(reported_at) < TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL
-        }) {
-            return TorrentPeerConnectionWatchdogDecision::Continue;
-        }
-
-        self.last_reported_at = Some(now);
-        TorrentPeerConnectionWatchdogDecision::Report
-    }
-}
-
-pub(super) fn is_torrent_low_throughput_sample(update: &TorrentRuntimeSnapshot) -> bool {
-    if update.finished || !matches!(update.phase, TorrentRuntimePhase::Live) {
-        return false;
-    }
-
-    let live_peers = update
-        .diagnostics
-        .as_ref()
-        .map(|diagnostics| diagnostics.live_peers)
-        .or(update.peers)
-        .unwrap_or(0);
-
-    live_peers >= TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD
-        && update.download_speed < TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND
-}
-
-pub(super) fn torrent_low_throughput_message(update: &TorrentRuntimeSnapshot) -> String {
-    let Some(diagnostics) = update.diagnostics.as_ref() else {
-        let live_peers = update.peers.unwrap_or(0);
-        return format!(
-            "Torrent throughput low: {live_peers} live peers, job down {} B/s",
-            update.download_speed
-        );
-    };
-
-    let listen_port = diagnostics
-        .listen_port
-        .map(|port| format!("listen port {port}"))
-        .unwrap_or_else(|| "listen port unavailable".into());
-    let listener_state = if diagnostics.listener_fallback {
-        "listener fallback active"
-    } else {
-        "listener fallback inactive"
-    };
-    let classification = torrent_low_throughput_classification(update);
-
-    format!(
-        "Torrent throughput low ({classification}): {} live peers, {} seen, {} queued, {} connecting, {} contributing, {} peer error events across {} peers, {} connection attempts, {} dead, {} not needed, job down {} B/s, session down {} B/s, session up {} B/s, {listen_port}, {listener_state}",
-        diagnostics.live_peers,
-        diagnostics.seen_peers,
-        diagnostics.queued_peers,
-        diagnostics.connecting_peers,
-        diagnostics.contributing_peers,
-        diagnostics.peer_errors,
-        diagnostics.peers_with_errors,
-        diagnostics.peer_connection_attempts,
-        diagnostics.dead_peers,
-        diagnostics.not_needed_peers,
-        update.download_speed,
-        diagnostics.session_download_speed,
-        diagnostics.session_upload_speed
-    )
-}
-
-pub(super) fn torrent_low_throughput_classification(
-    update: &TorrentRuntimeSnapshot,
-) -> &'static str {
-    let Some(diagnostics) = update.diagnostics.as_ref() else {
-        return "peer health unknown";
-    };
-
-    if diagnostics.listen_port.is_none() || diagnostics.listener_fallback {
-        return "listener unavailable or fallback active";
-    }
-
-    if diagnostics.contributing_peers == 0
-        || diagnostics.contributing_peers.saturating_mul(4) < diagnostics.live_peers
-    {
-        return "few contributing peers";
-    }
-
-    if diagnostics.peers_with_errors.saturating_mul(2) >= diagnostics.live_peers
-        || diagnostics.peer_errors >= diagnostics.live_peers
-    {
-        return "high peer churn";
-    }
-
-    if diagnostics.session_upload_speed == 0 && update.upload_speed == 0 {
-        return "upload reciprocity risk";
-    }
-
-    "peer throughput constrained"
 }
 
 #[derive(Debug, Clone)]

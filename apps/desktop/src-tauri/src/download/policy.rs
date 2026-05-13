@@ -23,6 +23,7 @@ const HTTP_PERFORMANCE_PROFILES: [HttpPerformanceModeConfig; 3] = [
     HttpPerformanceModeConfig {
         mode: DownloadPerformanceMode::Stable,
         profile: DownloadPerformanceProfile {
+            initial_segments: 1,
             max_segments: 1,
             min_segmented_size: u64::MAX,
             target_segment_size: u64::MAX,
@@ -31,11 +32,14 @@ const HTTP_PERFORMANCE_PROFILES: [HttpPerformanceModeConfig; 3] = [
             bulk_hoster_stall_timeout: Duration::from_secs(90),
             max_low_speed_retries: 2,
             speed_smoothing_alpha: 0.25,
+            adaptive_ramp_step: 0,
+            adaptive_ramp_interval: Duration::from_millis(1500),
         },
     },
     HttpPerformanceModeConfig {
         mode: DownloadPerformanceMode::Balanced,
         profile: DownloadPerformanceProfile {
+            initial_segments: 6,
             max_segments: 6,
             min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
             target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
@@ -44,19 +48,24 @@ const HTTP_PERFORMANCE_PROFILES: [HttpPerformanceModeConfig; 3] = [
             bulk_hoster_stall_timeout: Duration::from_secs(25),
             max_low_speed_retries: 2,
             speed_smoothing_alpha: 0.25,
+            adaptive_ramp_step: 0,
+            adaptive_ramp_interval: Duration::from_millis(1500),
         },
     },
     HttpPerformanceModeConfig {
         mode: DownloadPerformanceMode::Fast,
         profile: DownloadPerformanceProfile {
-            max_segments: 12,
+            initial_segments: 32,
+            max_segments: 64,
             min_segmented_size: FAST_MIN_SEGMENTED_SIZE,
             target_segment_size: FAST_TARGET_SEGMENT_SIZE,
             low_speed_threshold_bytes_per_second: 16 * 1024,
             low_speed_window: Duration::from_secs(15),
             bulk_hoster_stall_timeout: Duration::from_secs(15),
             max_low_speed_retries: 3,
-            speed_smoothing_alpha: 0.25,
+            speed_smoothing_alpha: 0.75,
+            adaptive_ramp_step: 8,
+            adaptive_ramp_interval: Duration::from_millis(1000),
         },
     },
 ];
@@ -105,15 +114,23 @@ pub(super) fn retry_exhaustion_can_pause_recoverably(
     error: &DownloadError,
     has_valid_partial: bool,
 ) -> bool {
-    error.retryable
-        && has_valid_partial
-        && matches!(
-            error.category,
-            FailureCategory::Network | FailureCategory::Server | FailureCategory::Http
-        )
+    has_valid_partial
+        && (error.category == FailureCategory::Resume
+            || (error.retryable
+                && matches!(
+                    error.category,
+                    FailureCategory::Network | FailureCategory::Server | FailureCategory::Http
+                )))
 }
 
 pub(super) fn recoverable_retry_pause_message(error: &DownloadError, attempts: u32) -> String {
+    if error.category == FailureCategory::Resume {
+        return format!(
+            "Resume was refused and partial data preserved. Use Restart to download from zero. Last error: {}",
+            error.message
+        );
+    }
+
     format!(
         "Network remained unstable after {attempts} retry attempts. Paused with partial data preserved; resume the download to continue. Last error: {}",
         error.message

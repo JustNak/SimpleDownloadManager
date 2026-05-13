@@ -63,6 +63,18 @@
     return [JobState.Queued, JobState.Starting, JobState.Downloading].includes(job.state);
   }
 
+  function segmentConnectionText(job: DownloadJob) {
+    const planned = segmentCount(job.plannedSegments);
+    if (planned <= 0) return '--';
+    const active = Math.min(planned, segmentCount(job.activeSegments));
+    return `${active}/${planned}`;
+  }
+
+  function segmentCount(value: number | undefined) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+    return Math.max(0, Math.trunc(value));
+  }
+
   function actionClass(variant: ActionVariant) {
     switch (variant) {
       case 'primary':
@@ -133,10 +145,11 @@
         </div>
       </section>
 
-      <section class="mt-1.5 grid grid-cols-3 gap-2 border-t border-border/35 bg-background/30 px-2 py-1">
+      <section class="mt-1.5 grid grid-cols-4 gap-2 border-t border-border/35 bg-background/30 px-2 py-1">
         {@render Metric('Speed', job.state === JobState.Downloading ? `${formatBytes(progressMetrics.averageSpeed)}/s` : '--')}
         {@render Metric('ETA', job.state === JobState.Downloading ? formatTime(progressMetrics.timeRemaining) : '--')}
         {@render Metric('Size', job.totalBytes > 0 ? formatBytes(job.totalBytes) : 'Unknown')}
+        {@render Metric('Connections', job.state === JobState.Downloading ? segmentConnectionText(job) : '--')}
       </section>
 
       <div class="mt-1 grid grid-cols-[48px_minmax(0,1fr)] gap-x-1.5 gap-y-0 text-[10px] leading-4">

@@ -10,20 +10,6 @@ pub(super) async fn ensure_parent_directory(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Could not create download directory: {error}"))
 }
 
-pub(super) async fn truncate_file(path: &Path) -> Result<(), String> {
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await
-        .map_err(|error| format!("Could not reset partial download file: {error}"))?;
-
-    file.set_len(0)
-        .await
-        .map_err(|error| format!("Could not truncate partial download file: {error}"))
-}
-
 pub(super) async fn metadata_len(path: &Path) -> Option<u64> {
     fs::metadata(path).await.ok().map(|metadata| metadata.len())
 }

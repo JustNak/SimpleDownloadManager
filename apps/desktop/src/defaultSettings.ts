@@ -1,5 +1,5 @@
-import { DEFAULT_ACCENT_COLOR } from './appearance';
-import type { ExtensionIntegrationSettings, Settings } from './types';
+import { DEFAULT_ACCENT_COLOR } from './appearance.ts';
+import type { ExtensionIntegrationSettings, Settings } from './types.ts';
 
 export const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
@@ -34,7 +34,7 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
-    downloadPerformanceMode: 'balanced',
+    downloadPerformanceMode: 'fast',
     torrent: {
       enabled: true,
       downloadDirectory: `${downloadDirectory}\\Torrent`,
@@ -44,13 +44,13 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       uploadLimitKibPerSecond: 0,
       portForwardingEnabled: false,
       portForwardingPort: 42000,
-      peerConnectionWatchdogMode: 'diagnose',
+      peerConnectionWatchdogMode: 'recover',
     },
     bulk: {
       outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),
       maxConcurrentDownloads: 4,
       speedLimitKibPerSecond: 0,
-      downloadPerformanceMode: 'balanced',
+      downloadPerformanceMode: 'fast',
       hosterFairnessMode: 'adaptive',
       hosterAccelerationMode: 'safe',
       autoRetryOverrideEnabled: false,

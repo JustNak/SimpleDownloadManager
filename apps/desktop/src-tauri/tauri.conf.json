@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Simple Download Manager",
-  "version": "0.7.1-beta",
+  "mainBinaryName": "simple-download-manager-desktop-backend",
+  "version": "0.8.0-beta",
   "identifier": "com.myapp.downloadmanager",
   "build": {
     "beforeDevCommand": "npm run dev --workspace @myapp/desktop",

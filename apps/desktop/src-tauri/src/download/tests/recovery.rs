@@ -15,7 +15,7 @@ fn retry_decision_pauses_recoverably_after_exhausted_retry_budget_with_partial_p
 }
 
 #[test]
-fn retry_decision_fails_hard_without_partial_progress_or_for_resume_conflicts() {
+fn retry_decision_fails_hard_without_partial_progress() {
     let network = download_error(
         FailureCategory::Network,
         "connection reset before any bytes arrived".into(),
@@ -25,14 +25,26 @@ fn retry_decision_fails_hard_without_partial_progress_or_for_resume_conflicts() 
         retry_decision_for_attempt_error(&network, 3, 3, false),
         RetryDecision::Fail
     );
+}
 
+#[test]
+fn retry_decision_pauses_recoverably_for_resume_conflicts_with_partial_progress() {
     let resume = download_error(
         FailureCategory::Resume,
-        "Resume metadata is missing or no longer matches this partial download.".into(),
+        "The server refused to resume this partial download.".into(),
         false,
     );
     assert_eq!(
         retry_decision_for_attempt_error(&resume, 0, 3, true),
+        RetryDecision::PauseRecoverably
+    );
+
+    let message = recoverable_retry_pause_message(&resume, 0);
+    assert!(message.contains("partial data preserved"));
+    assert!(message.contains("Restart"));
+
+    assert_eq!(
+        retry_decision_for_attempt_error(&resume, 0, 3, false),
         RetryDecision::Fail
     );
 }
@@ -72,6 +84,27 @@ async fn retry_exhaustion_pause_preserves_partial_progress() {
         .as_deref()
         .unwrap_or_default()
         .contains("partial data preserved"));
+}
+
+#[tokio::test]
+async fn single_stream_resume_refusal_preserves_partial_file_and_returns_resume_error() {
+    let root = test_download_runtime_dir("single-stream-resume-refusal");
+    let temp_path = root.join("download.bin.part");
+    tokio::fs::write(&temp_path, b"partial-bytes")
+        .await
+        .expect("partial file should exist before resume refusal");
+
+    let error = ensure_single_stream_resume_supported(&temp_path, 13, false)
+        .expect_err("resume refusal with existing bytes should require preserved pause");
+
+    assert_eq!(error.category, FailureCategory::Resume);
+    assert!(!error.retryable);
+    assert!(error.message.contains("server refused to resume"));
+    assert!(error.message.contains("partial file was preserved"));
+    assert!(error.message.contains("Restart"));
+    assert_eq!(tokio::fs::read(&temp_path).await.unwrap(), b"partial-bytes");
+
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]

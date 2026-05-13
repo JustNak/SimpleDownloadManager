@@ -40,12 +40,28 @@
     parseExcludedHostInput,
     removeExcludedHost,
   } from './settingsExcludedSites';
-  import { DEFAULT_EXTENSION_LISTEN_PORT, defaultBulkDownloadDirectory } from './defaultSettings';
+  import { defaultBulkDownloadDirectory } from './defaultSettings';
+  import {
+    diagnosticLevelConsoleClass,
+    formatDiagnosticEventTime,
+    formatUpdateProgress,
+    newestFirstDiagnosticEvents,
+    normalizeBulkSettings,
+    normalizeInteger,
+    normalizeListenPort,
+    normalizeNumber,
+    normalizeTorrentPort,
+    registrationBadgeClass,
+    registrationStatusLabel,
+    renderRegistrationMessage,
+    renderUpdateStatus,
+    updateProgressPercent,
+    usesTorrentRatioLimit,
+    usesTorrentTimeLimit,
+    versionIndicatorToneClass,
+  } from './settingsPageHelpers';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
-  const downloadPerformanceModes = new Set(['stable', 'balanced', 'fast']);
-  const bulkHosterFairnessModes = new Set(['adaptive', 'safe', 'off']);
-  const bulkHosterAccelerationModes = new Set(['safe', 'off']);
 
   interface Props {
     settings: Settings;
@@ -107,7 +123,7 @@
   const isDirty = $derived(!settingsEqual(completeSettingsDraft(), settings));
   const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
-  const recentDiagnosticEvents = $derived(diagnostics?.recentEvents ? [...diagnostics.recentEvents].reverse() : []);
+  const recentDiagnosticEvents = $derived(newestFirstDiagnosticEvents(diagnostics));
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
   const updateVersion = $derived(updateVersionIndicator(updateState, installedVersion));
 
@@ -250,93 +266,6 @@
     updateExtensionIntegration({ excludedHosts: removeExcludedHost(excludedHosts, host) });
   }
 
-  function normalizeListenPort(value: string): number {
-    const port = Number.parseInt(value, 10);
-    return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_EXTENSION_LISTEN_PORT;
-  }
-
-  function normalizeBulkSettings(settings: Settings['bulk'], downloadDirectory: string): Settings['bulk'] {
-    return {
-      ...settings,
-      outputDirectory: settings.outputDirectory.trim() || defaultBulkDownloadDirectory(downloadDirectory),
-      maxConcurrentDownloads: Math.max(1, Math.min(24, Math.trunc(settings.maxConcurrentDownloads) || 4)),
-      speedLimitKibPerSecond: Math.max(0, Math.min(1048576, Math.trunc(settings.speedLimitKibPerSecond) || 0)),
-      downloadPerformanceMode: downloadPerformanceModes.has(settings.downloadPerformanceMode) ? settings.downloadPerformanceMode : 'balanced',
-      hosterFairnessMode: bulkHosterFairnessModes.has(settings.hosterFairnessMode) ? settings.hosterFairnessMode : 'adaptive',
-      hosterAccelerationMode: bulkHosterAccelerationModes.has(settings.hosterAccelerationMode) ? settings.hosterAccelerationMode : 'safe',
-      autoRetryAttempts: Math.max(0, Math.min(10, Math.trunc(settings.autoRetryAttempts) || 0)),
-    };
-  }
-
-  function normalizeTorrentPort(value: string): number {
-    const port = Number.parseInt(value, 10);
-    return Number.isFinite(port) && port >= 1024 && port <= 65534 ? port : 42000;
-  }
-
-  function normalizeInteger(value: string, fallback: number): number {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-
-  function normalizeNumber(value: string, fallback: number): number {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-
-  function usesTorrentRatioLimit(mode: Settings['torrent']['seedMode']) {
-    return mode === 'ratio' || mode === 'ratio_or_time';
-  }
-
-  function usesTorrentTimeLimit(mode: Settings['torrent']['seedMode']) {
-    return mode === 'time' || mode === 'ratio_or_time';
-  }
-
-  function renderUpdateStatus(state: AppUpdateState): string {
-    if (state.status === 'checking') return 'Checking GitHub Releases for a newer beta build.';
-    if (state.status === 'available' && state.availableUpdate && updateInstallBlocked) return `Version ${state.availableUpdate.version} is ready after active bulk downloads pause or finish.`;
-    if (state.status === 'available' && state.availableUpdate) return `Version ${state.availableUpdate.version} is available.`;
-    if (state.status === 'not_available') return 'You are running the latest beta build.';
-    if (state.status === 'downloading') return 'Downloading the signed update package.';
-    if (state.status === 'installing') return 'Installing the update. The app may close automatically.';
-    if (state.status === 'error') return 'The last update action failed.';
-    return 'Checks the signed beta feed hosted on GitHub Releases.';
-  }
-
-  function versionIndicatorToneClass(tone: AppUpdateVersionTone): string {
-    switch (tone) {
-      case 'available':
-        return 'text-primary';
-      case 'error':
-        return 'text-destructive';
-      case 'pending':
-        return 'text-muted-foreground';
-      default:
-        return 'text-foreground';
-    }
-  }
-
-  function updateProgressPercent(state: AppUpdateState): number {
-    if (!state.totalBytes || state.totalBytes <= 0) return 0;
-    return Math.max(0, Math.min(100, (state.downloadedBytes / state.totalBytes) * 100));
-  }
-
-  function formatUpdateProgress(state: AppUpdateState): string {
-    if (!state.totalBytes) return `${formatCompactBytes(state.downloadedBytes)} downloaded`;
-    return `${formatCompactBytes(state.downloadedBytes)} / ${formatCompactBytes(state.totalBytes)}`;
-  }
-
-  function formatCompactBytes(value: number): string {
-    if (!Number.isFinite(value) || value <= 0) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB'];
-    let unitIndex = 0;
-    let nextValue = value;
-    while (nextValue >= 1024 && unitIndex < units.length - 1) {
-      nextValue /= 1024;
-      unitIndex += 1;
-    }
-    return `${nextValue >= 10 || unitIndex === 0 ? nextValue.toFixed(0) : nextValue.toFixed(1)} ${units[unitIndex]}`;
-  }
-
   function renderRegistrationIcon(status?: DiagnosticsSnapshot['hostRegistration']['status']): IconComponent {
     switch (status) {
       case 'configured':
@@ -346,66 +275,6 @@
       default:
         return ShieldX;
     }
-  }
-
-  function renderRegistrationMessage(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
-    switch (status) {
-      case 'configured':
-        return 'At least one browser has a valid native host registration and host binary path.';
-      case 'broken':
-        return 'A browser registration exists, but the manifest or native host binary path is broken.';
-      case 'missing':
-        return 'No browser registration was detected for the native messaging host.';
-      default:
-        return 'Diagnostics are still loading.';
-    }
-  }
-
-  function registrationStatusLabel(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
-    switch (status) {
-      case 'configured':
-        return 'Ready';
-      case 'broken':
-        return 'Repair';
-      case 'missing':
-        return 'Missing';
-      default:
-        return 'Checking';
-    }
-  }
-
-  function registrationBadgeClass(status?: DiagnosticsSnapshot['hostRegistration']['status']) {
-    switch (status) {
-      case 'configured':
-        return 'bg-success/10 text-success';
-      case 'broken':
-        return 'bg-warning/10 text-warning';
-      case 'missing':
-        return 'bg-destructive/10 text-destructive';
-      default:
-        return 'bg-muted text-muted-foreground';
-    }
-  }
-
-  function diagnosticLevelConsoleClass(level: DiagnosticsSnapshot['recentEvents'][number]['level']) {
-    switch (level) {
-      case 'error':
-        return 'text-red-300';
-      case 'warning':
-        return 'text-amber-300';
-      default:
-        return 'text-emerald-300';
-    }
-  }
-
-  function formatDiagnosticEventTime(timestamp: number) {
-    if (!Number.isFinite(timestamp) || timestamp <= 0) return 'Unknown time';
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(timestamp));
   }
 
   const queueRowSizes: Array<{ value: QueueRowSize; label: string }> = [
@@ -470,7 +339,7 @@
     <div class="flex items-start justify-between gap-3">
       <div class="min-w-0">
         <div class="font-semibold text-foreground">Beta channel updates</div>
-        <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderUpdateStatus(updateState)}</div>
+        <div class="mt-1 text-sm leading-6 text-muted-foreground">{renderUpdateStatus(updateState, updateInstallBlocked)}</div>
       </div>
       <button type="button" onclick={onCheckForUpdates} disabled={updateIsBusy} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
         <RotateCw size={16} class={updateState.status === 'checking' ? 'animate-spin' : ''} />
@@ -870,8 +739,8 @@
 
 {#snippet peerWatchdogControl()}
   <select bind:value={formData.torrent.peerConnectionWatchdogMode} onchange={() => updateTorrentSettings({ peerConnectionWatchdogMode: formData.torrent.peerConnectionWatchdogMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
-    <option value="diagnose">Diagnose</option>
-    <option value="experimental">Experimental</option>
+    <option value="recover">Recover</option>
+    <option value="diagnose">Diagnose only</option>
   </select>
 {/snippet}
 

@@ -52,7 +52,14 @@ Supported request types:
       "showProgressAfterHandoff": true,
       "showBadgeStatus": true,
       "excludedHosts": [],
-      "ignoredFileExtensions": []
+      "ignoredFileExtensions": [],
+      "authenticatedHandoffEnabled": false,
+      "protectedDownloadAuthScope": "off",
+      "authenticatedHandoffHosts": []
+    },
+    "appearanceSettings": {
+      "theme": "system",
+      "accentColor": "#3b82f6"
     }
   }
 }
@@ -88,6 +95,7 @@ Supported request types:
   "excludedHosts": ["example.com"],
   "ignoredFileExtensions": ["exe", "zip", "txt", "pdf"],
   "authenticatedHandoffEnabled": true,
+  "protectedDownloadAuthScope": "allowlist",
   "authenticatedHandoffHosts": ["chatgpt.com"]
 }
 ```
@@ -109,9 +117,11 @@ Torrent lifecycle behavior:
 `ignoredFileExtensions` applies only to automatic browser download capture.
 Manual sends, popup sends, and context-menu sends are still allowed.
 `authenticatedHandoffHosts` is retained for backward compatibility with older settings.
+`protectedDownloadAuthScope` is the current Protected Downloads authority: `off` disables captured auth, `allowlist` allows only exact allowlisted hosts, and `legacy_global` preserves older global-auth settings during migration.
 When Protected Downloads is enabled, exact browser download handoffs may include bounded, memory-only request headers in `handoffAuth`; auth header values are never persisted or written to diagnostics.
 Captured auth is globally capped in extension memory, cleared when Protected Downloads is disabled, and only matched by URL when exactly one fresh request capture exists.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
+`appearanceSettings` is returned with status responses so the popup and options UI can mirror the desktop theme and accent color. It is display-only for the extension and is not part of `save_extension_settings`.
 
 ## Host -> Extension
 

@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
+const queueBulkExpansionSource = await readFile(new URL('../src/queueBulkExpansion.ts', import.meta.url), 'utf8');
+const queueFormattingSource = await readFile(new URL('../src/queueFormatting.ts', import.meta.url), 'utf8');
+const queueSelectionSource = await readFile(new URL('../src/queueSelection.ts', import.meta.url), 'utf8');
 const queueLayoutSource = await readFile(new URL('../src/queueViewLayout.ts', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const fileBadgeSource = await readFile(new URL('../src/FileBadge.svelte', import.meta.url), 'utf8');
@@ -9,6 +12,12 @@ const fileBadgeSource = await readFile(new URL('../src/FileBadge.svelte', import
 assert.match(source, /queueTableColumnsForView\(view\)/, 'queue should use the Svelte view-specific column helper');
 assert.match(source, /tableColumns\[2\] === 'Seed'/, 'torrent views should switch to the Svelte seed and ratio columns');
 assert.match(source, /getVirtualQueueWindow/, 'queue should keep the Svelte virtualization window for large queues');
+assert.match(source, /from '\.\/queueBulkExpansion'/, 'bulk row expansion sizing should live outside QueueView');
+assert.match(source, /from '\.\/queueFormatting'/, 'queue row formatting should live outside QueueView');
+assert.match(source, /from '\.\/queueSelection'/, 'queue selection target helpers should live outside QueueView');
+assert.match(queueBulkExpansionSource, /export function bulkExpansionHeight/, 'bulk expansion helpers should be behavior-testable without Svelte');
+assert.match(queueFormattingSource, /export function formatQueueTime/, 'queue formatting helpers should be behavior-testable without Svelte');
+assert.match(queueSelectionSource, /export function deleteJobIdsForPrompt/, 'delete prompt id expansion should be behavior-testable without Svelte');
 assert.match(source, /queueRowSizeClass\(queueRowSize\)/, 'queue rows should read their density from the saved queue row-size setting');
 assert.match(queueLayoutSource, /default:[\s\S]*return 'min-h-\[42px\] py-1 text-sm'/, 'medium queue row size should preserve the current default density');
 assert.match(queueLayoutSource, /case 'compact':[\s\S]*min-h-\[28px\] py-0 text-xs[\s\S]*case 'small':[\s\S]*min-h-\[34px\] py-0\.5 text-xs[\s\S]*case 'large':[\s\S]*min-h-\[54px\] py-1\.5 text-sm[\s\S]*case 'damn':[\s\S]*min-h-\[68px\] py-2\.5 text-base/, 'queue row sizing should match Svelte density classes');

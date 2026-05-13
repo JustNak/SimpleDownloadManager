@@ -83,6 +83,14 @@ impl SharedState {
             .any(|job| is_torrent_engine_blocking_job(job, &state.active_workers))
     }
 
+    pub async fn has_other_torrent_engine_blocking_work(&self, current_job_id: &str) -> bool {
+        let state = self.inner.read().await;
+        state.jobs.iter().any(|job| {
+            job.id != current_job_id
+                && is_other_torrent_engine_reset_blocking_job(job, &state.active_workers)
+        })
+    }
+
     pub async fn prepare_torrent_session_cache_clear(
         &self,
     ) -> Result<TorrentSessionCacheClearState, BackendError> {
@@ -830,6 +838,18 @@ fn is_torrent_engine_blocking_job(job: &DownloadJob, active_workers: &HashSet<St
             || matches!(
                 job.state,
                 JobState::Queued | JobState::Starting | JobState::Downloading | JobState::Seeding
+            ))
+}
+
+fn is_other_torrent_engine_reset_blocking_job(
+    job: &DownloadJob,
+    active_workers: &HashSet<String>,
+) -> bool {
+    job.transfer_kind == TransferKind::Torrent
+        && (active_workers.contains(&job.id)
+            || matches!(
+                job.state,
+                JobState::Starting | JobState::Downloading | JobState::Seeding
             ))
 }
 

@@ -47,6 +47,11 @@ const averageSamples = recordProgressSample(
   { ...baseJob, downloadedBytes: 11_000, speed: 80_000 },
   11_000,
 );
+const startupSamples = recordProgressSample(
+  initialSamples,
+  { ...baseJob, downloadedBytes: 3_000, speed: 80_000 },
+  3_000,
+);
 
 assert.deepEqual(
   recordProgressSamples(
@@ -68,6 +73,15 @@ assert.deepEqual(
     { jobId: 'job_3', timestamp: 11_000, downloadedBytes: 7_000 },
   ],
   'recordProgressSamples should update active jobs and clear inactive or missing job samples in one pass',
+);
+
+assert.deepEqual(
+  calculateDownloadProgressMetrics({ ...baseJob, downloadedBytes: 3_000, speed: 80_000 }, startupSamples, 3_000),
+  {
+    averageSpeed: 80_000,
+    timeRemaining: 1,
+  },
+  'HTTP startup metrics should prefer backend live speed over short observed samples',
 );
 
 assert.deepEqual(

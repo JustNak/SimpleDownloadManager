@@ -232,6 +232,10 @@ pub struct DownloadJob {
     pub speed: u64,
     #[serde(default)]
     pub eta: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_segments: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_segments: Option<u32>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
@@ -386,8 +390,8 @@ pub enum StartupLaunchMode {
 #[serde(rename_all = "snake_case")]
 pub enum DownloadPerformanceMode {
     Stable,
-    #[default]
     Balanced,
+    #[default]
     Fast,
 }
 
@@ -421,12 +425,29 @@ pub enum TorrentSeedMode {
     RatioOrTime,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TorrentPeerConnectionWatchdogMode {
-    #[default]
     Diagnose,
-    Experimental,
+    #[default]
+    Recover,
+}
+
+impl<'de> Deserialize<'de> for TorrentPeerConnectionWatchdogMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "diagnose" => Ok(Self::Diagnose),
+            "recover" | "experimental" => Ok(Self::Recover),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["diagnose", "recover"],
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -802,7 +823,7 @@ impl Default for Settings {
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
-            download_performance_mode: DownloadPerformanceMode::Balanced,
+            download_performance_mode: DownloadPerformanceMode::Fast,
             torrent: TorrentSettings::default(),
             notifications_enabled: true,
             notification_sounds_enabled: true,
@@ -832,7 +853,7 @@ impl Default for BulkDownloadSettings {
             output_directory: String::new(),
             max_concurrent_downloads: default_bulk_max_concurrent_downloads(),
             speed_limit_kib_per_second: 0,
-            download_performance_mode: DownloadPerformanceMode::Balanced,
+            download_performance_mode: DownloadPerformanceMode::Fast,
             hoster_fairness_mode: BulkHosterFairnessMode::Adaptive,
             hoster_acceleration_mode: BulkHosterAccelerationMode::Safe,
             auto_retry_override_enabled: false,
@@ -875,7 +896,7 @@ impl Default for TorrentSettings {
             upload_limit_kib_per_second: 0,
             port_forwarding_enabled: false,
             port_forwarding_port: default_torrent_port_forwarding_port(),
-            peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Diagnose,
+            peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Recover,
         }
     }
 }
@@ -1185,7 +1206,7 @@ mod tests {
         assert_eq!(state.settings.speed_limit_kib_per_second, 0);
         assert_eq!(
             state.settings.download_performance_mode,
-            DownloadPerformanceMode::Balanced
+            DownloadPerformanceMode::Fast
         );
         assert_eq!(state.settings.accent_color, "#3b82f6");
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
@@ -1475,7 +1496,7 @@ mod tests {
         assert_eq!(settings.bulk.speed_limit_kib_per_second, 0);
         assert_eq!(
             settings.bulk.download_performance_mode,
-            DownloadPerformanceMode::Balanced
+            DownloadPerformanceMode::Fast
         );
         assert_eq!(
             settings.bulk.hoster_fairness_mode,
@@ -1500,7 +1521,7 @@ mod tests {
         assert_eq!(settings.speed_limit_kib_per_second, 0);
         assert_eq!(
             settings.download_performance_mode,
-            DownloadPerformanceMode::Balanced
+            DownloadPerformanceMode::Fast
         );
         assert_eq!(settings.accent_color, "#3b82f6");
         assert!(settings.show_details_on_click);
@@ -1522,9 +1543,9 @@ mod tests {
 
         assert_eq!(value["startOnStartup"], true);
         assert_eq!(value["startupLaunchMode"], "tray");
-        assert_eq!(value["downloadPerformanceMode"], "balanced");
+        assert_eq!(value["downloadPerformanceMode"], "fast");
         assert_eq!(value["bulk"]["speedLimitKibPerSecond"], 0);
-        assert_eq!(value["bulk"]["downloadPerformanceMode"], "balanced");
+        assert_eq!(value["bulk"]["downloadPerformanceMode"], "fast");
         assert_eq!(value["bulk"]["hosterFairnessMode"], "adaptive");
         assert_eq!(value["bulk"]["hosterAccelerationMode"], "safe");
         assert_eq!(value["showDetailsOnClick"], true);

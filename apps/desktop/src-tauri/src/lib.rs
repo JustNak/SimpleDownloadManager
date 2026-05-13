@@ -2,6 +2,8 @@ pub(crate) mod archive_parts;
 pub mod commands;
 pub mod download;
 pub mod hosters;
+#[cfg(any(test, debug_assertions))]
+pub mod http_bench;
 pub mod ipc;
 pub mod lifecycle;
 pub mod prompts;

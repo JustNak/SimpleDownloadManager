@@ -17,8 +17,8 @@ pub(super) fn prepare_torrent_source_for_task(
     prepare_torrent_source(cached_source.as_deref().unwrap_or(&task.url))
 }
 
-pub(super) async fn run_torrent_download_attempt(
-    app: &AppHandle,
+pub(super) async fn run_torrent_download_attempt<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
@@ -31,7 +31,7 @@ pub(super) async fn run_torrent_download_attempt(
         ));
     }
 
-    let engine = torrent_engine(state)
+    let mut engine = torrent_engine(state)
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
     if let Some(message) = engine.take_listener_fallback_message() {
@@ -182,46 +182,20 @@ pub(super) async fn run_torrent_download_attempt(
                     Some(task.id.clone()),
                 )
                 .await;
-            let tracker_first_diagnostics =
-                spawn_tracker_first_metadata_diagnostics(state.clone(), task.id.clone());
-            let add_outcome = add_prepared_torrent_with_controls(PreparedTorrentAddRequest {
+            let add_outcome = add_torrent_metadata_with_recovery(TorrentMetadataRecoveryRequest {
                 state,
                 job_id: &task.id,
-                engine: engine.as_ref(),
+                engine: &mut engine,
                 prepared_source: &prepared_source,
+                pending_cleanup_info_hash: pending_cleanup_info_hash.as_deref(),
                 output_folder: &output_folder,
                 upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
                 start_paused: restoring_seeding,
-                tracker_first_diagnostics: Some(tracker_first_diagnostics),
             })
-            .await;
-            let add_outcome = match add_outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    if is_torrent_metadata_timeout_error(&error) {
-                        cleanup_pending_torrent_metadata(
-                            engine.as_ref(),
-                            state,
-                            &task.id,
-                            pending_cleanup_info_hash.as_deref(),
-                        )
-                        .await;
-                    }
-                    return Err(error);
-                }
-            };
+            .await?;
             let mut add_session = match add_outcome {
                 TorrentAddOutcome::Added(outcome) => outcome,
                 TorrentAddOutcome::Interrupted(outcome) => {
-                    if matches!(outcome, DownloadOutcome::Canceled) {
-                        cleanup_pending_torrent_metadata(
-                            engine.as_ref(),
-                            state,
-                            &task.id,
-                            pending_cleanup_info_hash.as_deref(),
-                        )
-                        .await;
-                    }
                     return Ok(outcome);
                 }
             };
@@ -256,6 +230,7 @@ pub(super) async fn run_torrent_download_attempt(
                     output_folder: &output_folder,
                     upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
                     start_paused: false,
+                    metadata_timeout: TORRENT_METADATA_TIMEOUT,
                     tracker_first_diagnostics: None,
                 })
                 .await?;
@@ -401,6 +376,7 @@ pub(super) async fn run_torrent_download_attempt(
                     output_folder: &output_folder,
                     upload_limit_kib_per_second: settings.torrent.upload_limit_kib_per_second,
                     start_paused: false,
+                    metadata_timeout: TORRENT_METADATA_TIMEOUT,
                     tracker_first_diagnostics: None,
                 })
                 .await?;
@@ -495,6 +471,7 @@ pub(super) async fn run_torrent_download_attempt(
                                     .torrent
                                     .upload_limit_kib_per_second,
                                 start_paused: false,
+                                metadata_timeout: TORRENT_METADATA_TIMEOUT,
                                 tracker_first_diagnostics: None,
                             })
                             .await?;
@@ -574,7 +551,7 @@ pub(super) async fn run_torrent_download_attempt(
                             DiagnosticLevel::Warning,
                             "torrent",
                             format!(
-                                "Experimental peer watchdog refreshing peer connections: {}",
+                                "Recover peer watchdog refreshing peer connections: {}",
                                 torrent_low_throughput_message(&update)
                             ),
                             Some(task.id.clone()),
@@ -595,7 +572,7 @@ pub(super) async fn run_torrent_download_attempt(
                             DiagnosticLevel::Warning,
                             "torrent",
                             format!(
-                                "Experimental peer watchdog re-adding torrent session without deleting files: {}",
+                                "Recover peer watchdog re-adding torrent session without deleting files: {}",
                                 torrent_low_throughput_message(&update)
                             ),
                             Some(task.id.clone()),
@@ -629,6 +606,77 @@ pub(super) async fn run_torrent_download_attempt(
                                 .torrent
                                 .upload_limit_kib_per_second,
                             start_paused: false,
+                            metadata_timeout: TORRENT_METADATA_TIMEOUT,
+                            tracker_first_diagnostics: None,
+                        })
+                        .await?;
+                    match readd_outcome {
+                        TorrentAddOutcome::Added(outcome) => {
+                            engine_id = outcome.engine_id;
+                            prepared_source_for_recheck = Some(prepared_source);
+                            first_snapshot = true;
+                            low_throughput_monitor = TorrentLowThroughputMonitor::default();
+                            continue;
+                        }
+                        TorrentAddOutcome::Interrupted(outcome) => return Ok(outcome),
+                    }
+                }
+                TorrentPeerConnectionWatchdogDecision::ResetEngine => {
+                    let reset = clear_in_memory_torrent_engine_if_no_other_work(state, &task.id)
+                        .await
+                        .map_err(|message| {
+                            download_error(FailureCategory::Torrent, message, false)
+                        })?;
+                    if !reset {
+                        let _ = state
+                            .record_diagnostic_event(
+                                DiagnosticLevel::Warning,
+                                "torrent",
+                                "Recover peer watchdog skipped engine reset because another torrent is active",
+                                Some(task.id.clone()),
+                            )
+                            .await;
+                        low_throughput_monitor = TorrentLowThroughputMonitor::default();
+                        peer_connection_watchdog.rearm_engine_reset();
+                        continue;
+                    }
+
+                    let _ = state
+                        .record_diagnostic_event(
+                            DiagnosticLevel::Warning,
+                            "torrent",
+                            format!(
+                                "Recover peer watchdog resetting in-memory engine without deleting files: {}",
+                                torrent_low_throughput_message(&update)
+                            ),
+                            Some(task.id.clone()),
+                        )
+                        .await;
+                    engine = torrent_engine(state).await.map_err(|message| {
+                        download_error(FailureCategory::Torrent, message, false)
+                    })?;
+                    let prepared_source = prepare_torrent_source_for_task(task, &app_data_dir);
+                    if prepared_source.fallback_trackers_added > 0 {
+                        record_fallback_tracker_usage(
+                            state,
+                            &task.id,
+                            prepared_source.fallback_trackers_added,
+                            prepared_source.source_kind.label(),
+                        )
+                        .await;
+                    }
+                    let readd_outcome =
+                        add_prepared_torrent_with_controls(PreparedTorrentAddRequest {
+                            state,
+                            job_id: &task.id,
+                            engine: engine.as_ref(),
+                            prepared_source: &prepared_source,
+                            output_folder: &output_folder,
+                            upload_limit_kib_per_second: settings
+                                .torrent
+                                .upload_limit_kib_per_second,
+                            start_paused: false,
+                            metadata_timeout: TORRENT_METADATA_TIMEOUT,
                             tracker_first_diagnostics: None,
                         })
                         .await?;
@@ -725,8 +773,8 @@ pub(super) async fn run_torrent_download_attempt(
     }
 }
 
-pub(super) async fn persist_final_torrent_snapshot_before_pause(
-    app: &AppHandle,
+pub(super) async fn persist_final_torrent_snapshot_before_pause<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     engine: &TorrentEngine,
     engine_id: usize,
@@ -896,6 +944,199 @@ where
     }
 }
 
+pub(super) struct TorrentMetadataRecoveryRequest<'a> {
+    state: &'a SharedState,
+    job_id: &'a str,
+    engine: &'a mut Arc<TorrentEngine>,
+    prepared_source: &'a PreparedTorrentSource,
+    pending_cleanup_info_hash: Option<&'a str>,
+    output_folder: &'a Path,
+    upload_limit_kib_per_second: u32,
+    start_paused: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TorrentMetadataRecoveryStage {
+    pub(super) use_tracker_first: bool,
+    pub(super) reset_engine_before_retry: bool,
+    pub(super) timeout: Duration,
+    pub(super) is_final_failure: bool,
+}
+
+pub(super) fn torrent_metadata_recovery_stage(attempt: usize) -> TorrentMetadataRecoveryStage {
+    match attempt {
+        0 => TorrentMetadataRecoveryStage {
+            use_tracker_first: true,
+            reset_engine_before_retry: false,
+            timeout: TORRENT_METADATA_TIMEOUT,
+            is_final_failure: false,
+        },
+        1 => TorrentMetadataRecoveryStage {
+            use_tracker_first: false,
+            reset_engine_before_retry: false,
+            timeout: TORRENT_METADATA_TIMEOUT,
+            is_final_failure: false,
+        },
+        2 => TorrentMetadataRecoveryStage {
+            use_tracker_first: false,
+            reset_engine_before_retry: true,
+            timeout: TORRENT_METADATA_TIMEOUT,
+            is_final_failure: false,
+        },
+        _ => TorrentMetadataRecoveryStage {
+            use_tracker_first: false,
+            reset_engine_before_retry: false,
+            timeout: TORRENT_METADATA_TIMEOUT,
+            is_final_failure: true,
+        },
+    }
+}
+
+pub(super) async fn add_torrent_metadata_with_recovery(
+    request: TorrentMetadataRecoveryRequest<'_>,
+) -> Result<TorrentAddOutcome, DownloadError> {
+    let mut engine_reset_attempted = false;
+
+    for attempt in 0.. {
+        let stage = torrent_metadata_recovery_stage(attempt);
+        if stage.is_final_failure {
+            let error = torrent_metadata_recovery_failure_error(engine_reset_attempted);
+            let message = error.message.clone();
+            let _ = request
+                .state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Error,
+                    "torrent",
+                    message.clone(),
+                    Some(request.job_id.to_string()),
+                )
+                .await;
+            return Err(error);
+        }
+
+        if stage.reset_engine_before_retry {
+            cleanup_pending_torrent_metadata(
+                request.engine.as_ref(),
+                request.state,
+                request.job_id,
+                request.pending_cleanup_info_hash,
+            )
+            .await;
+            let reset =
+                clear_in_memory_torrent_engine_if_no_other_work(request.state, request.job_id)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+            if reset {
+                engine_reset_attempted = true;
+                let _ = request
+                    .state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        "Resetting in-memory torrent engine before metadata retry",
+                        Some(request.job_id.to_string()),
+                    )
+                    .await;
+                *request.engine = torrent_engine(request.state)
+                    .await
+                    .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
+            } else {
+                let _ = request
+                    .state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        "Skipped torrent engine reset before metadata retry because another torrent is active",
+                        Some(request.job_id.to_string()),
+                    )
+                    .await;
+            }
+        }
+
+        let mut staged_source = request.prepared_source.clone();
+        staged_source.tracker_first_metadata =
+            request.prepared_source.tracker_first_metadata && stage.use_tracker_first;
+        let tracker_first_diagnostics = staged_source.tracker_first_metadata.then(|| {
+            spawn_tracker_first_metadata_diagnostics(
+                (*request.state).clone(),
+                request.job_id.to_string(),
+            )
+        });
+        if attempt > 0 {
+            let _ = request
+                .state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "torrent",
+                    format!(
+                        "Retrying torrent metadata lookup after staged recovery attempt {attempt}"
+                    ),
+                    Some(request.job_id.to_string()),
+                )
+                .await;
+        }
+
+        let add_outcome = add_prepared_torrent_with_controls(PreparedTorrentAddRequest {
+            state: request.state,
+            job_id: request.job_id,
+            engine: request.engine.as_ref(),
+            prepared_source: &staged_source,
+            output_folder: request.output_folder,
+            upload_limit_kib_per_second: request.upload_limit_kib_per_second,
+            start_paused: request.start_paused,
+            metadata_timeout: stage.timeout,
+            tracker_first_diagnostics,
+        })
+        .await;
+
+        match add_outcome {
+            Ok(TorrentAddOutcome::Interrupted(DownloadOutcome::Canceled)) => {
+                cleanup_pending_torrent_metadata(
+                    request.engine.as_ref(),
+                    request.state,
+                    request.job_id,
+                    request.pending_cleanup_info_hash,
+                )
+                .await;
+                return Ok(TorrentAddOutcome::Interrupted(DownloadOutcome::Canceled));
+            }
+            Ok(outcome) => return Ok(outcome),
+            Err(error) if is_torrent_metadata_timeout_error(&error) => {
+                cleanup_pending_torrent_metadata(
+                    request.engine.as_ref(),
+                    request.state,
+                    request.job_id,
+                    request.pending_cleanup_info_hash,
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("metadata recovery loop should return on final failure stage")
+}
+
+pub(super) fn torrent_metadata_recovery_failure_message(engine_reset_attempted: bool) -> String {
+    if engine_reset_attempted {
+        return "Torrent metadata lookup stalled after tracker, DHT, cleanup, and engine-reset recovery attempts. Add more trackers, import a .torrent file, or retry later."
+            .into();
+    }
+
+    "Torrent metadata lookup stalled after tracker, DHT, and cleanup recovery attempts; the app could not reset the torrent engine because another torrent was active. Pause other torrents, add more trackers, import a .torrent file, or retry later."
+        .into()
+}
+
+pub(super) fn torrent_metadata_recovery_failure_error(
+    engine_reset_attempted: bool,
+) -> DownloadError {
+    download_error(
+        FailureCategory::Torrent,
+        torrent_metadata_recovery_failure_message(engine_reset_attempted),
+        false,
+    )
+}
+
 pub(super) struct PreparedTorrentAddRequest<'a> {
     state: &'a SharedState,
     job_id: &'a str,
@@ -904,6 +1145,7 @@ pub(super) struct PreparedTorrentAddRequest<'a> {
     output_folder: &'a Path,
     upload_limit_kib_per_second: u32,
     start_paused: bool,
+    metadata_timeout: Duration,
     tracker_first_diagnostics: Option<mpsc::UnboundedSender<TrackerFirstMetadataOutcome>>,
 }
 
@@ -920,7 +1162,7 @@ pub(super) async fn add_prepared_torrent_with_controls(
             request.start_paused,
             request.tracker_first_diagnostics,
         ),
-        TORRENT_METADATA_TIMEOUT,
+        request.metadata_timeout,
         TORRENT_METADATA_CONTROL_INTERVAL,
     )
     .await

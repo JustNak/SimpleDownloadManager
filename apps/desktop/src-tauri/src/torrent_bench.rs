@@ -569,15 +569,15 @@ fn engine_passes_decision_gate(
     if report.error.is_some() {
         return false;
     }
-    if !report
+    if report
         .metadata_time_ms
-        .is_some_and(|metadata_ms| metadata_ms <= GATE_METADATA_MS)
+        .is_none_or(|metadata_ms| metadata_ms > GATE_METADATA_MS)
     {
         return false;
     }
-    if !report
+    if report
         .first_byte_time_ms
-        .is_some_and(|first_byte_ms| first_byte_ms <= GATE_FIRST_BYTE_MS)
+        .is_none_or(|first_byte_ms| first_byte_ms > GATE_FIRST_BYTE_MS)
     {
         return false;
     }

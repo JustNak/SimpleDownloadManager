@@ -1,12 +1,12 @@
 use super::*;
-use crate::commands::{emit_notification_sound, NotificationSoundKind};
+use crate::commands::NotificationSoundKind;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 static BULK_FAILURE_SOUND_ARCHIVES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-pub(super) async fn notify_download_completed(
-    app: &AppHandle,
+pub(super) async fn notify_download_completed<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     final_path: &Path,
     is_bulk_member: bool,
@@ -28,8 +28,8 @@ pub(super) async fn notify_download_completed(
     }
 }
 
-pub(super) async fn notify_bulk_archive_completed(
-    app: &AppHandle,
+pub(super) async fn notify_bulk_archive_completed<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     final_path: &Path,
 ) {
@@ -63,6 +63,14 @@ pub(super) async fn prepare_bulk_archive_sources(
     .map_err(|error| format!("Could not prepare bulk archive task: {error}"))?
 }
 
+pub(super) async fn plan_bulk_archive_finalization(
+    archive: BulkArchiveReady,
+) -> Result<BulkFinalizationPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || bulk_finalization_plan(&archive))
+        .await
+        .map_err(|error| format!("Could not plan bulk archive task: {error}"))?
+}
+
 pub(super) async fn finish_prepared_bulk_archive(
     prepared: PreparedBulkArchive,
 ) -> Result<BulkArchiveCreateOutcome, String> {
@@ -71,8 +79,8 @@ pub(super) async fn finish_prepared_bulk_archive(
         .map_err(|error| format!("Could not create bulk archive task: {error}"))?
 }
 
-pub(super) async fn notify_download_failure(
-    app: &AppHandle,
+pub(super) async fn notify_download_failure<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     error: Option<&str>,
@@ -92,24 +100,12 @@ pub(super) async fn notify_download_failure(
     }
 }
 
-pub(super) async fn notify(app: &AppHandle, state: &SharedState, title: &str, body: &str) {
+pub(super) async fn notify<A: DownloadUi>(app: &A, state: &SharedState, title: &str, body: &str) {
     if !state.notifications_enabled().await {
         return;
     }
 
-    let notification = app.notification();
-    if matches!(notification.permission_state(), Ok(PermissionState::Prompt)) {
-        let _ = notification.request_permission();
-    }
-
-    if !matches!(
-        notification.permission_state(),
-        Ok(PermissionState::Granted)
-    ) {
-        return;
-    }
-
-    let _ = notification.builder().title(title).body(body).show();
+    app.show_notification(title, body);
 }
 
 pub(crate) fn reset_bulk_failure_sound(archive_id: &str) {
@@ -120,12 +116,12 @@ pub(crate) fn reset_bulk_failure_sound(archive_id: &str) {
 }
 
 async fn emit_notification_sound_if_enabled(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     kind: NotificationSoundKind,
 ) {
     if state.notification_sounds_enabled().await {
-        emit_notification_sound(app, kind);
+        app.emit_notification_sound(kind);
     }
 }
 

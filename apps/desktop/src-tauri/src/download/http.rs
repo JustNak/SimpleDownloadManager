@@ -7,15 +7,15 @@ const BULK_SLOW_RECOVERY_FAST_THRESHOLD: u64 = 128 * 1024;
 const BULK_HOSTER_FAIRNESS_RELEASE_THRESHOLD: u64 = 64 * 1024;
 const NORMAL_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 18;
 const NORMAL_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
-const NORMAL_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 36;
-const NORMAL_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
+const NORMAL_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 128;
+const NORMAL_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 64;
 const SEGMENT_BUDGET_ADMISSION_DEFER: Duration = Duration::from_secs(2);
 const SEGMENT_CONNECTION_LEASE_TTL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BulkSlowStreamRecoveryAction {
     Continue,
-    Retry { reset_partial: bool },
+    Retry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +49,65 @@ enum HosterWarmupEntry {
 #[derive(Debug)]
 pub(super) struct SegmentConnectionLeaseGuard {
     job_id: String,
+}
+
+#[derive(Debug)]
+pub(super) struct SegmentConnectionLeaseController {
+    guard: SegmentConnectionLeaseGuard,
+    class: SegmentConnectionClass,
+    effective_url: String,
+    budget: SegmentConnectionBudget,
+    policy_cap: usize,
+    fair_min_segments: usize,
+    fair_origin_workers: Option<usize>,
+}
+
+impl SegmentConnectionLeaseController {
+    pub(super) fn current_segments(&self) -> usize {
+        segment_connection_leases()
+            .lock()
+            .ok()
+            .and_then(|leases| leases.get(&self.guard.job_id).map(|lease| lease.segments))
+            .unwrap_or(0)
+    }
+
+    pub(super) fn grow_to(&self, desired_segments: usize) -> usize {
+        if desired_segments < 2 {
+            return self.current_segments();
+        }
+
+        let now = Instant::now();
+        let desired_cap = desired_segments.min(self.policy_cap);
+        let leases = segment_connection_leases();
+        let Ok(mut leases) = leases.lock() else {
+            return self.current_segments();
+        };
+        SegmentBudgetBroker::expire_stale_leases(&mut leases, now);
+        let current_segments = leases
+            .get(&self.guard.job_id)
+            .map(|lease| lease.segments)
+            .unwrap_or(0);
+        let Some(available_segments) = segment_budget_from_leases_locked(
+            &leases,
+            SegmentBudgetRequest {
+                class: self.class,
+                job_id: &self.guard.job_id,
+                effective_url: &self.effective_url,
+                budget: self.budget,
+                policy_cap: desired_cap,
+                fair_min_segments: self.fair_min_segments,
+                fair_origin_workers: self.fair_origin_workers,
+            },
+        ) else {
+            return current_segments;
+        };
+        let next_segments = current_segments.max(available_segments.min(desired_cap));
+        if let Some(lease) = leases.get_mut(&self.guard.job_id) {
+            lease.segments = next_segments;
+            lease.leased_at = now;
+        }
+        next_segments
+    }
 }
 
 struct SegmentBudgetBroker;
@@ -143,8 +202,8 @@ impl Drop for SegmentConnectionLeaseGuard {
     }
 }
 
-pub(super) async fn run_http_download_attempt(
-    app: &AppHandle,
+pub(super) async fn run_http_download_attempt<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
@@ -181,8 +240,8 @@ pub(super) async fn run_http_download_attempt(
     }
 }
 
-async fn run_http_download_attempt_for_url(
-    app: &AppHandle,
+async fn run_http_download_attempt_for_url<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     effective_url: &str,
@@ -202,11 +261,27 @@ async fn run_http_download_attempt_for_url(
         .await;
     let transfer_policy = HttpTransferPolicy::for_mode(performance_mode);
     let profile = transfer_policy.profile;
+    let mut segmented_client = if performance_mode == DownloadPerformanceMode::Fast {
+        segmented_download_client()?
+    } else {
+        client.clone()
+    };
+    let mut segmented_transport_label = if performance_mode == DownloadPerformanceMode::Fast {
+        "http/1.1 rustls"
+    } else {
+        "default"
+    };
     record_download_diagnostic(
         state,
         DiagnosticLevel::Info,
         task,
-        format!("HTTP transfer policy {:?} selected.", transfer_policy.mode),
+        format!(
+            "HTTP transfer policy {:?} selected (initial segments: {}, max segments: {}, target segment size: {} MiB).",
+            transfer_policy.mode,
+            profile.initial_segments,
+            profile.max_segments,
+            profile.target_segment_size / (1024 * 1024)
+        ),
     )
     .await;
     let segment_attempt =
@@ -240,8 +315,22 @@ async fn run_http_download_attempt_for_url(
         let segment_attempt = segment_attempt
             .as_ref()
             .expect("segment attempt context exists when segmented download can start");
-        let probe_metadata =
-            probe_range_metadata(&client, effective_url, request_auth.as_ref()).await;
+        let probe_metadata = if performance_mode == DownloadPerformanceMode::Fast {
+            let transport_probe = probe_fast_segmented_transport(
+                &segmented_client,
+                effective_url,
+                request_auth.as_ref(),
+            )
+            .await;
+            let diagnostic_message = transport_probe.diagnostic_message();
+            segmented_transport_label = transport_probe.label;
+            record_download_diagnostic(state, DiagnosticLevel::Info, task, diagnostic_message)
+                .await;
+            segmented_client = transport_probe.client;
+            transport_probe.metadata
+        } else {
+            probe_range_metadata(&segmented_client, effective_url, request_auth.as_ref()).await
+        };
         let mut range_probe_supported = false;
         match probe_metadata {
             Some(metadata) => {
@@ -263,7 +352,7 @@ async fn run_http_download_attempt_for_url(
         if range_probe_supported {
             if let Some(metadata) = preflight_metadata.as_ref() {
                 if let Some(total_bytes) = metadata.total_bytes {
-                    if let Some((plan, _segment_lease, secondary_hoster_worker)) =
+                    if let Some((plan, segment_lease, secondary_hoster_worker)) =
                         reserve_segmented_plan_for_attempt(
                             task,
                             effective_url,
@@ -286,13 +375,27 @@ async fn run_http_download_attempt_for_url(
                             )
                             .await;
                         }
+                        let planned_segment_count = plan_segmented_ranges_with_budget(
+                            total_bytes,
+                            metadata.resume_support,
+                            speed_limit,
+                            profile,
+                            (segment_attempt.policy_cap != usize::MAX)
+                                .then_some(segment_attempt.policy_cap),
+                        )
+                        .map(|planned| planned.segments.len())
+                        .unwrap_or(plan.segments.len());
                         record_download_diagnostic(
                             state,
                             DiagnosticLevel::Info,
                             task,
                             format!(
-                                "Starting segmented hoster download with {} segments.",
-                                plan.segments.len()
+                                "Starting segmented HTTP download: mode {:?}, planned segments {}, admitted segments {}, adaptive max {}, transport {}.",
+                                performance_mode,
+                                planned_segment_count,
+                                plan.segments.len(),
+                                profile.max_segments,
+                                segmented_transport_label
                             ),
                         )
                         .await;
@@ -300,12 +403,13 @@ async fn run_http_download_attempt_for_url(
                             app,
                             state,
                             task,
-                            client.clone(),
+                            segmented_client.clone(),
                             effective_url.to_string(),
                             request_auth.clone(),
                             plan,
                             profile,
                             metadata.validators.clone(),
+                            segment_lease,
                         )
                         .await
                         {
@@ -412,9 +516,31 @@ async fn run_http_download_attempt_for_url(
         .await;
         cleanup_partial_artifacts(&task.temp_path).await;
         existing_bytes = 0;
+    } else if segment_attempt.is_some() {
+        let fallback_reason = if existing_bytes > 0 && !has_segment_state {
+            "partial file has no segmented metadata"
+        } else if speed_limit.is_some() {
+            "speed limit is enabled"
+        } else if profile.max_segments < 2 {
+            "selected policy uses a single stream"
+        } else if segment_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.is_backed_off(effective_url, Instant::now()))
+        {
+            "range requests are temporarily backed off"
+        } else {
+            "attempt is not eligible"
+        };
+        record_download_diagnostic(
+            state,
+            DiagnosticLevel::Info,
+            task,
+            format!("Skipping segmented HTTP download: {fallback_reason}."),
+        )
+        .await;
     }
 
-    let mut response = send_request(
+    let response = send_request(
         &client,
         effective_url,
         existing_bytes,
@@ -426,23 +552,7 @@ async fn run_http_download_attempt_for_url(
     .await?;
     reject_hoster_html_response(task, &response)?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
-
-    if existing_bytes > 0 && !supports_resume {
-        truncate_file(&task.temp_path).await.map_err(disk_error)?;
-        existing_bytes = 0;
-        let snapshot = state
-            .mark_job_downloading(
-                &task.id,
-                0,
-                response.content_length(),
-                ResumeSupport::Unsupported,
-                extract_filename(&response),
-            )
-            .await?;
-        emit_snapshot(app, &snapshot);
-        response = send_request(&client, effective_url, 0, request_auth.as_ref(), None).await?;
-        reject_hoster_html_response(task, &response)?;
-    }
+    ensure_single_stream_resume_supported(&task.temp_path, existing_bytes, supports_resume)?;
 
     let total_bytes = derive_total_bytes(&response, existing_bytes).or_else(|| {
         preflight_metadata
@@ -512,16 +622,13 @@ async fn run_http_download_attempt_for_url(
     let mut last_emitted_bytes = existing_bytes;
     let mut last_persisted_at = Instant::now();
     let priority_throttle = Mutex::new(DynamicThrottleState::default());
+    let control_signal = WorkerControlSignal::default();
+    let _control_poller =
+        WorkerControlPoller::spawn(state.clone(), task.id.clone(), control_signal.clone());
+    let mut stream_controller = SignalStreamController::new(control_signal.clone(), stall_timeout);
 
     loop {
-        let chunk_result = match next_stream_item_with_control(
-            state,
-            &task.id,
-            stall_timeout,
-            stream.next(),
-        )
-        .await
-        {
+        let chunk_result = match stream_controller.next(stream.next()).await {
             StreamItemWait::Item(result) => result,
             StreamItemWait::Interrupted(DownloadOutcome::Paused) => {
                 file.flush().await.ok();
@@ -557,20 +664,16 @@ async fn run_http_download_attempt_for_url(
             break;
         };
 
-        match state.worker_control(&task.id).await {
-            WorkerControl::Paused => {
+        match control_signal.current_outcome() {
+            Some(DownloadOutcome::Paused) => {
                 file.flush().await.ok();
                 return Ok(DownloadOutcome::Paused);
             }
-            WorkerControl::Canceled => {
+            Some(DownloadOutcome::Canceled) => {
                 file.flush().await.ok();
                 return Ok(DownloadOutcome::Canceled);
             }
-            WorkerControl::Missing => {
-                file.flush().await.ok();
-                return Ok(DownloadOutcome::Canceled);
-            }
-            WorkerControl::Continue => {}
+            Some(DownloadOutcome::Completed) | Some(DownloadOutcome::Deferred(_)) | None => {}
         }
 
         let chunk = match chunk_result {
@@ -649,14 +752,9 @@ async fn run_http_download_attempt_for_url(
                 profile,
                 bulk_slow_recovery_state,
             ) {
-                BulkSlowStreamRecoveryAction::Retry { reset_partial } => {
+                BulkSlowStreamRecoveryAction::Retry => {
                     file.flush().await.ok();
                     drop(file);
-                    if reset_partial {
-                        cleanup_partial_artifacts(&task.temp_path).await;
-                        let snapshot = state.sync_downloaded_bytes(&task.id, 0).await?;
-                        emit_download_update(app, &snapshot, &task.id);
-                    }
                     return Err(download_error(
                         FailureCategory::Network,
                         "Bulk member download speed stayed below the recovery threshold; retrying the stream."
@@ -745,6 +843,116 @@ async fn run_http_download_attempt_for_url(
         .map_err(disk_error)?;
     complete_http_download(app, state, task, downloaded_bytes, &final_path).await?;
     Ok(DownloadOutcome::Completed)
+}
+
+struct FastSegmentTransportProbe {
+    client: Client,
+    label: &'static str,
+    metadata: Option<PreflightMetadata>,
+    rustls_elapsed: Duration,
+    native_elapsed: Option<Duration>,
+}
+
+impl FastSegmentTransportProbe {
+    fn diagnostic_message(&self) -> String {
+        let native = self
+            .native_elapsed
+            .map(|elapsed| format!("{} ms", elapsed.as_millis()))
+            .unwrap_or_else(|| "unavailable".into());
+        format!(
+            "Fast segmented transport selected {} (rustls probe: {} ms; native TLS probe: {native}).",
+            self.label,
+            self.rustls_elapsed.as_millis()
+        )
+    }
+}
+
+#[cfg(windows)]
+async fn probe_fast_segmented_transport(
+    rustls_client: &Client,
+    effective_url: &str,
+    request_auth: Option<&HandoffAuth>,
+) -> FastSegmentTransportProbe {
+    let is_https = Url::parse(effective_url)
+        .ok()
+        .is_some_and(|url| url.scheme().eq_ignore_ascii_case("https"));
+    if !is_https {
+        let rustls = timed_probe_range_metadata(rustls_client, effective_url, request_auth).await;
+        return FastSegmentTransportProbe {
+            client: rustls_client.clone(),
+            label: "http/1.1 rustls",
+            metadata: rustls.0,
+            rustls_elapsed: rustls.1,
+            native_elapsed: None,
+        };
+    }
+
+    let native_client = segmented_native_tls_download_client().ok();
+    let rustls_probe = timed_probe_range_metadata(rustls_client, effective_url, request_auth);
+    if let Some(native_client) = native_client {
+        let native_probe = timed_probe_range_metadata(&native_client, effective_url, request_auth);
+        let (rustls, native) = tokio::join!(rustls_probe, native_probe);
+        let native_matches = native.0.is_some()
+            && (rustls.0.is_none() || probe_elapsed_matches_or_wins(native.1, rustls.1));
+        if native_matches {
+            return FastSegmentTransportProbe {
+                client: native_client,
+                label: "http/1.1 native-tls",
+                metadata: native.0,
+                rustls_elapsed: rustls.1,
+                native_elapsed: Some(native.1),
+            };
+        }
+
+        return FastSegmentTransportProbe {
+            client: rustls_client.clone(),
+            label: "http/1.1 rustls",
+            metadata: rustls.0,
+            rustls_elapsed: rustls.1,
+            native_elapsed: Some(native.1),
+        };
+    }
+
+    let rustls = rustls_probe.await;
+    FastSegmentTransportProbe {
+        client: rustls_client.clone(),
+        label: "http/1.1 rustls",
+        metadata: rustls.0,
+        rustls_elapsed: rustls.1,
+        native_elapsed: None,
+    }
+}
+
+#[cfg(not(windows))]
+async fn probe_fast_segmented_transport(
+    rustls_client: &Client,
+    effective_url: &str,
+    request_auth: Option<&HandoffAuth>,
+) -> FastSegmentTransportProbe {
+    let rustls = timed_probe_range_metadata(rustls_client, effective_url, request_auth).await;
+    FastSegmentTransportProbe {
+        client: rustls_client.clone(),
+        label: "http/1.1 rustls",
+        metadata: rustls.0,
+        rustls_elapsed: rustls.1,
+        native_elapsed: None,
+    }
+}
+
+async fn timed_probe_range_metadata(
+    client: &Client,
+    effective_url: &str,
+    request_auth: Option<&HandoffAuth>,
+) -> (Option<PreflightMetadata>, Duration) {
+    let started = Instant::now();
+    let metadata = probe_range_metadata(client, effective_url, request_auth).await;
+    (metadata, started.elapsed())
+}
+
+fn probe_elapsed_matches_or_wins(candidate: Duration, baseline: Duration) -> bool {
+    let baseline_micros = baseline.as_micros();
+    let margin_micros = baseline_micros / 10 + 10_000;
+    candidate.as_micros() <= baseline_micros.saturating_add(margin_micros)
 }
 
 fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Option<HandoffAuth> {
@@ -984,7 +1192,7 @@ fn reserve_segmented_plan_for_attempt(
     resume_support: ResumeSupport,
     speed_limit: Option<u64>,
     profile: DownloadPerformanceProfile,
-) -> Option<(RangePlan, Option<SegmentConnectionLeaseGuard>, bool)> {
+) -> Option<(RangePlan, Option<SegmentConnectionLeaseController>, bool)> {
     let Some(class) = attempt.connection_class else {
         return plan_segmented_ranges_with_budget(
             total_bytes,
@@ -1019,7 +1227,19 @@ fn reserve_segmented_plan_for_attempt(
         }
     }
 
-    Some((plan, Some(lease), secondary_hoster_worker))
+    Some((
+        plan,
+        Some(SegmentConnectionLeaseController {
+            guard: lease,
+            class,
+            effective_url: effective_url.to_string(),
+            budget,
+            policy_cap: attempt.policy_cap,
+            fair_min_segments: attempt.fair_min_segments,
+            fair_origin_workers: attempt.fair_origin_workers,
+        }),
+        secondary_hoster_worker,
+    ))
 }
 
 #[cfg(test)]
@@ -1161,8 +1381,8 @@ fn segment_connection_leases() -> &'static StdMutex<HashMap<String, SegmentConne
     SEGMENT_CONNECTION_LEASES.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-pub(super) fn spawn_datanodes_hoster_warmups(
-    app: AppHandle,
+pub(super) fn spawn_datanodes_hoster_warmups<A: DownloadUi>(
+    app: A,
     state: SharedState,
     candidates: Vec<crate::state::HosterWarmupCandidate>,
 ) {
@@ -1459,8 +1679,8 @@ fn reject_hoster_html_response(
     Ok(())
 }
 
-pub(super) async fn complete_http_download(
-    app: &AppHandle,
+pub(super) async fn complete_http_download<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     total_bytes: u64,
@@ -1501,8 +1721,8 @@ pub(super) async fn complete_http_download(
     Ok(())
 }
 
-pub(super) async fn handle_bulk_archive_after_completion(
-    app: &AppHandle,
+pub(super) async fn handle_bulk_archive_after_completion<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     job_id: &str,
 ) -> Result<(), String> {
@@ -1511,6 +1731,25 @@ pub(super) async fn handle_bulk_archive_after_completion(
     }
 
     Ok(())
+}
+
+pub(super) fn ensure_single_stream_resume_supported(
+    temp_path: &Path,
+    existing_bytes: u64,
+    supports_resume: bool,
+) -> Result<(), DownloadError> {
+    if existing_bytes == 0 || supports_resume {
+        return Ok(());
+    }
+
+    Err(download_error(
+        FailureCategory::Resume,
+        format!(
+            "The server refused to resume this partial download after {existing_bytes} bytes; the partial file was preserved at {}. Use Restart to download from zero.",
+            temp_path.display()
+        ),
+        false,
+    ))
 }
 
 pub(super) fn bulk_slow_stream_recovery_action(
@@ -1541,9 +1780,7 @@ pub(super) fn bulk_slow_stream_recovery_action(
         return BulkSlowStreamRecoveryAction::Continue;
     }
 
-    BulkSlowStreamRecoveryAction::Retry {
-        reset_partial: false,
-    }
+    BulkSlowStreamRecoveryAction::Retry
 }
 
 fn accelerated_hoster_fair_origin_workers_for_mode(
@@ -1564,8 +1801,8 @@ fn bulk_slow_recovery_threshold(profile: DownloadPerformanceProfile) -> u64 {
     }
 }
 
-pub(super) async fn retry_bulk_archive_creation(
-    app: &AppHandle,
+pub(super) async fn retry_bulk_archive_creation<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     archive_id: &str,
 ) -> Result<(), String> {
@@ -1573,14 +1810,14 @@ pub(super) async fn retry_bulk_archive_creation(
     create_bulk_archive_from_ready(app, state, archive, None).await
 }
 
-async fn create_bulk_archive_from_ready(
-    app: &AppHandle,
+async fn create_bulk_archive_from_ready<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     archive: BulkArchiveReady,
     diagnostic_job_id: Option<String>,
 ) -> Result<(), String> {
     let archive_id = archive.archive_id.clone();
-    let plan = match bulk_finalization_plan(&archive) {
+    let plan = match plan_bulk_archive_finalization(archive.clone()).await {
         Ok(plan) => plan,
         Err(error) => {
             let snapshot = state
@@ -1730,8 +1967,8 @@ async fn create_bulk_archive_from_ready(
     }
 }
 
-async fn mark_bulk_archive_create_failed(
-    app: &AppHandle,
+async fn mark_bulk_archive_create_failed<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     archive_id: &str,
     archive_output_path: String,

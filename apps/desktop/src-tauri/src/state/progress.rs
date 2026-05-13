@@ -20,6 +20,7 @@ impl SharedState {
                 } else {
                     job.progress = 0.0;
                 }
+                apply_segment_counts(job, None);
             }
             state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
             (state.snapshot(), state.persisted())
@@ -53,6 +54,52 @@ impl SharedState {
                     job.state = JobState::Downloading;
                     job.error = None;
                     job.failure_category = None;
+                }
+                if let Some(filename) = filename {
+                    apply_download_filename(job, &filename);
+                }
+                apply_download_progress(job, downloaded_bytes, total_bytes);
+                apply_segment_counts(job, None);
+                job.resume_support = resume_support;
+            }
+            state.mark_bulk_hoster_worker_transferring(id, downloaded_bytes, Instant::now());
+            state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
+            (state.snapshot(), state.persisted())
+        };
+
+        persist_state(&self.storage_path, &persisted)?;
+        Ok(snapshot)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_segmented_job_downloading(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        resume_support: ResumeSupport,
+        filename: Option<String>,
+        active_segments: u32,
+        planned_segments: u32,
+    ) -> Result<DesktopSnapshot, String> {
+        let (snapshot, persisted) = {
+            let mut state = self.inner.write().await;
+            {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
+                };
+
+                let preserve_interrupted_state =
+                    should_preserve_worker_interrupted_state(job.state);
+                if preserve_interrupted_state {
+                    job.speed = 0;
+                    job.eta = 0;
+                    apply_segment_counts(job, None);
+                } else {
+                    job.state = JobState::Downloading;
+                    job.error = None;
+                    job.failure_category = None;
+                    apply_segment_counts(job, Some((active_segments, planned_segments)));
                 }
                 if let Some(filename) = filename {
                     apply_download_filename(job, &filename);
@@ -149,6 +196,7 @@ impl SharedState {
                 job.state = JobState::Queued;
                 job.speed = 0;
                 job.eta = 0;
+                apply_segment_counts(job, None);
                 job.error = None;
                 job.failure_category = None;
                 format!(
@@ -185,6 +233,48 @@ impl SharedState {
         speed: u64,
         persist: bool,
     ) -> Result<DesktopSnapshot, String> {
+        self.update_job_progress_with_segments(
+            id,
+            downloaded_bytes,
+            total_bytes,
+            speed,
+            None,
+            persist,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_segmented_job_progress(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed: u64,
+        active_segments: u32,
+        planned_segments: u32,
+        persist: bool,
+    ) -> Result<DesktopSnapshot, String> {
+        self.update_job_progress_with_segments(
+            id,
+            downloaded_bytes,
+            total_bytes,
+            speed,
+            Some((active_segments, planned_segments)),
+            persist,
+        )
+        .await
+    }
+
+    async fn update_job_progress_with_segments(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed: u64,
+        segment_counts: Option<(u32, u32)>,
+        persist: bool,
+    ) -> Result<DesktopSnapshot, String> {
         let (snapshot, persisted) = {
             let mut state = self.inner.write().await;
             {
@@ -202,6 +292,7 @@ impl SharedState {
                 if preserve_interrupted_state {
                     job.speed = 0;
                     job.eta = 0;
+                    apply_segment_counts(job, None);
                 } else {
                     job.speed = speed;
                     let remaining = job.total_bytes.saturating_sub(job.downloaded_bytes);
@@ -210,6 +301,7 @@ impl SharedState {
                     } else {
                         ((remaining as f64) / (speed as f64)).ceil() as u64
                     };
+                    apply_segment_counts(job, segment_counts);
                 }
             }
             state.update_bulk_hoster_worker_health(id, downloaded_bytes, speed, Instant::now());
@@ -267,6 +359,7 @@ impl SharedState {
             job.progress = 100.0;
             job.speed = 0;
             job.eta = 0;
+            apply_segment_counts(job, None);
             job.error = None;
             job.filename = target_path
                 .file_name()
@@ -564,6 +657,7 @@ impl SharedState {
                 job.state = JobState::Failed;
                 job.speed = 0;
                 job.eta = 0;
+                apply_segment_counts(job, None);
                 job.error = Some(message.clone());
                 job.failure_category = Some(failure_category);
                 format!("Failed {}: {message}", job.filename)
@@ -600,6 +694,7 @@ impl SharedState {
                 job.state = JobState::Paused;
                 job.speed = 0;
                 job.eta = 0;
+                apply_segment_counts(job, None);
                 job.error = Some(message.clone());
                 job.failure_category = Some(failure_category);
                 format!("Paused {} after retry exhaustion: {message}", job.filename)
@@ -618,13 +713,27 @@ impl SharedState {
     }
 
     pub async fn has_recoverable_partial_download(&self, id: &str) -> bool {
-        let state = self.inner.read().await;
-        state.job(id).is_some_and(|job| {
-            job.transfer_kind == TransferKind::Http
-                && job.downloaded_bytes > 0
-                && job.resume_support != ResumeSupport::Unsupported
-                && !matches!(job.state, JobState::Completed | JobState::Canceled)
-        })
+        let partial_path = {
+            let state = self.inner.read().await;
+            let Some(job) = state.job(id) else {
+                return false;
+            };
+            if job.transfer_kind != TransferKind::Http
+                || job.resume_support == ResumeSupport::Unsupported
+                || matches!(job.state, JobState::Completed | JobState::Canceled)
+            {
+                return false;
+            }
+            if job.downloaded_bytes > 0 {
+                return true;
+            }
+            PathBuf::from(&job.temp_path)
+        };
+
+        tokio::fs::metadata(partial_path)
+            .await
+            .map(|metadata| metadata.is_file() && metadata.len() > 0)
+            .unwrap_or(false)
     }
 
     pub async fn finish_interrupted_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
@@ -644,6 +753,7 @@ impl SharedState {
 
             job.speed = 0;
             job.eta = 0;
+            apply_segment_counts(job, None);
             (state.snapshot(), state.persisted())
         };
 
@@ -879,6 +989,19 @@ fn apply_download_progress(job: &mut DownloadJob, downloaded_bytes: u64, total_b
     } else {
         (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
     };
+}
+
+fn apply_segment_counts(job: &mut DownloadJob, segment_counts: Option<(u32, u32)>) {
+    match segment_counts {
+        Some((active_segments, planned_segments)) if planned_segments > 0 => {
+            job.active_segments = Some(active_segments.min(planned_segments));
+            job.planned_segments = Some(planned_segments);
+        }
+        _ => {
+            job.active_segments = None;
+            job.planned_segments = None;
+        }
+    }
 }
 
 pub(super) fn apply_preflight_metadata_to_job(

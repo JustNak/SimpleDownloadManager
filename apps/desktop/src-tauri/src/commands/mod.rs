@@ -27,7 +27,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -243,14 +243,14 @@ impl ProgressBatchRegistry {
     }
 }
 
-pub fn emit_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
+pub fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
     if let Err(error) = app.emit_to("main", STATE_CHANGED_EVENT, snapshot.clone()) {
         eprintln!("failed to emit state snapshot: {error}");
     }
     emit_popup_snapshots(app, snapshot);
 }
 
-pub fn emit_notification_sound(app: &AppHandle, kind: NotificationSoundKind) {
+pub fn emit_notification_sound<R: Runtime>(app: &AppHandle<R>, kind: NotificationSoundKind) {
     if let Err(error) = app.emit_to(
         "main",
         NOTIFICATION_SOUND_EVENT,
@@ -260,7 +260,11 @@ pub fn emit_notification_sound(app: &AppHandle, kind: NotificationSoundKind) {
     }
 }
 
-pub fn emit_download_update(app: &AppHandle, snapshot: &DesktopSnapshot, job_id: &str) {
+pub fn emit_download_update<R: Runtime>(
+    app: &AppHandle<R>,
+    snapshot: &DesktopSnapshot,
+    job_id: &str,
+) {
     let job = snapshot.jobs.iter().find(|job| job.id == job_id).cloned();
     let should_schedule = {
         let mut pending = pending_download_update_batch()
@@ -298,7 +302,7 @@ fn pending_download_update_batch() -> &'static Mutex<PendingDownloadUpdateBatch>
     DOWNLOAD_UPDATE_BATCH.get_or_init(|| Mutex::new(PendingDownloadUpdateBatch::default()))
 }
 
-fn flush_download_update_batch(app: &AppHandle) {
+fn flush_download_update_batch<R: Runtime>(app: &AppHandle<R>) {
     let payload = {
         let mut pending = pending_download_update_batch()
             .lock()
@@ -320,13 +324,13 @@ fn flush_download_update_batch(app: &AppHandle) {
     }
 }
 
-fn emit_popup_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+fn emit_popup_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
     emit_settings_snapshot(app, snapshot);
     emit_progress_job_snapshots(app, snapshot);
     emit_batch_progress_snapshots(app, snapshot);
 }
 
-fn emit_settings_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
+fn emit_settings_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
     if app.get_webview_window(DOWNLOAD_PROMPT_WINDOW).is_none() {
         return;
     }
@@ -342,7 +346,7 @@ fn emit_settings_snapshot(app: &AppHandle, snapshot: &DesktopSnapshot) {
     }
 }
 
-fn emit_progress_job_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+fn emit_progress_job_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
     for label in app.webview_windows().keys() {
         if !is_progress_window_label(label) {
             continue;
@@ -359,7 +363,7 @@ fn emit_progress_job_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
     }
 }
 
-fn emit_batch_progress_snapshots(app: &AppHandle, snapshot: &DesktopSnapshot) {
+fn emit_batch_progress_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
     let Some(registry) = app.try_state::<ProgressBatchRegistry>() else {
         return;
     };
@@ -2204,6 +2208,8 @@ mod tests {
             downloaded_bytes: 25,
             speed: 0,
             eta: 0,
+            active_segments: None,
+            planned_segments: None,
             error: Some("network error".into()),
             failure_category: None,
             resume_support: ResumeSupport::Supported,

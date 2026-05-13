@@ -5,14 +5,17 @@ const progressSource = readFileSync(new URL('../src/DownloadProgressWindow.svelt
 const sharedPopupSource = readFileSync(new URL('../src/useProgressPopup.svelte.ts', import.meta.url), 'utf8');
 const backendPreviewSource = readFileSync(new URL('../src/backendPreview.ts', import.meta.url), 'utf8');
 const windowsSource = readFileSync(new URL('../src-tauri/src/windows.rs', import.meta.url), 'utf8');
+const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
 
 assert.match(progressSource, /@render ProgressView\(/, 'download progress controller should render the compact progress view');
 assert.match(progressSource, /#snippet ProgressView/, 'normal downloads should render through a named compact progress view');
 assert.doesNotMatch(progressSource, /TorrentingProgressView|Torrent session|Uploaded|Ratio/, 'normal download progress popup should not include torrent-specific UI');
 assert.match(progressSource, /PopupTitlebar title="Download progress"/, 'normal progress popup should keep the Download progress title');
-assert.match(progressSource, /Metric\('Speed'[\s\S]*Metric\('ETA'[\s\S]*Metric\('Size'/, 'compact download view should keep speed, ETA, and size metrics visible in a flat metric rail');
+assert.match(typesSource, /activeSegments\?: number;[\s\S]*plannedSegments\?: number;/, 'DownloadJob typing should include optional transient segment counts');
+assert.match(progressSource, /Metric\('Speed'[\s\S]*Metric\('ETA'[\s\S]*Metric\('Size'[\s\S]*Metric\('Connections'/, 'compact download view should keep speed, ETA, size, and connection metrics visible in a flat metric rail');
+assert.match(progressSource, /Math\.min\(planned,\s*segmentCount\(job\.activeSegments\)\)/, 'connection count rendering should clamp active workers to the live planned count without a fixed 32-connection cap');
 assert.doesNotMatch(progressSource, /function MetricGrid|rounded border border-border bg-background/, 'progress popup metrics should be flat instead of boxed cards');
-assert.match(progressSource, /grid grid-cols-3 gap-2 border-t border-border\/35 bg-background\/30/, 'progress popup metric rail should use softer boxed-in shading and a muted top separator');
+assert.match(progressSource, /grid grid-cols-4 gap-2 border-t border-border\/35 bg-background\/30/, 'progress popup metric rail should use softer boxed-in shading and a muted top separator');
 assert.match(progressSource, /function isActiveProgressJob\(job: DownloadJob\)[\s\S]*JobState\.Queued[\s\S]*JobState\.Starting[\s\S]*JobState\.Downloading/, 'download progress popup should identify queued, starting, and downloading as active transfer states');
 assert.match(progressSource, /#if isActiveProgressJob\(job\)[\s\S]*Action\('Pause'[\s\S]*Action\(isConfirmingCancel \? 'Confirm delete' : 'Cancel'[\s\S]*#if job\.state === JobState\.Paused/, 'active download progress should expose only Pause and destructive Cancel controls');
 assert.match(progressSource, /#if job\.state === JobState\.Paused[\s\S]*Action\('Resume'[\s\S]*Action\(isConfirmingCancel \? 'Confirm delete' : 'Cancel'[\s\S]*#if job\.state === JobState\.Failed/, 'paused download progress should expose only Resume and destructive Cancel controls');

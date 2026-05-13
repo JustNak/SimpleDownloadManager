@@ -46,7 +46,7 @@ export type BulkHosterAccelerationMode = 'safe' | 'off';
 export type HosterPreflightStatus = 'unchecked' | 'checking' | 'ready' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
-export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'experimental';
+export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'recover';
 export type QueueRowSize = 'compact' | 'small' | 'medium' | 'large' | 'damn';
 
 export interface DownloadSource {
@@ -94,6 +94,8 @@ export interface DownloadJob {
   downloadedBytes: number;
   speed: number; // bytes per second
   eta: number; // seconds remaining
+  activeSegments?: number;
+  plannedSegments?: number;
   error?: string;
   failureCategory?: FailureCategory;
   resumeSupport?: ResumeSupport;

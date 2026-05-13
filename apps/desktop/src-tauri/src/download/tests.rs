@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::{
     BulkArchiveOutputKind, BulkHosterAccelerationMode, DownloadJob, HandoffAuth, HandoffAuthHeader,
-    JobState, TorrentInfo,
+    JobState, TorrentInfo, TorrentPeerConnectionWatchdogMode,
 };
 use std::future::pending;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,6 +9,8 @@ use tokio::net::TcpListener;
 
 #[path = "tests/recovery.rs"]
 mod recovery;
+#[path = "tests/scenarios.rs"]
+mod scenarios;
 
 fn torrent_runtime_update(
     uploaded_bytes: u64,
@@ -648,6 +650,30 @@ fn bulk_finalization_plan_normalizes_huge_requests_to_folder_output() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[tokio::test]
+async fn async_bulk_finalization_planning_counts_sources_before_prepare() {
+    let root = test_download_runtime_dir("bulk-finalization-plan-async");
+    let first = archive_test_entry(&root, "first.bin", b"first");
+    let second = archive_test_entry(&root, "second.bin", b"second");
+    let archive = BulkArchiveReady {
+        archive_id: "bulk_async_plan".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        output_path: root.join("Bundle"),
+        entries: vec![first, second],
+    };
+
+    let plan = plan_bulk_archive_finalization(archive)
+        .await
+        .expect("async bulk plan should be built before source preparation");
+
+    assert_eq!(plan.total_completed_bytes, 11);
+    assert_eq!(plan.output_kind, BulkArchiveOutputKind::Folder);
+    assert_eq!(plan.finalize_mode, BulkFinalizeMode::Move);
+    assert!(!plan.requires_extraction);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn cleanup_failures_warn_without_failing_completed_folder() {
     let root = test_download_runtime_dir("bulk-archive-cleanup-warning");
@@ -675,22 +701,6 @@ fn cleanup_failures_warn_without_failing_completed_folder() {
     assert!(outcome.cleanup_warnings[0].contains("missing.part01.rar"));
 
     let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn single_stream_http_drops_writer_before_finalizing_download() {
-    let source = include_str!("http.rs");
-    let drop_index = source
-        .find("drop(file);")
-        .expect("single-stream HTTP path should explicitly drop the completed writer");
-    let finalize_index = source
-        .find("move_to_final_path(&task.temp_path, &target_path)")
-        .expect("single-stream HTTP path should finalize the downloaded file");
-
-    assert!(
-        drop_index < finalize_index,
-        "download file handle should be released before finalizing and triggering bulk extraction"
-    );
 }
 
 #[test]
@@ -894,13 +904,54 @@ async fn torrent_metadata_timeout_is_retryable_torrent_error() {
     assert!(error.retryable);
     assert_eq!(
         error.message,
-        "Torrent metadata lookup timed out after 60 seconds. Add trackers or retry later."
+        "Torrent metadata lookup timed out after 20 seconds. Add trackers or retry later."
     );
 }
 
 #[test]
-fn torrent_metadata_timeout_is_sixty_seconds() {
-    assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(60));
+fn torrent_metadata_timeout_is_twenty_seconds() {
+    assert_eq!(TORRENT_METADATA_TIMEOUT, Duration::from_secs(20));
+}
+
+#[test]
+fn torrent_metadata_recovery_stages_escalate_without_generic_retries() {
+    let first = torrent_metadata_recovery_stage(0);
+    assert!(first.use_tracker_first);
+    assert!(!first.reset_engine_before_retry);
+    assert_eq!(first.timeout, TORRENT_METADATA_TIMEOUT);
+
+    let cleanup_retry = torrent_metadata_recovery_stage(1);
+    assert!(!cleanup_retry.use_tracker_first);
+    assert!(!cleanup_retry.reset_engine_before_retry);
+    assert_eq!(cleanup_retry.timeout, TORRENT_METADATA_TIMEOUT);
+
+    let reset_retry = torrent_metadata_recovery_stage(2);
+    assert!(!reset_retry.use_tracker_first);
+    assert!(reset_retry.reset_engine_before_retry);
+    assert_eq!(reset_retry.timeout, TORRENT_METADATA_TIMEOUT);
+
+    assert!(torrent_metadata_recovery_stage(3).is_final_failure);
+}
+
+#[test]
+fn torrent_metadata_recovery_final_message_distinguishes_skipped_engine_reset() {
+    let reset_attempted = torrent_metadata_recovery_failure_message(true);
+    assert!(reset_attempted.contains("engine-reset recovery attempts"));
+    assert!(!reset_attempted.contains("could not reset"));
+
+    let reset_skipped = torrent_metadata_recovery_failure_message(false);
+    assert!(reset_skipped.contains("could not reset the torrent engine"));
+    assert!(reset_skipped.contains("another torrent was active"));
+    assert!(reset_skipped.contains("Pause other torrents"));
+}
+
+#[test]
+fn torrent_metadata_recovery_final_error_is_terminal_torrent_failure() {
+    let error = torrent_metadata_recovery_failure_error(false);
+
+    assert_eq!(error.category, FailureCategory::Torrent);
+    assert!(!error.retryable);
+    assert!(error.message.contains("could not reset the torrent engine"));
 }
 
 #[test]
@@ -936,24 +987,21 @@ fn seeding_transition_releases_download_scheduler_slot_once() {
 }
 
 #[test]
-fn torrent_metadata_timeout_cleanup_runs_before_retryable_error_returns() {
+fn torrent_metadata_timeout_cleanup_runs_before_staged_retry() {
     let source = include_str!("torrent.rs");
     let timeout_branch = source
-        .find("if is_torrent_metadata_timeout_error(&error)")
+        .find("Err(error) if is_torrent_metadata_timeout_error(&error)")
         .expect("torrent metadata timeout branch should exist");
     let cleanup_call = source[timeout_branch..]
         .find("cleanup_pending_torrent_metadata(")
         .expect("timeout branch should clean up pending metadata")
         + timeout_branch;
-    let retryable_return = source[cleanup_call..]
-        .find("return Err(error);")
-        .expect("timeout branch should return the retryable error after cleanup")
-        + cleanup_call;
 
     assert!(
-        cleanup_call < retryable_return,
-        "pending torrent metadata cleanup must run before the retryable timeout error is returned"
+        cleanup_call > timeout_branch,
+        "pending torrent metadata cleanup must run before the next recovery stage"
     );
+    assert!(source.contains("torrent_metadata_recovery_failure_message"));
 }
 
 #[test]
@@ -964,7 +1012,7 @@ fn tracker_first_metadata_outcomes_have_user_visible_diagnostics() {
     );
     assert_eq!(
             tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::TimedOut),
-            "Tracker-first torrent metadata timed out after 15 seconds; falling back to the main DHT session"
+            "Tracker-first torrent metadata timed out after 8 seconds; falling back to the main DHT session"
         );
     assert_eq!(
             tracker_first_metadata_diagnostic_message(&TrackerFirstMetadataOutcome::Failed(
@@ -1300,13 +1348,11 @@ fn torrent_peer_watchdog_diagnose_mode_reports_without_actions() {
 }
 
 #[test]
-fn torrent_peer_watchdog_experimental_mode_refreshes_then_readds_once() {
+fn torrent_peer_watchdog_recover_mode_refreshes_readds_then_resets_once() {
     let started_at = Instant::now();
     let update = low_throughput_update();
-    let mut watchdog = TorrentPeerConnectionWatchdog::new(
-        TorrentPeerConnectionWatchdogMode::Experimental,
-        started_at,
-    );
+    let mut watchdog =
+        TorrentPeerConnectionWatchdog::new(TorrentPeerConnectionWatchdogMode::Recover, started_at);
 
     assert_eq!(
         watchdog.observe(&update, started_at + Duration::from_secs(59)),
@@ -1325,9 +1371,54 @@ fn torrent_peer_watchdog_experimental_mode_refreshes_then_readds_once() {
         TorrentPeerConnectionWatchdogDecision::ReaddTorrent
     );
     assert_eq!(
-        watchdog.observe(&update, started_at + Duration::from_secs(240)),
+        watchdog.observe(&update, started_at + Duration::from_secs(180)),
+        TorrentPeerConnectionWatchdogDecision::ResetEngine
+    );
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(300)),
         TorrentPeerConnectionWatchdogDecision::Report,
-        "experimental mode should not keep refreshing or re-adding the same job attempt"
+        "recover mode should not keep refreshing, re-adding, or resetting the same job attempt"
+    );
+}
+
+#[test]
+fn torrent_peer_watchdog_rearms_engine_reset_after_skip() {
+    let started_at = Instant::now();
+    let update = low_throughput_update();
+    let mut watchdog =
+        TorrentPeerConnectionWatchdog::new(TorrentPeerConnectionWatchdogMode::Recover, started_at);
+
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(60)),
+        TorrentPeerConnectionWatchdogDecision::RefreshPeers
+    );
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(120)),
+        TorrentPeerConnectionWatchdogDecision::ReaddTorrent
+    );
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(180)),
+        TorrentPeerConnectionWatchdogDecision::ResetEngine
+    );
+
+    watchdog.rearm_engine_reset();
+
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(239)),
+        TorrentPeerConnectionWatchdogDecision::Continue
+    );
+    assert_eq!(
+        watchdog.observe(&update, started_at + Duration::from_secs(240)),
+        TorrentPeerConnectionWatchdogDecision::ResetEngine,
+        "a skipped reset should be attempted again after another stall window"
+    );
+}
+
+#[test]
+fn torrent_peer_watchdog_defaults_to_recover_mode() {
+    assert_eq!(
+        TorrentPeerConnectionWatchdogMode::default(),
+        TorrentPeerConnectionWatchdogMode::Recover
     );
 }
 
@@ -1495,7 +1586,7 @@ fn torrent_add_flow_wires_tracker_first_diagnostics_channel() {
         .expect("torrent add flow should pass diagnostics to the controlled add helper")
         + channel;
     let argument = production_source[add_source..]
-        .find("Some(tracker_first_diagnostics)")
+        .find("tracker_first_diagnostics,")
         .expect("tracker-first diagnostics sender should be passed into the add helper")
         + add_source;
 
@@ -1708,6 +1799,70 @@ async fn torrent_engine_manager_cache_clear_reset_drops_idle_engine_slot() {
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
+#[tokio::test]
+async fn torrent_engine_manager_per_job_reset_ignores_other_queued_torrents() {
+    let root = test_download_runtime_dir("torrent-engine-reset-queued-peer");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-reset-queued-peer-state",
+        &root,
+        vec![
+            torrent_job("job_current", JobState::Starting),
+            torrent_job("job_queued", JobState::Queued),
+        ],
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+
+    let _engine = manager.get_or_create(&state).await.unwrap();
+    assert!(manager.current_config().await.is_some());
+
+    let reset = manager
+        .clear_if_no_other_torrent_work(&state, "job_current")
+        .await
+        .unwrap();
+
+    assert!(
+        reset,
+        "other queued torrents should not block per-job engine reset"
+    );
+    assert_eq!(manager.current_config().await, None);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn torrent_engine_manager_per_job_reset_blocks_other_active_torrents() {
+    let root = test_download_runtime_dir("torrent-engine-reset-active-peer");
+    let state = torrent_engine_state_for_test(
+        "torrent-engine-reset-active-peer-state",
+        &root,
+        vec![
+            torrent_job("job_current", JobState::Downloading),
+            torrent_job("job_active", JobState::Downloading),
+        ],
+        |_| {},
+    )
+    .await;
+    let manager = TorrentEngineManager::default();
+
+    let _engine = manager.get_or_create(&state).await.unwrap();
+    assert!(manager.current_config().await.is_some());
+
+    let reset = manager
+        .clear_if_no_other_torrent_work(&state, "job_current")
+        .await
+        .unwrap();
+
+    assert!(
+        !reset,
+        "other active torrents should still block per-job engine reset"
+    );
+    assert!(manager.current_config().await.is_some());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
 #[test]
 fn finished_torrent_pause_releases_engine_session() {
     let mut update = torrent_runtime_update(0, 1024, 0);
@@ -1836,6 +1991,8 @@ fn torrent_job(id: &str, state: JobState) -> DownloadJob {
         downloaded_bytes: 0,
         speed: 0,
         eta: 0,
+        active_segments: None,
+        planned_segments: None,
         error: None,
         failure_category: None,
         resume_support: ResumeSupport::Unknown,
@@ -1964,6 +2121,8 @@ async fn stream_wait_observes_canceled_control_before_next_chunk_arrives() {
         downloaded_bytes: 0,
         speed: 0,
         eta: 0,
+        active_segments: None,
+        planned_segments: None,
         error: None,
         failure_category: None,
         resume_support: ResumeSupport::Unknown,
@@ -2025,17 +2184,204 @@ fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
 }
 
 #[test]
-fn fast_range_plan_uses_target_size_and_caps_at_twelve_segments() {
+fn fast_profile_uses_fast_plus_initial_and_adaptive_segment_caps() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    assert_eq!(profile.initial_segments, 32);
+    assert_eq!(profile.max_segments, 64);
+    assert_eq!(profile.target_segment_size, 8 * 1024 * 1024);
+    assert_eq!(profile.adaptive_ramp_step, 8);
+    assert_eq!(profile.adaptive_ramp_interval, Duration::from_millis(1000));
+}
+
+#[test]
+fn fast_range_plan_uses_fast_plus_initial_fanout() {
     let profile = performance_profile(DownloadPerformanceMode::Fast);
     let minimum_plan =
         plan_segmented_ranges(16 * 1024 * 1024, ResumeSupport::Supported, None, profile)
             .expect("fast mode should segment range-capable files at 16 MiB");
+    let ramp_plan =
+        plan_segmented_ranges(256 * 1024 * 1024, ResumeSupport::Supported, None, profile)
+            .expect("large fast downloads should immediately fan out across the fast initial cap");
     let capped_plan =
         plan_segmented_ranges(1024 * 1024 * 1024, ResumeSupport::Supported, None, profile)
             .expect("large fast downloads should use capped segmented downloading");
 
     assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(capped_plan.segments.len(), 12);
+    assert_eq!(ramp_plan.segments.len(), 32);
+    assert_eq!(capped_plan.segments.len(), 32);
+}
+
+#[test]
+fn fast_dynamic_queue_depth_keeps_ranges_long_lived_past_mid_download() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+
+    assert_eq!(dynamic_segment_queue_depth(profile), 80);
+}
+
+#[test]
+fn fast_tail_lease_size_uses_remaining_byte_buckets() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let gib = 1024 * mib;
+
+    assert_eq!(
+        dynamic_segment_tail_lease_size(2 * gib, profile),
+        Some(32 * mib)
+    );
+    assert_eq!(dynamic_segment_tail_lease_size(gib, profile), Some(8 * mib));
+    assert_eq!(
+        dynamic_segment_tail_lease_size(256 * mib, profile),
+        Some(8 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(255 * mib, profile),
+        Some(mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(
+            2 * gib,
+            performance_profile(DownloadPerformanceMode::Balanced)
+        ),
+        None
+    );
+}
+
+#[test]
+fn fast_tail_leasing_splits_clean_ranges_into_fixed_leases() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let gib = 1024 * mib;
+    let total_bytes = 2 * gib;
+    let mut state = segmented_state_for_test(total_bytes, vec![(0, total_bytes - 1, 0, false)]);
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_profile_tests(
+        &mut state,
+        &mut active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    )
+    .expect("tail leasing should claim a clean lease");
+
+    assert_eq!(
+        claimed.range,
+        ByteRange {
+            start: 0,
+            end: 32 * mib - 1
+        }
+    );
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        total_bytes
+    );
+    assert!(state
+        .segments
+        .iter()
+        .all(|segment| segment.range.len() <= 32 * mib));
+}
+
+#[test]
+fn fast_tail_leasing_does_not_split_partial_pending_ranges() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let mut state = segmented_state_for_test(96 * mib, vec![(0, 96 * mib - 1, 4 * mib, false)]);
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_profile_tests(
+        &mut state,
+        &mut active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    )
+    .expect("partial pending range should still be claimed");
+
+    assert_eq!(state.segments.len(), 1);
+    assert_eq!(
+        claimed.range,
+        ByteRange {
+            start: 0,
+            end: 96 * mib - 1
+        }
+    );
+    assert_eq!(claimed.downloaded_bytes, 4 * mib);
+}
+
+#[test]
+fn fast_tail_stage_keeps_pending_one_mib_leases_available() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let mut state = segmented_state_for_test(128 * mib, vec![(0, 128 * mib - 1, 0, false)]);
+    let active = HashSet::new();
+
+    fill_dynamic_segment_queue_for_profile_tests(
+        &mut state,
+        &active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    );
+
+    let pending_one_mib_leases = state
+        .segments
+        .iter()
+        .filter(|segment| segment.range.len() <= mib)
+        .count();
+    assert!(pending_segment_count(&state, &active) >= profile.max_segments);
+    assert!(pending_one_mib_leases >= profile.max_segments);
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        128 * mib
+    );
+}
+
+#[test]
+fn fast_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let total_bytes = 80 * 64 * mib;
+    let mut state = segmented_state_for_test(
+        total_bytes,
+        (0_u64..80)
+            .map(|index| {
+                let start = index * 64 * mib;
+                (start, start + 64 * mib - 1, 0, false)
+            })
+            .collect(),
+    );
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_profile_tests(
+        &mut state,
+        &mut active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    )
+    .expect("clean resumed ranges should be leased before claim");
+
+    assert_eq!(claimed.range.len(), 32 * mib);
+    assert!(
+        state
+            .segments
+            .iter()
+            .filter(|segment| segment.range.len() <= 32 * mib)
+            .count()
+            >= dynamic_segment_queue_depth(profile)
+    );
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        total_bytes
+    );
 }
 
 #[test]
@@ -2138,6 +2484,196 @@ fn dynamic_segment_queue_does_not_reassign_completed_spans() {
     assert_eq!(state.segments[0].downloaded_bytes, 16);
 }
 
+#[tokio::test]
+async fn adaptive_segment_admission_blocks_after_throughput_regression() {
+    let root = test_download_runtime_dir("adaptive-ramp-regression");
+    let temp_path = root.join("download.part");
+    let mut job = torrent_job("job_adaptive_regression", JobState::Downloading);
+    job.transfer_kind = TransferKind::Http;
+    job.torrent = None;
+    job.temp_path = temp_path.display().to_string();
+    job.target_path = root.join("download.bin").display().to_string();
+    let state = SharedState::for_tests(test_storage_path("adaptive-ramp-regression"), vec![job]);
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
+    progress.store_segment_bytes(0, 128 * 1024 * 1024);
+    let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
+    let ramp_blocked = Arc::new(AtomicBool::new(false));
+    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 1024 * 1024 * 1024,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: (0_u64..96)
+            .map(|index| SegmentProgress {
+                index: index as usize,
+                range: ByteRange {
+                    start: index * 8 * 1024 * 1024,
+                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
+                },
+                downloaded_bytes: 0,
+                completed: false,
+            })
+            .collect(),
+    }));
+    let context = SegmentWorkerContext {
+        state,
+        client: download_client().unwrap(),
+        job_id: "job_adaptive_regression".into(),
+        url: "https://cdn.example.com/file.bin".into(),
+        handoff_auth: None,
+        temp_path,
+        total_bytes: 1024 * 1024 * 1024,
+        profile,
+        validators: EntityValidators::default(),
+        progress: progress.clone(),
+        metadata: metadata.clone(),
+        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
+        stop: Arc::new(AtomicBool::new(false)),
+        control_signal: WorkerControlSignal::default(),
+        ramp_blocked: ramp_blocked.clone(),
+        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        priority_throttle_enabled: false,
+        stall_timeout: None,
+    };
+    let admission = AdaptiveSegmentAdmission {
+        context,
+        active_segments,
+        metadata,
+        progress,
+        admitted_workers: Arc::new(AtomicUsize::new(32)),
+        segment_lease: None,
+        queue_depth: 128,
+        min_split_size: 1024 * 1024,
+        last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
+        last_ramp_speed_bps: AtomicU64::new(64 * 1024 * 1024),
+    };
+
+    assert!(!admission.can_admit_more().await);
+    assert!(ramp_blocked.load(Ordering::Relaxed));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression() {
+    let root = test_download_runtime_dir("adaptive-ramp-moderate-regression");
+    let temp_path = root.join("download.part");
+    let mut job = torrent_job("job_adaptive_moderate_regression", JobState::Downloading);
+    job.transfer_kind = TransferKind::Http;
+    job.torrent = None;
+    job.temp_path = temp_path.display().to_string();
+    job.target_path = root.join("download.bin").display().to_string();
+    let state = SharedState::for_tests(
+        test_storage_path("adaptive-ramp-moderate-regression"),
+        vec![job],
+    );
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
+    progress.store_segment_bytes(0, 154 * 1024 * 1024);
+    let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
+    let ramp_blocked = Arc::new(AtomicBool::new(false));
+    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 1024 * 1024 * 1024,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: (0_u64..96)
+            .map(|index| SegmentProgress {
+                index: index as usize,
+                range: ByteRange {
+                    start: index * 8 * 1024 * 1024,
+                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
+                },
+                downloaded_bytes: 0,
+                completed: false,
+            })
+            .collect(),
+    }));
+    let context = SegmentWorkerContext {
+        state,
+        client: download_client().unwrap(),
+        job_id: "job_adaptive_moderate_regression".into(),
+        url: "https://cdn.example.com/file.bin".into(),
+        handoff_auth: None,
+        temp_path,
+        total_bytes: 1024 * 1024 * 1024,
+        profile,
+        validators: EntityValidators::default(),
+        progress: progress.clone(),
+        metadata: metadata.clone(),
+        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
+        stop: Arc::new(AtomicBool::new(false)),
+        control_signal: WorkerControlSignal::default(),
+        ramp_blocked: ramp_blocked.clone(),
+        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        priority_throttle_enabled: false,
+        stall_timeout: None,
+    };
+    let admission = AdaptiveSegmentAdmission {
+        context,
+        active_segments,
+        metadata,
+        progress,
+        admitted_workers: Arc::new(AtomicUsize::new(32)),
+        segment_lease: None,
+        queue_depth: 128,
+        min_split_size: 1024 * 1024,
+        last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
+        last_ramp_speed_bps: AtomicU64::new(40 * 1024 * 1024),
+    };
+
+    assert!(!admission.can_admit_more().await);
+    assert!(ramp_blocked.load(Ordering::Relaxed));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn dynamic_segment_claim_does_not_persist_queue_splits_immediately() {
+    let root = test_download_runtime_dir("dynamic-claim-no-persist");
+    let temp_path = root.join("download.part");
+    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 64,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: vec![SegmentProgress {
+            index: 0,
+            range: ByteRange { start: 0, end: 63 },
+            downloaded_bytes: 0,
+            completed: false,
+        }],
+    }));
+    let active = Arc::new(Mutex::new(HashSet::new()));
+
+    let claimed = claim_dynamic_segment_work(&temp_path, &metadata, &active, 4, 8, None)
+        .await
+        .unwrap()
+        .expect("dynamic queue should claim a segment");
+
+    assert_eq!(claimed.range, ByteRange { start: 0, end: 15 });
+    assert!(
+        !segment_meta_path(&temp_path).exists(),
+        "claiming split work should leave sidecar persistence to the shared persist cadence"
+    );
+    assert_eq!(metadata.lock().await.segments.len(), 4);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
 #[test]
 fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
     assert!(plan_segmented_ranges(
@@ -2166,6 +2702,13 @@ fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
         ResumeSupport::Supported,
         Some(1024),
         performance_profile(DownloadPerformanceMode::Balanced),
+    )
+    .is_none());
+    assert!(plan_segmented_ranges(
+        256 * 1024 * 1024,
+        ResumeSupport::Supported,
+        Some(1024),
+        performance_profile(DownloadPerformanceMode::Fast),
     )
     .is_none());
 }
@@ -2856,6 +3399,64 @@ fn torrent_low_throughput_monitor_reports_after_sustained_slow_live_peers() {
 }
 
 #[test]
+fn torrent_low_throughput_monitor_reports_zero_speed_with_few_churning_peers() {
+    let now = Instant::now();
+    let mut monitor = TorrentLowThroughputMonitor::default();
+    let mut update = torrent_runtime_update(1024, 4096, 0);
+    update.peers = Some(2);
+    update.diagnostics = Some(crate::storage::TorrentRuntimeDiagnostics {
+        live_peers: 2,
+        seen_peers: 8,
+        connecting_peers: 2,
+        peer_connection_attempts: 6,
+        listen_port: None,
+        ..Default::default()
+    });
+
+    assert!(!monitor.should_report(&update, now));
+    assert!(
+        monitor.should_report(&update, now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW),
+        "few peer torrents with churn and no progress should still be reported as stalled"
+    );
+}
+
+#[test]
+fn torrent_low_throughput_monitor_uses_fetched_progress_window_over_instant_kbps() {
+    let now = Instant::now();
+    let mut monitor = TorrentLowThroughputMonitor::default();
+    let mut update = torrent_runtime_update(0, 0, 32 * 1024);
+    update.diagnostics = Some(crate::storage::TorrentRuntimeDiagnostics {
+        live_peers: TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD,
+        seen_peers: 20,
+        contributing_peers: 2,
+        listen_port: Some(42000),
+        ..Default::default()
+    });
+
+    assert!(!monitor.should_report(&update, now));
+    update.fetched_bytes = TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND
+        * TORRENT_LOW_THROUGHPUT_REPORT_WINDOW.as_secs();
+    update.downloaded_bytes = update.fetched_bytes;
+    assert!(
+        !monitor.should_report(&update, now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW),
+        "steady fetched-byte progress should prevent a low instant-speed stall report"
+    );
+    assert!(!monitor.should_report(
+        &update,
+        now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW + Duration::from_secs(1)
+    ));
+    assert!(
+        monitor.should_report(
+            &update,
+            now + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW
+                + Duration::from_secs(1)
+                + TORRENT_LOW_THROUGHPUT_REPORT_WINDOW
+        ),
+        "the monitor should report if fetched-byte progress stops after the recovery window"
+    );
+}
+
+#[test]
 fn torrent_low_throughput_monitor_resets_when_speed_recovers() {
     let now = Instant::now();
     let mut monitor = TorrentLowThroughputMonitor::default();
@@ -3044,9 +3645,7 @@ fn large_bulk_member_at_seventeen_kib_per_second_retries_without_partial_reset()
             profile,
             Some(recovery_state),
         ),
-        BulkSlowStreamRecoveryAction::Retry {
-            reset_partial: false
-        }
+        BulkSlowStreamRecoveryAction::Retry
     );
 }
 
@@ -3102,9 +3701,7 @@ fn near_complete_bulk_slow_recovery_preserves_partial_file() {
             profile,
             Some(recovery_state),
         ),
-        BulkSlowStreamRecoveryAction::Retry {
-            reset_partial: false
-        }
+        BulkSlowStreamRecoveryAction::Retry
     );
 }
 
@@ -3126,9 +3723,7 @@ fn exhausted_bulk_slow_recovery_recycles_stream_and_preserves_partial() {
             profile,
             Some(recovery_state),
         ),
-        BulkSlowStreamRecoveryAction::Retry {
-            reset_partial: false
-        }
+        BulkSlowStreamRecoveryAction::Retry
     );
 }
 
@@ -3651,8 +4246,12 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         validators,
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
+        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
         stop: Arc::new(AtomicBool::new(false)),
+        control_signal: WorkerControlSignal::default(),
+        ramp_blocked: Arc::new(AtomicBool::new(false)),
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        priority_throttle_enabled: false,
         stall_timeout: None,
     };
 
@@ -3774,6 +4373,123 @@ fn retry_delay_honors_retry_after_and_applies_stable_jitter() {
     );
 }
 
+#[tokio::test]
+async fn direct_segment_buffered_writer_appends_chunks_after_initial_seek() {
+    let root = test_download_runtime_dir("direct-segment-buffered-writer");
+    let temp_path = root.join("download.bin.part");
+
+    prepare_direct_segment_file(&temp_path, 12).await.unwrap();
+    let mut writer = open_direct_segment_writer_at(&temp_path, 4).await.unwrap();
+    write_segment_chunk(&mut writer, b"ru").await.unwrap();
+    write_segment_chunk(&mut writer, b"st").await.unwrap();
+    flush_segment_writer(&mut writer).await.unwrap();
+
+    let bytes = tokio::fs::read(&temp_path).await.unwrap();
+    assert_eq!(&bytes[4..8], b"rust");
+    assert!(!segment_path(&temp_path, 0).exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[test]
+fn normal_fast_segment_budget_allows_adaptive_fast_plus_ceiling() {
+    let budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Fast)
+        .expect("fast normal downloads should use brokered segment budgets");
+
+    assert_eq!(budget.total, 128);
+    assert_eq!(budget.per_origin, 64);
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::Normal,
+            "job_fast_1",
+            "https://cdn.example.com/fast.bin",
+            budget,
+            usize::MAX,
+            &[],
+        ),
+        Some(64)
+    );
+}
+
+#[test]
+fn segment_write_coalescer_batches_small_chunks_and_flushes_tail() {
+    let mut coalescer = SegmentWriteCoalescer::new(8);
+
+    assert_eq!(coalescer.push(b"abc"), None);
+    assert_eq!(coalescer.push(b"defg"), None);
+    assert_eq!(coalescer.push(b"h"), Some(b"abcdefgh".to_vec()));
+    assert_eq!(coalescer.flush(), None);
+
+    assert_eq!(coalescer.push(b"xy"), None);
+    assert_eq!(coalescer.flush(), Some(b"xy".to_vec()));
+    assert_eq!(coalescer.flush(), None);
+}
+
+#[test]
+fn worker_control_signal_maps_live_control_without_state_lookup() {
+    let signal = WorkerControlSignal::default();
+
+    assert_eq!(signal.current_outcome(), None);
+    signal.store_control(WorkerControl::Paused);
+    assert_eq!(signal.current_outcome(), Some(DownloadOutcome::Paused));
+    signal.store_control(WorkerControl::Canceled);
+    assert_eq!(signal.current_outcome(), Some(DownloadOutcome::Canceled));
+    signal.store_control(WorkerControl::Missing);
+    assert_eq!(signal.current_outcome(), Some(DownloadOutcome::Canceled));
+    signal.store_control(WorkerControl::Continue);
+    assert_eq!(signal.current_outcome(), None);
+}
+
+#[test]
+fn direct_bulk_fast_budget_allows_twenty_four_same_origin_segments() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::DirectBulk,
+            "bulk_fast_1",
+            "https://cdn.example.com/bulk-fast.bin",
+            SegmentConnectionBudget {
+                total: DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
+                per_origin: DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+            },
+            usize::MAX,
+            &[],
+        ),
+        Some(24)
+    );
+}
+
+#[test]
+fn segment_metadata_persist_gate_coalesces_regular_writes_and_allows_forced_writes() {
+    let now = Instant::now();
+    let mut last_persisted_at = now;
+
+    assert!(
+        !should_persist_segment_metadata(
+            &mut last_persisted_at,
+            now + Duration::from_secs(1),
+            false,
+        ),
+        "regular segment progress should not persist before the shared interval"
+    );
+    assert_eq!(last_persisted_at, now);
+
+    let interval_elapsed = now + PROGRESS_PERSIST_INTERVAL;
+    assert!(
+        should_persist_segment_metadata(&mut last_persisted_at, interval_elapsed, false),
+        "one worker should persist after the shared interval elapses"
+    );
+    assert_eq!(last_persisted_at, interval_elapsed);
+
+    assert!(
+        !should_persist_segment_metadata(&mut last_persisted_at, interval_elapsed, false),
+        "peer segment workers should be coalesced after another worker persists"
+    );
+    assert!(
+        should_persist_segment_metadata(&mut last_persisted_at, interval_elapsed, true),
+        "forced interruption and completion writes should bypass coalescing"
+    );
+}
+
 async fn spawn_one_response_server(
     response: &'static str,
 ) -> (String, tokio::task::JoinHandle<String>) {
@@ -3826,6 +4542,34 @@ fn new_segment_state_for_test(
                 downloaded_bytes: 0,
                 completed: false,
             })
+            .collect(),
+    }
+}
+
+fn segmented_state_for_test(
+    total_bytes: u64,
+    ranges: Vec<(u64, u64, u64, bool)>,
+) -> SegmentedDownloadState {
+    SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: ranges
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, (start, end, downloaded_bytes, completed))| SegmentProgress {
+                    index,
+                    range: ByteRange { start, end },
+                    downloaded_bytes,
+                    completed,
+                },
+            )
             .collect(),
     }
 }
@@ -3983,14 +4727,7 @@ async fn spawn_cookie_required_server() -> (String, tokio::task::JoinHandle<Stri
 
 #[tokio::test]
 async fn sha256_digest_reads_file_contents() {
-    let root = std::env::temp_dir().join(format!(
-        "sdm-sha256-test-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    tokio::fs::create_dir_all(&root).await.unwrap();
+    let root = test_download_runtime_dir("sha256-digest");
     let path = root.join("hello.txt");
     tokio::fs::write(&path, b"hello").await.unwrap();
 

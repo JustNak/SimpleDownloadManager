@@ -3,10 +3,49 @@ use super::*;
 static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
     OnceLock::new();
 static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
-const DYNAMIC_SEGMENT_QUEUE_MULTIPLIER: usize = 2;
+const DYNAMIC_SEGMENT_FAST_SPILL_WORKERS: usize = 16;
 const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
+const FAST_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 256 * 1024 * 1024;
+const FAST_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
+const FAST_TAIL_SMALL_LEASE_SIZE: u64 = 1024 * 1024;
+const FAST_TAIL_MEDIUM_LEASE_SIZE: u64 = 8 * 1024 * 1024;
+const FAST_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
+const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
+const ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT: u64 = 90;
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
     "Resume metadata is missing or no longer matches this partial download. Use Restart to download from zero.";
+
+pub(super) struct SegmentWriteCoalescer {
+    threshold: usize,
+    buffer: Vec<u8>,
+}
+
+impl SegmentWriteCoalescer {
+    pub(super) fn new(threshold: usize) -> Self {
+        Self {
+            threshold: threshold.max(1),
+            buffer: Vec::with_capacity(threshold.max(1)),
+        }
+    }
+
+    pub(super) fn push(&mut self, chunk: &[u8]) -> Option<Vec<u8>> {
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() >= self.threshold {
+            Some(std::mem::take(&mut self.buffer))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn flush(&mut self) -> Option<Vec<u8>> {
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.buffer))
+        }
+    }
+}
 
 struct SegmentJournal {
     temp_path: PathBuf,
@@ -76,9 +115,10 @@ pub(super) fn plan_segmented_ranges_with_budget(
     profile: DownloadPerformanceProfile,
     segment_budget: Option<usize>,
 ) -> Option<RangePlan> {
+    let initial_cap = profile.initial_segments.min(profile.max_segments);
     let max_segments = segment_budget
-        .map(|budget| profile.max_segments.min(budget))
-        .unwrap_or(profile.max_segments);
+        .map(|budget| initial_cap.min(budget))
+        .unwrap_or(initial_cap);
     if speed_limit.is_some()
         || resume_support != ResumeSupport::Supported
         || total_bytes < profile.min_segmented_size
@@ -168,17 +208,47 @@ pub(super) fn merge_preflight_metadata(
     }
 }
 
-fn dynamic_segment_queue_depth(worker_count: usize) -> usize {
-    worker_count
-        .saturating_mul(DYNAMIC_SEGMENT_QUEUE_MULTIPLIER)
-        .max(worker_count)
-        .max(1)
+pub(super) fn dynamic_segment_queue_depth(profile: DownloadPerformanceProfile) -> usize {
+    let worker_ceiling = profile.max_segments.max(profile.initial_segments).max(1);
+    let spill_workers = if profile.adaptive_ramp_step > 0 {
+        profile
+            .adaptive_ramp_step
+            .saturating_mul(2)
+            .max(DYNAMIC_SEGMENT_FAST_SPILL_WORKERS)
+    } else {
+        0
+    };
+    worker_ceiling
+        .saturating_add(spill_workers)
+        .min(worker_ceiling.saturating_mul(2))
+        .max(worker_ceiling)
 }
 
 fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
     (profile.target_segment_size / 4)
         .max(DYNAMIC_SEGMENT_MIN_SPLIT_SIZE)
         .max(1)
+}
+
+fn profile_uses_fast_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
+    profile.initial_segments >= 32 && profile.max_segments >= 64 && profile.adaptive_ramp_step > 0
+}
+
+pub(super) fn dynamic_segment_tail_lease_size(
+    remaining_bytes: u64,
+    profile: DownloadPerformanceProfile,
+) -> Option<u64> {
+    if !profile_uses_fast_tail_leasing(profile) {
+        return None;
+    }
+
+    Some(if remaining_bytes > FAST_TAIL_LARGE_REMAINING_THRESHOLD {
+        FAST_TAIL_LARGE_LEASE_SIZE
+    } else if remaining_bytes >= FAST_TAIL_SMALL_REMAINING_THRESHOLD {
+        FAST_TAIL_MEDIUM_LEASE_SIZE
+    } else {
+        FAST_TAIL_SMALL_LEASE_SIZE
+    })
 }
 
 fn segment_remaining_bytes(segment: &SegmentProgress) -> u64 {
@@ -189,11 +259,37 @@ fn segment_remaining_bytes(segment: &SegmentProgress) -> u64 {
     segment.range.len().saturating_sub(segment.downloaded_bytes)
 }
 
-fn pending_segment_count(state: &SegmentedDownloadState, active: &HashSet<usize>) -> usize {
+fn state_remaining_bytes(state: &SegmentedDownloadState) -> u64 {
+    state
+        .segments
+        .iter()
+        .map(segment_remaining_bytes)
+        .sum::<u64>()
+}
+
+pub(super) fn pending_segment_count(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+) -> usize {
     state
         .segments
         .iter()
         .filter(|segment| !active.contains(&segment.index) && segment_remaining_bytes(segment) > 0)
+        .count()
+}
+
+fn pending_lease_sized_segment_count(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+    lease_size: u64,
+) -> usize {
+    state
+        .segments
+        .iter()
+        .filter(|segment| {
+            !active.contains(&segment.index)
+                && (1..=lease_size).contains(&segment_remaining_bytes(segment))
+        })
         .count()
 }
 
@@ -202,9 +298,49 @@ fn largest_pending_segment_position(
     active: &HashSet<usize>,
     min_remaining_bytes: u64,
 ) -> Option<usize> {
+    largest_pending_segment_position_bounded(state, active, min_remaining_bytes, None)
+}
+
+fn largest_pending_segment_position_bounded(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+    min_remaining_bytes: u64,
+    max_remaining_bytes: Option<u64>,
+) -> Option<usize> {
     let mut best: Option<(usize, u64, u64)> = None;
     for (position, segment) in state.segments.iter().enumerate() {
         if active.contains(&segment.index) {
+            continue;
+        }
+        let remaining = segment_remaining_bytes(segment);
+        if remaining < min_remaining_bytes {
+            continue;
+        }
+        if max_remaining_bytes.is_some_and(|max| remaining > max) {
+            continue;
+        }
+        let key = (remaining, u64::MAX.saturating_sub(segment.range.start));
+        if best
+            .map(|(_, best_remaining, best_start_key)| {
+                key.0 > best_remaining || (key.0 == best_remaining && key.1 > best_start_key)
+            })
+            .unwrap_or(true)
+        {
+            best = Some((position, key.0, key.1));
+        }
+    }
+
+    best.map(|(position, _, _)| position)
+}
+
+fn largest_clean_pending_segment_position(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+    min_remaining_bytes: u64,
+) -> Option<usize> {
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (position, segment) in state.segments.iter().enumerate() {
+        if active.contains(&segment.index) || segment.downloaded_bytes > 0 {
             continue;
         }
         let remaining = segment_remaining_bytes(segment);
@@ -225,7 +361,39 @@ fn largest_pending_segment_position(
     best.map(|(position, _, _)| position)
 }
 
-fn split_largest_pending_segment(
+fn next_segment_index(state: &SegmentedDownloadState) -> usize {
+    state
+        .segments
+        .iter()
+        .map(|segment| segment.index)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn push_segment_tail(
+    state: &mut SegmentedDownloadState,
+    position: usize,
+    split_end: u64,
+    original_end: u64,
+) {
+    let next_index = next_segment_index(state);
+    state.segments[position].range.end = split_end;
+    state.segments[position].completed = false;
+    state.segments.push(SegmentProgress {
+        index: next_index,
+        range: ByteRange {
+            start: split_end.saturating_add(1),
+            end: original_end,
+        },
+        downloaded_bytes: 0,
+        completed: false,
+    });
+    state.segments.sort_by_key(|segment| segment.range.start);
+    state.retry_generation = state.retry_generation.saturating_add(1);
+}
+
+fn split_largest_pending_segment_by_halving(
     state: &mut SegmentedDownloadState,
     active: &HashSet<usize>,
     min_split_size: u64,
@@ -257,26 +425,38 @@ fn split_largest_pending_segment(
         return false;
     }
 
-    let next_index = state
-        .segments
-        .iter()
-        .map(|segment| segment.index)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
-    state.segments[position].range.end = split_end;
-    state.segments[position].completed = false;
-    state.segments.push(SegmentProgress {
-        index: next_index,
-        range: ByteRange {
-            start: split_end.saturating_add(1),
-            end: segment.range.end,
-        },
-        downloaded_bytes: 0,
-        completed: false,
-    });
-    state.segments.sort_by_key(|segment| segment.range.start);
-    state.retry_generation = state.retry_generation.saturating_add(1);
+    push_segment_tail(state, position, split_end, segment.range.end);
+    true
+}
+
+fn split_largest_clean_pending_segment_for_lease(
+    state: &mut SegmentedDownloadState,
+    active: &HashSet<usize>,
+    lease_size: u64,
+) -> bool {
+    let lease_size = lease_size.max(1);
+    let Some(position) =
+        largest_clean_pending_segment_position(state, active, lease_size.saturating_add(1))
+    else {
+        return false;
+    };
+
+    let segment = state.segments[position].clone();
+    let remaining = segment_remaining_bytes(&segment);
+    if remaining <= lease_size {
+        return false;
+    }
+
+    let split_end = segment
+        .range
+        .start
+        .saturating_add(lease_size)
+        .saturating_sub(1);
+    if split_end >= segment.range.end {
+        return false;
+    }
+
+    push_segment_tail(state, position, split_end, segment.range.end);
     true
 }
 
@@ -285,10 +465,27 @@ fn fill_dynamic_segment_queue(
     active: &HashSet<usize>,
     target_depth: usize,
     min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
 ) -> bool {
     let mut changed = false;
-    while pending_segment_count(state, active) < target_depth {
-        if !split_largest_pending_segment(state, active, min_split_size) {
+    loop {
+        if let Some(lease_size) = lease_profile.and_then(|profile| {
+            dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile)
+        }) {
+            if pending_lease_sized_segment_count(state, active, lease_size) >= target_depth {
+                break;
+            }
+            if !split_largest_clean_pending_segment_for_lease(state, active, lease_size) {
+                break;
+            }
+            changed = true;
+            continue;
+        }
+
+        if pending_segment_count(state, active) >= target_depth {
+            break;
+        }
+        if !split_largest_pending_segment_by_halving(state, active, min_split_size) {
             break;
         }
         changed = true;
@@ -301,9 +498,16 @@ fn claim_largest_dynamic_segment(
     active: &mut HashSet<usize>,
     target_depth: usize,
     min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
 ) -> (Option<SegmentProgress>, bool) {
-    let changed = fill_dynamic_segment_queue(state, active, target_depth, min_split_size);
-    let Some(position) = largest_pending_segment_position(state, active, 1) else {
+    let changed =
+        fill_dynamic_segment_queue(state, active, target_depth, min_split_size, lease_profile);
+    let lease_size = lease_profile
+        .and_then(|profile| dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile));
+    let position = lease_size
+        .and_then(|max| largest_pending_segment_position_bounded(state, active, 1, Some(max)))
+        .or_else(|| largest_pending_segment_position(state, active, 1));
+    let Some(position) = position else {
         return (None, changed);
     };
 
@@ -319,23 +523,60 @@ pub(super) fn claim_largest_dynamic_segment_for_tests(
     target_depth: usize,
     min_split_size: u64,
 ) -> Option<SegmentProgress> {
-    claim_largest_dynamic_segment(state, active, target_depth, min_split_size).0
+    claim_largest_dynamic_segment(state, active, target_depth, min_split_size, None).0
 }
 
-async fn claim_dynamic_segment_work(
+#[cfg(test)]
+pub(super) fn claim_largest_dynamic_segment_for_profile_tests(
+    state: &mut SegmentedDownloadState,
+    active: &mut HashSet<usize>,
+    target_depth: usize,
+    profile: DownloadPerformanceProfile,
+) -> Option<SegmentProgress> {
+    claim_largest_dynamic_segment(
+        state,
+        active,
+        target_depth,
+        dynamic_segment_min_split_size(profile),
+        Some(profile),
+    )
+    .0
+}
+
+#[cfg(test)]
+pub(super) fn fill_dynamic_segment_queue_for_profile_tests(
+    state: &mut SegmentedDownloadState,
+    active: &HashSet<usize>,
+    target_depth: usize,
+    profile: DownloadPerformanceProfile,
+) -> bool {
+    fill_dynamic_segment_queue(
+        state,
+        active,
+        target_depth,
+        dynamic_segment_min_split_size(profile),
+        Some(profile),
+    )
+}
+
+pub(super) async fn claim_dynamic_segment_work(
     temp_path: &Path,
     metadata: &Arc<Mutex<SegmentedDownloadState>>,
     active: &Arc<Mutex<HashSet<usize>>>,
     target_depth: usize,
     min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
 ) -> Result<Option<SegmentProgress>, DownloadError> {
     let mut active = active.lock().await;
     let mut metadata = metadata.lock().await;
-    let (segment, changed) =
-        claim_largest_dynamic_segment(&mut metadata, &mut active, target_depth, min_split_size);
-    if changed {
-        persist_segment_state(temp_path, &metadata).await?;
-    }
+    let (segment, changed) = claim_largest_dynamic_segment(
+        &mut metadata,
+        &mut active,
+        target_depth,
+        min_split_size,
+        lease_profile,
+    );
+    let _ = (temp_path, changed);
 
     Ok(segment)
 }
@@ -356,13 +597,59 @@ fn update_segment_recovery_metadata(
     state.temp_path = Some(temp_path.display().to_string());
 }
 
+fn segment_tail_leasing_diagnostic(
+    state: &SegmentedDownloadState,
+    active: &HashSet<usize>,
+    profile: DownloadPerformanceProfile,
+    planned_workers: usize,
+) -> Option<String> {
+    let lease_size = dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile)?;
+    let remaining_bytes = state_remaining_bytes(state);
+    let bucket = if remaining_bytes > FAST_TAIL_LARGE_REMAINING_THRESHOLD {
+        ">1GiB"
+    } else if remaining_bytes >= FAST_TAIL_SMALL_REMAINING_THRESHOLD {
+        "256MiB-1GiB"
+    } else {
+        "<256MiB"
+    };
+    let pending_lease_count = pending_lease_sized_segment_count(state, active, lease_size);
+    let clean_split_candidates = state
+        .segments
+        .iter()
+        .filter(|segment| {
+            !active.contains(&segment.index)
+                && segment.downloaded_bytes == 0
+                && segment_remaining_bytes(segment) > lease_size
+        })
+        .count();
+    let tail_active_floor = profile
+        .max_segments
+        .min(remaining_bytes.div_ceil(lease_size).min(usize::MAX as u64) as usize);
+    let reason = if clean_split_candidates == 0 && pending_lease_count < profile.max_segments {
+        "skipped: no clean pending range above lease size"
+    } else {
+        "active"
+    };
+
+    Some(format!(
+        "Fast tail leasing {reason}; lease={}MiB bucket={} remaining={}MiB active/planned={}/{} pending_lease_count={} tail_active_floor={}.",
+        lease_size / (1024 * 1024),
+        bucket,
+        remaining_bytes / (1024 * 1024),
+        active.len(),
+        planned_workers,
+        pending_lease_count,
+        tail_active_floor
+    ))
+}
+
 pub(super) fn segmented_error_allows_single_stream_fallback(error: &DownloadError) -> bool {
     error.category == FailureCategory::Resume
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_segmented_download_attempt(
-    app: &AppHandle,
+pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
+    app: &A,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     client: Client,
@@ -371,6 +658,7 @@ pub(super) async fn run_segmented_download_attempt(
     plan: RangePlan,
     profile: DownloadPerformanceProfile,
     validators: EntityValidators,
+    segment_lease: Option<SegmentConnectionLeaseController>,
 ) -> Result<DownloadOutcome, DownloadError> {
     let mut segment_state =
         load_or_create_segment_state(&task.temp_path, &plan, &validators).await?;
@@ -384,8 +672,9 @@ pub(super) async fn run_segmented_download_attempt(
     fill_dynamic_segment_queue(
         &mut segment_state,
         &HashSet::new(),
-        dynamic_segment_queue_depth(plan.segments.len()),
+        dynamic_segment_queue_depth(profile),
         dynamic_segment_min_split_size(profile),
+        Some(profile),
     );
     persist_segment_state(&task.temp_path, &segment_state).await?;
     prepare_direct_segment_file(&task.temp_path, plan.total_bytes).await?;
@@ -393,14 +682,31 @@ pub(super) async fn run_segmented_download_attempt(
     let initial_segment_bytes =
         segment_existing_lengths_by_index(&task.temp_path, &segment_state.segments);
     let initial_downloaded = initial_segment_bytes.iter().sum::<u64>();
+    let worker_count = plan.segments.len().max(1);
+    let admitted_workers = Arc::new(AtomicUsize::new(worker_count));
+    let planned_segments = worker_count.min(u32::MAX as usize) as u32;
+    if let Some(message) =
+        segment_tail_leasing_diagnostic(&segment_state, &HashSet::new(), profile, worker_count)
+    {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download",
+                message,
+                Some(task.id.clone()),
+            )
+            .await;
+    }
 
     let snapshot = state
-        .mark_job_downloading(
+        .mark_segmented_job_downloading(
             &task.id,
             initial_downloaded,
             Some(plan.total_bytes),
             ResumeSupport::Supported,
             None,
+            0,
+            planned_segments,
         )
         .await?;
     emit_snapshot(app, &snapshot);
@@ -410,7 +716,12 @@ pub(super) async fn run_segmented_download_attempt(
     ));
     let reporter_stop = Arc::new(AtomicBool::new(false));
     let metadata = Arc::new(Mutex::new(segment_state));
+    let metadata_persisted_at = Arc::new(Mutex::new(Instant::now()));
     let worker_stop = Arc::new(AtomicBool::new(false));
+    let control_signal = WorkerControlSignal::default();
+    let _control_poller =
+        WorkerControlPoller::spawn(state.clone(), task.id.clone(), control_signal.clone());
+    let ramp_blocked = Arc::new(AtomicBool::new(false));
     let active_segments = Arc::new(Mutex::new(HashSet::new()));
     let priority_throttle = Arc::new(Mutex::new(DynamicThrottleState::default()));
     let reporter_handle = tauri::async_runtime::spawn(report_segmented_progress(
@@ -420,6 +731,8 @@ pub(super) async fn run_segmented_download_attempt(
         plan.total_bytes,
         profile,
         progress.clone(),
+        active_segments.clone(),
+        admitted_workers.clone(),
         reporter_stop.clone(),
     ));
     let worker_context = SegmentWorkerContext {
@@ -434,14 +747,17 @@ pub(super) async fn run_segmented_download_attempt(
         validators: validators.clone(),
         progress: progress.clone(),
         metadata: metadata.clone(),
+        metadata_persisted_at,
         stop: worker_stop.clone(),
+        control_signal,
+        ramp_blocked: ramp_blocked.clone(),
         priority_throttle,
+        priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
     };
 
     let mut handles = tokio::task::JoinSet::new();
-    let worker_count = plan.segments.len().max(1);
-    let queue_depth = dynamic_segment_queue_depth(worker_count);
+    let queue_depth = dynamic_segment_queue_depth(profile);
     let min_split_size = dynamic_segment_min_split_size(profile);
     for _ in 0..worker_count {
         handles.spawn(download_dynamic_segment_worker(
@@ -452,8 +768,20 @@ pub(super) async fn run_segmented_download_attempt(
         ));
     }
 
+    let adaptive = AdaptiveSegmentAdmission {
+        context: worker_context.clone(),
+        active_segments: active_segments.clone(),
+        metadata: metadata.clone(),
+        progress: progress.clone(),
+        admitted_workers: admitted_workers.clone(),
+        segment_lease,
+        queue_depth,
+        min_split_size,
+        last_ramp_total_bytes: AtomicU64::new(initial_downloaded),
+        last_ramp_speed_bps: AtomicU64::new(0),
+    };
     let (worker_outcome, mut worker_error) =
-        await_segment_workers_with_stop(handles, worker_stop).await;
+        await_segment_workers_with_adaptive_ramp(handles, worker_stop, adaptive).await;
 
     reporter_stop.store(true, Ordering::Relaxed);
     match reporter_handle.await {
@@ -519,6 +847,7 @@ pub(super) async fn download_dynamic_segment_worker(
             &active_segments,
             queue_depth,
             min_split_size,
+            Some(context.profile),
         )
         .await?
         else {
@@ -539,20 +868,70 @@ pub(super) async fn download_dynamic_segment_worker(
     }
 }
 
+async fn flush_and_record_segment_progress(
+    context: &SegmentWorkerContext,
+    writer: &mut BufWriter<fs::File>,
+    segment_index: usize,
+    downloaded_bytes: u64,
+    completed: bool,
+    persist: bool,
+) -> Result<(), DownloadError> {
+    flush_segment_writer(writer).await?;
+    record_segment_progress(
+        &context.temp_path,
+        &context.metadata,
+        segment_index,
+        downloaded_bytes,
+        completed,
+        persist,
+    )
+    .await
+}
+
+async fn flush_coalesced_and_record_segment_progress(
+    context: &SegmentWorkerContext,
+    writer: &mut BufWriter<fs::File>,
+    coalescer: &mut SegmentWriteCoalescer,
+    segment_index: usize,
+    downloaded_bytes: u64,
+    completed: bool,
+    persist: bool,
+) -> Result<(), DownloadError> {
+    if let Some(batch) = coalescer.flush() {
+        write_segment_chunk(writer, &batch).await?;
+        context
+            .progress
+            .store_segment_bytes(segment_index, downloaded_bytes);
+        context.progress.add_sample_bytes(batch.len() as u64);
+    }
+    flush_and_record_segment_progress(
+        context,
+        writer,
+        segment_index,
+        downloaded_bytes,
+        completed,
+        persist,
+    )
+    .await
+}
+
 pub(super) async fn download_segment_worker(
     context: SegmentWorkerContext,
     segment: SegmentProgress,
 ) -> Result<DownloadOutcome, DownloadError> {
     let mut current_len = segment_existing_len(&context.temp_path, &segment);
     let mut low_speed_monitor = LowSpeedMonitor::new(context.profile);
-    let mut file = open_direct_segment_file(&context.temp_path).await?;
-    let mut last_metadata_persisted_at = Instant::now();
+    let mut writer =
+        open_direct_segment_writer_at(&context.temp_path, segment.range.start + current_len)
+            .await?;
+    let mut coalescer = SegmentWriteCoalescer::new(SEGMENT_WRITE_COALESCE_THRESHOLD);
 
     while current_len < segment.range.len() {
         if context.stop.load(Ordering::Relaxed) {
-            record_segment_progress(
-                &context.temp_path,
-                &context.metadata,
+            flush_coalesced_and_record_segment_progress(
+                &context,
+                &mut writer,
+                &mut coalescer,
                 segment.index,
                 current_len,
                 false,
@@ -562,32 +941,36 @@ pub(super) async fn download_segment_worker(
             return Ok(DownloadOutcome::Paused);
         }
 
-        match context.state.worker_control(&context.job_id).await {
-            WorkerControl::Paused => {
-                record_segment_progress(
-                    &context.temp_path,
-                    &context.metadata,
-                    segment.index,
-                    current_len,
-                    false,
-                    true,
-                )
-                .await?;
-                return Ok(DownloadOutcome::Paused);
+        if let Some(outcome) = context.control_signal.current_outcome() {
+            match outcome {
+                DownloadOutcome::Paused => {
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
+                        segment.index,
+                        current_len,
+                        false,
+                        true,
+                    )
+                    .await?;
+                    return Ok(DownloadOutcome::Paused);
+                }
+                DownloadOutcome::Canceled => {
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
+                        segment.index,
+                        current_len,
+                        false,
+                        true,
+                    )
+                    .await?;
+                    return Ok(DownloadOutcome::Canceled);
+                }
+                DownloadOutcome::Completed | DownloadOutcome::Deferred(_) => {}
             }
-            WorkerControl::Canceled | WorkerControl::Missing => {
-                record_segment_progress(
-                    &context.temp_path,
-                    &context.metadata,
-                    segment.index,
-                    current_len,
-                    false,
-                    true,
-                )
-                .await?;
-                return Ok(DownloadOutcome::Canceled);
-            }
-            WorkerControl::Continue => {}
         }
 
         let requested = ByteRange {
@@ -607,10 +990,12 @@ pub(super) async fn download_segment_worker(
             Err(error) => {
                 if error.category == FailureCategory::Resume {
                     range_backoffs().record_rejection(&context.url, Instant::now());
+                    context.ramp_blocked.store(true, Ordering::Relaxed);
                 }
-                record_segment_progress(
-                    &context.temp_path,
-                    &context.metadata,
+                flush_coalesced_and_record_segment_progress(
+                    &context,
+                    &mut writer,
+                    &mut coalescer,
                     segment.index,
                     current_len,
                     false,
@@ -623,9 +1008,11 @@ pub(super) async fn download_segment_worker(
 
         if response.status() != StatusCode::PARTIAL_CONTENT {
             range_backoffs().record_rejection(&context.url, Instant::now());
-            record_segment_progress(
-                &context.temp_path,
-                &context.metadata,
+            context.ramp_blocked.store(true, Ordering::Relaxed);
+            flush_coalesced_and_record_segment_progress(
+                &context,
+                &mut writer,
+                &mut coalescer,
                 segment.index,
                 current_len,
                 false,
@@ -648,9 +1035,11 @@ pub(super) async fn download_segment_worker(
 
         if !range_ok {
             range_backoffs().record_rejection(&context.url, Instant::now());
-            record_segment_progress(
-                &context.temp_path,
-                &context.metadata,
+            context.ramp_blocked.store(true, Ordering::Relaxed);
+            flush_coalesced_and_record_segment_progress(
+                &context,
+                &mut writer,
+                &mut coalescer,
                 segment.index,
                 current_len,
                 false,
@@ -665,24 +1054,20 @@ pub(super) async fn download_segment_worker(
         }
 
         let mut stream = response.bytes_stream();
+        let mut stream_controller =
+            SignalStreamController::new(context.control_signal.clone(), context.stall_timeout);
         let mut low_speed_bytes = 0_u64;
         let mut low_speed_started = Instant::now();
         let mut priority_throttle_limited = false;
 
         loop {
-            let chunk_result = match next_stream_item_with_control(
-                &context.state,
-                &context.job_id,
-                context.stall_timeout,
-                stream.next(),
-            )
-            .await
-            {
+            let chunk_result = match stream_controller.next(stream.next()).await {
                 StreamItemWait::Item(result) => result,
                 StreamItemWait::Interrupted(DownloadOutcome::Paused) => {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
                         segment.index,
                         current_len,
                         false,
@@ -692,9 +1077,10 @@ pub(super) async fn download_segment_worker(
                     return Ok(DownloadOutcome::Paused);
                 }
                 StreamItemWait::Interrupted(DownloadOutcome::Canceled) => {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
                         segment.index,
                         current_len,
                         false,
@@ -713,9 +1099,11 @@ pub(super) async fn download_segment_worker(
                     let timeout = context
                         .stall_timeout
                         .expect("stall wait can only stall when configured");
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
+                    context.ramp_blocked.store(true, Ordering::Relaxed);
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
                         segment.index,
                         current_len,
                         false,
@@ -730,9 +1118,10 @@ pub(super) async fn download_segment_worker(
             };
 
             if context.stop.load(Ordering::Relaxed) {
-                record_segment_progress(
-                    &context.temp_path,
-                    &context.metadata,
+                flush_coalesced_and_record_segment_progress(
+                    &context,
+                    &mut writer,
+                    &mut coalescer,
                     segment.index,
                     current_len,
                     false,
@@ -742,40 +1131,14 @@ pub(super) async fn download_segment_worker(
                 return Ok(DownloadOutcome::Paused);
             }
 
-            match context.state.worker_control(&context.job_id).await {
-                WorkerControl::Paused => {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
-                        segment.index,
-                        current_len,
-                        false,
-                        true,
-                    )
-                    .await?;
-                    return Ok(DownloadOutcome::Paused);
-                }
-                WorkerControl::Canceled | WorkerControl::Missing => {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
-                        segment.index,
-                        current_len,
-                        false,
-                        true,
-                    )
-                    .await?;
-                    return Ok(DownloadOutcome::Canceled);
-                }
-                WorkerControl::Continue => {}
-            }
-
             let chunk = match chunk_result {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
+                    context.ramp_blocked.store(true, Ordering::Relaxed);
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
                         segment.index,
                         current_len,
                         false,
@@ -788,9 +1151,11 @@ pub(super) async fn download_segment_worker(
             let chunk_len = chunk.len() as u64;
             if chunk_len > segment.range.len().saturating_sub(current_len) {
                 range_backoffs().record_rejection(&context.url, Instant::now());
-                record_segment_progress(
-                    &context.temp_path,
-                    &context.metadata,
+                context.ramp_blocked.store(true, Ordering::Relaxed);
+                flush_coalesced_and_record_segment_progress(
+                    &context,
+                    &mut writer,
+                    &mut coalescer,
                     segment.index,
                     current_len,
                     false,
@@ -804,74 +1169,82 @@ pub(super) async fn download_segment_worker(
                 ));
             }
 
-            write_segment_chunk_to(&mut file, segment.range.start + current_len, &chunk).await?;
-
             current_len = current_len
                 .saturating_add(chunk_len)
                 .min(segment.range.len());
             low_speed_bytes = low_speed_bytes.saturating_add(chunk_len);
-            context
-                .progress
-                .store_segment_bytes(segment.index, current_len);
-            context.progress.add_sample_bytes(chunk_len);
-            if let Some(decision) = context
-                .state
-                .hoster_priority_throttle_decision(&context.job_id)
-                .await
-            {
-                priority_throttle_limited = true;
-                match throttle_download_with_dynamic_limit(
-                    &context.state,
-                    &context.job_id,
-                    &context.priority_throttle,
-                    decision.cap_bytes_per_second,
-                    chunk_len,
-                )
-                .await
+            if let Some(batch) = coalescer.push(&chunk) {
+                write_segment_chunk(&mut writer, &batch).await?;
+                context
+                    .progress
+                    .store_segment_bytes(segment.index, current_len);
+                context.progress.add_sample_bytes(batch.len() as u64);
+            }
+            if context.priority_throttle_enabled {
+                if let Some(decision) = context
+                    .state
+                    .hoster_priority_throttle_decision(&context.job_id)
+                    .await
                 {
-                    WorkerControl::Paused => {
-                        record_segment_progress(
-                            &context.temp_path,
-                            &context.metadata,
-                            segment.index,
-                            current_len,
-                            false,
-                            true,
-                        )
-                        .await?;
-                        return Ok(DownloadOutcome::Paused);
+                    context.ramp_blocked.store(true, Ordering::Relaxed);
+                    priority_throttle_limited = true;
+                    match throttle_download_with_dynamic_limit(
+                        &context.state,
+                        &context.job_id,
+                        &context.priority_throttle,
+                        decision.cap_bytes_per_second,
+                        chunk_len,
+                    )
+                    .await
+                    {
+                        WorkerControl::Paused => {
+                            flush_coalesced_and_record_segment_progress(
+                                &context,
+                                &mut writer,
+                                &mut coalescer,
+                                segment.index,
+                                current_len,
+                                false,
+                                true,
+                            )
+                            .await?;
+                            return Ok(DownloadOutcome::Paused);
+                        }
+                        WorkerControl::Canceled | WorkerControl::Missing => {
+                            flush_coalesced_and_record_segment_progress(
+                                &context,
+                                &mut writer,
+                                &mut coalescer,
+                                segment.index,
+                                current_len,
+                                false,
+                                true,
+                            )
+                            .await?;
+                            return Ok(DownloadOutcome::Canceled);
+                        }
+                        WorkerControl::Continue => {}
                     }
-                    WorkerControl::Canceled | WorkerControl::Missing => {
-                        record_segment_progress(
-                            &context.temp_path,
-                            &context.metadata,
-                            segment.index,
-                            current_len,
-                            false,
-                            true,
-                        )
-                        .await?;
-                        return Ok(DownloadOutcome::Canceled);
-                    }
-                    WorkerControl::Continue => {}
+                } else {
+                    clear_dynamic_throttle(&context.priority_throttle).await;
                 }
-            } else {
-                clear_dynamic_throttle(&context.priority_throttle).await;
             }
 
-            let should_persist_metadata =
-                last_metadata_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
-            record_segment_progress(
-                &context.temp_path,
-                &context.metadata,
-                segment.index,
-                current_len,
-                false,
-                should_persist_metadata,
-            )
-            .await?;
+            let should_persist_metadata = {
+                let mut last_persisted_at = context.metadata_persisted_at.lock().await;
+                should_persist_segment_metadata(&mut last_persisted_at, Instant::now(), false)
+            };
             if should_persist_metadata {
-                last_metadata_persisted_at = Instant::now();
+                flush_coalesced_and_record_segment_progress(
+                    &context,
+                    &mut writer,
+                    &mut coalescer,
+                    segment.index,
+                    current_len,
+                    false,
+                    true,
+                )
+                .await?;
             }
 
             if low_speed_started.elapsed() >= context.profile.low_speed_window {
@@ -881,9 +1254,11 @@ pub(super) async fn download_segment_worker(
                     priority_throttle_limited,
                 ) == LowSpeedDecision::Retry
                 {
-                    record_segment_progress(
-                        &context.temp_path,
-                        &context.metadata,
+                    context.ramp_blocked.store(true, Ordering::Relaxed);
+                    flush_coalesced_and_record_segment_progress(
+                        &context,
+                        &mut writer,
+                        &mut coalescer,
                         segment.index,
                         current_len,
                         false,
@@ -902,15 +1277,27 @@ pub(super) async fn download_segment_worker(
             }
         }
 
+        flush_coalesced_and_record_segment_progress(
+            &context,
+            &mut writer,
+            &mut coalescer,
+            segment.index,
+            current_len,
+            false,
+            false,
+        )
+        .await?;
         if current_len >= segment.range.len() {
             mark_segment_completed(&context.temp_path, &context.metadata, segment.index).await?;
             return Ok(DownloadOutcome::Completed);
         }
 
         if low_speed_monitor.retries >= context.profile.max_low_speed_retries {
-            record_segment_progress(
-                &context.temp_path,
-                &context.metadata,
+            context.ramp_blocked.store(true, Ordering::Relaxed);
+            flush_coalesced_and_record_segment_progress(
+                &context,
+                &mut writer,
+                &mut coalescer,
                 segment.index,
                 current_len,
                 false,
@@ -925,17 +1312,42 @@ pub(super) async fn download_segment_worker(
         }
     }
 
+    flush_coalesced_and_record_segment_progress(
+        &context,
+        &mut writer,
+        &mut coalescer,
+        segment.index,
+        current_len,
+        false,
+        false,
+    )
+    .await?;
     mark_segment_completed(&context.temp_path, &context.metadata, segment.index).await?;
     Ok(DownloadOutcome::Completed)
 }
 
-pub(super) async fn report_segmented_progress(
-    app: AppHandle,
+pub(super) fn should_persist_segment_metadata(
+    last_persisted_at: &mut Instant,
+    now: Instant,
+    force: bool,
+) -> bool {
+    if force || now.duration_since(*last_persisted_at) >= PROGRESS_PERSIST_INTERVAL {
+        *last_persisted_at = now;
+        true
+    } else {
+        false
+    }
+}
+
+pub(super) async fn report_segmented_progress<A: DownloadUi>(
+    app: A,
     state: SharedState,
     task: crate::state::DownloadTask,
     total_bytes: u64,
     profile: DownloadPerformanceProfile,
     progress: Arc<SegmentedProgressCounters>,
+    active_segments: Arc<Mutex<HashSet<usize>>>,
+    admitted_workers: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), DownloadError> {
     let job_id = task.id.clone();
@@ -969,12 +1381,18 @@ pub(super) async fn report_segmented_progress(
 
         let snapshot = match state.worker_control(&job_id).await {
             WorkerControl::Continue => {
+                let active_segment_count = active_segments.lock().await.len() as u32;
+                let planned_segments = admitted_workers
+                    .load(Ordering::Relaxed)
+                    .min(u32::MAX as usize) as u32;
                 state
-                    .update_job_progress(
+                    .update_segmented_job_progress(
                         &job_id,
                         downloaded_bytes,
                         Some(total_bytes),
                         speed,
+                        active_segment_count,
+                        planned_segments,
                         should_persist,
                     )
                     .await?
@@ -998,6 +1416,174 @@ pub(super) async fn report_segmented_progress(
     Ok(())
 }
 
+pub(super) struct AdaptiveSegmentAdmission {
+    pub(super) context: SegmentWorkerContext,
+    pub(super) active_segments: Arc<Mutex<HashSet<usize>>>,
+    pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
+    pub(super) progress: Arc<SegmentedProgressCounters>,
+    pub(super) admitted_workers: Arc<AtomicUsize>,
+    pub(super) segment_lease: Option<SegmentConnectionLeaseController>,
+    pub(super) queue_depth: usize,
+    pub(super) min_split_size: u64,
+    pub(super) last_ramp_total_bytes: AtomicU64,
+    pub(super) last_ramp_speed_bps: AtomicU64,
+}
+
+impl AdaptiveSegmentAdmission {
+    pub(super) async fn can_admit_more(&self) -> bool {
+        let profile = self.context.profile;
+        let admitted = self.admitted_workers.load(Ordering::Relaxed);
+        if profile.adaptive_ramp_step == 0
+            || admitted >= profile.max_segments
+            || self.context.stop.load(Ordering::Relaxed)
+            || self.context.ramp_blocked.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+
+        let active = self.active_segments.lock().await;
+        if active.len() < admitted.saturating_sub(1) {
+            return false;
+        }
+
+        let downloaded = self.progress.total_downloaded();
+        let remaining_bytes = self.context.total_bytes.saturating_sub(downloaded);
+        let desired_new_workers = self
+            .context
+            .profile
+            .adaptive_ramp_step
+            .min(self.context.profile.max_segments.saturating_sub(admitted));
+        let minimum_remaining = dynamic_segment_min_split_size(self.context.profile)
+            .saturating_mul(desired_new_workers.max(1) as u64);
+        if remaining_bytes < minimum_remaining {
+            return false;
+        }
+
+        let previous_downloaded = self
+            .last_ramp_total_bytes
+            .swap(downloaded, Ordering::Relaxed);
+        let sample_bytes = downloaded.saturating_sub(previous_downloaded);
+        if sample_bytes == 0 {
+            return false;
+        }
+        let sample_bps = (sample_bytes as f64
+            / self
+                .context
+                .profile
+                .adaptive_ramp_interval
+                .as_secs_f64()
+                .max(0.001)) as u64;
+        let previous_bps = self.last_ramp_speed_bps.swap(sample_bps, Ordering::Relaxed);
+        if previous_bps > 0
+            && sample_bps.saturating_mul(100)
+                < previous_bps.saturating_mul(ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT)
+        {
+            self.context.ramp_blocked.store(true, Ordering::Relaxed);
+            return false;
+        }
+
+        let metadata = self.metadata.lock().await;
+        pending_segment_count(&metadata, &active) > 0
+    }
+
+    fn admit_worker_target(&self) -> usize {
+        let current = self.admitted_workers.load(Ordering::Relaxed);
+        let desired = current
+            .saturating_add(self.context.profile.adaptive_ramp_step)
+            .min(self.context.profile.max_segments);
+        self.segment_lease
+            .as_ref()
+            .map(|lease| lease.grow_to(desired))
+            .unwrap_or(desired)
+            .min(self.context.profile.max_segments)
+    }
+
+    fn spawn_until(
+        &self,
+        handles: &mut tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+        target_workers: usize,
+    ) {
+        let current = self.admitted_workers.load(Ordering::Relaxed);
+        if target_workers <= current {
+            return;
+        }
+
+        for _ in current..target_workers {
+            handles.spawn(download_dynamic_segment_worker(
+                self.context.clone(),
+                self.active_segments.clone(),
+                self.queue_depth,
+                self.min_split_size,
+            ));
+        }
+        self.admitted_workers
+            .store(target_workers, Ordering::Relaxed);
+    }
+}
+
+async fn await_segment_workers_with_adaptive_ramp(
+    mut handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
+    stop: Arc<AtomicBool>,
+    adaptive: AdaptiveSegmentAdmission,
+) -> (DownloadOutcome, Option<DownloadError>) {
+    let ramp_sleep = tokio::time::sleep(adaptive.context.profile.adaptive_ramp_interval);
+    tokio::pin!(ramp_sleep);
+
+    loop {
+        if handles.is_empty() {
+            return (DownloadOutcome::Completed, None);
+        }
+
+        tokio::select! {
+            result = handles.join_next() => {
+                let Some(result) = result else {
+                    return (DownloadOutcome::Completed, None);
+                };
+                match result {
+                    Ok(Ok(DownloadOutcome::Completed)) => {}
+                    Ok(Ok(
+                        outcome @ (DownloadOutcome::Paused
+                        | DownloadOutcome::Canceled
+                        | DownloadOutcome::Deferred(_)),
+                    )) => {
+                        stop.store(true, Ordering::Relaxed);
+                        handles.abort_all();
+                        return (outcome, None);
+                    }
+                    Ok(Err(error)) => {
+                        stop.store(true, Ordering::Relaxed);
+                        adaptive.context.ramp_blocked.store(true, Ordering::Relaxed);
+                        drain_segment_workers_after_stop(&mut handles).await;
+                        return (DownloadOutcome::Completed, Some(error));
+                    }
+                    Err(error) => {
+                        stop.store(true, Ordering::Relaxed);
+                        adaptive.context.ramp_blocked.store(true, Ordering::Relaxed);
+                        drain_segment_workers_after_stop(&mut handles).await;
+                        return (
+                            DownloadOutcome::Completed,
+                            Some(download_error(
+                                FailureCategory::Internal,
+                                format!("Segment worker failed: {error}"),
+                                true,
+                            )),
+                        );
+                    }
+                }
+            }
+            _ = &mut ramp_sleep => {
+                if adaptive.can_admit_more().await {
+                    let target_workers = adaptive.admit_worker_target();
+                    adaptive.spawn_until(&mut handles, target_workers);
+                }
+                ramp_sleep.as_mut().reset(
+                    tokio::time::Instant::now() + adaptive.context.profile.adaptive_ramp_interval,
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) async fn await_segment_workers(
     handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
@@ -1005,6 +1591,7 @@ pub(super) async fn await_segment_workers(
     await_segment_workers_with_stop(handles, Arc::new(AtomicBool::new(false))).await
 }
 
+#[cfg(test)]
 pub(super) async fn await_segment_workers_with_stop(
     mut handles: tokio::task::JoinSet<Result<DownloadOutcome, DownloadError>>,
     stop: Arc<AtomicBool>,
@@ -1171,6 +1758,37 @@ pub(super) async fn open_direct_segment_file(temp_path: &Path) -> Result<fs::Fil
         .map_err(|error| disk_error(format!("Could not open segmented partial file: {error}")))
 }
 
+pub(super) async fn open_direct_segment_writer_at(
+    temp_path: &Path,
+    offset: u64,
+) -> Result<BufWriter<fs::File>, DownloadError> {
+    let mut file = open_direct_segment_file(temp_path).await?;
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|error| disk_error(format!("Could not seek segmented partial file: {error}")))?;
+    Ok(BufWriter::with_capacity(SEGMENT_WRITE_BUFFER_SIZE, file))
+}
+
+pub(super) async fn write_segment_chunk(
+    writer: &mut BufWriter<fs::File>,
+    chunk: &[u8],
+) -> Result<(), DownloadError> {
+    writer
+        .write_all(chunk)
+        .await
+        .map_err(|error| disk_error(format!("Could not write segment chunk: {error}")))
+}
+
+pub(super) async fn flush_segment_writer(
+    writer: &mut BufWriter<fs::File>,
+) -> Result<(), DownloadError> {
+    writer
+        .flush()
+        .await
+        .map_err(|error| disk_error(format!("Could not flush segment chunk: {error}")))
+}
+
+#[cfg(test)]
 pub(super) async fn write_segment_chunk_to(
     file: &mut fs::File,
     offset: u64,

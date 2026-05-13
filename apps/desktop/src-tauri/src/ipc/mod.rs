@@ -546,12 +546,14 @@ async fn handle_request(
                 return enqueue_handoff_download(
                     &app,
                     state,
-                    request.request_id,
-                    payload.url,
-                    source,
-                    payload.suggested_filename,
-                    payload.handoff_auth,
-                    transfer_kind,
+                    HandoffDownloadRequest {
+                        request_id: request.request_id,
+                        url: payload.url,
+                        source,
+                        filename_hint: payload.suggested_filename,
+                        handoff_auth: payload.handoff_auth,
+                        transfer_kind,
+                    },
                 )
                 .await;
             }
@@ -605,12 +607,14 @@ async fn handle_request(
                 return enqueue_handoff_download(
                     &app,
                     state,
-                    request.request_id,
-                    payload.url,
-                    source,
-                    payload.suggested_filename,
-                    payload.handoff_auth,
-                    transfer_kind,
+                    HandoffDownloadRequest {
+                        request_id: request.request_id,
+                        url: payload.url,
+                        source,
+                        filename_hint: payload.suggested_filename,
+                        handoff_auth: payload.handoff_auth,
+                        transfer_kind,
+                    },
                 )
                 .await;
             }
@@ -1557,16 +1561,29 @@ fn suggested_filename_is_torrent(suggested_filename: Option<&str>) -> bool {
         .is_some_and(|filename| filename.to_ascii_lowercase().ends_with(".torrent"))
 }
 
-async fn enqueue_handoff_download(
-    app: &AppHandle,
-    state: SharedState,
+struct HandoffDownloadRequest {
     request_id: String,
     url: String,
     source: DownloadSource,
     filename_hint: Option<String>,
     handoff_auth: Option<HandoffAuth>,
     transfer_kind: TransferKind,
+}
+
+async fn enqueue_handoff_download(
+    app: &AppHandle,
+    state: SharedState,
+    request: HandoffDownloadRequest,
 ) -> HostResponse {
+    let HandoffDownloadRequest {
+        request_id,
+        url,
+        source,
+        filename_hint,
+        handoff_auth,
+        transfer_kind,
+    } = request;
+
     if let Err(error) =
         probe_browser_download_access(&state, &source, &url, handoff_auth.as_ref()).await
     {
@@ -1737,6 +1754,20 @@ mod tests {
             "url": "https://example.com/file.zip",
             "source": valid_source()
         })
+    }
+
+    fn test_runtime_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::current_dir()
+            .unwrap()
+            .join("test-runtime")
+            .join(format!("{name}-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
     }
 
     #[test]
@@ -1954,10 +1985,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn invalid_native_host_manifest_is_reported_as_broken_entry() {
-        let manifest_path = std::env::temp_dir().join(format!(
-            "simple-download-manager-invalid-manifest-{}.json",
-            std::process::id()
-        ));
+        let root = test_runtime_path("invalid-native-host-manifest");
+        let manifest_path = root.join("simple-download-manager-invalid-manifest.json");
         std::fs::write(&manifest_path, "{not valid json").expect("write invalid manifest");
 
         let entry = super::read_host_registration_entry("Chrome", "Software\\Test", &manifest_path)
@@ -1971,6 +2000,6 @@ mod tests {
         assert_eq!(entry.host_binary_path, None);
         assert!(!entry.host_binary_exists);
 
-        let _ = std::fs::remove_file(manifest_path);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -66,7 +66,16 @@ try {
     Remove-Item -Path $bundleDir -Recurse -Force
   }
 
-  Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'tauri:build', '--workspace', '@myapp/desktop')
+  Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @(
+    'run',
+    'tauri:build',
+    '--workspace',
+    '@myapp/desktop',
+    '--',
+    '--',
+    '--bin',
+    'simple-download-manager-desktop-backend'
+  )
 
   $chromiumZip = Join-Path $releaseRoot 'simple-download-manager-chromium-extension.zip'
   $firefoxZip = Join-Path $releaseRoot 'simple-download-manager-firefox-extension.zip'

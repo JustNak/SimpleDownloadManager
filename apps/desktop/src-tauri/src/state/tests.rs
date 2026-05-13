@@ -1852,6 +1852,62 @@ async fn update_job_progress_coalesces_persistence() {
 }
 
 #[tokio::test]
+async fn segmented_progress_counts_are_visible_but_not_persisted() {
+    let download_dir = test_runtime_dir("segmented-progress-counts-transient");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job(
+        "job_segments",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.total_bytes = 100;
+    let state = shared_state_with_jobs(storage_path.clone(), vec![job]);
+
+    state
+        .update_segmented_job_progress("job_segments", 40, Some(100), 4096, 3, 16, true)
+        .await
+        .expect("segmented progress update should expose connection counts");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.jobs[0].active_segments, Some(3));
+    assert_eq!(snapshot.jobs[0].planned_segments, Some(16));
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    assert_eq!(persisted.jobs[0].active_segments, None);
+    assert_eq!(persisted.jobs[0].planned_segments, None);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn single_stream_progress_clears_segment_counts() {
+    let download_dir = test_runtime_dir("single-stream-progress-clears-segment-counts");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job(
+        "job_single",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.total_bytes = 100;
+    job.active_segments = Some(4);
+    job.planned_segments = Some(16);
+    let state = shared_state_with_jobs(storage_path, vec![job]);
+
+    state
+        .update_job_progress("job_single", 25, Some(100), 2048, true)
+        .await
+        .expect("single stream progress should clear segmented connection counts");
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.jobs[0].active_segments, None);
+    assert_eq!(snapshot.jobs[0].planned_segments, None);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn mark_job_downloading_preserves_pause_requested_during_startup() {
     let download_dir = test_runtime_dir("mark-downloading-preserves-paused");
     let storage_path = download_dir.join("state.json");
@@ -3298,6 +3354,8 @@ fn restart_reset_clears_partial_progress_and_failure_metadata() {
         downloaded_bytes: 42,
         speed: 2048,
         eta: 12,
+        active_segments: None,
+        planned_segments: None,
         error: Some("server closed the connection".into()),
         failure_category: Some(FailureCategory::Network),
         resume_support: ResumeSupport::Supported,
@@ -3388,6 +3446,8 @@ fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
         downloaded_bytes: 4096,
         speed: 2048,
         eta: 0,
+        active_segments: None,
+        planned_segments: None,
         error: Some("previous torrent error".into()),
         failure_category: Some(FailureCategory::Torrent),
         resume_support: ResumeSupport::Unsupported,
@@ -4943,6 +5003,34 @@ async fn retry_bulk_member_preserves_partial_state_and_bulk_identity() {
     assert_eq!(retried.bulk_archive.as_ref(), Some(&bulk_archive));
     assert!(temp_path.exists());
     assert!(meta_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn recoverable_partial_detection_uses_existing_partial_file_when_counters_are_zero() {
+    let download_dir = test_runtime_dir("recoverable-partial-file-detected");
+    let temp_path = download_dir.join("big-bulk-member.bin.part");
+    std::fs::write(&temp_path, b"partial bytes from an interrupted transfer").unwrap();
+
+    let mut job = download_job(
+        "job_partial_file_only",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.temp_path = temp_path.display().to_string();
+    job.total_bytes = 1024;
+    job.bulk_archive = Some(bulk_archive_info(&download_dir, "bulk_partial_file_only"));
+
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    assert!(
+        state
+            .has_recoverable_partial_download("job_partial_file_only")
+            .await,
+        "an existing non-empty partial file should be recoverable even before progress counters were flushed"
+    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -8157,8 +8245,8 @@ fn seed_policy_defaults_to_forever_and_supports_limits() {
     let mut settings = Settings::default();
     assert_eq!(
         settings.torrent.peer_connection_watchdog_mode,
-        TorrentPeerConnectionWatchdogMode::Diagnose,
-        "peer connection watchdog should default to diagnostic-only mode"
+        TorrentPeerConnectionWatchdogMode::Recover,
+        "peer connection watchdog should default to recovery mode"
     );
     assert!(!should_stop_seeding(&settings.torrent, 9.0, 24 * 60 * 60));
 
@@ -8201,6 +8289,8 @@ fn download_job(
         downloaded_bytes,
         speed: 0,
         eta: 0,
+        active_segments: None,
+        planned_segments: None,
         error: None,
         failure_category: None,
         resume_support,

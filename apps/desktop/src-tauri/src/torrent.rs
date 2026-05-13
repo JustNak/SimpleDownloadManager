@@ -23,7 +23,7 @@ pub const TORRENT_DHT_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 pub const TORRENT_DEFER_WRITES_MB: usize = 16;
 pub const TORRENT_CONCURRENT_INIT_LIMIT: usize = 2;
 pub const MAX_TORRENT_UPLOAD_LIMIT_KIB_PER_SECOND: u32 = 1_048_576;
-pub const TORRENT_TRACKER_FIRST_METADATA_TIMEOUT: Duration = Duration::from_secs(15);
+pub const TORRENT_TRACKER_FIRST_METADATA_TIMEOUT: Duration = Duration::from_secs(8);
 pub const TORRENT_METADATA_CACHE_DIR: &str = "torrent-metadata";
 const BYTES_PER_MEBIBYTE: f64 = 1024.0 * 1024.0;
 pub const FALLBACK_TORRENT_TRACKERS: [&str; 8] = [
@@ -1090,7 +1090,7 @@ mod tests {
     fn tracker_first_timeout_is_shorter_than_outer_metadata_timeout() {
         assert_eq!(
             TORRENT_TRACKER_FIRST_METADATA_TIMEOUT,
-            Duration::from_secs(15)
+            Duration::from_secs(8)
         );
     }
 

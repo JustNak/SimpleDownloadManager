@@ -53,6 +53,8 @@ impl RuntimeState {
                 job.state = JobState::Paused;
                 job.speed = 0;
                 job.eta = 0;
+                job.active_segments = None;
+                job.planned_segments = None;
             }
         }
         self.bulk_hoster_worker_health.clear();
@@ -75,6 +77,8 @@ impl RuntimeState {
                 job.auto_restart_attempts = 0;
                 job.speed = 0;
                 job.eta = 0;
+                job.active_segments = None;
+                job.planned_segments = None;
             }
         }
         self.bulk_hoster_worker_health.clear();
@@ -324,6 +328,8 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
         job.state = JobState::Queued;
         job.speed = 0;
         job.eta = 0;
+        job.active_segments = None;
+        job.planned_segments = None;
     }
 
     mark_stale_bulk_archive_finalization_failed(&mut job);
@@ -371,6 +377,8 @@ fn mark_stale_bulk_archive_finalization_failed(job: &mut DownloadJob) {
 
 pub(super) fn clear_transient_job_state(mut job: DownloadJob) -> DownloadJob {
     job.artifact_exists = None;
+    job.active_segments = None;
+    job.planned_segments = None;
     if let Some(torrent) = &mut job.torrent {
         torrent.diagnostics = None;
     }

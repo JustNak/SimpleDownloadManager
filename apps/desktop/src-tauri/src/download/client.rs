@@ -9,7 +9,7 @@ pub(super) fn download_client() -> Result<Client, DownloadError> {
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .pool_idle_timeout(Some(Duration::from_secs(120)))
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(64)
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .http2_adaptive_window(true)
         .no_gzip()
@@ -24,6 +24,66 @@ pub(super) fn download_client() -> Result<Client, DownloadError> {
     let _ = CLIENT.set(client);
     CLIENT.get().cloned().ok_or_else(|| {
         "Could not initialize shared download client."
+            .to_string()
+            .into()
+    })
+}
+
+pub(super) fn segmented_download_client() -> Result<Client, DownloadError> {
+    if let Some(client) = SEGMENTED_CLIENT.get() {
+        return Ok(client.clone());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .pool_idle_timeout(Some(Duration::from_secs(120)))
+        .pool_max_idle_per_host(64)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http1_only()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .redirect(Policy::none())
+        .user_agent("SimpleDownloadManager/0.2")
+        .build()
+        .map_err(|error| format!("Could not create segmented download client: {error}"))?;
+
+    let _ = SEGMENTED_CLIENT.set(client);
+    SEGMENTED_CLIENT.get().cloned().ok_or_else(|| {
+        "Could not initialize shared segmented download client."
+            .to_string()
+            .into()
+    })
+}
+
+#[cfg(windows)]
+pub(super) fn segmented_native_tls_download_client() -> Result<Client, DownloadError> {
+    if let Some(client) = SEGMENTED_NATIVE_TLS_CLIENT.get() {
+        return Ok(client.clone());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .pool_idle_timeout(Some(Duration::from_secs(120)))
+        .pool_max_idle_per_host(64)
+        .tcp_keepalive(Some(Duration::from_secs(30)))
+        .http1_only()
+        .use_native_tls()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .redirect(Policy::none())
+        .user_agent("SimpleDownloadManager/0.2")
+        .build()
+        .map_err(|error| format!("Could not create native TLS segmented client: {error}"))?;
+
+    let _ = SEGMENTED_NATIVE_TLS_CLIENT.set(client);
+    SEGMENTED_NATIVE_TLS_CLIENT.get().cloned().ok_or_else(|| {
+        "Could not initialize shared native TLS segmented client."
             .to_string()
             .into()
     })

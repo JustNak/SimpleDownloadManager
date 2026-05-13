@@ -3,51 +3,100 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const repoRoot = path.resolve();
-const expectedVersion = '0.7.1-beta';
-const expectedProtocolVersion = '0.3.48-alpha';
-const expectedNativeHostVersion = '0.3.48-alpha';
-const expectedExtensionVersion = '1.0.1';
+const rootManifest = await readJson('package.json');
+const packageLock = await readJson('package-lock.json');
+const desktopVersion = rootManifest.version;
 
-for (const manifestPath of [
-  'package.json',
-  'apps/desktop/package.json',
-]) {
-  const manifest = JSON.parse(await readFile(path.join(repoRoot, manifestPath), 'utf8'));
-  assert.equal(manifest.version, expectedVersion, `${manifestPath} should be bumped to ${expectedVersion}`);
-}
+assert.equal(packageLock.version, desktopVersion, 'package-lock root version should match package.json');
+assert.equal(packageLock.packages[''].version, desktopVersion, 'package-lock package entry should match package.json');
 
-const protocolManifest = JSON.parse(await readFile(path.join(repoRoot, 'packages/protocol/package.json'), 'utf8'));
+const desktopManifest = await readJson('apps/desktop/package.json');
+assert.equal(desktopManifest.version, desktopVersion, 'desktop package version should match package.json');
 assert.equal(
-  protocolManifest.version,
-  expectedProtocolVersion,
-  'protocol package version should remain unchanged for this desktop-only release bump',
+  packageLock.packages['apps/desktop'].version,
+  desktopVersion,
+  'package-lock desktop package entry should match package.json',
 );
 
-const extensionManifest = JSON.parse(await readFile(path.join(repoRoot, 'apps/extension/package.json'), 'utf8'));
-assert.equal(
-  extensionManifest.version,
-  expectedExtensionVersion,
-  'extension package version should remain on the extension release version',
-);
-
-const tauriConfig = JSON.parse(await readFile(path.join(repoRoot, 'apps', 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'));
-assert.equal(tauriConfig.version, expectedVersion, 'Tauri config should be bumped to the release version');
+const tauriConfig = await readJson('apps/desktop/src-tauri/tauri.conf.json');
+assert.equal(tauriConfig.version, desktopVersion, 'Tauri config version should match package.json');
 assert.deepEqual(
   tauriConfig.plugins.updater.endpoints,
   ['https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/latest-beta.json'],
   'desktop updater endpoint should track the beta feed',
 );
 
-const desktopCargoManifest = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8');
-assert.match(
-  desktopCargoManifest,
-  new RegExp(`version = "${expectedVersion}"`),
-  `apps/desktop/src-tauri/Cargo.toml should be bumped to ${expectedVersion}`,
+const desktopCargoManifest = await readText('apps/desktop/src-tauri/Cargo.toml');
+assert.equal(
+  cargoPackageVersion(desktopCargoManifest, 'simple-download-manager-desktop-backend'),
+  desktopVersion,
+  'desktop Cargo manifest version should match package.json',
 );
 
-const nativeHostCargoManifest = await readFile(path.join(repoRoot, 'apps/native-host/Cargo.toml'), 'utf8');
-assert.match(
-  nativeHostCargoManifest,
-  new RegExp(`version = "${expectedNativeHostVersion}"`),
-  'native host package version should remain unchanged for this desktop UI release',
+const desktopCargoLock = await readText('apps/desktop/src-tauri/Cargo.lock');
+assert.equal(
+  cargoLockPackageVersion(desktopCargoLock, 'simple-download-manager-desktop-backend'),
+  desktopVersion,
+  'desktop Cargo lock package entry should match package.json',
 );
+
+const protocolManifest = await readJson('packages/protocol/package.json');
+assert.equal(
+  packageLock.packages['packages/protocol'].version,
+  protocolManifest.version,
+  'package-lock protocol package entry should match protocol package.json',
+);
+
+const extensionManifest = await readJson('apps/extension/package.json');
+assert.equal(
+  packageLock.packages['apps/extension'].version,
+  extensionManifest.version,
+  'package-lock extension package entry should match extension package.json',
+);
+
+const nativeHostCargoManifest = await readText('apps/native-host/Cargo.toml');
+const nativeHostVersion = cargoPackageVersion(nativeHostCargoManifest, 'simple-download-manager-native-host');
+const nativeHostCargoLock = await readText('apps/native-host/Cargo.lock');
+assert.equal(
+  cargoLockPackageVersion(nativeHostCargoLock, 'simple-download-manager-native-host'),
+  nativeHostVersion,
+  'native host Cargo lock package entry should match native host Cargo manifest',
+);
+
+async function readJson(relativePath) {
+  return JSON.parse(await readText(relativePath));
+}
+
+async function readText(relativePath) {
+  return readFile(path.join(repoRoot, relativePath), 'utf8');
+}
+
+function cargoPackageVersion(manifest, expectedName) {
+  const packageSection = manifest.match(/(?:^|\r?\n)\[package\]\r?\n([\s\S]*?)(?=\r?\n\[|$)/);
+  assert(packageSection, `Cargo manifest should contain [package] for ${expectedName}`);
+  assert.equal(
+    tomlStringValue(packageSection[1], 'name'),
+    expectedName,
+    `Cargo manifest package name should be ${expectedName}`,
+  );
+  return tomlStringValue(packageSection[1], 'version');
+}
+
+function cargoLockPackageVersion(lockfile, expectedName) {
+  for (const section of lockfile.split(/\r?\n(?=\[\[package\]\])/)) {
+    if (!section.startsWith('[[package]]')) {
+      continue;
+    }
+    if (tomlStringValue(section, 'name') === expectedName) {
+      return tomlStringValue(section, 'version');
+    }
+  }
+
+  assert.fail(`Cargo lock should contain package ${expectedName}`);
+}
+
+function tomlStringValue(section, key) {
+  const match = section.match(new RegExp(`^${key} = "([^"]+)"`, 'm'));
+  assert(match, `TOML section should contain string key ${key}`);
+  return match[1];
+}

@@ -1,5 +1,11 @@
 import type { TorrentSettings } from './types';
 
+type TorrentSettingsInput = Partial<
+  Omit<TorrentSettings, 'peerConnectionWatchdogMode'> & {
+    peerConnectionWatchdogMode?: unknown;
+  }
+>;
+
 const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   enabled: true,
   downloadDirectory: '',
@@ -9,11 +15,11 @@ const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   uploadLimitKibPerSecond: 0,
   portForwardingEnabled: false,
   portForwardingPort: 42000,
-  peerConnectionWatchdogMode: 'diagnose',
+  peerConnectionWatchdogMode: 'recover',
 };
 
 export function normalizeTorrentSettings(
-  value: Partial<TorrentSettings> | undefined,
+  value: TorrentSettingsInput | undefined,
   downloadDirectory = '',
 ): TorrentSettings {
   return {
@@ -30,9 +36,7 @@ export function normalizeTorrentSettings(
     uploadLimitKibPerSecond: Math.round(clampNumber(value?.uploadLimitKibPerSecond, 0, 1_048_576, 0)),
     portForwardingEnabled: value?.portForwardingEnabled ?? DEFAULT_TORRENT_SETTINGS.portForwardingEnabled,
     portForwardingPort: normalizeForwardingPort(value?.portForwardingPort),
-    peerConnectionWatchdogMode: isPeerConnectionWatchdogMode(value?.peerConnectionWatchdogMode)
-      ? value.peerConnectionWatchdogMode
-      : DEFAULT_TORRENT_SETTINGS.peerConnectionWatchdogMode,
+    peerConnectionWatchdogMode: normalizePeerConnectionWatchdogMode(value?.peerConnectionWatchdogMode),
   };
 }
 
@@ -62,8 +66,10 @@ function isSeedMode(value: unknown): value is TorrentSettings['seedMode'] {
   return value === 'forever' || value === 'ratio' || value === 'time' || value === 'ratio_or_time';
 }
 
-function isPeerConnectionWatchdogMode(value: unknown): value is TorrentSettings['peerConnectionWatchdogMode'] {
-  return value === 'diagnose' || value === 'experimental';
+function normalizePeerConnectionWatchdogMode(value: unknown): TorrentSettings['peerConnectionWatchdogMode'] {
+  if (value === 'diagnose') return 'diagnose';
+  if (value === 'recover' || value === 'experimental') return 'recover';
+  return DEFAULT_TORRENT_SETTINGS.peerConnectionWatchdogMode;
 }
 
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number {

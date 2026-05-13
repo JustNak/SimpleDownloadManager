@@ -104,9 +104,11 @@ impl SharedState {
                 };
                 protected_bulk_hoster_targets.insert(key, target);
             }
+            let protected_bulk_archive_groups = protected_bulk_archive_member_groups(&state);
             let (protected_bulk_archive_windows, archive_window_diagnostics) =
                 protected_bulk_archive_scheduling_windows(
                     &state,
+                    &protected_bulk_archive_groups,
                     &fairness_metrics_by_key,
                     &protected_bulk_hoster_targets,
                     bulk_slot_limit,
@@ -120,7 +122,7 @@ impl SharedState {
                     None,
                 );
             }
-            let scheduler_job_order = scheduler_job_indexes(&state);
+            let scheduler_job_order = scheduler_job_indexes(&state, &protected_bulk_archive_groups);
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
             let mut blocked_accelerated_hoster_queue_keys: HashSet<String> = HashSet::new();
             let mut blocked_admission_hoster_queue_keys: HashSet<String> = HashSet::new();
@@ -603,21 +605,10 @@ fn accelerated_bulk_slot_floor(state: &RuntimeState) -> u32 {
         .unwrap_or(0)
 }
 
-fn scheduler_job_indexes(state: &RuntimeState) -> Vec<usize> {
-    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
-    for (index, job) in state.jobs.iter().enumerate() {
-        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
-            groups
-                .entry(group_key)
-                .or_default()
-                .push(ProtectedBulkArchiveMember::from_job(index, job));
-        }
-    }
-
-    for members in groups.values_mut() {
-        sort_protected_bulk_archive_members(members);
-    }
-
+fn scheduler_job_indexes(
+    state: &RuntimeState,
+    groups: &HashMap<(String, String), Vec<ProtectedBulkArchiveMember>>,
+) -> Vec<usize> {
     let mut emitted_groups = HashSet::new();
     let mut order = Vec::with_capacity(state.jobs.len());
     for (index, job) in state.jobs.iter().enumerate() {
@@ -638,6 +629,7 @@ fn scheduler_job_indexes(state: &RuntimeState) -> Vec<usize> {
 
 fn protected_bulk_archive_scheduling_windows(
     state: &RuntimeState,
+    groups: &HashMap<(String, String), Vec<ProtectedBulkArchiveMember>>,
     fairness_metrics_by_key: &HashMap<String, BulkHosterFairnessMetrics>,
     protected_bulk_hoster_targets: &HashMap<String, u32>,
     bulk_slot_limit: u32,
@@ -646,21 +638,9 @@ fn protected_bulk_archive_scheduling_windows(
     HashMap<(String, String), ProtectedBulkArchiveWindow>,
     Vec<String>,
 ) {
-    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
-    for (index, job) in state.jobs.iter().enumerate() {
-        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
-            groups
-                .entry(group_key)
-                .or_default()
-                .push(ProtectedBulkArchiveMember::from_job(index, job));
-        }
-    }
-
     let mut windows = HashMap::new();
     let mut diagnostics = Vec::new();
-    for (group_key, mut members) in groups {
-        sort_protected_bulk_archive_members(&mut members);
-
+    for (group_key, members) in groups {
         let fairness_key = &group_key.1;
         let metrics = fairness_metrics_by_key
             .get(fairness_key)
@@ -722,7 +702,7 @@ fn protected_bulk_archive_scheduling_windows(
         }
 
         windows.insert(
-            group_key,
+            group_key.clone(),
             ProtectedBulkArchiveWindow {
                 allowed_job_ids,
                 target_active,
@@ -732,6 +712,26 @@ fn protected_bulk_archive_scheduling_windows(
     }
 
     (windows, diagnostics)
+}
+
+fn protected_bulk_archive_member_groups(
+    state: &RuntimeState,
+) -> HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> {
+    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
+    for (index, job) in state.jobs.iter().enumerate() {
+        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
+            groups
+                .entry(group_key)
+                .or_default()
+                .push(ProtectedBulkArchiveMember::from_job(index, job));
+        }
+    }
+
+    for members in groups.values_mut() {
+        sort_protected_bulk_archive_members(members);
+    }
+
+    groups
 }
 
 fn sort_protected_bulk_archive_members(members: &mut [ProtectedBulkArchiveMember]) {

@@ -289,6 +289,8 @@ mod tests {
             downloaded_bytes: 0,
             speed: 0,
             eta: 0,
+            active_segments: None,
+            planned_segments: None,
             error: None,
             failure_category: None,
             resume_support: ResumeSupport::Supported,

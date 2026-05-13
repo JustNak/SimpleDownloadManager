@@ -2,6 +2,7 @@ import type { DownloadJob } from './types';
 
 const SAMPLE_WINDOW_MS = 60_000;
 const MIN_SAMPLE_ELAPSED_MS = 1_000;
+const STARTUP_BACKEND_SPEED_WINDOW_MS = 5_000;
 
 export interface ProgressSample {
   jobId: string;
@@ -76,9 +77,10 @@ export function calculateDownloadProgressMetrics(
   _timestamp = Date.now(),
 ): DownloadProgressMetrics {
   const backendSpeed = Math.max(0, job.speed || 0);
+  const observedSpeed = observedAverageSpeed(job, samples);
   const averageSpeed = job.transferKind === 'torrent'
     ? backendSpeed
-    : observedAverageSpeed(job, samples) || backendSpeed;
+    : httpAverageSpeed(backendSpeed, observedSpeed);
   const remainingBytes = Math.max(0, (job.totalBytes || 0) - (job.downloadedBytes || 0));
   const timeRemaining = job.transferKind === 'torrent'
     ? torrentBackendTimeRemaining(job)
@@ -90,6 +92,20 @@ export function calculateDownloadProgressMetrics(
     averageSpeed,
     timeRemaining,
   };
+}
+
+function httpAverageSpeed(
+  backendSpeed: number,
+  observedSpeed: { speed: number; elapsedMs: number },
+): number {
+  if (
+    backendSpeed > 0
+    && observedSpeed.elapsedMs > 0
+    && observedSpeed.elapsedMs <= STARTUP_BACKEND_SPEED_WINDOW_MS
+  ) {
+    return backendSpeed;
+  }
+  return observedSpeed.speed || backendSpeed;
 }
 
 export function calculateDownloadProgressMetricsByJobId(
@@ -114,19 +130,19 @@ function torrentBackendTimeRemaining(job: DownloadJob): number {
   return Math.max(0, Math.round(job.eta || 0));
 }
 
-function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): number {
+function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): { speed: number; elapsedMs: number } {
   const jobSamples = samples
     .filter((sample) => sample.jobId === job.id)
     .sort((left, right) => left.timestamp - right.timestamp);
-  if (jobSamples.length < 2) return 0;
+  if (jobSamples.length < 2) return { speed: 0, elapsedMs: 0 };
 
   const first = jobSamples[0];
   const last = jobSamples[jobSamples.length - 1];
   const elapsedMs = last.timestamp - first.timestamp;
   const byteDelta = last.downloadedBytes - first.downloadedBytes;
-  if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || byteDelta <= 0) return 0;
+  if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || byteDelta <= 0) return { speed: 0, elapsedMs };
 
-  return Math.round(byteDelta / (elapsedMs / 1000));
+  return { speed: Math.round(byteDelta / (elapsedMs / 1000)), elapsedMs };
 }
 
 function isTorrentMetadataPendingForProgress(job: DownloadJob): boolean {

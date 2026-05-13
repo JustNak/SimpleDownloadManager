@@ -59,6 +59,21 @@
     shouldBlurJobIdentity,
     shouldOpenJobFileOnDoubleClick,
   } from './queueInteractions';
+  import {
+    BULK_MEMBER_ROW_HEIGHT,
+    bulkExpansionHeight,
+    bulkMemberPanelHeight,
+    pruneRecordKeys,
+  } from './queueBulkExpansion';
+  import {
+    formatFullJobDate,
+    formatJobDate,
+    formatQueueSpeed,
+    formatQueueTime,
+    formatTorrentRatio,
+    formatTorrentSeedMetric,
+  } from './queueFormatting';
+  import { deleteJobIdsForPrompt, selectedIdsForJob } from './queueSelection';
   import { getVirtualQueueWindow, type VirtualQueueExtraHeight } from './queueVirtualization';
   import {
     BULK_QUEUE_TABLE_GRID_CLASS,
@@ -80,15 +95,12 @@
     type DetailsLevel,
     type QueueTableAlignment,
   } from './queueViewLayout';
-  import { formatBytes, formatTime, getHost } from './popupShared';
+  import { formatBytes, getHost } from './popupShared';
   import type { DownloadJob, QueueRowSize } from './types';
   import { JobState } from './types';
   import { isBulkAggregateJob, type BulkAggregateDownloadJob, type BulkMembersByArchiveId, type QueueDisplayJob } from './bulkQueueRows';
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
-  const BULK_MEMBER_ROW_HEIGHT = 32;
-  const BULK_MEMBER_PANEL_MAX_HEIGHT = 256;
-  const BULK_MEMBER_PANEL_VERTICAL_CHROME = 8;
 
   interface Props {
     jobs: QueueDisplayJob[];
@@ -380,15 +392,6 @@
     return isBulkAggregateJob(job) ? bulkMembersByArchiveId[job.bulkArchiveId] ?? [] : [];
   }
 
-  function bulkMemberPanelHeight(memberCount: number): number {
-    return Math.min(BULK_MEMBER_PANEL_MAX_HEIGHT, Math.max(1, memberCount) * BULK_MEMBER_ROW_HEIGHT);
-  }
-
-  function bulkExpansionHeight(memberCount: number): number {
-    if (memberCount <= 0) return 0;
-    return bulkMemberPanelHeight(memberCount) + BULK_MEMBER_PANEL_VERTICAL_CHROME;
-  }
-
   function bulkExpansionHeightForJob(job: QueueDisplayJob): number {
     if (!isBulkTable || !canExpandBulkAggregate(job) || !expandedBulkRowIds.has(job.id)) return 0;
     return bulkExpansionHeight(bulkMembersForJob(job).length);
@@ -413,19 +416,6 @@
     if (bulkMemberViewportHeights[jobId] !== nextViewportHeight) {
       bulkMemberViewportHeights = { ...bulkMemberViewportHeights, [jobId]: nextViewportHeight };
     }
-  }
-
-  function pruneRecordKeys<T>(record: Record<string, T>, allowedKeys: Set<string>): Record<string, T> {
-    let changed = false;
-    const next: Record<string, T> = {};
-    for (const [key, value] of Object.entries(record)) {
-      if (allowedKeys.has(key)) {
-        next[key] = value;
-      } else {
-        changed = true;
-      }
-    }
-    return changed ? next : record;
   }
 
   function canExcludeBulkReviewMember(member: DownloadJob): boolean {
@@ -512,13 +502,8 @@
     applySelectionRange(selectionDrag.anchorId, jobId, selectionDrag.selected, selectionDrag.baseSelection);
   }
 
-  function selectedIdsFor(job: QueueDisplayJob): string[] {
-    if (selectedJobIds.has(job.id) && selectedJobIds.size > 1) return [...selectedJobIds];
-    return [job.id];
-  }
-
   function selectedJobsFor(job: QueueDisplayJob): QueueDisplayJob[] {
-    const ids = new Set(selectedIdsFor(job));
+    const ids = new Set(selectedIdsForJob(job, selectedJobIds));
     return jobs.filter((candidate) => ids.has(candidate.id));
   }
 
@@ -536,10 +521,6 @@
     deletePromptJobs = selectedJobsFor(job);
     deleteFromDisk = true;
     closeMenus();
-  }
-
-  function deleteJobIdsForPrompt(promptJobs: QueueDisplayJob[]): string[] {
-    return promptJobs.flatMap((job) => isBulkAggregateJob(job) ? job.bulkMemberIds : [job.id]);
   }
 
   function confirmDelete() {
@@ -691,56 +672,6 @@
       default:
         return 'px-1.5 py-[1px] text-[10px] leading-4';
     }
-  }
-
-  function formatQueueSpeed(job: DownloadJob, averageSpeed: number) {
-    if (job.state === JobState.Downloading) return `${formatBytes(averageSpeed)}/s`;
-    if (job.state === JobState.Seeding && job.torrent) return `Up ${formatBytes(job.torrent.uploadedBytes)}`;
-    return '--';
-  }
-
-  function formatTorrentSeedMetric(job: DownloadJob) {
-    if (!job.torrent) return '--';
-    if (job.torrent.uploadedBytes > 0) return formatBytes(job.torrent.uploadedBytes);
-    return '--';
-  }
-
-  function formatTorrentRatio(job: DownloadJob) {
-    const ratio = job.torrent?.ratio;
-    if (!Number.isFinite(ratio) || !ratio || ratio <= 0) return '--';
-    return `${ratio.toFixed(2)}x`;
-  }
-
-  function formatQueueTime(job: DownloadJob, timeRemaining: number) {
-    if (job.state === JobState.Downloading) return formatTime(timeRemaining);
-    if (job.state === JobState.Seeding && job.torrent) return formatTorrentRatio(job);
-    return '--';
-  }
-
-  function formatJobDate(timestamp: number | undefined) {
-    if (!isValidTimestamp(timestamp)) return '--';
-    return new Intl.DateTimeFormat(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(timestamp));
-  }
-
-  function formatFullJobDate(timestamp: number | undefined) {
-    if (!isValidTimestamp(timestamp)) return 'No date recorded';
-    return new Intl.DateTimeFormat(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    }).format(new Date(timestamp));
-  }
-
-  function isValidTimestamp(timestamp: number | undefined): timestamp is number {
-    return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0;
   }
 
   function torrentMetricValue(metric: ReturnType<typeof torrentDetailMetrics>[number]) {

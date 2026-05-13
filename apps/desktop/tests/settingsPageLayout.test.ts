@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const helpersSource = readFileSync(new URL('../src/settingsPageHelpers.ts', import.meta.url), 'utf8');
 const sectionsSource = readFileSync(new URL('../src/settingsSections.ts', import.meta.url), 'utf8');
 
 assert.match(source, /settings-surface mx-auto w-full max-w-6xl p-4/, 'settings content should keep the Svelte centered max-width form layout');
@@ -42,6 +43,9 @@ assert.match(source, /formData\.bulk\.expandActiveRowsByDefault[\s\S]*formData\.
 assert.doesNotMatch(source, /0\.5\.1-beta/, 'app update current version should not use the stale hardcoded 0.5.1-beta fallback');
 assert.match(source, /installedVersion:\s*string/, 'settings page should receive the installed app version from the app shell');
 assert.match(source, /updateVersionIndicator\(updateState,\s*installedVersion\)/, 'app update version rows should use the shared installed-version indicator helper');
+assert.match(source, /from '\.\/settingsPageHelpers'/, 'settings normalization and presentation helpers should live outside SettingsPage');
+assert.match(helpersSource, /export function normalizeBulkSettings/, 'bulk normalization should be behavior-testable outside the Svelte component');
+assert.match(helpersSource, /export function renderUpdateStatus/, 'update status presentation should be behavior-testable outside the Svelte component');
 assert.match(appSource, /getInstalledVersion/, 'app shell should read the installed app version through the backend wrapper');
 assert.doesNotMatch(appSource, /Preview build/, 'app shell should not initialize update version rows with the non-version Preview build fallback');
 assert.doesNotMatch(backendSource, /return 'Preview build'/, 'backend version wrapper should not return the non-version Preview build fallback');
@@ -65,6 +69,8 @@ assert.doesNotMatch(source, /#snippet CompactSetting[\s\S]*rounded-md border bor
 assert.doesNotMatch(source, /<div class="rounded-md border border-border bg-surface p-4">/, 'settings content should not use nested page cards');
 assert.doesNotMatch(source, /border-border\/70/, 'settings page separators should avoid the heavier hairline treatment');
 assert.match(source, /bind:value=\{formData\.torrent\.downloadDirectory\}/, 'torrent settings should expose the torrent download directory field');
+assert.match(source, /<option value="recover">Recover<\/option>[\s\S]*<option value="diagnose">Diagnose only<\/option>/, 'torrent peer watchdog should default to a recovery-first mode with a diagnose-only opt-out');
+assert.doesNotMatch(source, /<option value="experimental">Experimental<\/option>/, 'torrent peer watchdog should no longer expose experimental wording');
 assert.match(source, /Clear torrent session cache/, 'torrent settings should expose the torrent session cache cleanup action');
 assert.match(source, /Show details on click/, 'settings should expose the click-to-show details pane toggle');
 assert.match(source, /formData\.showDetailsOnClick[\s\S]*formData\.showDetailsOnClick = checked/, 'click-to-show details setting should be wired to the settings draft');
@@ -93,6 +99,6 @@ assert.match(source, /onRefreshDiagnostics/, 'native host diagnostics should kee
 assert.match(source, /onCheckForUpdates/, 'app updates section should keep the manual update callback');
 assert.match(source, /Recent Events \(latest 500\)[\s\S]*max-h-56 overflow-auto rounded-md border border-border\/55 bg-zinc-950 font-mono shadow-inner/, 'recent events should render as a compact latest-500 console-like box');
 assert.match(source, /diagnosticLevelConsoleClass/, 'recent event levels should use console-specific colors');
-assert.match(source, /const recentDiagnosticEvents = \$derived\(diagnostics\?\.recentEvents \? \[\.\.\.diagnostics\.recentEvents\]\.reverse\(\) : \[\]\)/, 'recent events should use a reversed display copy so newest entries render first');
+assert.match(source, /const recentDiagnosticEvents = \$derived\(newestFirstDiagnosticEvents\(diagnostics\)\)/, 'recent events should use a helper-backed newest-first display list');
 assert.match(source, /\{#if recentDiagnosticEvents\.length\}[\s\S]*\{#each recentDiagnosticEvents as event\}/, 'recent events should render from the newest-first display list');
 assert.doesNotMatch(source, /\{#each diagnostics\.recentEvents as event\}/, 'recent events should not render directly from the backend-ordered diagnostics array');

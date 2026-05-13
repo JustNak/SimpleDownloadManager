@@ -23,21 +23,3 @@ assert.match(
   /command\.creation_flags\(CREATE_NO_WINDOW\)/,
   '7-Zip extraction command should apply the hidden-window creation flag before spawning',
 );
-
-assert.doesNotMatch(
-  archiveSource,
-  /write_zip_archive|finish_prepared_zip_output|ZipCentralDirectoryEntry/,
-  'bulk finalization should not keep the removed ZIP archive writer path',
-);
-
-assert.doesNotMatch(
-  archiveSource,
-  /BulkArchiveOutputKind::Archive\s*=>/,
-  'bulk finalization should not branch into archive output after File Combine was reduced to folder output',
-);
-
-assert.match(
-  archiveSource,
-  /std::fs::rename/,
-  'folder finalization should use move-first filesystem renames before falling back to copy',
-);

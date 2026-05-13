@@ -1,4 +1,4 @@
-use crate::commands::{emit_download_update, emit_snapshot};
+use crate::commands::NotificationSoundKind;
 use crate::state::{
     should_stop_seeding, BulkArchiveReady, BulkMemberAutoRestartMode, BulkMemberSlowRecoveryState,
     ExternalReseedAttempt, SharedState, TorrentRuntimePhase, TorrentRuntimeSnapshot, WorkerControl,
@@ -6,8 +6,7 @@ use crate::state::{
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode,
     BulkHosterAccelerationMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory,
-    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
-    TransferKind,
+    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
@@ -29,11 +28,11 @@ use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::plugin::PermissionState;
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -48,6 +47,7 @@ mod policy;
 mod segmented;
 mod stream;
 mod torrent;
+mod torrent_watchdog;
 mod types;
 
 use bulk_finalize::*;
@@ -59,6 +59,7 @@ use policy::*;
 use segmented::*;
 use stream::*;
 use torrent::*;
+use torrent_watchdog::*;
 use types::*;
 
 pub(crate) use notifications::reset_bulk_failure_sound;
@@ -66,12 +67,77 @@ pub(crate) use notifications::reset_bulk_failure_sound;
 #[cfg(test)]
 mod tests;
 
+pub trait DownloadUi: Clone + Send + Sync + 'static {
+    fn emit_snapshot(&self, snapshot: &crate::storage::DesktopSnapshot);
+    fn emit_download_update(&self, snapshot: &crate::storage::DesktopSnapshot, job_id: &str);
+    fn emit_notification_sound(&self, kind: NotificationSoundKind);
+    fn show_notification(&self, title: &str, body: &str);
+}
+
+impl<R: Runtime> DownloadUi for AppHandle<R> {
+    fn emit_snapshot(&self, snapshot: &crate::storage::DesktopSnapshot) {
+        crate::commands::emit_snapshot(self, snapshot);
+    }
+
+    fn emit_download_update(&self, snapshot: &crate::storage::DesktopSnapshot, job_id: &str) {
+        crate::commands::emit_download_update(self, snapshot, job_id);
+    }
+
+    fn emit_notification_sound(&self, kind: NotificationSoundKind) {
+        crate::commands::emit_notification_sound(self, kind);
+    }
+
+    fn show_notification(&self, title: &str, body: &str) {
+        let notification = self.notification();
+        if matches!(notification.permission_state(), Ok(PermissionState::Prompt)) {
+            let _ = notification.request_permission();
+        }
+
+        if !matches!(
+            notification.permission_state(),
+            Ok(PermissionState::Granted)
+        ) {
+            return;
+        }
+
+        let _ = notification.builder().title(title).body(body).show();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(super) struct NoopDownloadUi;
+
+#[cfg(test)]
+impl DownloadUi for NoopDownloadUi {
+    fn emit_snapshot(&self, _snapshot: &crate::storage::DesktopSnapshot) {}
+
+    fn emit_download_update(&self, _snapshot: &crate::storage::DesktopSnapshot, _job_id: &str) {}
+
+    fn emit_notification_sound(&self, _kind: NotificationSoundKind) {}
+
+    fn show_notification(&self, _title: &str, _body: &str) {}
+}
+
+fn emit_snapshot(app: &impl DownloadUi, snapshot: &crate::storage::DesktopSnapshot) {
+    app.emit_snapshot(snapshot);
+}
+
+fn emit_download_update(
+    app: &impl DownloadUi,
+    snapshot: &crate::storage::DesktopSnapshot,
+    job_id: &str,
+) {
+    app.emit_download_update(snapshot, job_id);
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(8);
 const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(750);
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const THROTTLE_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(test)]
 const TORRENT_LOW_THROUGHPUT_LIVE_PEER_THRESHOLD: u32 = 10;
 const TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND: u64 = 256 * 1024;
 const TORRENT_LOW_THROUGHPUT_REPORT_WINDOW: Duration = Duration::from_secs(30);
@@ -79,17 +145,17 @@ const TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL: Duration = Duration::from_secs(60)
 const TORRENT_RESTORE_RECHECK_IDLE_WINDOW: Duration = Duration::from_secs(45);
 const TORRENT_RESTORE_STALLED_IDLE_WINDOW: Duration = Duration::from_secs(90);
 const TORRENT_PEER_WATCHDOG_WINDOW: Duration = Duration::from_secs(60);
-const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(60);
+const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 pub const EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS: u64 = 60;
 const DOWNLOAD_BUFFER_SIZE: usize = 512 * 1024;
 const BALANCED_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
 const BALANCED_TARGET_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 const FAST_MIN_SEGMENTED_SIZE: u64 = 16 * 1024 * 1024;
-const FAST_TARGET_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
+const FAST_TARGET_SEGMENT_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
-const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 16;
-const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 8;
+const DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 48;
+const DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 24;
 const HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 24;
 const HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
 const HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 48;
@@ -118,7 +184,7 @@ pub struct BrowserHandoffAccessError {
     pub status: Option<u16>,
 }
 
-pub fn schedule_downloads(app: AppHandle, state: SharedState) {
+pub fn schedule_downloads<A: DownloadUi>(app: A, state: SharedState) {
     tauri::async_runtime::spawn(async move {
         match state.claim_schedulable_jobs().await {
             Ok((snapshot, tasks)) => {
@@ -286,6 +352,23 @@ impl TorrentEngineManager {
         Ok(())
     }
 
+    async fn clear_if_no_other_torrent_work(
+        &self,
+        state: &SharedState,
+        current_job_id: &str,
+    ) -> Result<bool, String> {
+        if state
+            .has_other_torrent_engine_blocking_work(current_job_id)
+            .await
+        {
+            return Ok(false);
+        }
+
+        let mut slot = self.slot.lock().await;
+        *slot = None;
+        Ok(true)
+    }
+
     async fn current_engine(&self) -> Option<Arc<TorrentEngine>> {
         self.slot
             .lock()
@@ -316,6 +399,15 @@ pub async fn apply_torrent_runtime_settings(state: &SharedState) -> Result<(), S
 
 pub async fn clear_in_memory_torrent_engine_if_idle(state: &SharedState) -> Result<(), String> {
     torrent_engine_manager().clear_if_idle(state).await
+}
+
+pub async fn clear_in_memory_torrent_engine_if_no_other_work(
+    state: &SharedState,
+    current_job_id: &str,
+) -> Result<bool, String> {
+    torrent_engine_manager()
+        .clear_if_no_other_torrent_work(state, current_job_id)
+        .await
 }
 
 async fn record_deferred_torrent_engine_settings_refresh(
@@ -373,14 +465,14 @@ pub async fn forget_known_torrent_sessions(torrents: &[TorrentInfo]) -> Result<(
 }
 
 pub async fn retry_bulk_archive(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     archive_id: &str,
 ) -> Result<(), String> {
     retry_bulk_archive_creation(app, state, archive_id).await
 }
 
-pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: String) {
+pub async fn schedule_external_reseed<A: DownloadUi>(app: A, state: SharedState, id: String) {
     state.begin_external_reseed(&id).await;
 
     tauri::async_runtime::spawn(async move {
@@ -403,7 +495,11 @@ pub async fn schedule_external_reseed(app: AppHandle, state: SharedState, id: St
     });
 }
 
-fn start_download_worker(app: AppHandle, state: SharedState, task: crate::state::DownloadTask) {
+fn start_download_worker<A: DownloadUi>(
+    app: A,
+    state: SharedState,
+    task: crate::state::DownloadTask,
+) {
     tauri::async_runtime::spawn(async move {
         let cleanup_temp_on_exit = matches!(
             state.worker_control(&task.id).await,
@@ -536,7 +632,7 @@ enum BulkMemberAutoRestartOutcome {
 }
 
 async fn try_auto_restart_failed_bulk_member(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     error: &DownloadError,
@@ -604,7 +700,7 @@ fn auto_restart_reset_failure_category(message: &str) -> FailureCategory {
 }
 
 async fn fail_job_and_notify(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     task: &crate::state::DownloadTask,
     error: &DownloadError,
@@ -629,7 +725,7 @@ async fn fail_job_and_notify(
 }
 
 async fn run_download(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
@@ -674,6 +770,8 @@ async fn run_download(
 }
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
+static SEGMENTED_CLIENT: OnceLock<Client> = OnceLock::new();
+static SEGMENTED_NATIVE_TLS_CLIENT: OnceLock<Client> = OnceLock::new();
 static TORRENT_ENGINE_MANAGER: OnceLock<TorrentEngineManager> = OnceLock::new();
 static RANGE_BACKOFFS: OnceLock<RangeBackoffRegistry> = OnceLock::new();
 
@@ -754,7 +852,7 @@ pub async fn probe_browser_handoff_access(
     }
 }
 async fn run_transfer_attempt(
-    app: &AppHandle,
+    app: &impl DownloadUi,
     state: &SharedState,
     task: &crate::state::DownloadTask,
 ) -> Result<DownloadOutcome, DownloadError> {
