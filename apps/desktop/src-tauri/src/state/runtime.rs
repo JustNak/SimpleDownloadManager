@@ -7,7 +7,7 @@ impl RuntimeState {
         category: String,
         message: String,
         job_id: Option<String>,
-    ) {
+    ) -> DiagnosticEvent {
         let event = DiagnosticEvent {
             timestamp: current_unix_timestamp_millis(),
             level,
@@ -17,9 +17,13 @@ impl RuntimeState {
         };
 
         self.diagnostic_events.push(event.clone());
-        let _ = self.diagnostic_event_store.append(&event);
-
+        self.pending_diagnostic_events.push(event.clone());
         trim_diagnostic_events(&mut self.diagnostic_events);
+        event
+    }
+
+    pub(super) fn take_pending_diagnostic_events(&mut self) -> Vec<DiagnosticEvent> {
+        std::mem::take(&mut self.pending_diagnostic_events)
     }
 
     pub(super) fn snapshot(&self) -> DesktopSnapshot {

@@ -1,14 +1,160 @@
 use super::*;
 use crate::archive_parts::detect_archive_part;
 
+#[derive(Debug)]
+pub(super) struct SchedulerAdmissionIndex {
+    accelerated_bulk_slot_floor: u32,
+    protected_hoster_max_adaptive_concurrency_by_key: HashMap<String, u32>,
+    protected_bulk_archive_groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>>,
+    scheduler_job_order: Vec<usize>,
+}
+
+#[derive(Debug)]
+enum SchedulerOrderEntry {
+    Job(usize),
+    ProtectedGroup((String, String)),
+}
+
+impl SchedulerAdmissionIndex {
+    pub(super) fn new(state: &RuntimeState) -> Self {
+        let mut accelerated_bulk_slot_floor = 0_u32;
+        let mut protected_hoster_max_adaptive_concurrency_by_key: HashMap<String, u32> =
+            HashMap::new();
+        let mut protected_bulk_archive_groups: HashMap<
+            (String, String),
+            Vec<ProtectedBulkArchiveMember>,
+        > = HashMap::new();
+        let mut order_entries = Vec::with_capacity(state.jobs.len());
+        let mut emitted_protected_groups = HashSet::new();
+
+        for (index, job) in state.jobs.iter().enumerate() {
+            if is_bulk_member_job(job) {
+                if let Some(max_concurrency) = accelerated_hoster_concurrency(&state.settings, job)
+                {
+                    accelerated_bulk_slot_floor = accelerated_bulk_slot_floor.max(max_concurrency);
+                }
+            }
+
+            if let Some(fairness_key) = protected_bulk_hoster_fairness_key(job) {
+                let max_concurrency = accelerated_hoster_concurrency(&state.settings, job)
+                    .unwrap_or(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY);
+                protected_hoster_max_adaptive_concurrency_by_key
+                    .entry(fairness_key)
+                    .and_modify(|current| *current = (*current).max(max_concurrency))
+                    .or_insert(max_concurrency);
+            }
+
+            let Some(group_key) = protected_bulk_hoster_priority_group_key(job) else {
+                order_entries.push(SchedulerOrderEntry::Job(index));
+                continue;
+            };
+
+            protected_bulk_archive_groups
+                .entry(group_key.clone())
+                .or_default()
+                .push(ProtectedBulkArchiveMember::from_job(index, job));
+            if emitted_protected_groups.insert(group_key.clone()) {
+                order_entries.push(SchedulerOrderEntry::ProtectedGroup(group_key));
+            }
+        }
+
+        for members in protected_bulk_archive_groups.values_mut() {
+            sort_protected_bulk_archive_members(members);
+        }
+
+        let mut scheduler_job_order = Vec::with_capacity(state.jobs.len());
+        for entry in order_entries {
+            match entry {
+                SchedulerOrderEntry::Job(index) => scheduler_job_order.push(index),
+                SchedulerOrderEntry::ProtectedGroup(group_key) => {
+                    if let Some(members) = protected_bulk_archive_groups.get(&group_key) {
+                        scheduler_job_order.extend(members.iter().map(|member| member.index));
+                    }
+                }
+            }
+        }
+
+        Self {
+            accelerated_bulk_slot_floor,
+            protected_hoster_max_adaptive_concurrency_by_key,
+            protected_bulk_archive_groups,
+            scheduler_job_order,
+        }
+    }
+
+    pub(super) fn accelerated_bulk_slot_floor(&self) -> u32 {
+        self.accelerated_bulk_slot_floor
+    }
+
+    pub(super) fn max_adaptive_concurrency_for_key(&self, fairness_key: &str) -> u32 {
+        self.protected_hoster_max_adaptive_concurrency_by_key
+            .get(fairness_key)
+            .copied()
+            .unwrap_or(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
+    }
+
+    fn protected_hoster_fairness_keys(&self) -> impl Iterator<Item = &String> {
+        self.protected_hoster_max_adaptive_concurrency_by_key.keys()
+    }
+
+    fn protected_bulk_archive_groups(
+        &self,
+    ) -> &HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> {
+        &self.protected_bulk_archive_groups
+    }
+
+    pub(super) fn scheduler_job_order(&self) -> &[usize] {
+        &self.scheduler_job_order
+    }
+}
+
 impl SharedState {
+    pub(crate) fn request_scheduler_wake(&self) -> bool {
+        let mut scheduler_wake = self
+            .scheduler_wake
+            .lock()
+            .expect("scheduler wake lock poisoned");
+        if scheduler_wake.running {
+            scheduler_wake.pending = true;
+            return false;
+        }
+
+        scheduler_wake.running = true;
+        true
+    }
+
+    pub(crate) fn complete_scheduler_run(&self) -> bool {
+        let mut scheduler_wake = self
+            .scheduler_wake
+            .lock()
+            .expect("scheduler wake lock poisoned");
+        if scheduler_wake.pending {
+            scheduler_wake.pending = false;
+            return true;
+        }
+
+        scheduler_wake.running = false;
+        false
+    }
+
     pub async fn claim_schedulable_jobs(
         &self,
     ) -> Result<(DesktopSnapshot, Vec<DownloadTask>), String> {
+        let claim = self.claim_schedulable_jobs_for_scheduler().await?;
+        let snapshot = match claim.snapshot {
+            Some(snapshot) => snapshot,
+            None => self.snapshot().await,
+        };
+
+        Ok((snapshot, claim.tasks))
+    }
+
+    pub async fn claim_schedulable_jobs_for_scheduler(&self) -> Result<SchedulableClaim, String> {
         let auth_by_job = self.handoff_auth.read().await.clone();
-        let (snapshot, persisted, tasks) = {
+        let (claim, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let now = Instant::now();
+            let admission_index = SchedulerAdmissionIndex::new(&state);
             let active_normal_workers = state
                 .active_workers
                 .iter()
@@ -35,12 +181,15 @@ impl SharedState {
                 .bulk
                 .max_concurrent_downloads
                 .max(1)
-                .max(accelerated_bulk_slot_floor(&state));
+                .max(admission_index.accelerated_bulk_slot_floor());
             let available_normal_slots = normal_slot_limit.saturating_sub(active_normal_workers);
             let available_bulk_slots = bulk_slot_limit.saturating_sub(active_bulk_workers);
 
             if available_normal_slots == 0 && available_bulk_slots == 0 {
-                return Ok((state.snapshot(), Vec::new()));
+                return Ok(SchedulableClaim {
+                    snapshot: None,
+                    tasks: Vec::new(),
+                });
             }
 
             let mut scheduled_ids = Vec::new();
@@ -55,7 +204,7 @@ impl SharedState {
                 let mut diagnostics = Vec::new();
                 for (key, metrics) in &fairness_metrics_by_key {
                     let max_adaptive_concurrency =
-                        protected_bulk_hoster_max_adaptive_concurrency_for_key(&state, key);
+                        admission_index.max_adaptive_concurrency_for_key(key);
                     diagnostics.extend(
                         state
                             .bulk_hoster_fairness
@@ -82,14 +231,13 @@ impl SharedState {
                 .retain(|_, until| *until > now);
             state.retain_active_download_admission_defers(now);
             let mut protected_bulk_hoster_targets = HashMap::new();
-            for key in state
-                .jobs
-                .iter()
-                .filter_map(protected_bulk_hoster_fairness_key)
+            for key in admission_index
+                .protected_hoster_fairness_keys()
+                .cloned()
                 .chain(fairness_metrics_by_key.keys().cloned())
             {
                 let max_adaptive_concurrency =
-                    protected_bulk_hoster_max_adaptive_concurrency_for_key(&state, &key);
+                    admission_index.max_adaptive_concurrency_for_key(&key);
                 let target = match fairness_mode {
                     BulkHosterFairnessMode::Adaptive => state
                         .bulk_hoster_fairness
@@ -104,11 +252,10 @@ impl SharedState {
                 };
                 protected_bulk_hoster_targets.insert(key, target);
             }
-            let protected_bulk_archive_groups = protected_bulk_archive_member_groups(&state);
             let (protected_bulk_archive_windows, archive_window_diagnostics) =
                 protected_bulk_archive_scheduling_windows(
                     &state,
-                    &protected_bulk_archive_groups,
+                    admission_index.protected_bulk_archive_groups(),
                     &fairness_metrics_by_key,
                     &protected_bulk_hoster_targets,
                     bulk_slot_limit,
@@ -122,12 +269,11 @@ impl SharedState {
                     None,
                 );
             }
-            let scheduler_job_order = scheduler_job_indexes(&state, &protected_bulk_archive_groups);
             let mut scheduled_protected_bulk_hoster_workers: HashMap<String, u32> = HashMap::new();
             let mut blocked_accelerated_hoster_queue_keys: HashSet<String> = HashSet::new();
             let mut blocked_admission_hoster_queue_keys: HashSet<String> = HashSet::new();
             let mut admission_defer_diagnostics = Vec::new();
-            for job_index in scheduler_job_order {
+            for &job_index in admission_index.scheduler_job_order() {
                 let job = &state.jobs[job_index];
                 if scheduled_normal_workers >= available_normal_slots
                     && scheduled_bulk_workers >= available_bulk_slots
@@ -318,14 +464,25 @@ impl SharedState {
                 }
             }
 
-            (state.snapshot(), state.persisted(), tasks)
+            let has_tasks = !tasks.is_empty();
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (
+                SchedulableClaim {
+                    snapshot: has_tasks.then(|| state.snapshot()),
+                    tasks,
+                },
+                has_tasks.then(|| state.persisted()),
+                diagnostic_events,
+            )
         };
 
-        if !tasks.is_empty() {
+        if let Some(persisted) = persisted {
             persist_state(&self.storage_path, &persisted)?;
         }
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
 
-        Ok((snapshot, tasks))
+        Ok(claim)
     }
 
     pub async fn clear_handoff_auth(&self, id: &str) {
@@ -355,54 +512,60 @@ impl SharedState {
         &self,
         id: &str,
     ) -> Option<HosterPriorityThrottleDecision> {
-        let mut state = self.inner.write().await;
-        let decision = hoster_priority_throttle_decision_for_state(&state, id);
-        match decision.as_ref() {
-            Some(decision) => {
-                let should_report = state
-                    .hoster_priority_cap_reports
-                    .get(id)
-                    .map(|report| hoster_priority_cap_report_changed(report, decision))
-                    .unwrap_or(true);
-                if should_report {
-                    state.push_diagnostic_event(
-                        DiagnosticLevel::Warning,
-                        "download".into(),
-                        format!(
-                            "Hoster priority capped {id} to {} B/s to keep {} ahead; reference {} B/s, current {} B/s, target {} B/s, average {} B/s, peak {} B/s.",
-                            decision.cap_bytes_per_second,
-                            decision.protected_job_id,
-                            decision.reference_bytes_per_second,
-                            decision.current_speed,
-                            decision.target_speed,
-                            decision.baseline_speed,
-                            decision.peak_speed
-                        ),
-                        Some(id.into()),
+        let (decision, diagnostic_events) = {
+            let mut state = self.inner.write().await;
+            let decision = hoster_priority_throttle_decision_for_state(&state, id);
+            match decision.as_ref() {
+                Some(decision) => {
+                    let should_report = state
+                        .hoster_priority_cap_reports
+                        .get(id)
+                        .map(|report| hoster_priority_cap_report_changed(report, decision))
+                        .unwrap_or(true);
+                    if should_report {
+                        state.push_diagnostic_event(
+                            DiagnosticLevel::Warning,
+                            "download".into(),
+                            format!(
+                                "Hoster priority capped {id} to {} B/s to keep {} ahead; reference {} B/s, current {} B/s, target {} B/s, average {} B/s, peak {} B/s.",
+                                decision.cap_bytes_per_second,
+                                decision.protected_job_id,
+                                decision.reference_bytes_per_second,
+                                decision.current_speed,
+                                decision.target_speed,
+                                decision.baseline_speed,
+                                decision.peak_speed
+                            ),
+                            Some(id.into()),
+                        );
+                    }
+                    state.hoster_priority_cap_reports.insert(
+                        id.to_string(),
+                        HosterPriorityCapReport {
+                            protected_job_id: decision.protected_job_id.clone(),
+                            cap_bytes_per_second: decision.cap_bytes_per_second,
+                        },
                     );
                 }
-                state.hoster_priority_cap_reports.insert(
-                    id.to_string(),
-                    HosterPriorityCapReport {
-                        protected_job_id: decision.protected_job_id.clone(),
-                        cap_bytes_per_second: decision.cap_bytes_per_second,
-                    },
-                );
-            }
-            None => {
-                if let Some(report) = state.hoster_priority_cap_reports.remove(id) {
-                    state.push_diagnostic_event(
-                        DiagnosticLevel::Info,
-                        "download".into(),
-                        format!(
-                            "Hoster priority released cap for {id}; protected worker {} left the active priority group or no longer needs a cascade cap.",
-                            report.protected_job_id
-                        ),
-                        Some(id.into()),
-                    );
+                None => {
+                    if let Some(report) = state.hoster_priority_cap_reports.remove(id) {
+                        state.push_diagnostic_event(
+                            DiagnosticLevel::Info,
+                            "download".into(),
+                            format!(
+                                "Hoster priority released cap for {id}; protected worker {} left the active priority group or no longer needs a cascade cap.",
+                                report.protected_job_id
+                            ),
+                            Some(id.into()),
+                        );
+                    }
                 }
             }
-        }
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (decision, diagnostic_events)
+        };
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         decision
     }
 }
@@ -595,38 +758,6 @@ struct ProtectedBulkArchiveWindow {
     throughput_rescue: bool,
 }
 
-fn accelerated_bulk_slot_floor(state: &RuntimeState) -> u32 {
-    state
-        .jobs
-        .iter()
-        .filter(|job| is_bulk_member_job(job))
-        .filter_map(|job| accelerated_hoster_concurrency(&state.settings, job))
-        .max()
-        .unwrap_or(0)
-}
-
-fn scheduler_job_indexes(
-    state: &RuntimeState,
-    groups: &HashMap<(String, String), Vec<ProtectedBulkArchiveMember>>,
-) -> Vec<usize> {
-    let mut emitted_groups = HashSet::new();
-    let mut order = Vec::with_capacity(state.jobs.len());
-    for (index, job) in state.jobs.iter().enumerate() {
-        let Some(group_key) = protected_bulk_hoster_priority_group_key(job) else {
-            order.push(index);
-            continue;
-        };
-
-        if emitted_groups.insert(group_key.clone()) {
-            if let Some(members) = groups.get(&group_key) {
-                order.extend(members.iter().map(|member| member.index));
-            }
-        }
-    }
-
-    order
-}
-
 fn protected_bulk_archive_scheduling_windows(
     state: &RuntimeState,
     groups: &HashMap<(String, String), Vec<ProtectedBulkArchiveMember>>,
@@ -712,26 +843,6 @@ fn protected_bulk_archive_scheduling_windows(
     }
 
     (windows, diagnostics)
-}
-
-fn protected_bulk_archive_member_groups(
-    state: &RuntimeState,
-) -> HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> {
-    let mut groups: HashMap<(String, String), Vec<ProtectedBulkArchiveMember>> = HashMap::new();
-    for (index, job) in state.jobs.iter().enumerate() {
-        if let Some(group_key) = protected_bulk_hoster_priority_group_key(job) {
-            groups
-                .entry(group_key)
-                .or_default()
-                .push(ProtectedBulkArchiveMember::from_job(index, job));
-        }
-    }
-
-    for members in groups.values_mut() {
-        sort_protected_bulk_archive_members(members);
-    }
-
-    groups
 }
 
 fn sort_protected_bulk_archive_members(members: &mut [ProtectedBulkArchiveMember]) {

@@ -138,12 +138,13 @@ impl SharedState {
             .filter(|_| normalized_entries.len() > 1)
             .map(|name| normalize_bulk_output_name(&name, bulk_output_kind));
 
-        let (results, persisted) = {
+        let (results, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let original_jobs = state.jobs.clone();
             let original_job_indexes = state.job_indexes.clone();
             let original_next_job_number = state.next_job_number;
             let original_diagnostic_events = state.diagnostic_events.clone();
+            let original_pending_diagnostic_events = state.pending_diagnostic_events.clone();
             let original_active_workers = state.active_workers.clone();
             let original_hoster_health = state.bulk_hoster_worker_health.clone();
             let original_hoster_fairness = state.bulk_hoster_fairness.clone();
@@ -176,6 +177,7 @@ impl SharedState {
                         state.job_indexes = original_job_indexes;
                         state.next_job_number = original_next_job_number;
                         state.diagnostic_events = original_diagnostic_events;
+                        state.pending_diagnostic_events = original_pending_diagnostic_events;
                         state.active_workers = original_active_workers;
                         state.bulk_hoster_worker_health = original_hoster_health;
                         state.bulk_hoster_fairness = original_hoster_fairness;
@@ -195,6 +197,7 @@ impl SharedState {
                             state.job_indexes = original_job_indexes;
                             state.next_job_number = original_next_job_number;
                             state.diagnostic_events = original_diagnostic_events;
+                            state.pending_diagnostic_events = original_pending_diagnostic_events;
                             state.active_workers = original_active_workers;
                             state.bulk_hoster_worker_health = original_hoster_health;
                             state.bulk_hoster_fairness = original_hoster_fairness;
@@ -207,6 +210,7 @@ impl SharedState {
                         state.job_indexes = original_job_indexes;
                         state.next_job_number = original_next_job_number;
                         state.diagnostic_events = original_diagnostic_events;
+                        state.pending_diagnostic_events = original_pending_diagnostic_events;
                         state.active_workers = original_active_workers;
                         state.bulk_hoster_worker_health = original_hoster_health;
                         state.bulk_hoster_fairness = original_hoster_fairness;
@@ -226,6 +230,7 @@ impl SharedState {
                         state.job_indexes = original_job_indexes;
                         state.next_job_number = original_next_job_number;
                         state.diagnostic_events = original_diagnostic_events;
+                        state.pending_diagnostic_events = original_pending_diagnostic_events;
                         state.active_workers = original_active_workers;
                         state.bulk_hoster_worker_health = original_hoster_health;
                         state.bulk_hoster_fairness = original_hoster_fairness;
@@ -278,12 +283,15 @@ impl SharedState {
                 result.snapshot = final_snapshot.clone();
             }
             let persisted = (!queued_ids.is_empty()).then(|| state.persisted());
-            (results, persisted)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (results, persisted, diagnostic_events)
         };
 
         if let Some(persisted) = persisted {
             persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
         }
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
 
         Ok(results)
     }
@@ -310,15 +318,18 @@ impl SharedState {
             self.validate_handoff_auth_for_url(&url, auth).await?;
         }
 
-        let (result, persisted) = {
+        let (result, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let result = state.enqueue_download_in_memory(&url, options)?;
             let persisted = state.persisted();
-            (result, persisted)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (result, persisted, diagnostic_events)
         };
 
         if result.status == EnqueueStatus::Queued {
             persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+            self.append_diagnostic_events_blocking(diagnostic_events)
+                .await;
             if let Some(auth) = handoff_auth {
                 self.handoff_auth
                     .write()

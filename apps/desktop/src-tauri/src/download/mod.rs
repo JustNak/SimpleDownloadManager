@@ -70,6 +70,7 @@ mod tests;
 pub trait DownloadUi: Clone + Send + Sync + 'static {
     fn emit_snapshot(&self, snapshot: &crate::storage::DesktopSnapshot);
     fn emit_download_update(&self, snapshot: &crate::storage::DesktopSnapshot, job_id: &str);
+    fn emit_progress_delta(&self, delta: crate::state::ProgressDelta);
     fn emit_notification_sound(&self, kind: NotificationSoundKind);
     fn show_notification(&self, title: &str, body: &str);
 }
@@ -81,6 +82,10 @@ impl<R: Runtime> DownloadUi for AppHandle<R> {
 
     fn emit_download_update(&self, snapshot: &crate::storage::DesktopSnapshot, job_id: &str) {
         crate::commands::emit_download_update(self, snapshot, job_id);
+    }
+
+    fn emit_progress_delta(&self, delta: crate::state::ProgressDelta) {
+        crate::commands::emit_progress_delta(self, delta);
     }
 
     fn emit_notification_sound(&self, kind: NotificationSoundKind) {
@@ -114,6 +119,8 @@ impl DownloadUi for NoopDownloadUi {
 
     fn emit_download_update(&self, _snapshot: &crate::storage::DesktopSnapshot, _job_id: &str) {}
 
+    fn emit_progress_delta(&self, _delta: crate::state::ProgressDelta) {}
+
     fn emit_notification_sound(&self, _kind: NotificationSoundKind) {}
 
     fn show_notification(&self, _title: &str, _body: &str) {}
@@ -129,6 +136,10 @@ fn emit_download_update(
     job_id: &str,
 ) {
     app.emit_download_update(snapshot, job_id);
+}
+
+fn emit_progress_delta(app: &impl DownloadUi, delta: crate::state::ProgressDelta) {
+    app.emit_progress_delta(delta);
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -183,25 +194,42 @@ pub struct BrowserHandoffAccessError {
 }
 
 pub fn schedule_downloads<A: DownloadUi>(app: A, state: SharedState) {
+    if !state.request_scheduler_wake() {
+        return;
+    }
+
     tauri::async_runtime::spawn(async move {
-        match state.claim_schedulable_jobs().await {
-            Ok((snapshot, tasks)) => {
-                if !tasks.is_empty() {
-                    emit_snapshot(&app, &snapshot);
-                }
-
-                for task in tasks {
-                    start_download_worker(app.clone(), state.clone(), task);
-                }
-
-                let warmup_candidates = state.datanodes_hoster_warmup_candidates().await;
-                if !warmup_candidates.is_empty() {
-                    spawn_datanodes_hoster_warmups(app.clone(), state.clone(), warmup_candidates);
-                }
-            }
-            Err(error) => eprintln!("failed to claim queued jobs: {error}"),
-        }
+        run_scheduler_loop(app, state).await;
     });
+}
+
+async fn run_scheduler_loop<A: DownloadUi>(app: A, state: SharedState) {
+    loop {
+        run_scheduler_once(&app, &state).await;
+        if !state.complete_scheduler_run() {
+            break;
+        }
+    }
+}
+
+async fn run_scheduler_once<A: DownloadUi>(app: &A, state: &SharedState) {
+    match state.claim_schedulable_jobs_for_scheduler().await {
+        Ok(claim) => {
+            if let Some(snapshot) = &claim.snapshot {
+                emit_snapshot(app, snapshot);
+            }
+
+            for task in claim.tasks {
+                start_download_worker(app.clone(), state.clone(), task);
+            }
+
+            let warmup_candidates = state.datanodes_hoster_warmup_candidates().await;
+            if !warmup_candidates.is_empty() {
+                spawn_datanodes_hoster_warmups(app.clone(), state.clone(), warmup_candidates);
+            }
+        }
+        Err(error) => eprintln!("failed to claim queued jobs: {error}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

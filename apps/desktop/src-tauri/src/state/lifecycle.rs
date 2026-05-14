@@ -101,7 +101,7 @@ impl SharedState {
                 settings: persisted.settings,
                 main_window: persisted.main_window,
                 diagnostic_events,
-                diagnostic_event_store: Arc::clone(&diagnostic_event_store),
+                pending_diagnostic_events: Vec::new(),
                 next_job_number,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -117,6 +117,7 @@ impl SharedState {
             storage_path: Arc::new(storage_path),
             diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
+            scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
         };
 
         state.persist_current_state_sync()?;
@@ -136,7 +137,7 @@ impl SharedState {
                 settings: Settings::default(),
                 main_window: None,
                 diagnostic_events: Vec::new(),
-                diagnostic_event_store: Arc::clone(&diagnostic_event_store),
+                pending_diagnostic_events: Vec::new(),
                 next_job_number: 99,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -152,6 +153,7 @@ impl SharedState {
             storage_path: Arc::new(storage_path),
             diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
+            scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
         }
     }
 
@@ -455,6 +457,20 @@ impl SharedState {
         self.diagnostic_event_store.retained_events()
     }
 
+    pub(super) async fn append_diagnostic_events_blocking(&self, events: Vec<DiagnosticEvent>) {
+        if events.is_empty() {
+            return;
+        }
+
+        let diagnostic_event_store = Arc::clone(&self.diagnostic_event_store);
+        let _ = tokio::task::spawn_blocking(move || {
+            for event in events {
+                let _ = diagnostic_event_store.append(&event);
+            }
+        })
+        .await;
+    }
+
     pub async fn record_diagnostic_event(
         &self,
         level: DiagnosticLevel,
@@ -462,10 +478,12 @@ impl SharedState {
         message: impl Into<String>,
         job_id: Option<String>,
     ) -> Result<(), String> {
-        {
+        let events = {
             let mut state = self.inner.write().await;
             state.push_diagnostic_event(level, category.into(), message.into(), job_id);
-        }
+            state.take_pending_diagnostic_events()
+        };
+        self.append_diagnostic_events_blocking(events).await;
 
         Ok(())
     }

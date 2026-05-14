@@ -116,6 +116,55 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  calculateDownloadProgressMetrics(
+    { ...baseJob, downloadedBytes: 11_000, speed: 0 },
+    [
+      { jobId: 'job_1', timestamp: 11_000, downloadedBytes: 11_000 },
+      { jobId: 'job_1', timestamp: 1_000, downloadedBytes: 1_000 },
+      { jobId: 'job_1', timestamp: 6_000, downloadedBytes: 6_000 },
+    ],
+    11_000,
+  ),
+  {
+    averageSpeed: 1_000,
+    timeRemaining: 20,
+  },
+  'observed speed should use earliest and latest samples by timestamp when samples are shuffled',
+);
+
+{
+  const jobCount = 1_000;
+  const sampleCount = 120;
+  const largeJobs = Array.from({ length: jobCount }, (_, index): DownloadJob => ({
+    ...baseJob,
+    id: `large_job_${index}`,
+    downloadedBytes: 60_000,
+    speed: 0,
+  }));
+  const largeSamples = [];
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    for (let jobIndex = 0; jobIndex < jobCount; jobIndex += 1) {
+      largeSamples.push({
+        jobId: `large_job_${jobIndex}`,
+        timestamp: sampleIndex * 1_000,
+        downloadedBytes: sampleIndex * 1_000 + jobIndex,
+      });
+    }
+  }
+
+  const start = performance.now();
+  const metrics = calculateDownloadProgressMetricsByJobId(largeJobs, largeSamples, 120_000);
+  const elapsedMs = performance.now() - start;
+
+  assert.equal(Object.keys(metrics).length, jobCount);
+  assert.equal(metrics.large_job_999.averageSpeed, 1_000);
+  assert.ok(
+    elapsedMs < 250,
+    `large queue metrics should finish under 250ms, took ${elapsedMs.toFixed(1)}ms`,
+  );
+}
+
+assert.deepEqual(
   calculateDownloadProgressMetrics({ ...baseJob, downloadedBytes: 10_000, speed: 2_000 }, [], 6_000),
   {
     averageSpeed: 2_000,

@@ -141,6 +141,322 @@ async fn claim_schedulable_jobs_preserves_persisted_retry_attempts() {
 }
 
 #[tokio::test]
+async fn scheduler_claim_without_available_slots_omits_snapshot() {
+    let download_dir = test_runtime_dir("scheduler-no-slot-no-snapshot");
+    let archive = bulk_archive_info(&download_dir, "bulk_no_slot");
+    let mut active_normal = download_job(
+        "job_active_normal",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        25,
+    );
+    active_normal.target_path = download_dir.join("active.zip").display().to_string();
+    active_normal.temp_path = download_dir.join("active.zip.part").display().to_string();
+    let mut active_bulk = download_job(
+        "job_active_bulk",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        40,
+    );
+    active_bulk.bulk_archive = Some(archive);
+    active_bulk.target_path = download_dir.join("bulk.zip").display().to_string();
+    active_bulk.temp_path = download_dir.join("bulk.zip.part").display().to_string();
+    let queued = download_job("job_queued", JobState::Queued, ResumeSupport::Unknown, 0);
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![active_normal, active_bulk, queued],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 1;
+        runtime.settings.bulk.max_concurrent_downloads = 1;
+        runtime.active_workers.insert("job_active_normal".into());
+        runtime.active_workers.insert("job_active_bulk".into());
+    }
+
+    let claim = state
+        .claim_schedulable_jobs_for_scheduler()
+        .await
+        .expect("scheduler claim should work");
+
+    assert!(claim.tasks.is_empty());
+    assert!(
+        claim.snapshot.is_none(),
+        "scheduler no-op claims should not clone a full DesktopSnapshot"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn scheduler_claim_with_tasks_returns_snapshot_for_emission() {
+    let download_dir = test_runtime_dir("scheduler-claim-snapshot");
+    let mut queued = download_job("job_queued", JobState::Queued, ResumeSupport::Unknown, 0);
+    queued.target_path = download_dir.join("queued.zip").display().to_string();
+    queued.temp_path = download_dir.join("queued.zip.part").display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![queued]);
+
+    let claim = state
+        .claim_schedulable_jobs_for_scheduler()
+        .await
+        .expect("scheduler claim should work");
+
+    assert_eq!(claim.tasks.len(), 1);
+    assert_eq!(claim.tasks[0].id, "job_queued");
+    let snapshot = claim
+        .snapshot
+        .expect("scheduler claims with tasks should include the emission snapshot");
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].id, "job_queued");
+    assert_eq!(snapshot.jobs[0].state, JobState::Starting);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn compatibility_scheduler_claim_materializes_snapshot_for_noop_claims() {
+    let download_dir = test_runtime_dir("scheduler-compat-snapshot");
+    let mut active = download_job(
+        "job_active",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        25,
+    );
+    active.target_path = download_dir.join("active.zip").display().to_string();
+    active.temp_path = download_dir.join("active.zip.part").display().to_string();
+    let queued = download_job("job_queued", JobState::Queued, ResumeSupport::Unknown, 0);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.max_concurrent_downloads = 1;
+        runtime.active_workers.insert("job_active".into());
+    }
+
+    let (snapshot, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("compatibility scheduler claim should work");
+
+    assert!(tasks.is_empty());
+    assert_eq!(snapshot.jobs.len(), 2);
+    assert_eq!(snapshot.jobs[0].id, "job_active");
+    assert_eq!(snapshot.jobs[1].id, "job_queued");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_wake_guard_starts_first_run_and_coalesces_later_wakes() {
+    let download_dir = test_runtime_dir("scheduler-wake-starts-coalesces");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+
+    assert!(
+        state.request_scheduler_wake(),
+        "first scheduler wake should start a runner"
+    );
+    assert!(
+        !state.request_scheduler_wake(),
+        "second scheduler wake should be coalesced while a runner is active"
+    );
+    assert!(
+        !state.request_scheduler_wake(),
+        "additional scheduler wakes should keep coalescing into the pending pass"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_wake_guard_consumes_pending_pass_then_releases_runner() {
+    let download_dir = test_runtime_dir("scheduler-wake-finish");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+
+    assert!(state.request_scheduler_wake());
+    assert!(!state.request_scheduler_wake());
+    assert!(
+        state.complete_scheduler_run(),
+        "finishing with a pending wake should keep the runner active"
+    );
+    assert!(
+        !state.complete_scheduler_run(),
+        "finishing without a pending wake should release the runner"
+    );
+    assert!(
+        state.request_scheduler_wake(),
+        "future scheduler wakes should start a new runner after release"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_admission_index_preserves_mixed_queue_order() {
+    fn numbered_fuckingfast_job(
+        id: &str,
+        archive: BulkArchiveInfo,
+        part_number: u32,
+    ) -> DownloadJob {
+        let mut job = fuckingfast_bulk_job(id, archive);
+        job.filename = format!("Game.part{part_number:03}.rar");
+        job.url = format!("https://fuckingfast.co/{id}#{}", job.filename);
+        job.resolved_from_url = Some(job.url.clone());
+        job
+    }
+
+    let download_dir = test_runtime_dir("scheduler-index-mixed-order");
+    let archive = bulk_archive_info(&download_dir, "bulk_scheduler_index_mixed");
+    let normal_first = download_job("job_normal_1", JobState::Queued, ResumeSupport::Unknown, 0);
+    let protected_late = numbered_fuckingfast_job("job_hoster_3", archive.clone(), 3);
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    direct_bulk.bulk_archive = Some(archive.clone());
+    let protected_first = numbered_fuckingfast_job("job_hoster_1", archive.clone(), 1);
+    let normal_second = download_job("job_normal_2", JobState::Queued, ResumeSupport::Unknown, 0);
+    let protected_middle = numbered_fuckingfast_job("job_hoster_2", archive, 2);
+    let runtime = runtime_state_with_jobs(vec![
+        normal_first,
+        protected_late,
+        direct_bulk,
+        protected_first,
+        normal_second,
+        protected_middle,
+    ]);
+
+    let index = super::scheduler::SchedulerAdmissionIndex::new(&runtime);
+    let ordered_ids = index
+        .scheduler_job_order()
+        .iter()
+        .map(|index| runtime.jobs[*index].id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ordered_ids,
+        vec![
+            "job_normal_1",
+            "job_hoster_1",
+            "job_hoster_2",
+            "job_hoster_3",
+            "job_direct_bulk",
+            "job_normal_2",
+        ],
+        "protected archive groups should expand at their first queue position while non-protected rows keep queue order"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_admission_index_keeps_non_protected_rows_in_queue_order() {
+    let download_dir = test_runtime_dir("scheduler-index-non-protected-order");
+    let archive = bulk_archive_info(&download_dir, "bulk_scheduler_index_direct");
+    let normal_first = download_job("job_normal_1", JobState::Queued, ResumeSupport::Unknown, 0);
+    let mut direct_bulk = download_job(
+        "job_direct_bulk",
+        JobState::Queued,
+        ResumeSupport::Unknown,
+        0,
+    );
+    direct_bulk.bulk_archive = Some(archive);
+    let normal_second = download_job("job_normal_2", JobState::Queued, ResumeSupport::Unknown, 0);
+    let runtime = runtime_state_with_jobs(vec![normal_first, direct_bulk, normal_second]);
+
+    let index = super::scheduler::SchedulerAdmissionIndex::new(&runtime);
+    let ordered_ids = index
+        .scheduler_job_order()
+        .iter()
+        .map(|index| runtime.jobs[*index].id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ordered_ids,
+        vec!["job_normal_1", "job_direct_bulk", "job_normal_2"]
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_admission_index_computes_acceleration_caps_by_hoster_key() {
+    let download_dir = test_runtime_dir("scheduler-index-acceleration-caps");
+    let archive = bulk_archive_info(&download_dir, "bulk_scheduler_index_caps");
+    let datanodes = datanodes_bulk_job("job_datanodes_fast", archive.clone());
+    let fuckingfast = fuckingfast_bulk_job("job_fuckingfast_fast", archive);
+    let mut runtime = runtime_state_with_jobs(vec![datanodes, fuckingfast]);
+    runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
+    runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
+
+    let datanodes_key = protected_bulk_hoster_fairness_key(
+        runtime
+            .job("job_datanodes_fast")
+            .expect("DataNodes job should exist"),
+    )
+    .expect("DataNodes key should exist");
+    let fuckingfast_key = protected_bulk_hoster_fairness_key(
+        runtime
+            .job("job_fuckingfast_fast")
+            .expect("FuckingFast job should exist"),
+    )
+    .expect("FuckingFast key should exist");
+
+    let index = super::scheduler::SchedulerAdmissionIndex::new(&runtime);
+
+    assert_eq!(index.accelerated_bulk_slot_floor(), 8);
+    assert_eq!(index.max_adaptive_concurrency_for_key(&datanodes_key), 8);
+    assert_eq!(index.max_adaptive_concurrency_for_key(&fuckingfast_key), 8);
+    assert_eq!(
+        index.max_adaptive_concurrency_for_key("https://missing.example:443"),
+        BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn scheduler_claim_uses_single_admission_index() {
+    let source = include_str!("scheduler.rs");
+    let claim = source
+        .split("pub async fn claim_schedulable_jobs_for_scheduler")
+        .nth(1)
+        .expect("scheduler claim function should exist");
+
+    assert!(
+        claim.contains("let admission_index = SchedulerAdmissionIndex::new(&state);"),
+        "scheduler claims should build the admission index once per pass"
+    );
+    assert!(
+        claim.contains("admission_index.accelerated_bulk_slot_floor()"),
+        "bulk slot floor should come from the admission index"
+    );
+    assert!(
+        claim.contains("admission_index.max_adaptive_concurrency_for_key("),
+        "per-key adaptive caps should come from the admission index"
+    );
+    assert!(
+        claim.contains("admission_index.scheduler_job_order()"),
+        "scheduler order should come from the admission index"
+    );
+}
+
+#[test]
+fn scheduler_source_does_not_keep_repeated_full_queue_scan_helpers() {
+    let scheduler_source = include_str!("scheduler.rs");
+    let state_source = include_str!("../state.rs");
+
+    assert!(
+        !scheduler_source.contains("fn accelerated_bulk_slot_floor(state: &RuntimeState)"),
+        "accelerated bulk slot floor should not remain as a separate full-queue scan"
+    );
+    assert!(
+        !state_source.contains("fn protected_bulk_hoster_max_adaptive_concurrency_for_key("),
+        "per-key adaptive caps should not remain as a separate full-queue scan"
+    );
+}
+
+#[tokio::test]
 async fn authenticated_handoff_auth_requires_allowed_host() {
     let download_dir = test_runtime_dir("auth-handoff-allowlist");
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
@@ -1475,6 +1791,48 @@ async fn torrent_progress_keeps_live_download_speed_until_seeding() {
 }
 
 #[tokio::test]
+async fn torrent_progress_delta_keeps_live_download_speed_until_seeding() {
+    let download_dir = test_runtime_dir("torrent-progress-delta-live-speed");
+    let mut job = download_job(
+        "job_39_delta",
+        JobState::Downloading,
+        ResumeSupport::Unsupported,
+        0,
+    );
+    job.transfer_kind = TransferKind::Torrent;
+    job.torrent = Some(TorrentInfo::default());
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let mut update = torrent_runtime_update(0, 1024, false);
+    update.total_bytes = 4096;
+    update.download_speed = 123_456;
+    let delta = state
+        .update_torrent_progress_delta("job_39_delta", update.clone(), false)
+        .await
+        .expect("torrent progress delta should update");
+
+    assert_eq!(delta.job.state, JobState::Downloading);
+    assert_eq!(delta.job.speed, 123_456);
+    assert_eq!(delta.job.eta, 0);
+
+    let mut finished_update = update;
+    finished_update.downloaded_bytes = 4096;
+    finished_update.total_bytes = 4096;
+    finished_update.download_speed = 999_999;
+    finished_update.upload_speed = 456_789;
+    finished_update.finished = true;
+    let delta = state
+        .update_torrent_progress_delta("job_39_delta", finished_update, false)
+        .await
+        .expect("torrent progress delta should update");
+
+    assert_eq!(delta.job.state, JobState::Seeding);
+    assert_eq!(delta.job.speed, 456_789);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn torrent_progress_uses_runtime_eta_until_seeding() {
     let download_dir = test_runtime_dir("torrent-progress-live-eta");
     let mut job = download_job(
@@ -1852,6 +2210,45 @@ async fn update_job_progress_coalesces_persistence() {
 }
 
 #[tokio::test]
+async fn update_job_progress_delta_returns_changed_job_and_settings() {
+    let download_dir = test_runtime_dir("progress-delta-http");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job(
+        "job_delta",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.total_bytes = 200;
+    let state = shared_state_with_jobs(storage_path, vec![job]);
+
+    let delta = state
+        .update_job_progress_delta("job_delta", 50, Some(200), 25, true)
+        .await
+        .expect("progress delta should update the job");
+
+    assert_eq!(delta.job.id, "job_delta");
+    assert_eq!(delta.job.downloaded_bytes, 50);
+    assert_eq!(delta.job.total_bytes, 200);
+    assert_eq!(delta.job.speed, 25);
+    assert_eq!(delta.job.eta, 6);
+    assert_eq!(
+        delta.settings.download_directory,
+        Settings::default().download_directory
+    );
+
+    let snapshot = state.snapshot().await;
+    assert_eq!(snapshot.jobs[0].id, delta.job.id);
+    assert_eq!(
+        snapshot.jobs[0].downloaded_bytes,
+        delta.job.downloaded_bytes
+    );
+    assert_eq!(snapshot.jobs[0].speed, delta.job.speed);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn segmented_progress_counts_are_visible_but_not_persisted() {
     let download_dir = test_runtime_dir("segmented-progress-counts-transient");
     let storage_path = download_dir.join("state.json");
@@ -1878,6 +2275,156 @@ async fn segmented_progress_counts_are_visible_but_not_persisted() {
     assert_eq!(persisted.jobs[0].planned_segments, None);
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn segmented_progress_delta_counts_are_visible_but_not_persisted() {
+    let download_dir = test_runtime_dir("segmented-progress-delta-counts-transient");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job(
+        "job_segments_delta",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.total_bytes = 100;
+    let state = shared_state_with_jobs(storage_path.clone(), vec![job]);
+
+    let delta = state
+        .update_segmented_job_progress_delta("job_segments_delta", 40, Some(100), 4096, 3, 16, true)
+        .await
+        .expect("segmented progress delta should expose connection counts");
+
+    assert_eq!(delta.job.active_segments, Some(3));
+    assert_eq!(delta.job.planned_segments, Some(16));
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    assert_eq!(persisted.jobs[0].active_segments, None);
+    assert_eq!(persisted.jobs[0].planned_segments, None);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn sync_downloaded_bytes_delta_updates_memory_and_returns_changed_job() {
+    let download_dir = test_runtime_dir("sync-progress-delta");
+    let storage_path = download_dir.join("state.json");
+    let mut job = download_job(
+        "job_sync_delta",
+        JobState::Paused,
+        ResumeSupport::Supported,
+        0,
+    );
+    job.total_bytes = 100;
+    job.active_segments = Some(2);
+    job.planned_segments = Some(8);
+    let state = shared_state_with_jobs(storage_path.clone(), vec![job]);
+
+    let delta = state
+        .sync_downloaded_bytes_delta("job_sync_delta", 25)
+        .await
+        .expect("sync progress delta should update the job");
+
+    assert_eq!(delta.job.downloaded_bytes, 25);
+    assert_eq!(delta.job.progress, 25.0);
+    assert_eq!(delta.job.active_segments, None);
+    assert_eq!(delta.job.planned_segments, None);
+
+    let persisted = load_persisted_state(&storage_path).expect("persisted state should load");
+    assert_eq!(persisted.jobs[0].downloaded_bytes, 25);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn batch_progress_jobs_returns_only_context_members_in_queue_order() {
+    let download_dir = test_runtime_dir("batch-progress-delta-jobs");
+    let first = download_job("job_1", JobState::Downloading, ResumeSupport::Supported, 10);
+    let second = download_job("job_2", JobState::Downloading, ResumeSupport::Supported, 20);
+    let third = download_job("job_3", JobState::Downloading, ResumeSupport::Supported, 30);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![first, second, third]);
+
+    let jobs = state
+        .batch_progress_jobs(&["job_3".into(), "missing".into(), "job_1".into()])
+        .await;
+
+    assert_eq!(
+        jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+        vec!["job_1", "job_3"],
+        "batch progress delta refresh should scan queue state without cloning unrelated jobs"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn progress_job_snapshot_parts_returns_requested_job_and_settings() {
+    let download_dir = test_runtime_dir("progress-job-selector");
+    let first = download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0);
+    let second = download_job("job_2", JobState::Downloading, ResumeSupport::Supported, 45);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![first, second]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.download_directory = download_dir.display().to_string();
+    }
+
+    let (job, settings) = state.progress_job_snapshot_parts("job_2").await;
+
+    let job = job.expect("requested job should be returned");
+    assert_eq!(job.id, "job_2");
+    assert_eq!(job.downloaded_bytes, 45);
+    assert_eq!(
+        settings.download_directory,
+        download_dir.display().to_string()
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn batch_progress_snapshot_parts_preserve_queue_order_and_deduplicate_ids() {
+    let download_dir = test_runtime_dir("batch-selector-dedupes");
+    let state = shared_state_with_jobs(
+        download_dir.join("state.json"),
+        vec![
+            download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0),
+            download_job("job_2", JobState::Downloading, ResumeSupport::Supported, 50),
+            download_job("job_3", JobState::Paused, ResumeSupport::Supported, 10),
+        ],
+    );
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.download_directory = download_dir.display().to_string();
+    }
+
+    let ids = vec![
+        "job_3".to_string(),
+        "missing".to_string(),
+        "job_1".to_string(),
+        "job_3".to_string(),
+    ];
+    let (jobs, settings) = state.batch_progress_snapshot_parts(&ids).await;
+
+    assert_eq!(
+        jobs.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+        vec!["job_1", "job_3"]
+    );
+    assert_eq!(
+        settings.download_directory,
+        download_dir.display().to_string()
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn batch_progress_jobs_use_indexed_selection() {
+    let source = include_str!("progress.rs");
+
+    assert!(
+        source.contains("state.job_index(id)"),
+        "batch progress selectors should use RuntimeState job_indexes instead of scanning and cloning the full queue"
+    );
 }
 
 #[tokio::test]
@@ -3332,6 +3879,105 @@ async fn record_diagnostic_event_survives_unwritable_log_path() {
         snapshot.recent_events[0].message,
         "event survives log append failure"
     );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn diagnostic_event_push_is_memory_only() {
+    let source = include_str!("runtime.rs");
+    let body = source
+        .split("pub(super) fn push_diagnostic_event")
+        .nth(1)
+        .expect("push_diagnostic_event should exist")
+        .split("pub(super) fn snapshot")
+        .next()
+        .expect("push_diagnostic_event body should end before snapshot");
+
+    assert!(
+        body.contains("-> DiagnosticEvent"),
+        "push_diagnostic_event should return the event for append outside the state lock"
+    );
+    assert!(
+        !body.contains("diagnostic_event_store")
+            && !body.contains(".append(")
+            && !body.contains("spawn_blocking"),
+        "push_diagnostic_event must only update in-memory diagnostics"
+    );
+}
+
+#[test]
+fn hot_diagnostic_state_paths_use_blocking_append_helper() {
+    for (name, source) in [
+        ("scheduler", include_str!("scheduler.rs")),
+        ("progress", include_str!("progress.rs")),
+        ("jobs", include_str!("jobs.rs")),
+        ("torrent", include_str!("torrent.rs")),
+        ("enqueue", include_str!("enqueue.rs")),
+    ] {
+        assert!(
+            !source.contains("diagnostic_event_store.append"),
+            "{name} should not append diagnostic events directly"
+        );
+        assert!(
+            source.contains("append_diagnostic_events_blocking"),
+            "{name} should flush diagnostic events through the blocking helper"
+        );
+    }
+}
+
+#[tokio::test]
+async fn blocking_diagnostic_append_helper_persists_event_history() {
+    let download_dir = test_runtime_dir("diagnostic-events-blocking-helper");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+    let event = diagnostic_test_event(
+        "blocking helper persisted event",
+        current_unix_timestamp_millis(),
+    );
+
+    state
+        .append_diagnostic_events_blocking(vec![event.clone()])
+        .await;
+
+    let history = state
+        .diagnostic_event_history()
+        .await
+        .expect("diagnostic event history should load");
+
+    assert_eq!(history, vec![event]);
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn scheduler_claim_diagnostic_is_memory_visible_and_persisted() {
+    let download_dir = test_runtime_dir("diagnostic-events-scheduler-claim");
+    let job = download_job("job_1", JobState::Queued, ResumeSupport::Unknown, 0);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let claim = state.claim_schedulable_jobs_for_scheduler().await.unwrap();
+
+    assert_eq!(claim.tasks.len(), 1);
+    let snapshot = state
+        .diagnostics_snapshot(HostRegistrationDiagnostics {
+            status: HostRegistrationStatus::Configured,
+            entries: Vec::new(),
+        })
+        .await;
+    assert!(snapshot.recent_events.iter().any(|event| {
+        event.category == "download"
+            && event.job_id.as_deref() == Some("job_1")
+            && event.message == "Starting job_1"
+    }));
+
+    let history = state
+        .diagnostic_event_history()
+        .await
+        .expect("diagnostic event history should load");
+    assert!(history.iter().any(|event| {
+        event.category == "download"
+            && event.job_id.as_deref() == Some("job_1")
+            && event.message == "Starting job_1"
+    }));
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -8332,13 +8978,6 @@ fn torrent_runtime_update(
 }
 
 fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
-    runtime_state_with_jobs_and_store(jobs, Arc::new(DiagnosticEventStore::new(PathBuf::new())))
-}
-
-fn runtime_state_with_jobs_and_store(
-    jobs: Vec<DownloadJob>,
-    diagnostic_event_store: Arc<DiagnosticEventStore>,
-) -> RuntimeState {
     let job_indexes = job_indexes_for(&jobs);
     RuntimeState {
         connection_state: ConnectionState::Connected,
@@ -8346,7 +8985,7 @@ fn runtime_state_with_jobs_and_store(
         settings: Settings::default(),
         main_window: None,
         diagnostic_events: Vec::new(),
-        diagnostic_event_store,
+        pending_diagnostic_events: Vec::new(),
         next_job_number: 99,
         job_indexes,
         active_workers: HashSet::new(),
@@ -8579,13 +9218,11 @@ fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Shar
         diagnostic_event_log_path_for(&storage_path),
     ));
     SharedState {
-        inner: Arc::new(RwLock::new(runtime_state_with_jobs_and_store(
-            jobs,
-            Arc::clone(&diagnostic_event_store),
-        ))),
+        inner: Arc::new(RwLock::new(runtime_state_with_jobs(jobs))),
         storage_path: Arc::new(storage_path),
         diagnostic_event_store,
         handoff_auth: Arc::new(RwLock::new(HashMap::new())),
+        scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
     }
 }
 

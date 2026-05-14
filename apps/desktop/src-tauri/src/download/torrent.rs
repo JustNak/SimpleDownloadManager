@@ -706,17 +706,12 @@ pub(super) async fn run_torrent_download_attempt<A: DownloadUi>(
             last_persisted_at = now;
         }
 
-        let snapshot = state
-            .update_torrent_progress(&task.id, update.clone(), should_persist)
+        let delta = state
+            .update_torrent_progress_delta(&task.id, update.clone(), should_persist)
             .await
             .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-        emit_download_update(app, &snapshot, &task.id);
-        let next_snapshot_job_state = snapshot
-            .jobs
-            .iter()
-            .find(|job| job.id == task.id)
-            .map(|job| job.state)
-            .unwrap_or(last_snapshot_job_state);
+        emit_progress_delta(app, delta.clone());
+        let next_snapshot_job_state = delta.job.state;
         let released_download_slot = seeding_transition_releases_download_slot(
             last_snapshot_job_state,
             next_snapshot_job_state,
@@ -730,20 +725,15 @@ pub(super) async fn run_torrent_download_attempt<A: DownloadUi>(
         if update.finished {
             let started = seeding_started.get_or_insert_with(Instant::now);
             if persisted_seeding_started_at.is_none() {
-                persisted_seeding_started_at = snapshot
-                    .jobs
-                    .iter()
-                    .find(|job| job.id == task.id)
-                    .and_then(|job| job.torrent.as_ref())
+                persisted_seeding_started_at = delta
+                    .job
+                    .torrent
+                    .as_ref()
                     .and_then(|torrent| torrent.seeding_started_at);
             }
             was_finished = true;
             let torrent_settings = state.settings().await.torrent;
-            let torrent = snapshot
-                .jobs
-                .iter()
-                .find(|job| job.id == task.id)
-                .and_then(|job| job.torrent.as_ref());
+            let torrent = delta.job.torrent.as_ref();
             let ratio = torrent_seed_ratio_for_policy(
                 torrent,
                 update.downloaded_bytes,
@@ -806,11 +796,11 @@ pub(super) async fn persist_final_torrent_snapshot_before_pause<A: DownloadUi>(
             .await;
     }
 
-    let snapshot = state
-        .update_torrent_progress(job_id, update.clone(), true)
+    let delta = state
+        .update_torrent_progress_delta(job_id, update.clone(), true)
         .await
         .map_err(|message| download_error(FailureCategory::Torrent, message, false))?;
-    emit_download_update(app, &snapshot, job_id);
+    emit_progress_delta(app, delta);
     Ok(Some(update))
 }
 

@@ -8,8 +8,8 @@ use crate::lifecycle::sync_autostart_setting;
 use crate::prompts::{PromptDecision, PromptDuplicateAction, PromptRegistry, PROMPT_CHANGED_EVENT};
 use crate::state::{
     clear_torrent_session_cache_directory, validate_settings, BatchDownloadEntry,
-    DestructiveCleanupJob, DuplicatePolicy, EnqueueResult, EnqueueStatus, SharedState,
-    TorrentSessionCacheClearResult,
+    DestructiveCleanupJob, DuplicatePolicy, EnqueueResult, EnqueueStatus, ProgressDelta,
+    SharedState, TorrentSessionCacheClearResult,
 };
 use crate::storage::{
     BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
@@ -266,6 +266,21 @@ pub fn emit_download_update<R: Runtime>(
     job_id: &str,
 ) {
     let job = snapshot.jobs.iter().find(|job| job.id == job_id).cloned();
+    queue_download_update(app, job, Some(job_id));
+    emit_popup_snapshots(app, snapshot);
+}
+
+pub fn emit_progress_delta<R: Runtime>(app: &AppHandle<R>, delta: ProgressDelta) {
+    queue_download_update(app, Some(delta.job.clone()), None);
+    emit_progress_delta_job_snapshots(app, &delta);
+    emit_progress_delta_batch_snapshots(app, delta);
+}
+
+fn queue_download_update<R: Runtime>(
+    app: &AppHandle<R>,
+    job: Option<DownloadJob>,
+    removed_job_id: Option<&str>,
+) {
     let should_schedule = {
         let mut pending = pending_download_update_batch()
             .lock()
@@ -274,7 +289,7 @@ pub fn emit_download_update<R: Runtime>(
         if let Some(job) = job {
             pending.removed_job_ids.remove(&job.id);
             pending.jobs.insert(job.id.clone(), job);
-        } else {
+        } else if let Some(job_id) = removed_job_id {
             pending.jobs.remove(job_id);
             pending.removed_job_ids.insert(job_id.to_string());
         }
@@ -286,8 +301,6 @@ pub fn emit_download_update<R: Runtime>(
             true
         }
     };
-
-    emit_popup_snapshots(app, snapshot);
 
     if should_schedule {
         let app = app.clone();
@@ -385,8 +398,79 @@ fn emit_batch_progress_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &Desk
     }
 }
 
+fn emit_progress_delta_job_snapshots<R: Runtime>(app: &AppHandle<R>, delta: &ProgressDelta) {
+    for label in app.webview_windows().keys() {
+        if !progress_delta_matches_window_label(&delta.job, label) {
+            continue;
+        }
+
+        let payload = ProgressJobSnapshot {
+            job: Some(delta.job.clone()),
+            settings: delta.settings.clone(),
+        };
+        if let Err(error) = app.emit_to(label, PROGRESS_JOB_SNAPSHOT_EVENT, payload) {
+            eprintln!("failed to emit progress job snapshot: {error}");
+        }
+    }
+}
+
+fn emit_progress_delta_batch_snapshots<R: Runtime>(app: &AppHandle<R>, delta: ProgressDelta) {
+    let Some(registry) = app.try_state::<ProgressBatchRegistry>() else {
+        return;
+    };
+    let Some(state) = app.try_state::<SharedState>() else {
+        return;
+    };
+
+    let targets = app
+        .webview_windows()
+        .keys()
+        .filter_map(|label| {
+            let batch_id = label.strip_prefix("batch-progress-")?;
+            let context = registry.get(batch_id)?;
+            context
+                .job_ids
+                .iter()
+                .any(|job_id| job_id == &delta.job.id)
+                .then(|| (label.clone(), context))
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return;
+    }
+
+    let app = app.clone();
+    let settings = delta.settings;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        for (label, context) in targets {
+            let jobs = state.batch_progress_jobs(&context.job_ids).await;
+            let payload = BatchProgressSnapshot {
+                context: Some(context),
+                jobs,
+                settings: settings.clone(),
+            };
+            if let Err(error) = app.emit_to(&label, BATCH_PROGRESS_SNAPSHOT_EVENT, payload) {
+                eprintln!("failed to emit batch progress snapshot: {error}");
+            }
+        }
+    });
+}
+
 fn is_progress_window_label(label: &str) -> bool {
     label.starts_with("download-progress-") || label.starts_with("torrent-progress-")
+}
+
+fn progress_delta_matches_window_label(job: &DownloadJob, label: &str) -> bool {
+    if let Some(job_id) = label.strip_prefix("download-progress-") {
+        return job.id == job_id && job.transfer_kind == TransferKind::Http;
+    }
+
+    if let Some(job_id) = label.strip_prefix("torrent-progress-") {
+        return job.id == job_id && job.transfer_kind == TransferKind::Torrent;
+    }
+
+    false
 }
 
 fn progress_job_for_window_label(snapshot: &DesktopSnapshot, label: &str) -> Option<DownloadJob> {
@@ -456,11 +540,8 @@ pub async fn get_progress_job_snapshot(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<ProgressJobSnapshot, String> {
-    let snapshot = state.snapshot().await;
-    Ok(ProgressJobSnapshot {
-        job: snapshot.jobs.into_iter().find(|job| job.id == id),
-        settings: snapshot.settings,
-    })
+    let (job, settings) = state.progress_job_snapshot_parts(&id).await;
+    Ok(ProgressJobSnapshot { job, settings })
 }
 
 #[tauri::command]
@@ -469,13 +550,15 @@ pub async fn get_batch_progress_snapshot(
     registry: State<'_, ProgressBatchRegistry>,
     batch_id: String,
 ) -> Result<BatchProgressSnapshot, String> {
-    let snapshot = state.snapshot().await;
     let context = registry.get(&batch_id);
-    let jobs = filter_batch_jobs(&snapshot, context.as_ref());
+    let (jobs, settings) = match context.as_ref() {
+        Some(context) => state.batch_progress_snapshot_parts(&context.job_ids).await,
+        None => (Vec::new(), state.settings().await),
+    };
     Ok(BatchProgressSnapshot {
         context,
         jobs,
-        settings: snapshot.settings,
+        settings,
     })
 }
 
@@ -955,13 +1038,11 @@ pub async fn swap_failed_download_to_browser(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.snapshot().await;
-    let job = snapshot
-        .jobs
-        .iter()
-        .find(|job| job.id == id)
+    let job = state
+        .job_snapshot(&id)
+        .await
         .ok_or_else(|| "Download was not found.".to_string())?;
-    let url = failed_browser_download_url(job)?;
+    let url = failed_browser_download_url(&job)?;
     open_url(url)
 }
 
@@ -1312,11 +1393,9 @@ pub async fn open_progress_window(
     state: State<'_, SharedState>,
     id: String,
 ) -> Result<(), String> {
-    let snapshot = state.snapshot().await;
-    let transfer_kind = snapshot
-        .jobs
-        .iter()
-        .find(|job| job.id == id)
+    let transfer_kind = state
+        .job_snapshot(&id)
+        .await
         .map(|job| job.transfer_kind)
         .ok_or_else(|| "Download job is no longer available.".to_string())?;
     show_progress_window_for_transfer_kind(&app, &id, transfer_kind)
@@ -2115,6 +2194,43 @@ mod tests {
             runtime_apply < schedule,
             "torrent upload limits should be applied to the live session before downloads are rescheduled"
         );
+    }
+
+    #[test]
+    fn targeted_read_commands_do_not_clone_full_snapshots() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        for (function_name, expected_selector) in [
+            ("get_progress_job_snapshot", "progress_job_snapshot_parts"),
+            (
+                "get_batch_progress_snapshot",
+                "batch_progress_snapshot_parts",
+            ),
+            ("open_progress_window", "job_snapshot"),
+            ("swap_failed_download_to_browser", "job_snapshot"),
+        ] {
+            let function_start = production_source
+                .find(&format!("pub async fn {function_name}("))
+                .unwrap_or_else(|| panic!("{function_name} command should exist"));
+            let function_body = &production_source[function_start..];
+            let function_end = function_body
+                .find("\n#[tauri::command]")
+                .unwrap_or(function_body.len());
+            let function_body = &function_body[..function_end];
+
+            assert!(
+                !function_body.contains("state.snapshot().await"),
+                "{function_name} should avoid full DesktopSnapshot clones for targeted reads"
+            );
+            assert!(
+                function_body.contains(expected_selector),
+                "{function_name} should use {expected_selector}"
+            );
+        }
     }
 
     #[test]

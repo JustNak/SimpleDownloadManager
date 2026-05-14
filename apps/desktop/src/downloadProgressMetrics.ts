@@ -15,6 +15,11 @@ export interface DownloadProgressMetrics {
   timeRemaining: number;
 }
 
+interface ProgressSampleRange {
+  first: ProgressSample;
+  last: ProgressSample;
+}
+
 export function recordProgressSample(
   samples: ProgressSample[],
   job: DownloadJob,
@@ -76,8 +81,17 @@ export function calculateDownloadProgressMetrics(
   samples: ProgressSample[],
   _timestamp = Date.now(),
 ): DownloadProgressMetrics {
+  return calculateDownloadProgressMetricsFromObservedSpeed(
+    job,
+    observedAverageSpeedForJob(job.id, samples),
+  );
+}
+
+function calculateDownloadProgressMetricsFromObservedSpeed(
+  job: DownloadJob,
+  observedSpeed: { speed: number; elapsedMs: number },
+): DownloadProgressMetrics {
   const backendSpeed = Math.max(0, job.speed || 0);
-  const observedSpeed = observedAverageSpeed(job, samples);
   const averageSpeed = job.transferKind === 'torrent'
     ? backendSpeed
     : httpAverageSpeed(backendSpeed, observedSpeed);
@@ -111,12 +125,16 @@ function httpAverageSpeed(
 export function calculateDownloadProgressMetricsByJobId(
   jobs: DownloadJob[],
   samples: ProgressSample[],
-  timestamp = Date.now(),
+  _timestamp = Date.now(),
 ): Record<string, DownloadProgressMetrics> {
+  const samplesByJobId = summarizeProgressSamplesByJobId(samples);
   return Object.fromEntries(
     jobs.map((job) => [
       job.id,
-      calculateDownloadProgressMetrics(job, samples, timestamp),
+      calculateDownloadProgressMetricsFromObservedSpeed(
+        job,
+        observedAverageSpeedFromRange(samplesByJobId.get(job.id)),
+      ),
     ]),
   );
 }
@@ -130,19 +148,50 @@ function torrentBackendTimeRemaining(job: DownloadJob): number {
   return Math.max(0, Math.round(job.eta || 0));
 }
 
-function observedAverageSpeed(job: DownloadJob, samples: ProgressSample[]): { speed: number; elapsedMs: number } {
-  const jobSamples = samples
-    .filter((sample) => sample.jobId === job.id)
-    .sort((left, right) => left.timestamp - right.timestamp);
-  if (jobSamples.length < 2) return { speed: 0, elapsedMs: 0 };
+function observedAverageSpeedForJob(jobId: string, samples: ProgressSample[]): { speed: number; elapsedMs: number } {
+  return observedAverageSpeedFromRange(selectProgressSampleRangeForJob(jobId, samples));
+}
 
-  const first = jobSamples[0];
-  const last = jobSamples[jobSamples.length - 1];
+function observedAverageSpeedFromRange(range: ProgressSampleRange | undefined): { speed: number; elapsedMs: number } {
+  if (!range) return { speed: 0, elapsedMs: 0 };
+
+  const { first, last } = range;
   const elapsedMs = last.timestamp - first.timestamp;
   const byteDelta = last.downloadedBytes - first.downloadedBytes;
   if (elapsedMs < MIN_SAMPLE_ELAPSED_MS || byteDelta <= 0) return { speed: 0, elapsedMs };
 
   return { speed: Math.round(byteDelta / (elapsedMs / 1000)), elapsedMs };
+}
+
+function selectProgressSampleRangeForJob(jobId: string, samples: ProgressSample[]): ProgressSampleRange | undefined {
+  let range: ProgressSampleRange | undefined;
+  for (const sample of samples) {
+    if (sample.jobId !== jobId) continue;
+    range = mergeProgressSampleRange(range, sample);
+  }
+  return range;
+}
+
+function summarizeProgressSamplesByJobId(samples: ProgressSample[]): Map<string, ProgressSampleRange> {
+  const ranges = new Map<string, ProgressSampleRange>();
+  for (const sample of samples) {
+    ranges.set(sample.jobId, mergeProgressSampleRange(ranges.get(sample.jobId), sample));
+  }
+  return ranges;
+}
+
+function mergeProgressSampleRange(
+  range: ProgressSampleRange | undefined,
+  sample: ProgressSample,
+): ProgressSampleRange {
+  if (!range) {
+    return { first: sample, last: sample };
+  }
+
+  return {
+    first: sample.timestamp < range.first.timestamp ? sample : range.first,
+    last: sample.timestamp >= range.last.timestamp ? sample : range.last,
+  };
 }
 
 function isTorrentMetadataPendingForProgress(job: DownloadJob): boolean {

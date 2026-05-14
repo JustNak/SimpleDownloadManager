@@ -3313,6 +3313,54 @@ fn datanodes_warmup_completion_wakes_scheduler() {
 }
 
 #[test]
+fn scheduler_uses_optional_snapshot_claims() {
+    let source = include_str!("mod.rs");
+    let scheduler_function = source
+        .split("pub fn schedule_downloads")
+        .nth(1)
+        .expect("scheduler entrypoint should exist");
+
+    assert!(
+        scheduler_function.contains("if !state.request_scheduler_wake()"),
+        "production scheduler wakeups should use the per-state wake guard before spawning"
+    );
+    assert!(
+        scheduler_function.contains("run_scheduler_loop(app, state).await"),
+        "production scheduler wakeups should delegate repeated passes to the guarded runner"
+    );
+    assert!(
+        scheduler_function.contains("claim_schedulable_jobs_for_scheduler().await"),
+        "production scheduler wakeups should use the optional-snapshot claim path"
+    );
+    assert!(
+        !scheduler_function.contains("claim_schedulable_jobs().await"),
+        "production scheduler wakeups should not force full snapshots on no-op claims"
+    );
+}
+
+#[test]
+fn scheduler_runner_loops_while_pending_wakes_exist() {
+    let source = include_str!("mod.rs");
+    let scheduler_loop = source
+        .split("async fn run_scheduler_loop")
+        .nth(1)
+        .expect("scheduler loop helper should exist");
+
+    assert!(
+        scheduler_loop.contains("loop {"),
+        "scheduler runner should loop instead of spawning one task per wake"
+    );
+    assert!(
+        scheduler_loop.contains("run_scheduler_once(&app, &state).await"),
+        "scheduler runner should preserve the existing single-pass scheduling behavior"
+    );
+    assert!(
+        scheduler_loop.contains("if !state.complete_scheduler_run()"),
+        "scheduler runner should release or continue through the per-state wake guard"
+    );
+}
+
+#[test]
 fn datanodes_warmup_cache_consumes_ready_links_and_drops_expired_links() {
     clear_hoster_warmup_cache_for_tests();
     let source_url = "https://datanodes.to/abc123456/Game.part.rar";

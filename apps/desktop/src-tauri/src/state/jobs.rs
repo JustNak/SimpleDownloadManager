@@ -3,7 +3,7 @@ use futures_util::{stream, StreamExt};
 
 impl SharedState {
     pub async fn pause_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             let (event_message, clear_hoster_health) = {
@@ -39,16 +39,19 @@ impl SharedState {
                     Some(id.into()),
                 );
             }
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         self.clear_handoff_auth(id).await;
         Ok(snapshot)
     }
 
     pub async fn resume_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             let event_message = {
@@ -81,10 +84,13 @@ impl SharedState {
                     Some(id.into()),
                 );
             }
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -127,7 +133,7 @@ impl SharedState {
             });
         }
 
-        let (snapshot, persisted, cleanup_jobs) = {
+        let (snapshot, persisted, cleanup_jobs, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let mut cleanup_jobs = Vec::new();
             let mut captured_archive_outputs = HashSet::new();
@@ -182,10 +188,18 @@ impl SharedState {
                     );
                 }
             }
-            (state.snapshot(), state.persisted(), cleanup_jobs)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (
+                state.snapshot(),
+                state.persisted(),
+                cleanup_jobs,
+                diagnostic_events,
+            )
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         {
             let mut handoff_auth = self.handoff_auth.write().await;
             for id in ids {
@@ -226,7 +240,7 @@ impl SharedState {
             let _ = remove_path_if_exists(&temp_path);
         }
 
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             for id in ids {
                 state.external_reseed_jobs.remove(id);
@@ -255,10 +269,13 @@ impl SharedState {
                     Some(id.clone()),
                 );
             }
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         {
             let mut handoff_auth = self.handoff_auth.write().await;
             for id in ids {
@@ -269,7 +286,7 @@ impl SharedState {
     }
 
     pub async fn retry_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             let event_message = {
@@ -292,15 +309,18 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
     pub async fn restart_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             if state.active_workers.contains(id) {
@@ -323,10 +343,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -393,7 +416,7 @@ impl SharedState {
         failure_category: FailureCategory,
         failure_message: &str,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             state.remove_active_worker(id);
@@ -424,10 +447,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -488,7 +514,7 @@ impl SharedState {
         id: &str,
         resolved_url: String,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             state.remove_active_worker(id);
@@ -514,10 +540,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -565,7 +594,7 @@ impl SharedState {
     }
 
     pub async fn retry_failed_jobs(&self) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
 
             for job in &mut state.jobs {
@@ -588,10 +617,13 @@ impl SharedState {
                 None,
             );
 
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -610,7 +642,7 @@ impl SharedState {
     }
 
     pub async fn remove_job(&self, id: &str) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted, paths_to_cleanup) = {
+        let (snapshot, persisted, paths_to_cleanup, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.external_reseed_jobs.remove(id);
             let Some(job_index) = state.jobs.iter().position(|job| job.id == id) else {
@@ -642,7 +674,13 @@ impl SharedState {
                 );
             }
 
-            (state.snapshot(), state.persisted(), paths_to_cleanup)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (
+                state.snapshot(),
+                state.persisted(),
+                paths_to_cleanup,
+                diagnostic_events,
+            )
         };
 
         let (temp_path, job_state) = paths_to_cleanup;
@@ -651,6 +689,8 @@ impl SharedState {
         }
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -724,7 +764,7 @@ impl SharedState {
             });
         }
 
-        let (snapshot, persisted, cleanup_jobs) = {
+        let (snapshot, persisted, cleanup_jobs, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let mut cleanup_jobs = Vec::new();
             let mut captured_archive_outputs = HashSet::new();
@@ -769,10 +809,18 @@ impl SharedState {
                 cleanup_jobs.push(cleanup_job);
             }
 
-            (state.snapshot(), state.persisted(), cleanup_jobs)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (
+                state.snapshot(),
+                state.persisted(),
+                cleanup_jobs,
+                diagnostic_events,
+            )
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         {
             let mut handoff_auth = self.handoff_auth.write().await;
             for id in ids {
@@ -867,7 +915,7 @@ impl SharedState {
         job: &DestructiveCleanupJob,
         message: String,
     ) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             if let Some(existing) = state.job_mut(&job.id) {
                 existing.removal_state = Some(RemovalState::CleanupFailed);
@@ -885,10 +933,13 @@ impl SharedState {
                 ),
                 Some(job.id.clone()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -940,7 +991,7 @@ impl SharedState {
         id: &str,
         message: String,
     ) -> Result<DesktopSnapshot, BackendError> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             if let Some(job) = state.job_mut(id) {
                 mark_job_canceled(job);
@@ -953,10 +1004,13 @@ impl SharedState {
                 format!("Could not delete canceled download files: {message}"),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 

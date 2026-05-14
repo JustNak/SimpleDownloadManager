@@ -94,7 +94,7 @@ impl SharedState {
     pub async fn prepare_torrent_session_cache_clear(
         &self,
     ) -> Result<TorrentSessionCacheClearState, BackendError> {
-        let (snapshot, persisted, torrents) = {
+        let (snapshot, persisted, torrents, diagnostic_events) = {
             let mut state = self.inner.write().await;
             if state
                 .jobs
@@ -131,10 +131,18 @@ impl SharedState {
                 "Cleared torrent runtime session identity".into(),
                 None,
             );
-            (state.snapshot(), state.persisted(), torrents)
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (
+                state.snapshot(),
+                state.persisted(),
+                torrents,
+                diagnostic_events,
+            )
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(TorrentSessionCacheClearState { snapshot, torrents })
     }
 
@@ -142,7 +150,7 @@ impl SharedState {
         &self,
         id: &str,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let filename = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -175,10 +183,13 @@ impl SharedState {
                 ),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -229,7 +240,8 @@ impl SharedState {
                         format!("Queued automatic reseed for {filename}"),
                         Some(id.into()),
                     );
-                    Some((state.snapshot(), state.persisted()))
+                    let diagnostic_events = state.take_pending_diagnostic_events();
+                    Some((state.snapshot(), state.persisted(), diagnostic_events))
                 }
                 JobState::Paused
                 | JobState::Queued
@@ -244,8 +256,10 @@ impl SharedState {
             }
         };
 
-        if let Some((snapshot, persisted)) = queued {
+        if let Some((snapshot, persisted, diagnostic_events)) = queued {
             persist_state(&self.storage_path, &persisted)?;
+            self.append_diagnostic_events_blocking(diagnostic_events)
+                .await;
             return Ok(ExternalReseedAttempt::Queued(Box::new(snapshot)));
         }
 
@@ -294,13 +308,16 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            Some((state.snapshot(), state.persisted()))
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            Some((state.snapshot(), state.persisted(), diagnostic_events))
         };
 
-        let Some((snapshot, persisted)) = handled else {
+        let Some((snapshot, persisted, diagnostic_events)) = handled else {
             return Ok(None);
         };
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(Some(snapshot))
     }
 
@@ -357,13 +374,16 @@ impl SharedState {
                 Some(id.into()),
             );
 
-            Some((state.snapshot(), state.persisted()))
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            Some((state.snapshot(), state.persisted(), diagnostic_events))
         };
 
-        let Some((snapshot, persisted)) = handled else {
+        let Some((snapshot, persisted, diagnostic_events)) = handled else {
             return Ok(None);
         };
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(Some(TorrentSeedingRestoreFailure {
             snapshot,
             retry_reseed,
@@ -421,7 +441,7 @@ impl SharedState {
         message: impl Into<String>,
     ) -> Result<DesktopSnapshot, String> {
         let message = message.into();
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.remove_active_worker(id);
             state.external_reseed_jobs.remove(id);
@@ -447,10 +467,13 @@ impl SharedState {
                 format!("Paused torrent seeding for {filename}: {message}"),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -498,13 +521,14 @@ impl SharedState {
                     message,
                     Some(id.into()),
                 );
-                Some((state.snapshot(), state.persisted()))
+                let diagnostic_events = state.take_pending_diagnostic_events();
+                Some((state.snapshot(), state.persisted(), diagnostic_events))
             } else {
                 None
             }
         };
 
-        let Some((snapshot, persisted)) = paused else {
+        let Some((snapshot, persisted, diagnostic_events)) = paused else {
             return Ok(ExternalUsePreparation {
                 paused_torrent: false,
                 snapshot: None,
@@ -512,6 +536,8 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         self.clear_handoff_auth(id).await;
         self.wait_for_external_use_release(id, timeout, poll_interval)
             .await?;
@@ -572,7 +598,7 @@ impl SharedState {
         id: &str,
         target_path: &Path,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
                 return Err("Job not found.".into());
@@ -593,10 +619,13 @@ impl SharedState {
                 Some(id.into()),
             );
 
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -606,88 +635,116 @@ impl SharedState {
         update: TorrentRuntimeSnapshot,
         persist: bool,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
-            let mut state = self.inner.write().await;
-            let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
-                return Err("Job not found.".into());
-            };
+        let (_, snapshot) = self
+            .update_torrent_progress_result(id, update, persist, true)
+            .await?;
+        snapshot.ok_or_else(|| "Torrent progress update did not produce a snapshot.".into())
+    }
 
-            let preserve_paused = job.state == JobState::Paused;
-            let was_seeding = job.state == JobState::Seeding;
-            let restoring_seeding = job
-                .torrent
-                .as_ref()
-                .and_then(|torrent| torrent.seeding_started_at)
-                .is_some();
-            let restore_validation = restoring_seeding
-                && !update.finished
-                && matches!(
-                    update.phase,
-                    TorrentRuntimePhase::Initializing | TorrentRuntimePhase::Paused
-                );
-            if !preserve_paused {
-                job.state = if update.finished {
-                    JobState::Seeding
-                } else {
-                    JobState::Downloading
+    pub async fn update_torrent_progress_delta(
+        &self,
+        id: &str,
+        update: TorrentRuntimeSnapshot,
+        persist: bool,
+    ) -> Result<ProgressDelta, String> {
+        let (delta, _) = self
+            .update_torrent_progress_result(id, update, persist, false)
+            .await?;
+        Ok(delta)
+    }
+
+    async fn update_torrent_progress_result(
+        &self,
+        id: &str,
+        update: TorrentRuntimeSnapshot,
+        persist: bool,
+        include_snapshot: bool,
+    ) -> Result<(ProgressDelta, Option<DesktopSnapshot>), String> {
+        let (delta, snapshot, persisted, diagnostic_events) = {
+            let mut state = self.inner.write().await;
+            let (updated_job, event_message) = {
+                let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
+                    return Err("Job not found.".into());
                 };
-            }
-            job.downloaded_bytes = update.downloaded_bytes;
-            job.total_bytes = update.total_bytes.max(update.downloaded_bytes);
-            job.speed = if preserve_paused {
-                0
-            } else if update.finished {
-                update.upload_speed
-            } else if restore_validation {
-                0
-            } else {
-                update.download_speed
+
+                let preserve_paused = job.state == JobState::Paused;
+                let was_seeding = job.state == JobState::Seeding;
+                let restoring_seeding = job
+                    .torrent
+                    .as_ref()
+                    .and_then(|torrent| torrent.seeding_started_at)
+                    .is_some();
+                let restore_validation = restoring_seeding
+                    && !update.finished
+                    && matches!(
+                        update.phase,
+                        TorrentRuntimePhase::Initializing | TorrentRuntimePhase::Paused
+                    );
+                if !preserve_paused {
+                    job.state = if update.finished {
+                        JobState::Seeding
+                    } else {
+                        JobState::Downloading
+                    };
+                }
+                job.downloaded_bytes = update.downloaded_bytes;
+                job.total_bytes = update.total_bytes.max(update.downloaded_bytes);
+                job.speed = if preserve_paused {
+                    0
+                } else if update.finished {
+                    update.upload_speed
+                } else if restore_validation {
+                    0
+                } else {
+                    update.download_speed
+                };
+                job.eta = if preserve_paused || update.finished || restore_validation {
+                    0
+                } else {
+                    update.eta.unwrap_or(0)
+                };
+                job.progress = if job.total_bytes == 0 {
+                    0.0
+                } else {
+                    (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+                };
+                if let Some(name) = &update.name {
+                    job.filename = sanitize_filename(name);
+                }
+                let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
+                let had_seeding_started = torrent.seeding_started_at.is_some();
+                torrent.engine_id = Some(update.engine_id);
+                torrent.info_hash = Some(update.info_hash);
+                torrent.name = update.name;
+                torrent.total_files = update.total_files;
+                torrent.peers = update.peers;
+                torrent.seeds = update.seeds;
+                torrent.diagnostics = update.diagnostics;
+                torrent.uploaded_bytes = cumulative_torrent_runtime_bytes(
+                    torrent.uploaded_bytes,
+                    torrent.last_runtime_uploaded_bytes,
+                    update.uploaded_bytes,
+                );
+                torrent.last_runtime_uploaded_bytes = Some(update.uploaded_bytes);
+                torrent.fetched_bytes = cumulative_torrent_runtime_bytes(
+                    torrent.fetched_bytes,
+                    torrent.last_runtime_fetched_bytes,
+                    update.fetched_bytes,
+                );
+                torrent.last_runtime_fetched_bytes = Some(update.fetched_bytes);
+                torrent.ratio = if update.downloaded_bytes == 0 {
+                    0.0
+                } else {
+                    torrent.uploaded_bytes as f64 / update.downloaded_bytes as f64
+                };
+                if update.finished && torrent.seeding_started_at.is_none() {
+                    torrent.seeding_started_at = Some(current_unix_timestamp_millis());
+                }
+                let started_seeding =
+                    !preserve_paused && update.finished && !was_seeding && !had_seeding_started;
+                let event_message = started_seeding.then(|| format!("Seeding {}", job.filename));
+                (job.clone(), event_message)
             };
-            job.eta = if preserve_paused || update.finished || restore_validation {
-                0
-            } else {
-                update.eta.unwrap_or(0)
-            };
-            job.progress = if job.total_bytes == 0 {
-                0.0
-            } else {
-                (job.downloaded_bytes as f64 / job.total_bytes as f64 * 100.0).clamp(0.0, 100.0)
-            };
-            if let Some(name) = &update.name {
-                job.filename = sanitize_filename(name);
-            }
-            let torrent = job.torrent.get_or_insert_with(TorrentInfo::default);
-            let had_seeding_started = torrent.seeding_started_at.is_some();
-            torrent.engine_id = Some(update.engine_id);
-            torrent.info_hash = Some(update.info_hash);
-            torrent.name = update.name;
-            torrent.total_files = update.total_files;
-            torrent.peers = update.peers;
-            torrent.seeds = update.seeds;
-            torrent.diagnostics = update.diagnostics;
-            torrent.uploaded_bytes = cumulative_torrent_runtime_bytes(
-                torrent.uploaded_bytes,
-                torrent.last_runtime_uploaded_bytes,
-                update.uploaded_bytes,
-            );
-            torrent.last_runtime_uploaded_bytes = Some(update.uploaded_bytes);
-            torrent.fetched_bytes = cumulative_torrent_runtime_bytes(
-                torrent.fetched_bytes,
-                torrent.last_runtime_fetched_bytes,
-                update.fetched_bytes,
-            );
-            torrent.last_runtime_fetched_bytes = Some(update.fetched_bytes);
-            torrent.ratio = if update.downloaded_bytes == 0 {
-                0.0
-            } else {
-                torrent.uploaded_bytes as f64 / update.downloaded_bytes as f64
-            };
-            if update.finished && torrent.seeding_started_at.is_none() {
-                torrent.seeding_started_at = Some(current_unix_timestamp_millis());
-            }
-            let started_seeding =
-                !preserve_paused && update.finished && !was_seeding && !had_seeding_started;
-            let event_message = started_seeding.then(|| format!("Seeding {}", job.filename));
             if let Some(message) = event_message {
                 state.push_diagnostic_event(
                     DiagnosticLevel::Info,
@@ -697,13 +754,25 @@ impl SharedState {
                 );
             }
 
-            (state.snapshot(), state.persisted())
+            let snapshot = include_snapshot.then(|| state.snapshot());
+            let persisted = persist.then(|| state.persisted());
+            (
+                ProgressDelta {
+                    job: updated_job,
+                    settings: state.settings.clone(),
+                },
+                snapshot,
+                persisted,
+                state.take_pending_diagnostic_events(),
+            )
         };
 
-        if persist {
-            persist_state(&self.storage_path, &persisted)?;
+        if let Some(persisted) = persisted {
+            persist_state_blocking(&self.storage_path, &persisted).await?;
         }
-        Ok(snapshot)
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
+        Ok((delta, snapshot))
     }
 
     pub async fn reset_stale_torrent_completion_for_recheck(
@@ -711,7 +780,7 @@ impl SharedState {
         id: &str,
         info_hash: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let filename = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -750,10 +819,13 @@ impl SharedState {
                 format!("Cleared stale torrent verification for {filename}; rechecking files"),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -762,7 +834,7 @@ impl SharedState {
         id: &str,
         info_hash: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let filename = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -797,15 +869,18 @@ impl SharedState {
                 format!("Rechecking seeding restore for {filename} after idle validation"),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
     pub async fn complete_torrent_job(&self, id: &str) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let filename = {
                 let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) else {
@@ -824,10 +899,13 @@ impl SharedState {
                 format!("Completed torrent seeding for {filename}"),
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 }

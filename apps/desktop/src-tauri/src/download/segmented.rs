@@ -1475,14 +1475,14 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
             last_persisted_at = Instant::now();
         }
 
-        let snapshot = match state.worker_control(&job_id).await {
+        let delta = match state.worker_control(&job_id).await {
             WorkerControl::Continue => {
                 let active_segment_count = active_segments.lock().await.len() as u32;
                 let planned_segments = admitted_workers
                     .load(Ordering::Relaxed)
                     .min(u32::MAX as usize) as u32;
                 state
-                    .update_segmented_job_progress(
+                    .update_segmented_job_progress_delta(
                         &job_id,
                         downloaded_bytes,
                         Some(total_bytes),
@@ -1495,11 +1495,11 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
             }
             WorkerControl::Paused | WorkerControl::Canceled | WorkerControl::Missing => {
                 state
-                    .sync_downloaded_bytes(&job_id, downloaded_bytes)
+                    .sync_downloaded_bytes_delta(&job_id, downloaded_bytes)
                     .await?
             }
         };
-        emit_download_update(&app, &snapshot, &job_id);
+        emit_progress_delta(&app, delta);
         if task_releases_bulk_hoster_fairness(&task, speed) {
             schedule_downloads(app.clone(), state.clone());
         }

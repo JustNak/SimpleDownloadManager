@@ -1,6 +1,7 @@
 use crate::storage::{
-    BulkArchiveInfo, BulkArchiveOutputKind, DesktopSnapshot, DownloadSource, HandoffAuth,
-    HosterPreflightInfo, TorrentInfo, TorrentRuntimeDiagnostics, TransferKind,
+    BulkArchiveInfo, BulkArchiveOutputKind, DesktopSnapshot, DownloadJob, DownloadSource,
+    HandoffAuth, HosterPreflightInfo, Settings, TorrentInfo, TorrentRuntimeDiagnostics,
+    TransferKind,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -25,6 +26,18 @@ pub struct DownloadTask {
     pub retry_attempts: u32,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgressDelta {
+    pub job: DownloadJob,
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone)]
+pub struct SchedulableClaim {
+    pub snapshot: Option<DesktopSnapshot>,
+    pub tasks: Vec<DownloadTask>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

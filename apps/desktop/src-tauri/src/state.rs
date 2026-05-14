@@ -15,7 +15,7 @@ use crate::storage::{
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
@@ -50,9 +50,10 @@ pub use types::{
     BulkMemberAutoRestartCandidate, BulkMemberAutoRestartMode, BulkMemberRetryCandidate,
     BulkMemberSlowRecoveryState, DestructiveCleanupJob, DestructiveCleanupPlan, DownloadTask,
     DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, ExternalReseedAttempt,
-    ExternalUsePreparation, HosterWarmupCandidate, TorrentRemovalCleanupInfo, TorrentRuntimePhase,
-    TorrentRuntimeSnapshot, TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult,
-    TorrentSessionCacheClearState, WorkerControl,
+    ExternalUsePreparation, HosterWarmupCandidate, ProgressDelta, SchedulableClaim,
+    TorrentRemovalCleanupInfo, TorrentRuntimePhase, TorrentRuntimeSnapshot,
+    TorrentSeedingRestoreFailure, TorrentSessionCacheClearResult, TorrentSessionCacheClearState,
+    WorkerControl,
 };
 
 const MAX_URL_LENGTH: usize = 2048;
@@ -113,7 +114,7 @@ struct RuntimeState {
     settings: Settings,
     main_window: Option<MainWindowState>,
     diagnostic_events: Vec<DiagnosticEvent>,
-    diagnostic_event_store: Arc<DiagnosticEventStore>,
+    pending_diagnostic_events: Vec<DiagnosticEvent>,
     next_job_number: u64,
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,
@@ -658,6 +659,13 @@ pub struct SharedState {
     storage_path: Arc<PathBuf>,
     diagnostic_event_store: Arc<DiagnosticEventStore>,
     handoff_auth: Arc<RwLock<HashMap<String, HandoffAuth>>>,
+    scheduler_wake: Arc<StdMutex<SchedulerWakeState>>,
+}
+
+#[derive(Debug, Default)]
+struct SchedulerWakeState {
+    running: bool,
+    pending: bool,
 }
 
 fn internal_error(error: String) -> BackendError {
@@ -712,19 +720,6 @@ fn bulk_hoster_worker_profile_for_job(
     accelerated_hoster_concurrency(settings, job)
         .map(|max_concurrency| BulkHosterWorkerProfile::Accelerated { max_concurrency })
         .unwrap_or(BulkHosterWorkerProfile::Conservative)
-}
-
-fn protected_bulk_hoster_max_adaptive_concurrency_for_key(
-    state: &RuntimeState,
-    fairness_key: &str,
-) -> u32 {
-    state
-        .jobs
-        .iter()
-        .filter(|job| protected_bulk_hoster_fairness_key(job).as_deref() == Some(fairness_key))
-        .filter_map(|job| accelerated_hoster_concurrency(&state.settings, job))
-        .max()
-        .unwrap_or(BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY)
 }
 
 fn accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {

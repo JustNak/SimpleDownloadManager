@@ -30,6 +30,42 @@ impl SharedState {
         Ok(snapshot)
     }
 
+    pub async fn sync_downloaded_bytes_delta(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+    ) -> Result<ProgressDelta, String> {
+        let (delta, persisted) = {
+            let mut state = self.inner.write().await;
+            let updated_job = {
+                let Some(job) = state.job_mut(id) else {
+                    return Err("Job not found.".into());
+                };
+
+                job.downloaded_bytes = downloaded_bytes;
+                if job.total_bytes > 0 {
+                    job.progress = (downloaded_bytes as f64 / job.total_bytes as f64 * 100.0)
+                        .clamp(0.0, 100.0);
+                } else {
+                    job.progress = 0.0;
+                }
+                apply_segment_counts(job, None);
+                job.clone()
+            };
+            state.update_bulk_hoster_worker_health(id, downloaded_bytes, 0, Instant::now());
+            (
+                ProgressDelta {
+                    job: updated_job,
+                    settings: state.settings.clone(),
+                },
+                state.persisted(),
+            )
+        };
+
+        persist_state_blocking(&self.storage_path, &persisted).await?;
+        Ok(delta)
+    }
+
     pub async fn mark_job_downloading(
         &self,
         id: &str,
@@ -147,7 +183,7 @@ impl SharedState {
         id: &str,
         retry_attempts: u32,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let event_message = {
                 let Some(job) = state.job_mut(id) else {
@@ -165,10 +201,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -181,7 +220,7 @@ impl SharedState {
         let delay = delay.min(DOWNLOAD_ADMISSION_DEFER_MAX);
         let now = Instant::now();
         let until = now + delay;
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             if state.job(id).is_none() {
                 return Err("Job not found.".into());
@@ -218,10 +257,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -233,15 +275,40 @@ impl SharedState {
         speed: u64,
         persist: bool,
     ) -> Result<DesktopSnapshot, String> {
-        self.update_job_progress_with_segments(
-            id,
-            downloaded_bytes,
-            total_bytes,
-            speed,
-            None,
-            persist,
-        )
-        .await
+        let (_, snapshot) = self
+            .update_job_progress_with_segments_result(
+                id,
+                downloaded_bytes,
+                total_bytes,
+                speed,
+                None,
+                persist,
+                true,
+            )
+            .await?;
+        snapshot.ok_or_else(|| "Progress update did not produce a snapshot.".into())
+    }
+
+    pub async fn update_job_progress_delta(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed: u64,
+        persist: bool,
+    ) -> Result<ProgressDelta, String> {
+        let (delta, _) = self
+            .update_job_progress_with_segments_result(
+                id,
+                downloaded_bytes,
+                total_bytes,
+                speed,
+                None,
+                persist,
+                false,
+            )
+            .await?;
+        Ok(delta)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -255,18 +322,47 @@ impl SharedState {
         planned_segments: u32,
         persist: bool,
     ) -> Result<DesktopSnapshot, String> {
-        self.update_job_progress_with_segments(
-            id,
-            downloaded_bytes,
-            total_bytes,
-            speed,
-            Some((active_segments, planned_segments)),
-            persist,
-        )
-        .await
+        let (_, snapshot) = self
+            .update_job_progress_with_segments_result(
+                id,
+                downloaded_bytes,
+                total_bytes,
+                speed,
+                Some((active_segments, planned_segments)),
+                persist,
+                true,
+            )
+            .await?;
+        snapshot.ok_or_else(|| "Progress update did not produce a snapshot.".into())
     }
 
-    async fn update_job_progress_with_segments(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_segmented_job_progress_delta(
+        &self,
+        id: &str,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed: u64,
+        active_segments: u32,
+        planned_segments: u32,
+        persist: bool,
+    ) -> Result<ProgressDelta, String> {
+        let (delta, _) = self
+            .update_job_progress_with_segments_result(
+                id,
+                downloaded_bytes,
+                total_bytes,
+                speed,
+                Some((active_segments, planned_segments)),
+                persist,
+                false,
+            )
+            .await?;
+        Ok(delta)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_job_progress_with_segments_result(
         &self,
         id: &str,
         downloaded_bytes: u64,
@@ -274,10 +370,11 @@ impl SharedState {
         speed: u64,
         segment_counts: Option<(u32, u32)>,
         persist: bool,
-    ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        include_snapshot: bool,
+    ) -> Result<(ProgressDelta, Option<DesktopSnapshot>), String> {
+        let (delta, snapshot, persisted) = {
             let mut state = self.inner.write().await;
-            {
+            let updated_job = {
                 let Some(job) = state.job_mut(id) else {
                     return Err("Job not found.".into());
                 };
@@ -303,20 +400,55 @@ impl SharedState {
                     };
                     apply_segment_counts(job, segment_counts);
                 }
-            }
+                job.clone()
+            };
             state.update_bulk_hoster_worker_health(id, downloaded_bytes, speed, Instant::now());
 
             let persisted = persist
                 .then(|| state.should_persist_progress_at(Instant::now()))
                 .filter(|should_persist| *should_persist)
                 .map(|_| state.persisted());
-            (state.snapshot(), persisted)
+            let snapshot = include_snapshot.then(|| state.snapshot());
+            (
+                ProgressDelta {
+                    job: updated_job,
+                    settings: state.settings.clone(),
+                },
+                snapshot,
+                persisted,
+            )
         };
 
         if let Some(persisted) = persisted {
             persist_state_blocking(&self.storage_path, &persisted).await?;
         }
-        Ok(snapshot)
+        Ok((delta, snapshot))
+    }
+
+    pub async fn job_snapshot(&self, id: &str) -> Option<DownloadJob> {
+        let state = self.inner.read().await;
+        state.job(id).cloned()
+    }
+
+    pub async fn progress_job_snapshot_parts(&self, id: &str) -> (Option<DownloadJob>, Settings) {
+        let state = self.inner.read().await;
+        (state.job(id).cloned(), state.settings.clone())
+    }
+
+    pub async fn batch_progress_snapshot_parts(
+        &self,
+        job_ids: &[String],
+    ) -> (Vec<DownloadJob>, Settings) {
+        let state = self.inner.read().await;
+        (
+            batch_progress_jobs_for_state(&state, job_ids),
+            state.settings.clone(),
+        )
+    }
+
+    pub async fn batch_progress_jobs(&self, job_ids: &[String]) -> Vec<DownloadJob> {
+        let state = self.inner.read().await;
+        batch_progress_jobs_for_state(&state, job_ids)
     }
 
     pub async fn job_requires_sha256(&self, id: &str) -> bool {
@@ -347,7 +479,7 @@ impl SharedState {
         target_path: &Path,
         actual_sha256: Option<String>,
     ) -> Result<DesktopSnapshot, String> {
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             let Some(job) = state.job_mut(id) else {
                 return Err("Job not found.".into());
@@ -399,10 +531,13 @@ impl SharedState {
             }
             state.remove_active_worker(id);
             state.push_diagnostic_event(event.0, "download".into(), event.1, Some(id.into()));
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -645,7 +780,7 @@ impl SharedState {
         failure_category: FailureCategory,
     ) -> Result<DesktopSnapshot, String> {
         let message = message.into();
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.remove_active_worker(id);
             state.external_reseed_jobs.remove(id);
@@ -668,10 +803,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -682,7 +820,7 @@ impl SharedState {
         failure_category: FailureCategory,
     ) -> Result<DesktopSnapshot, String> {
         let message = message.into();
-        let (snapshot, persisted) = {
+        let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
             state.remove_active_worker(id);
             state.external_reseed_jobs.remove(id);
@@ -705,10 +843,13 @@ impl SharedState {
                 event_message,
                 Some(id.into()),
             );
-            (state.snapshot(), state.persisted())
+            let diagnostic_events = state.take_pending_diagnostic_events();
+            (state.snapshot(), state.persisted(), diagnostic_events)
         };
 
         persist_state(&self.storage_path, &persisted)?;
+        self.append_diagnostic_events_blocking(diagnostic_events)
+            .await;
         Ok(snapshot)
     }
 
@@ -963,6 +1104,25 @@ impl RuntimeState {
             }
         }
     }
+}
+
+fn batch_progress_jobs_for_state(state: &RuntimeState, job_ids: &[String]) -> Vec<DownloadJob> {
+    let mut seen = HashSet::new();
+    let mut indexes = job_ids
+        .iter()
+        .filter_map(|id| {
+            if !seen.insert(id.as_str()) {
+                return None;
+            }
+            state.job_index(id)
+        })
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+        .into_iter()
+        .filter_map(|index| state.jobs.get(index).cloned())
+        .collect()
 }
 
 pub(super) fn apply_download_filename(job: &mut DownloadJob, filename: &str) {

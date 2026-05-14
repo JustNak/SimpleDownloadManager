@@ -806,8 +806,8 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         if elapsed >= PROGRESS_UPDATE_INTERVAL {
             let speed = displayed_speed.record_sample(sample_bytes, elapsed);
             let should_persist = last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
-            let snapshot = state
-                .update_job_progress(
+            let delta = state
+                .update_job_progress_delta(
                     &task.id,
                     downloaded_bytes,
                     total_bytes,
@@ -815,7 +815,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                     should_persist,
                 )
                 .await?;
-            emit_download_update(app, &snapshot, &task.id);
+            emit_progress_delta(app, delta);
             if task_releases_bulk_hoster_fairness(task, speed) {
                 schedule_downloads(app.clone(), state.clone());
             }
@@ -851,10 +851,10 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
 
     if downloaded_bytes != last_emitted_bytes {
         let should_persist = last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
-        let snapshot = state
-            .update_job_progress(&task.id, downloaded_bytes, total_bytes, 0, should_persist)
+        let delta = state
+            .update_job_progress_delta(&task.id, downloaded_bytes, total_bytes, 0, should_persist)
             .await?;
-        emit_download_update(app, &snapshot, &task.id);
+        emit_progress_delta(app, delta);
     }
 
     let final_path = move_to_final_path(&task.temp_path, &target_path)
