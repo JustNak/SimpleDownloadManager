@@ -8,11 +8,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_DURATION: Duration = Duration::from_secs(30);
 const SEGMENT_VARIANTS: [usize; 7] = [8, 12, 16, 24, 32, 48, 64];
 const BENCHMARK_MODES: [HttpBenchmarkMode; 2] =
     [HttpBenchmarkMode::NetworkOnly, HttpBenchmarkMode::DiskWrite];
+const BENCHMARK_ADMISSIONS: [HttpBenchmarkAdmission; 3] = [
+    HttpBenchmarkAdmission::Normal,
+    HttpBenchmarkAdmission::DirectBulk,
+    HttpBenchmarkAdmission::ProtectedHosterBulk,
+];
+const BENCHMARK_NORMAL_FAST_ORIGIN_SEGMENT_CAP: usize = 64;
+const BENCHMARK_PROTECTED_HOSTER_FAST_ADAPTIVE_SEGMENT_CAP: usize = 10;
 
 #[derive(Debug, Serialize)]
 pub struct HttpBenchmarkReport {
@@ -26,6 +33,9 @@ pub struct HttpBenchmarkReport {
 #[derive(Debug, Serialize)]
 pub struct HttpBenchmarkVariant {
     pub label: String,
+    pub admission_class: String,
+    pub requested_segments: usize,
+    pub admitted_segments: usize,
     pub segments: usize,
     pub mode: String,
     pub transport: String,
@@ -39,6 +49,35 @@ pub struct HttpBenchmarkVariant {
 enum HttpBenchmarkMode {
     NetworkOnly,
     DiskWrite,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HttpBenchmarkAdmission {
+    Normal,
+    DirectBulk,
+    ProtectedHosterBulk,
+}
+
+impl HttpBenchmarkAdmission {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::DirectBulk => "direct_bulk",
+            Self::ProtectedHosterBulk => "protected_hoster_bulk",
+        }
+    }
+
+    fn admit_segments(self, requested_segments: usize) -> usize {
+        match self {
+            Self::Normal | Self::DirectBulk => {
+                requested_segments.min(BENCHMARK_NORMAL_FAST_ORIGIN_SEGMENT_CAP)
+            }
+            Self::ProtectedHosterBulk => {
+                requested_segments.min(BENCHMARK_PROTECTED_HOSTER_FAST_ADAPTIVE_SEGMENT_CAP)
+            }
+        }
+        .max(1)
+    }
 }
 
 impl HttpBenchmarkMode {
@@ -77,10 +116,26 @@ pub async fn run_benchmark(
         .await
         .map_err(|error| format!("Could not create HTTP benchmark directory: {error}"))?;
 
-    let mut variants = Vec::with_capacity(SEGMENT_VARIANTS.len() * BENCHMARK_MODES.len());
+    let mut variants = Vec::with_capacity(
+        SEGMENT_VARIANTS.len() * BENCHMARK_MODES.len() * BENCHMARK_ADMISSIONS.len(),
+    );
     for mode in BENCHMARK_MODES {
-        for segments in SEGMENT_VARIANTS {
-            variants.push(run_variant(source, segments, mode, duration, &run_dir).await);
+        for admission in BENCHMARK_ADMISSIONS {
+            for requested_segments in SEGMENT_VARIANTS {
+                let admitted_segments = admission.admit_segments(requested_segments);
+                variants.push(
+                    run_variant(
+                        source,
+                        admission,
+                        requested_segments,
+                        admitted_segments,
+                        mode,
+                        duration,
+                        &run_dir,
+                    )
+                    .await,
+                );
+            }
         }
     }
 
@@ -101,7 +156,9 @@ pub async fn run_benchmark(
 
 async fn run_variant(
     source: &str,
-    segments: usize,
+    admission: HttpBenchmarkAdmission,
+    requested_segments: usize,
+    admitted_segments: usize,
     mode: HttpBenchmarkMode,
     duration: Duration,
     run_dir: &std::path::Path,
@@ -121,7 +178,9 @@ async fn run_variant(
         Ok(client) => client,
         Err(error) => {
             return benchmark_error(
-                segments,
+                admission,
+                requested_segments,
+                admitted_segments,
                 mode,
                 format!("Could not create benchmark client: {error}"),
             );
@@ -130,10 +189,18 @@ async fn run_variant(
 
     let total_bytes = match probe_total_bytes(&client, source).await {
         Ok(total_bytes) => total_bytes,
-        Err(error) => return benchmark_error(segments, mode, error),
+        Err(error) => {
+            return benchmark_error(
+                admission,
+                requested_segments,
+                admitted_segments,
+                mode,
+                error,
+            )
+        }
     };
 
-    let ranges = partition_ranges(total_bytes, segments);
+    let ranges = partition_ranges(total_bytes, admitted_segments);
     let deadline = Instant::now() + duration;
     let mut handles = tokio::task::JoinSet::new();
     for (index, range) in ranges.into_iter().enumerate() {
@@ -141,9 +208,11 @@ async fn run_variant(
         let source = source.to_string();
         let output_path = match mode {
             HttpBenchmarkMode::NetworkOnly => None,
-            HttpBenchmarkMode::DiskWrite => {
-                Some(run_dir.join(format!("http1-{segments}-{}-{index}.part", mode.label())))
-            }
+            HttpBenchmarkMode::DiskWrite => Some(run_dir.join(format!(
+                "http1-{}-{requested_segments}-{admitted_segments}-{}-{index}.part",
+                admission.label(),
+                mode.label()
+            ))),
         };
         handles.spawn(async move {
             read_range_until(&client, &source, range, deadline, output_path).await
@@ -169,8 +238,11 @@ async fn run_variant(
 
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     HttpBenchmarkVariant {
-        label: format!("http1-{segments}-{}", mode.label()),
-        segments,
+        label: benchmark_variant_label(admission, requested_segments, admitted_segments, mode),
+        admission_class: admission.label().into(),
+        requested_segments,
+        admitted_segments,
+        segments: admitted_segments,
         mode: mode.label().into(),
         transport: "http/1.1".into(),
         first_byte_time_ms,
@@ -288,13 +360,18 @@ async fn read_range_until(
 }
 
 fn benchmark_error(
-    segments: usize,
+    admission: HttpBenchmarkAdmission,
+    requested_segments: usize,
+    admitted_segments: usize,
     mode: HttpBenchmarkMode,
     error: String,
 ) -> HttpBenchmarkVariant {
     HttpBenchmarkVariant {
-        label: format!("http1-{segments}-{}", mode.label()),
-        segments,
+        label: benchmark_variant_label(admission, requested_segments, admitted_segments, mode),
+        admission_class: admission.label().into(),
+        requested_segments,
+        admitted_segments,
+        segments: admitted_segments,
         mode: mode.label().into(),
         transport: "http/1.1".into(),
         first_byte_time_ms: None,
@@ -302,6 +379,19 @@ fn benchmark_error(
         bytes_read: 0,
         error: Some(error),
     }
+}
+
+fn benchmark_variant_label(
+    admission: HttpBenchmarkAdmission,
+    requested_segments: usize,
+    admitted_segments: usize,
+    mode: HttpBenchmarkMode,
+) -> String {
+    format!(
+        "http1-{}-requested-{requested_segments}-admitted-{admitted_segments}-{}",
+        admission.label(),
+        mode.label()
+    )
 }
 
 fn min_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -340,6 +430,24 @@ mod tests {
     #[test]
     fn live_http_benchmark_covers_adaptive_sustain_variants() {
         assert_eq!(SEGMENT_VARIANTS, [8, 12, 16, 24, 32, 48, 64]);
+    }
+
+    #[test]
+    fn benchmark_schema_records_bulk_admission_details() {
+        assert_eq!(REPORT_SCHEMA_VERSION, 2);
+
+        let variant = benchmark_error(
+            HttpBenchmarkAdmission::DirectBulk,
+            64,
+            64,
+            HttpBenchmarkMode::NetworkOnly,
+            "expected error".into(),
+        );
+
+        assert_eq!(variant.admission_class, "direct_bulk");
+        assert_eq!(variant.requested_segments, 64);
+        assert_eq!(variant.admitted_segments, 64);
+        assert_eq!(variant.segments, 64);
     }
 
     #[tokio::test]

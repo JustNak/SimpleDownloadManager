@@ -2909,21 +2909,27 @@ fn hoster_acceleration_off_disallows_verified_hoster_bulk_segmentation() {
 fn hoster_acceleration_caps_segments_by_performance_mode() {
     let policy = crate::hosters::HosterAccelerationPolicy {
         backoff_key: "hoster:datanodes:abc123456789".into(),
-        max_balanced_segments: 4,
-        max_fast_segments: 6,
+        balanced_initial_segments: 4,
+        balanced_max_segments: 4,
+        fast_initial_segments: 6,
+        fast_max_segments: 10,
     };
 
     assert_eq!(
-        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Stable),
+        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Stable),
         1
     );
     assert_eq!(
-        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Balanced),
+        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Balanced),
         4
     );
     assert_eq!(
-        hoster_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
+        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
         6
+    );
+    assert_eq!(
+        hoster_adaptive_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
+        10
     );
 }
 
@@ -3141,6 +3147,26 @@ fn datanodes_oldest_fast_worker_keeps_full_segment_cap() {
             &[],
         ),
         Some(6)
+    );
+}
+
+#[test]
+fn datanodes_fast_worker_can_grow_to_adaptive_segment_cap() {
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::ProtectedHosterBulk,
+            "job_1",
+            "https://s1.datanodes.to/d/abc/file.bin",
+            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
+            10,
+            &[(
+                "job_1",
+                SegmentConnectionClass::ProtectedHosterBulk,
+                "https://s1.datanodes.to/d/abc/file.bin",
+                6,
+            )],
+        ),
+        Some(10)
     );
 }
 
@@ -4148,6 +4174,118 @@ async fn segment_state_persists_concurrent_writers_without_temp_file_race() {
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
+#[tokio::test]
+async fn record_segment_progress_releases_metadata_lock_before_persisting() {
+    let root = test_download_runtime_dir("segment-progress-lock-release");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let metadata = Arc::new(Mutex::new(new_segment_state_for_test(
+        &plan,
+        EntityValidators::default(),
+    )));
+    let metadata_lock = segment_metadata_lock(&temp_path);
+    let metadata_guard = metadata_lock.lock().await;
+
+    let record_task = {
+        let metadata = Arc::clone(&metadata);
+        let temp_path = temp_path.clone();
+        tokio::spawn(async move {
+            record_segment_progress(&temp_path, &metadata, 1, 2, false, true).await
+        })
+    };
+
+    let progress_observed = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let Ok(state) = metadata.try_lock() {
+                let segment = state
+                    .segments
+                    .iter()
+                    .find(|segment| segment.index == 1)
+                    .expect("segment should exist");
+                if segment.downloaded_bytes == 2 && !segment.completed {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+
+    assert!(
+        progress_observed,
+        "segment progress should release the metadata mutex before waiting on sidecar persistence"
+    );
+
+    drop(metadata_guard);
+    record_task
+        .await
+        .expect("progress task should not panic")
+        .expect("progress task should finish after sidecar lock is released");
+
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &EntityValidators::default())
+        .await
+        .expect("forced progress persist should write readable metadata");
+    assert_eq!(reloaded.segments[1].downloaded_bytes, 2);
+    assert!(!reloaded.segments[1].completed);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn blocked_segment_progress_persist_flushes_latest_metadata_snapshot() {
+    let root = test_download_runtime_dir("segment-progress-latest-snapshot");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let metadata = Arc::new(Mutex::new(new_segment_state_for_test(
+        &plan,
+        EntityValidators::default(),
+    )));
+    let metadata_lock = segment_metadata_lock(&temp_path);
+    let metadata_guard = metadata_lock.lock().await;
+
+    let persist_task = {
+        let metadata = Arc::clone(&metadata);
+        let temp_path = temp_path.clone();
+        tokio::spawn(async move {
+            record_segment_progress(&temp_path, &metadata, 0, 4, true, true).await
+        })
+    };
+
+    tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let Ok(state) = metadata.try_lock() {
+                if state.segments[0].completed {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first progress update should not keep the metadata mutex while persistence waits");
+
+    record_segment_progress(&temp_path, &metadata, 1, 3, false, false)
+        .await
+        .expect("coalesced progress update should succeed while persistence waits");
+
+    drop(metadata_guard);
+    persist_task
+        .await
+        .expect("persisting progress task should not panic")
+        .expect("persisting progress task should finish after sidecar lock is released");
+
+    let reloaded = load_or_create_segment_state(&temp_path, &plan, &EntityValidators::default())
+        .await
+        .expect("forced progress persist should write readable metadata");
+    assert_eq!(reloaded.segments[0].downloaded_bytes, 4);
+    assert!(reloaded.segments[0].completed);
+    assert_eq!(reloaded.segments[1].downloaded_bytes, 3);
+    assert!(!reloaded.segments[1].completed);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
 #[test]
 fn range_rejection_after_probe_requests_single_stream_fallback() {
     let resume_error = download_error(
@@ -4635,20 +4773,46 @@ fn worker_control_signal_maps_live_control_without_state_lookup() {
 }
 
 #[test]
-fn direct_bulk_fast_budget_allows_twenty_four_same_origin_segments() {
+fn direct_bulk_fast_budget_reuses_normal_fast_connection_ceiling() {
+    let budget = direct_bulk_segment_budget_for_mode(DownloadPerformanceMode::Fast)
+        .expect("fast direct bulk downloads should use brokered segment budgets");
+    let normal_budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Fast)
+        .expect("fast normal downloads should use brokered segment budgets");
+
+    assert_eq!(budget, normal_budget);
     assert_eq!(
         segment_budget_from_test_leases(
             SegmentConnectionClass::DirectBulk,
             "bulk_fast_1",
             "https://cdn.example.com/bulk-fast.bin",
-            SegmentConnectionBudget {
-                total: DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
-                per_origin: DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
-            },
+            budget,
             usize::MAX,
             &[],
         ),
-        Some(24)
+        Some(64)
+    );
+}
+
+#[test]
+fn direct_bulk_and_normal_segment_budgets_are_isolated_by_class() {
+    let budget = direct_bulk_segment_budget_for_mode(DownloadPerformanceMode::Fast)
+        .expect("fast direct bulk downloads should use brokered segment budgets");
+
+    assert_eq!(
+        segment_budget_from_test_leases(
+            SegmentConnectionClass::DirectBulk,
+            "bulk_fast_1",
+            "https://cdn.example.com/bulk-fast.bin",
+            budget,
+            usize::MAX,
+            &[(
+                "normal_fast_1",
+                SegmentConnectionClass::Normal,
+                "https://cdn.example.com/normal-fast.bin",
+                64,
+            )],
+        ),
+        Some(64)
     );
 }
 

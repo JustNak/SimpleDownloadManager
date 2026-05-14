@@ -669,6 +669,8 @@ pub async fn add_jobs(
     Ok(add_jobs_result_from_parts(results, failed_items))
 }
 
+const HOSTER_PREFLIGHT_CONCURRENCY: usize = 6;
+
 fn spawn_hoster_preflight_checks(
     app: AppHandle,
     state: SharedState,
@@ -676,7 +678,7 @@ fn spawn_hoster_preflight_checks(
 ) {
     tauri::async_runtime::spawn(async move {
         stream::iter(targets)
-            .for_each_concurrent(4, |target| {
+            .for_each_concurrent(HOSTER_PREFLIGHT_CONCURRENCY, |target| {
                 let app = app.clone();
                 let state = state.clone();
                 async move {
@@ -2025,6 +2027,18 @@ mod tests {
         assert!(production_source.contains("spawn_hoster_preflight_checks"));
         assert!(production_source.contains("preflight_hoster_source"));
         assert!(!production_source.contains("resolve_hoster_links_partial(urls)"));
+    }
+
+    #[test]
+    fn bulk_hoster_preflight_uses_resolver_concurrency() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("commands source should contain production code");
+
+        assert!(production_source.contains("const HOSTER_PREFLIGHT_CONCURRENCY: usize = 6"));
+        assert!(production_source.contains(".for_each_concurrent(HOSTER_PREFLIGHT_CONCURRENCY"));
     }
 
     #[test]

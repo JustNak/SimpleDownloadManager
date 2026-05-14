@@ -57,7 +57,7 @@ pub(super) struct SegmentConnectionLeaseController {
     class: SegmentConnectionClass,
     effective_url: String,
     budget: SegmentConnectionBudget,
-    policy_cap: usize,
+    adaptive_cap: usize,
     fair_min_segments: usize,
     fair_origin_workers: Option<usize>,
 }
@@ -77,7 +77,7 @@ impl SegmentConnectionLeaseController {
         }
 
         let now = Instant::now();
-        let desired_cap = desired_segments.min(self.policy_cap);
+        let desired_cap = desired_segments.min(self.adaptive_cap);
         let leases = segment_connection_leases();
         let Ok(mut leases) = leases.lock() else {
             return self.current_segments();
@@ -397,11 +397,13 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                             metadata.resume_support,
                             speed_limit,
                             profile,
-                            (segment_attempt.policy_cap != usize::MAX)
-                                .then_some(segment_attempt.policy_cap),
+                            (segment_attempt.adaptive_cap != usize::MAX)
+                                .then_some(segment_attempt.adaptive_cap),
                         )
                         .map(|planned| planned.segments.len())
                         .unwrap_or(plan.segments.len());
+                        let adaptive_segment_cap =
+                            segment_attempt.adaptive_cap.min(profile.max_segments);
                         record_download_diagnostic(
                             state,
                             DiagnosticLevel::Info,
@@ -411,7 +413,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                                 performance_mode,
                                 planned_segment_count,
                                 plan.segments.len(),
-                                profile.max_segments,
+                                adaptive_segment_cap,
                                 segmented_transport_label
                             ),
                         )
@@ -448,7 +450,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                         metadata.resume_support,
                         speed_limit,
                         profile,
-                        segment_attempt.policy_cap,
+                        segment_attempt.initial_cap,
                     ) {
                         match segment_attempt
                             .admission
@@ -456,7 +458,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                         {
                             SegmentBudgetWaitAction::Defer => {
                                 let requested_chunks =
-                                    segment_attempt.policy_cap.min(profile.max_segments);
+                                    segment_attempt.adaptive_cap.min(profile.max_segments);
                                 let host_key = segment_attempt
                                     .backoff_key
                                     .clone()
@@ -1058,7 +1060,8 @@ struct SegmentAttemptContext {
     backoff_key: Option<String>,
     connection_class: Option<SegmentConnectionClass>,
     connection_budget: Option<SegmentConnectionBudget>,
-    policy_cap: usize,
+    initial_cap: usize,
+    adaptive_cap: usize,
     fair_min_segments: usize,
     fair_origin_workers: Option<usize>,
 }
@@ -1091,11 +1094,9 @@ async fn segment_attempt_context_for_task(
             admission: DownloadAdmission::direct_bulk(),
             backoff_key: None,
             connection_class: Some(SegmentConnectionClass::DirectBulk),
-            connection_budget: Some(SegmentConnectionBudget {
-                total: DIRECT_BULK_TOTAL_SEGMENT_CONNECTION_BUDGET,
-                per_origin: DIRECT_BULK_ORIGIN_SEGMENT_CONNECTION_BUDGET,
-            }),
-            policy_cap: usize::MAX,
+            connection_budget: direct_bulk_segment_budget_for_mode(performance_mode),
+            initial_cap: usize::MAX,
+            adaptive_cap: usize::MAX,
             fair_min_segments: 2,
             fair_origin_workers: None,
         });
@@ -1107,9 +1108,10 @@ async fn segment_attempt_context_for_task(
         }
         let source_url = task.resolved_from_url.as_deref()?;
         let policy = crate::hosters::hoster_acceleration_policy(source_url, effective_url)?;
-        let policy_cap = hoster_segment_cap_for_mode(&policy, performance_mode);
+        let initial_cap = hoster_initial_segment_cap_for_mode(&policy, performance_mode);
+        let adaptive_cap = hoster_adaptive_segment_cap_for_mode(&policy, performance_mode);
         let connection_budget = hoster_segment_budget_for_mode(performance_mode)?;
-        if policy_cap < 2 {
+        if initial_cap < 2 || adaptive_cap < 2 {
             return None;
         }
         return Some(SegmentAttemptContext {
@@ -1117,7 +1119,8 @@ async fn segment_attempt_context_for_task(
             backoff_key: Some(policy.backoff_key),
             connection_class: Some(SegmentConnectionClass::ProtectedHosterBulk),
             connection_budget: Some(connection_budget),
-            policy_cap,
+            initial_cap,
+            adaptive_cap,
             fair_min_segments: 2,
             fair_origin_workers: accelerated_hoster_fair_origin_workers_for_mode(performance_mode),
         });
@@ -1128,7 +1131,8 @@ async fn segment_attempt_context_for_task(
         backoff_key: None,
         connection_class: Some(SegmentConnectionClass::Normal),
         connection_budget: normal_segment_budget_for_mode(performance_mode),
-        policy_cap: usize::MAX,
+        initial_cap: usize::MAX,
+        adaptive_cap: usize::MAX,
         fair_min_segments: 2,
         fair_origin_workers: None,
     })
@@ -1158,14 +1162,25 @@ pub(super) fn task_allows_segmented_download_with_mode(
     crate::hosters::hoster_acceleration_policy(source_url, &task.url).is_some()
 }
 
-pub(super) fn hoster_segment_cap_for_mode(
+pub(super) fn hoster_initial_segment_cap_for_mode(
     policy: &crate::hosters::HosterAccelerationPolicy,
     performance_mode: DownloadPerformanceMode,
 ) -> usize {
     match performance_mode {
         DownloadPerformanceMode::Stable => 1,
-        DownloadPerformanceMode::Balanced => policy.max_balanced_segments,
-        DownloadPerformanceMode::Fast => policy.max_fast_segments,
+        DownloadPerformanceMode::Balanced => policy.balanced_initial_segments,
+        DownloadPerformanceMode::Fast => policy.fast_initial_segments,
+    }
+}
+
+pub(super) fn hoster_adaptive_segment_cap_for_mode(
+    policy: &crate::hosters::HosterAccelerationPolicy,
+    performance_mode: DownloadPerformanceMode,
+) -> usize {
+    match performance_mode {
+        DownloadPerformanceMode::Stable => 1,
+        DownloadPerformanceMode::Balanced => policy.balanced_max_segments,
+        DownloadPerformanceMode::Fast => policy.fast_max_segments,
     }
 }
 
@@ -1201,6 +1216,12 @@ pub(super) fn normal_segment_budget_for_mode(
     }
 }
 
+pub(super) fn direct_bulk_segment_budget_for_mode(
+    performance_mode: DownloadPerformanceMode,
+) -> Option<SegmentConnectionBudget> {
+    normal_segment_budget_for_mode(performance_mode)
+}
+
 fn reserve_segmented_plan_for_attempt(
     task: &crate::state::DownloadTask,
     effective_url: &str,
@@ -1227,7 +1248,7 @@ fn reserve_segmented_plan_for_attempt(
         effective_url,
         class,
         budget,
-        attempt.policy_cap,
+        attempt.initial_cap,
         attempt.fair_min_segments,
         attempt.fair_origin_workers,
     )?;
@@ -1251,7 +1272,7 @@ fn reserve_segmented_plan_for_attempt(
             class,
             effective_url: effective_url.to_string(),
             budget,
-            policy_cap: attempt.policy_cap,
+            adaptive_cap: attempt.adaptive_cap,
             fair_min_segments: attempt.fair_min_segments,
             fair_origin_workers: attempt.fair_origin_workers,
         }),
@@ -1324,7 +1345,7 @@ async fn try_low_cap_segmented_recovery_after_probe_failure<A: DownloadUi>(
 fn low_cap_segmented_recovery_profile(
     mut profile: DownloadPerformanceProfile,
 ) -> DownloadPerformanceProfile {
-    profile.initial_segments = profile.initial_segments.min(8).max(2);
+    profile.initial_segments = profile.initial_segments.clamp(2, 8);
     profile.soft_max_segments = profile.soft_max_segments.min(profile.initial_segments);
     profile.max_segments = profile.max_segments.min(profile.initial_segments);
     profile.adaptive_ramp_step = 0;
@@ -1449,6 +1470,11 @@ fn datanodes_fair_origin_workers_for_budget(
             HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
             HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
             6,
+        )
+        | (
+            HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET,
+            HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET,
+            10,
         ) => Some(8),
         _ => None,
     }

@@ -1434,6 +1434,7 @@ pub(super) fn should_persist_segment_metadata(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn report_segmented_progress<A: DownloadUi>(
     app: A,
     state: SharedState,
@@ -1626,7 +1627,7 @@ impl AdaptiveSegmentAdmission {
         pending_segment_count(&metadata, &active) > 0
     }
 
-    fn admit_worker_target(&self) -> usize {
+    async fn admit_worker_target(&self) -> usize {
         let current = self.admitted_workers.load(Ordering::Relaxed);
         let desired = current
             .saturating_add(self.context.profile.adaptive_ramp_step)
@@ -1637,6 +1638,25 @@ impl AdaptiveSegmentAdmission {
             .map(|lease| lease.grow_to(desired))
             .unwrap_or(desired)
             .min(self.context.profile.max_segments);
+        if admitted > current {
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast expanded segmented workers from {current} to {admitted} (requested {desired})."
+                ),
+            )
+            .await;
+        } else if desired > current {
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast segment ramp deferred by connection budget (requested {desired}, admitted {admitted})."
+                ),
+            )
+            .await;
+        }
         record_segment_host_success(&self.context.url, admitted, Instant::now());
         self.target_workers.store(admitted, Ordering::Relaxed);
         admitted
@@ -1718,7 +1738,7 @@ async fn await_segment_workers_with_adaptive_ramp(
             }
             _ = &mut ramp_sleep => {
                 if adaptive.can_admit_more().await {
-                    let target_workers = adaptive.admit_worker_target();
+                    let target_workers = adaptive.admit_worker_target().await;
                     adaptive.spawn_until(&mut handles, target_workers);
                 }
                 ramp_sleep.as_mut().reset(
@@ -2046,17 +2066,26 @@ pub(super) async fn record_segment_progress(
     completed: bool,
     persist: bool,
 ) -> Result<(), DownloadError> {
-    let mut metadata = metadata.lock().await;
-    if let Some(segment) = metadata
-        .segments
-        .iter_mut()
-        .find(|segment| segment.index == segment_index)
     {
-        segment.downloaded_bytes = downloaded_bytes.min(segment.range.len());
-        segment.completed = completed || segment.downloaded_bytes == segment.range.len();
+        let mut metadata = metadata.lock().await;
+        if let Some(segment) = metadata
+            .segments
+            .iter_mut()
+            .find(|segment| segment.index == segment_index)
+        {
+            segment.downloaded_bytes = downloaded_bytes.min(segment.range.len());
+            segment.completed = completed || segment.downloaded_bytes == segment.range.len();
+        }
     }
+
     if persist {
-        persist_segment_state(temp_path, &metadata).await?;
+        // A dedicated writer actor could batch this later; for now, wait for our
+        // sidecar turn without holding the metadata mutex, then snapshot the
+        // latest in-memory progress before the existing atomic write.
+        let lock = segment_metadata_lock(temp_path);
+        let _guard = lock.lock().await;
+        let metadata = metadata.lock().await.clone();
+        write_segment_state_sidecar(temp_path, &metadata).await?;
     }
 
     Ok(())
@@ -2066,10 +2095,17 @@ pub(super) async fn persist_segment_state(
     temp_path: &Path,
     state: &SegmentedDownloadState,
 ) -> Result<(), DownloadError> {
-    let serialized = serde_json::to_string_pretty(state)
-        .map_err(|error| format!("Could not serialize segment metadata: {error}"))?;
     let lock = segment_metadata_lock(temp_path);
     let _guard = lock.lock().await;
+    write_segment_state_sidecar(temp_path, state).await
+}
+
+async fn write_segment_state_sidecar(
+    temp_path: &Path,
+    state: &SegmentedDownloadState,
+) -> Result<(), DownloadError> {
+    let serialized = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("Could not serialize segment metadata: {error}"))?;
     let meta_path = segment_meta_path(temp_path);
     let temp_meta_path = unique_segment_meta_temp_path(temp_path);
     let backup_meta_path = segment_meta_backup_path(temp_path);
@@ -2172,7 +2208,7 @@ pub(super) fn segment_path(temp_path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.seg{index}", temp_path.display()))
 }
 
-fn segment_metadata_lock(temp_path: &Path) -> Arc<Mutex<()>> {
+pub(super) fn segment_metadata_lock(temp_path: &Path) -> Arc<Mutex<()>> {
     let key = temp_path.to_path_buf();
     let locks = SEGMENT_METADATA_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = locks

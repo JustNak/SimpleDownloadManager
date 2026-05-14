@@ -80,8 +80,10 @@ pub struct HosterSourcePreflight {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HosterAccelerationPolicy {
     pub backoff_key: String,
-    pub max_balanced_segments: usize,
-    pub max_fast_segments: usize,
+    pub balanced_initial_segments: usize,
+    pub balanced_max_segments: usize,
+    pub fast_initial_segments: usize,
+    pub fast_max_segments: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -641,8 +643,10 @@ fn datanodes_hoster_acceleration_policy(
     let file_code = datanodes_file_code_from_url(source_url)?;
     Some(HosterAccelerationPolicy {
         backoff_key: format!("hoster:datanodes:{file_code}"),
-        max_balanced_segments: 4,
-        max_fast_segments: 6,
+        balanced_initial_segments: 4,
+        balanced_max_segments: 4,
+        fast_initial_segments: 6,
+        fast_max_segments: 10,
     })
 }
 
@@ -656,8 +660,10 @@ fn fuckingfast_hoster_acceleration_policy(
     let source_id = fuckingfast_source_id(source_url)?;
     Some(HosterAccelerationPolicy {
         backoff_key: format!("hoster:fuckingfast:{source_id}"),
-        max_balanced_segments: 4,
-        max_fast_segments: 6,
+        balanced_initial_segments: 4,
+        balanced_max_segments: 4,
+        fast_initial_segments: 6,
+        fast_max_segments: 10,
     })
 }
 
@@ -1976,8 +1982,10 @@ mod tests {
         .expect("validated DataNodes direct URLs should opt into safe acceleration");
 
         assert_eq!(policy.backoff_key, "hoster:datanodes:abc123456789");
-        assert_eq!(policy.max_balanced_segments, 4);
-        assert_eq!(policy.max_fast_segments, 6);
+        assert_eq!(policy.balanced_initial_segments, 4);
+        assert_eq!(policy.balanced_max_segments, 4);
+        assert_eq!(policy.fast_initial_segments, 6);
+        assert_eq!(policy.fast_max_segments, 10);
     }
 
     #[test]
@@ -1989,8 +1997,10 @@ mod tests {
         .expect("validated FuckingFast direct URLs should opt into safe acceleration");
 
         assert_eq!(policy.backoff_key, "hoster:fuckingfast:ecw0lw398okf");
-        assert_eq!(policy.max_balanced_segments, 4);
-        assert_eq!(policy.max_fast_segments, 6);
+        assert_eq!(policy.balanced_initial_segments, 4);
+        assert_eq!(policy.balanced_max_segments, 4);
+        assert_eq!(policy.fast_initial_segments, 6);
+        assert_eq!(policy.fast_max_segments, 10);
 
         let same_source_with_other_fragment = hoster_acceleration_policy(
             "https://www.fuckingfast.co/ecw0lw398okf#Other.part01.rar",

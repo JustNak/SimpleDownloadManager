@@ -314,7 +314,7 @@ impl SharedState {
         };
 
         if let Some(persisted) = persisted {
-            persist_state(&self.storage_path, &persisted)?;
+            persist_state_blocking(&self.storage_path, &persisted).await?;
         }
         Ok(snapshot)
     }

@@ -1067,6 +1067,14 @@ pub fn persist_state(path: &Path, state: &PersistedState) -> Result<(), String> 
     Ok(())
 }
 
+pub async fn persist_state_blocking(path: &Path, state: &PersistedState) -> Result<(), String> {
+    let path = path.to_path_buf();
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || persist_state(&path, &state))
+        .await
+        .map_err(|error| format!("Persisted state writer task failed: {error}"))?
+}
+
 fn persist_state_write_lock() -> &'static Mutex<()> {
     PERSIST_STATE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -1159,6 +1167,25 @@ mod tests {
         }
 
         load_persisted_state(&path).expect("final state should stay readable");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn persist_state_blocking_writes_recoverable_state() {
+        let dir = test_runtime_dir("persist-blocking");
+        let path = dir.join("state.json");
+        let mut state = PersistedState::default();
+        state.settings.max_concurrent_downloads = 9;
+
+        persist_state_blocking(&path, &state).await.unwrap();
+
+        let loaded = load_persisted_state(&path).expect("persisted state should be readable");
+        assert_eq!(loaded.settings.max_concurrent_downloads, 9);
+        assert!(
+            !state_temp_path(&path).exists(),
+            "blocking persist should still finalize through the atomic state path"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
