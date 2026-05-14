@@ -2186,11 +2186,12 @@ fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
 #[test]
 fn fast_profile_uses_fast_plus_initial_and_adaptive_segment_caps() {
     let profile = performance_profile(DownloadPerformanceMode::Fast);
-    assert_eq!(profile.initial_segments, 32);
+    assert_eq!(profile.initial_segments, 16);
+    assert_eq!(profile.soft_max_segments, 32);
     assert_eq!(profile.max_segments, 64);
     assert_eq!(profile.target_segment_size, 8 * 1024 * 1024);
-    assert_eq!(profile.adaptive_ramp_step, 8);
-    assert_eq!(profile.adaptive_ramp_interval, Duration::from_millis(1000));
+    assert_eq!(profile.adaptive_ramp_step, 4);
+    assert_eq!(profile.adaptive_ramp_interval, Duration::from_secs(2));
 }
 
 #[test]
@@ -2207,8 +2208,8 @@ fn fast_range_plan_uses_fast_plus_initial_fanout() {
             .expect("large fast downloads should use capped segmented downloading");
 
     assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(ramp_plan.segments.len(), 32);
-    assert_eq!(capped_plan.segments.len(), 32);
+    assert_eq!(ramp_plan.segments.len(), 16);
+    assert_eq!(capped_plan.segments.len(), 16);
 }
 
 #[test]
@@ -2484,6 +2485,95 @@ fn dynamic_segment_queue_does_not_reassign_completed_spans() {
     assert_eq!(state.segments[0].downloaded_bytes, 16);
 }
 
+fn adaptive_admission_for_test(
+    name: &str,
+    admitted_workers: usize,
+    active_count: usize,
+    previous_downloaded: u64,
+    current_downloaded: u64,
+    previous_bps: u64,
+) -> (
+    PathBuf,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+    AdaptiveSegmentAdmission,
+) {
+    let root = test_download_runtime_dir(name);
+    let temp_path = root.join("download.part");
+    let mut job = torrent_job(name, JobState::Downloading);
+    job.transfer_kind = TransferKind::Http;
+    job.torrent = None;
+    job.temp_path = temp_path.display().to_string();
+    job.target_path = root.join("download.bin").display().to_string();
+    let state = SharedState::for_tests(test_storage_path(name), vec![job]);
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
+    progress.store_segment_bytes(0, current_downloaded);
+    let active_segments = Arc::new(Mutex::new((0_usize..active_count).collect::<HashSet<_>>()));
+    let ramp_blocked = Arc::new(AtomicBool::new(false));
+    let target_workers = Arc::new(AtomicUsize::new(admitted_workers));
+    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
+        schema_version: default_segment_state_schema_version(),
+        total_bytes: 1024 * 1024 * 1024,
+        validators: EntityValidators::default(),
+        effective_url: None,
+        target_path: None,
+        temp_path: None,
+        last_verified_file_len: 0,
+        retry_generation: 0,
+        segments: (0_u64..96)
+            .map(|index| SegmentProgress {
+                index: index as usize,
+                range: ByteRange {
+                    start: index * 8 * 1024 * 1024,
+                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
+                },
+                downloaded_bytes: 0,
+                completed: false,
+            })
+            .collect(),
+    }));
+    let context = SegmentWorkerContext {
+        state,
+        client: download_client().unwrap(),
+        job_id: name.into(),
+        url: "https://cdn.example.com/file.bin".into(),
+        handoff_auth: None,
+        temp_path,
+        total_bytes: 1024 * 1024 * 1024,
+        profile,
+        validators: EntityValidators::default(),
+        progress: progress.clone(),
+        metadata: metadata.clone(),
+        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
+        stop: Arc::new(AtomicBool::new(false)),
+        control_signal: WorkerControlSignal::default(),
+        ramp_blocked: ramp_blocked.clone(),
+        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        priority_throttle_enabled: false,
+        stall_timeout: None,
+        reconnects: Arc::new(SegmentReconnectTracker::default()),
+        target_workers: target_workers.clone(),
+        active_workers: Arc::new(AtomicUsize::new(admitted_workers)),
+    };
+    let admission = AdaptiveSegmentAdmission {
+        context,
+        active_segments,
+        metadata,
+        progress,
+        admitted_workers: Arc::new(AtomicUsize::new(admitted_workers)),
+        target_workers: target_workers.clone(),
+        segment_lease: None,
+        queue_depth: 128,
+        min_split_size: 1024 * 1024,
+        last_ramp_total_bytes: AtomicU64::new(previous_downloaded),
+        last_ramp_speed_bps: AtomicU64::new(previous_bps),
+        regression_windows: AtomicUsize::new(0),
+    };
+
+    (root, ramp_blocked, target_workers, admission)
+}
+
 #[tokio::test]
 async fn adaptive_segment_admission_blocks_after_throughput_regression() {
     let root = test_download_runtime_dir("adaptive-ramp-regression");
@@ -2499,6 +2589,7 @@ async fn adaptive_segment_admission_blocks_after_throughput_regression() {
     progress.store_segment_bytes(0, 128 * 1024 * 1024);
     let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
     let ramp_blocked = Arc::new(AtomicBool::new(false));
+    let target_workers = Arc::new(AtomicUsize::new(32));
     let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
         schema_version: default_segment_state_schema_version(),
         total_bytes: 1024 * 1024 * 1024,
@@ -2539,6 +2630,9 @@ async fn adaptive_segment_admission_blocks_after_throughput_regression() {
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: false,
         stall_timeout: None,
+        reconnects: Arc::new(SegmentReconnectTracker::default()),
+        target_workers: target_workers.clone(),
+        active_workers: Arc::new(AtomicUsize::new(32)),
     };
     let admission = AdaptiveSegmentAdmission {
         context,
@@ -2546,11 +2640,13 @@ async fn adaptive_segment_admission_blocks_after_throughput_regression() {
         metadata,
         progress,
         admitted_workers: Arc::new(AtomicUsize::new(32)),
+        target_workers,
         segment_lease: None,
         queue_depth: 128,
         min_split_size: 1024 * 1024,
         last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
         last_ramp_speed_bps: AtomicU64::new(64 * 1024 * 1024),
+        regression_windows: AtomicUsize::new(0),
     };
 
     assert!(!admission.can_admit_more().await);
@@ -2577,6 +2673,7 @@ async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression(
     progress.store_segment_bytes(0, 154 * 1024 * 1024);
     let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
     let ramp_blocked = Arc::new(AtomicBool::new(false));
+    let target_workers = Arc::new(AtomicUsize::new(32));
     let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
         schema_version: default_segment_state_schema_version(),
         total_bytes: 1024 * 1024 * 1024,
@@ -2617,6 +2714,9 @@ async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression(
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: false,
         stall_timeout: None,
+        reconnects: Arc::new(SegmentReconnectTracker::default()),
+        target_workers: target_workers.clone(),
+        active_workers: Arc::new(AtomicUsize::new(32)),
     };
     let admission = AdaptiveSegmentAdmission {
         context,
@@ -2624,15 +2724,53 @@ async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression(
         metadata,
         progress,
         admitted_workers: Arc::new(AtomicUsize::new(32)),
+        target_workers,
         segment_lease: None,
         queue_depth: 128,
         min_split_size: 1024 * 1024,
         last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
         last_ramp_speed_bps: AtomicU64::new(40 * 1024 * 1024),
+        regression_windows: AtomicUsize::new(0),
     };
 
     assert!(!admission.can_admit_more().await);
     assert!(ramp_blocked.load(Ordering::Relaxed));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_holds_at_soft_cap_without_clear_improvement() {
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-soft-cap-hold",
+        32,
+        31,
+        120 * 1024 * 1024,
+        204 * 1024 * 1024,
+        40 * 1024 * 1024,
+    );
+
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_allows_peak_cap_after_clear_improvement() {
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-soft-cap-grow",
+        32,
+        31,
+        120 * 1024 * 1024,
+        208 * 1024 * 1024,
+        40 * 1024 * 1024,
+    );
+
+    assert!(admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -4253,6 +4391,9 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: false,
         stall_timeout: None,
+        reconnects: Arc::new(SegmentReconnectTracker::default()),
+        target_workers: Arc::new(AtomicUsize::new(1)),
+        active_workers: Arc::new(AtomicUsize::new(1)),
     };
 
     let outcome = download_segment_worker(context, segment).await.unwrap();
@@ -4409,6 +4550,59 @@ fn normal_fast_segment_budget_allows_adaptive_fast_plus_ceiling() {
         ),
         Some(64)
     );
+}
+
+#[test]
+fn fast_profile_uses_adaptive_sustain_defaults() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+
+    assert_eq!(profile.initial_segments, 16);
+    assert_eq!(profile.soft_max_segments, 32);
+    assert_eq!(profile.max_segments, 64);
+    assert_eq!(profile.adaptive_ramp_step, 4);
+    assert_eq!(profile.adaptive_ramp_interval, Duration::from_secs(2));
+}
+
+#[test]
+fn gofile_fast_profile_uses_conservative_direct_cap() {
+    let profile = profile_for_effective_http_url(
+        DownloadPerformanceMode::Fast,
+        "https://store1.gofile.io/download/web/file-token/BeamNG-drive-SteamRIP.com.rar",
+    );
+
+    assert_eq!(profile.initial_segments, 8);
+    assert_eq!(profile.soft_max_segments, 16);
+    assert_eq!(profile.max_segments, 16);
+    assert_eq!(profile.adaptive_ramp_step, 4);
+}
+
+#[test]
+fn host_score_temporarily_caps_fast_profile_after_reconnects() {
+    reset_segment_host_scores_for_tests();
+    let now = Instant::now();
+    let url = "https://cdn.example.com/downloads/game.rar";
+
+    record_segment_host_success(url, 32, now);
+    record_segment_host_failure(url, 16, "segment reconnect", now + Duration::from_secs(1));
+
+    let score = segment_host_score_snapshot(url, now + Duration::from_secs(2))
+        .expect("host score should be retained during its TTL");
+    assert_eq!(score.best_cap, 16);
+    assert_eq!(score.recent_reconnects, 1);
+    assert_eq!(
+        score.last_failure_reason.as_deref(),
+        Some("segment reconnect")
+    );
+
+    let profile = profile_for_effective_http_url_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        now + Duration::from_secs(2),
+    );
+    assert_eq!(profile.max_segments, 16);
+    assert_eq!(profile.soft_max_segments, 16);
+
+    assert!(segment_host_score_snapshot(url, now + Duration::from_secs(31 * 60)).is_none());
 }
 
 #[test]

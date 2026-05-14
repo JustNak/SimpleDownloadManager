@@ -260,7 +260,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         .download_performance_mode_for_task(task.is_bulk_member)
         .await;
     let transfer_policy = HttpTransferPolicy::for_mode(performance_mode);
-    let profile = transfer_policy.profile;
+    let profile = profile_for_effective_http_url(performance_mode, effective_url);
     let mut segmented_client = if performance_mode == DownloadPerformanceMode::Fast {
         segmented_download_client()?
     } else {
@@ -276,9 +276,10 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         DiagnosticLevel::Info,
         task,
         format!(
-            "HTTP transfer policy {:?} selected (initial segments: {}, max segments: {}, target segment size: {} MiB).",
+            "HTTP transfer policy {:?} selected (initial segments: {}, soft cap: {}, max segments: {}, target segment size: {} MiB).",
             transfer_policy.mode,
             profile.initial_segments,
+            profile.soft_max_segments,
             profile.max_segments,
             profile.target_segment_size / (1024 * 1024)
         ),
@@ -346,6 +347,22 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                     "Range probe failed; using single-stream fallback for this hoster link.".into(),
                 )
                 .await;
+                if has_segment_state && metadata_len(&task.temp_path).await.unwrap_or(0) > 0 {
+                    if let Some(outcome) = try_low_cap_segmented_recovery_after_probe_failure(
+                        app,
+                        state,
+                        task,
+                        &segmented_client,
+                        effective_url,
+                        request_auth.clone(),
+                        segment_attempt,
+                        profile,
+                    )
+                    .await?
+                    {
+                        return Ok(outcome);
+                    }
+                }
             }
         }
 
@@ -1240,6 +1257,78 @@ fn reserve_segmented_plan_for_attempt(
         }),
         secondary_hoster_worker,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_low_cap_segmented_recovery_after_probe_failure<A: DownloadUi>(
+    app: &A,
+    state: &SharedState,
+    task: &crate::state::DownloadTask,
+    segmented_client: &Client,
+    effective_url: &str,
+    request_auth: Option<HandoffAuth>,
+    attempt: &SegmentAttemptContext,
+    profile: DownloadPerformanceProfile,
+) -> Result<Option<DownloadOutcome>, DownloadError> {
+    let Some(existing_state) = load_existing_segment_state(&task.temp_path).await? else {
+        return Ok(None);
+    };
+    if existing_state.total_bytes == 0 || existing_state.segments.is_empty() {
+        return Ok(None);
+    }
+
+    let recovery_profile = low_cap_segmented_recovery_profile(profile);
+    let Some((plan, segment_lease, _secondary_hoster_worker)) = reserve_segmented_plan_for_attempt(
+        task,
+        effective_url,
+        attempt,
+        existing_state.total_bytes,
+        ResumeSupport::Supported,
+        None,
+        recovery_profile,
+    ) else {
+        return Ok(None);
+    };
+
+    record_download_diagnostic(
+        state,
+        DiagnosticLevel::Warning,
+        task,
+        format!(
+            "Range probe failed with segmented partial state; attempting low-cap segmented recovery with {} workers.",
+            plan.segments.len()
+        ),
+    )
+    .await;
+
+    match run_segmented_download_attempt(
+        app,
+        state,
+        task,
+        segmented_client.clone(),
+        effective_url.to_string(),
+        request_auth,
+        plan,
+        recovery_profile,
+        existing_state.validators,
+        segment_lease,
+    )
+    .await
+    {
+        Ok(outcome) => Ok(Some(outcome)),
+        Err(error) if segmented_error_allows_single_stream_fallback(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn low_cap_segmented_recovery_profile(
+    mut profile: DownloadPerformanceProfile,
+) -> DownloadPerformanceProfile {
+    profile.initial_segments = profile.initial_segments.min(8).max(2);
+    profile.soft_max_segments = profile.soft_max_segments.min(profile.initial_segments);
+    profile.max_segments = profile.max_segments.min(profile.initial_segments);
+    profile.adaptive_ramp_step = 0;
+    profile
 }
 
 #[cfg(test)]

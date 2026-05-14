@@ -13,6 +13,10 @@ const FAST_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
 const ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT: u64 = 90;
+const ADAPTIVE_RAMP_PEAK_MIN_IMPROVEMENT_PERCENT: u64 = 108;
+const ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT: u64 = 88;
+const ADAPTIVE_RAMP_REGRESSION_WINDOW_LIMIT: usize = 2;
+const SEGMENT_RECONNECT_MAX_ATTEMPTS: u32 = 12;
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
     "Resume metadata is missing or no longer matches this partial download. Use Restart to download from zero.";
 
@@ -231,7 +235,7 @@ fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
 }
 
 fn profile_uses_fast_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
-    profile.initial_segments >= 32 && profile.max_segments >= 64 && profile.adaptive_ramp_step > 0
+    profile.max_segments >= 64 && profile.adaptive_ramp_step > 0
 }
 
 pub(super) fn dynamic_segment_tail_lease_size(
@@ -684,6 +688,9 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
     let initial_downloaded = initial_segment_bytes.iter().sum::<u64>();
     let worker_count = plan.segments.len().max(1);
     let admitted_workers = Arc::new(AtomicUsize::new(worker_count));
+    let target_workers = Arc::new(AtomicUsize::new(worker_count));
+    let active_workers = Arc::new(AtomicUsize::new(worker_count));
+    let reconnects = Arc::new(SegmentReconnectTracker::default());
     let planned_segments = worker_count.min(u32::MAX as usize) as u32;
     if let Some(message) =
         segment_tail_leasing_diagnostic(&segment_state, &HashSet::new(), profile, worker_count)
@@ -754,6 +761,9 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         priority_throttle,
         priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
+        reconnects,
+        target_workers: target_workers.clone(),
+        active_workers: active_workers.clone(),
     };
 
     let mut handles = tokio::task::JoinSet::new();
@@ -774,11 +784,13 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         metadata: metadata.clone(),
         progress: progress.clone(),
         admitted_workers: admitted_workers.clone(),
+        target_workers,
         segment_lease,
         queue_depth,
         min_split_size,
         last_ramp_total_bytes: AtomicU64::new(initial_downloaded),
         last_ramp_speed_bps: AtomicU64::new(0),
+        regression_windows: AtomicUsize::new(0),
     };
     let (worker_outcome, mut worker_error) =
         await_segment_workers_with_adaptive_ramp(handles, worker_stop, adaptive).await;
@@ -836,6 +848,7 @@ pub(super) async fn download_dynamic_segment_worker(
     queue_depth: usize,
     min_split_size: u64,
 ) -> Result<DownloadOutcome, DownloadError> {
+    let _active_worker = ActiveSegmentWorkerGuard::new(context.active_workers.clone());
     loop {
         if context.stop.load(Ordering::Relaxed) {
             return Ok(DownloadOutcome::Paused);
@@ -855,17 +868,99 @@ pub(super) async fn download_dynamic_segment_worker(
         };
         let segment_index = segment.index;
         let outcome = download_segment_worker(context.clone(), segment).await;
-
-        if !matches!(&outcome, Ok(DownloadOutcome::Completed)) {
-            context.stop.store(true, Ordering::Relaxed);
-        }
         release_dynamic_segment_work(&active_segments, segment_index).await;
 
-        match outcome? {
-            DownloadOutcome::Completed => {}
-            outcome => return Ok(outcome),
+        match outcome {
+            Ok(DownloadOutcome::Completed) => {
+                context.reconnects.clear_segment(segment_index).await;
+                let target = context.target_workers.load(Ordering::Relaxed).max(1);
+                if context.active_workers.load(Ordering::Relaxed) > target {
+                    return Ok(DownloadOutcome::Completed);
+                }
+            }
+            Ok(
+                outcome @ (DownloadOutcome::Paused
+                | DownloadOutcome::Canceled
+                | DownloadOutcome::Deferred(_)),
+            ) => {
+                context.stop.store(true, Ordering::Relaxed);
+                return Ok(outcome);
+            }
+            Err(error) if segment_error_allows_worker_reconnect(&error) => {
+                let attempt = context.reconnects.record_attempt(segment_index).await;
+                if attempt > SEGMENT_RECONNECT_MAX_ATTEMPTS {
+                    context.stop.store(true, Ordering::Relaxed);
+                    return Err(error);
+                }
+                context.ramp_blocked.store(true, Ordering::Relaxed);
+                record_segment_host_failure(
+                    &context.url,
+                    context.target_workers.load(Ordering::Relaxed),
+                    "segment reconnect",
+                    Instant::now(),
+                );
+                context.reconnects.begin_reconnect();
+                record_segment_worker_diagnostic(
+                    &context,
+                    DiagnosticLevel::Warning,
+                    format!(
+                        "Segment worker disconnected; reconnecting segment {} after retryable {:?} error (attempt {attempt}/{SEGMENT_RECONNECT_MAX_ATTEMPTS}; reconnecting workers: {}). Last error: {}",
+                        segment_index,
+                        error.category,
+                        context.reconnects.reconnecting_count(),
+                        error.message
+                    ),
+                )
+                .await;
+                tokio::time::sleep(retry_delay_for_attempt(attempt.saturating_sub(1) as usize))
+                    .await;
+                context.reconnects.end_reconnect();
+            }
+            Err(error) => {
+                context.stop.store(true, Ordering::Relaxed);
+                return Err(error);
+            }
         }
     }
+}
+
+struct ActiveSegmentWorkerGuard {
+    active_workers: Arc<AtomicUsize>,
+}
+
+impl ActiveSegmentWorkerGuard {
+    fn new(active_workers: Arc<AtomicUsize>) -> Self {
+        Self { active_workers }
+    }
+}
+
+impl Drop for ActiveSegmentWorkerGuard {
+    fn drop(&mut self) {
+        self.active_workers
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            })
+            .ok();
+    }
+}
+
+fn segment_error_allows_worker_reconnect(error: &DownloadError) -> bool {
+    error.retryable
+        && matches!(
+            error.category,
+            FailureCategory::Network | FailureCategory::Server | FailureCategory::Http
+        )
+}
+
+async fn record_segment_worker_diagnostic(
+    context: &SegmentWorkerContext,
+    level: DiagnosticLevel,
+    message: String,
+) {
+    let _ = context
+        .state
+        .record_diagnostic_event(level, "download", message, Some(context.job_id.clone()))
+        .await;
 }
 
 async fn flush_and_record_segment_progress(
@@ -1422,11 +1517,13 @@ pub(super) struct AdaptiveSegmentAdmission {
     pub(super) metadata: Arc<Mutex<SegmentedDownloadState>>,
     pub(super) progress: Arc<SegmentedProgressCounters>,
     pub(super) admitted_workers: Arc<AtomicUsize>,
+    pub(super) target_workers: Arc<AtomicUsize>,
     pub(super) segment_lease: Option<SegmentConnectionLeaseController>,
     pub(super) queue_depth: usize,
     pub(super) min_split_size: u64,
     pub(super) last_ramp_total_bytes: AtomicU64,
     pub(super) last_ramp_speed_bps: AtomicU64,
+    pub(super) regression_windows: AtomicUsize,
 }
 
 impl AdaptiveSegmentAdmission {
@@ -1474,12 +1571,55 @@ impl AdaptiveSegmentAdmission {
                 .as_secs_f64()
                 .max(0.001)) as u64;
         let previous_bps = self.last_ramp_speed_bps.swap(sample_bps, Ordering::Relaxed);
-        if previous_bps > 0
-            && sample_bps.saturating_mul(100)
+        if previous_bps > 0 {
+            if sample_bps.saturating_mul(100)
+                < previous_bps.saturating_mul(ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT)
+            {
+                let regression_windows = self
+                    .regression_windows
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                if regression_windows >= ADAPTIVE_RAMP_REGRESSION_WINDOW_LIMIT {
+                    let reduced = admitted
+                        .saturating_sub(self.context.profile.adaptive_ramp_step.saturating_mul(2))
+                        .max(self.context.profile.initial_segments)
+                        .max(1);
+                    self.target_workers.store(reduced, Ordering::Relaxed);
+                    record_segment_host_failure(
+                        &self.context.url,
+                        reduced,
+                        "throughput regression",
+                        Instant::now(),
+                    );
+                    record_segment_worker_diagnostic(
+                        &self.context,
+                        DiagnosticLevel::Info,
+                        format!(
+                            "Adaptive Fast reduced target workers to {reduced} after sustained throughput regression (sample {} B/s, previous {} B/s).",
+                            sample_bps, previous_bps
+                        ),
+                    )
+                    .await;
+                }
+                self.context.ramp_blocked.store(true, Ordering::Relaxed);
+                return false;
+            }
+
+            self.regression_windows.store(0, Ordering::Relaxed);
+
+            if admitted >= self.context.profile.soft_max_segments
+                && sample_bps.saturating_mul(100)
+                    < previous_bps.saturating_mul(ADAPTIVE_RAMP_PEAK_MIN_IMPROVEMENT_PERCENT)
+            {
+                return false;
+            }
+
+            if sample_bps.saturating_mul(100)
                 < previous_bps.saturating_mul(ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT)
-        {
-            self.context.ramp_blocked.store(true, Ordering::Relaxed);
-            return false;
+            {
+                self.context.ramp_blocked.store(true, Ordering::Relaxed);
+                return false;
+            }
         }
 
         let metadata = self.metadata.lock().await;
@@ -1491,11 +1631,15 @@ impl AdaptiveSegmentAdmission {
         let desired = current
             .saturating_add(self.context.profile.adaptive_ramp_step)
             .min(self.context.profile.max_segments);
-        self.segment_lease
+        let admitted = self
+            .segment_lease
             .as_ref()
             .map(|lease| lease.grow_to(desired))
             .unwrap_or(desired)
-            .min(self.context.profile.max_segments)
+            .min(self.context.profile.max_segments);
+        record_segment_host_success(&self.context.url, admitted, Instant::now());
+        self.target_workers.store(admitted, Ordering::Relaxed);
+        admitted
     }
 
     fn spawn_until(
@@ -1509,6 +1653,7 @@ impl AdaptiveSegmentAdmission {
         }
 
         for _ in current..target_workers {
+            self.context.active_workers.fetch_add(1, Ordering::Relaxed);
             handles.spawn(download_dynamic_segment_worker(
                 self.context.clone(),
                 self.active_segments.clone(),
@@ -1680,6 +1825,21 @@ pub(super) async fn load_or_create_segment_state(
             })
             .collect(),
     })
+}
+
+pub(super) async fn load_existing_segment_state(
+    temp_path: &Path,
+) -> Result<Option<SegmentedDownloadState>, DownloadError> {
+    let journal = SegmentJournal::new(temp_path);
+    if let Some(state) = journal
+        .load_state_from(&segment_meta_path(temp_path))
+        .await?
+    {
+        return Ok(Some(state));
+    }
+    journal
+        .load_state_from(&segment_meta_backup_path(temp_path))
+        .await
 }
 
 fn reconcile_segment_state(

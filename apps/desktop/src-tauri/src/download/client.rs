@@ -278,6 +278,21 @@ pub(super) async fn send_download_request(
 
                 let status = response.status();
 
+                if is_gofile_direct_http_url(&current_url)
+                    && matches!(
+                        status,
+                        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::GONE
+                    )
+                {
+                    return Err(download_error(
+                        FailureCategory::Http,
+                        format!(
+                            "Gofile direct link expired or access was rejected with HTTP {status}. Reopen the source page or capture a fresh download link."
+                        ),
+                        false,
+                    ));
+                }
+
                 if should_retry_status(status) && next_retry < REQUEST_RETRY_DELAYS.len() {
                     let delay = retry_delay_for_response(
                         status,

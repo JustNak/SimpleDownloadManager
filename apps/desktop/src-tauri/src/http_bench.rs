@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 const REPORT_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_DURATION: Duration = Duration::from_secs(30);
-const SEGMENT_VARIANTS: [usize; 3] = [32, 48, 64];
+const SEGMENT_VARIANTS: [usize; 7] = [8, 12, 16, 24, 32, 48, 64];
 const BENCHMARK_MODES: [HttpBenchmarkMode; 2] =
     [HttpBenchmarkMode::NetworkOnly, HttpBenchmarkMode::DiskWrite];
 
@@ -335,6 +335,11 @@ mod tests {
     #[test]
     fn partition_ranges_covers_total_without_overlap() {
         assert_eq!(partition_ranges(10, 3), vec![(0, 2), (3, 5), (6, 9)]);
+    }
+
+    #[test]
+    fn live_http_benchmark_covers_adaptive_sustain_variants() {
+        assert_eq!(SEGMENT_VARIANTS, [8, 12, 16, 24, 32, 48, 64]);
     }
 
     #[tokio::test]

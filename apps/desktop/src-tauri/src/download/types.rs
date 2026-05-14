@@ -182,11 +182,59 @@ pub(super) struct SegmentWorkerContext {
     pub(super) priority_throttle: Arc<Mutex<DynamicThrottleState>>,
     pub(super) priority_throttle_enabled: bool,
     pub(super) stall_timeout: Option<Duration>,
+    pub(super) reconnects: Arc<SegmentReconnectTracker>,
+    pub(super) target_workers: Arc<AtomicUsize>,
+    pub(super) active_workers: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+pub(super) struct SegmentReconnectTracker {
+    attempts: Mutex<HashMap<usize, u32>>,
+    reconnecting: AtomicUsize,
+}
+
+impl Default for SegmentReconnectTracker {
+    fn default() -> Self {
+        Self {
+            attempts: Mutex::new(HashMap::new()),
+            reconnecting: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SegmentReconnectTracker {
+    pub(super) async fn record_attempt(&self, segment_index: usize) -> u32 {
+        let mut attempts = self.attempts.lock().await;
+        let entry = attempts.entry(segment_index).or_insert(0);
+        *entry = entry.saturating_add(1);
+        *entry
+    }
+
+    pub(super) async fn clear_segment(&self, segment_index: usize) {
+        self.attempts.lock().await.remove(&segment_index);
+    }
+
+    pub(super) fn begin_reconnect(&self) {
+        self.reconnecting.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn end_reconnect(&self) {
+        self.reconnecting
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.saturating_sub(1))
+            })
+            .ok();
+    }
+
+    pub(super) fn reconnecting_count(&self) -> usize {
+        self.reconnecting.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DownloadPerformanceProfile {
     pub(super) initial_segments: usize,
+    pub(super) soft_max_segments: usize,
     pub(super) max_segments: usize,
     pub(super) min_segmented_size: u64,
     pub(super) target_segment_size: u64,

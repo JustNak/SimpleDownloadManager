@@ -8,8 +8,9 @@ use crate::storage::{
     DownloadSource, FailureCategory, HandoffAuth, HandoffAuthHeader, IntegrityStatus, JobState,
     ProtectedDownloadAuthScope, Settings, TransferKind,
 };
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -276,6 +277,82 @@ async fn scenario_segmented_http_resumes_after_transient_segment_interruption() 
         .iter()
         .find(|progress| progress.index == 0)
         .is_some_and(|progress| progress.completed && progress.downloaded_bytes == 4));
+}
+
+#[tokio::test]
+async fn scenario_dynamic_segment_worker_reconnects_without_aborting_job() {
+    let (_root, state) = scenario_state("segmented-reconnect-worker").await;
+    let enqueued = state
+        .enqueue_download_with_options(
+            "http://127.0.0.1/reconnect.bin".into(),
+            EnqueueOptions {
+                filename_hint: Some("reconnect.bin".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (_snapshot, tasks) = state.claim_schedulable_jobs().await.unwrap();
+    let task = only_task(tasks);
+    assert_eq!(task.id, enqueued.job_id);
+
+    prepare_direct_segment_file(&task.temp_path, 4)
+        .await
+        .unwrap();
+    let plan = RangePlan {
+        total_bytes: 4,
+        segments: vec![ByteRange { start: 0, end: 3 }],
+    };
+    let metadata = Arc::new(Mutex::new(new_segment_state_for_test(
+        &plan,
+        EntityValidators::default(),
+    )));
+    persist_segment_state(&task.temp_path, &metadata.lock().await.clone())
+        .await
+        .unwrap();
+
+    let interrupted_first_segment = concat!(
+        "HTTP/1.1 206 Partial Content\r\n",
+        "Content-Range: bytes 0-3/4\r\n",
+        "Transfer-Encoding: chunked\r\n",
+        "\r\n",
+        "2\r\nab\r\nzz\r\n"
+    )
+    .to_string();
+    let (url, request_handle) = spawn_recording_response_server(vec![
+        interrupted_first_segment,
+        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-3/4\r\nContent-Length: 2\r\nConnection: close\r\n\r\ncd".into(),
+    ])
+    .await;
+    let active_segments = Arc::new(Mutex::new(HashSet::new()));
+    let mut context = segment_context(&state, &task, url);
+    context.metadata = metadata.clone();
+    context.total_bytes = 4;
+    context.progress = Arc::new(SegmentedProgressCounters::new(vec![0]));
+
+    let result = download_dynamic_segment_worker(context, active_segments, 1, 1).await;
+    let requests = request_handle.await.unwrap();
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => panic!(
+            "transient segment disconnect should be retried locally: {error:?}; requests: {requests:?}"
+        ),
+    };
+    assert_eq!(outcome, DownloadOutcome::Completed);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("range: bytes=0-3"));
+    assert!(requests[1]
+        .to_ascii_lowercase()
+        .contains("range: bytes=2-3"));
+    assert_eq!(tokio::fs::read(&task.temp_path).await.unwrap(), b"abcd");
+    assert!(metadata
+        .lock()
+        .await
+        .segments
+        .iter()
+        .all(|segment| segment.completed));
 }
 
 #[tokio::test]
@@ -917,6 +994,9 @@ fn segment_context(
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: None,
+        reconnects: Arc::new(SegmentReconnectTracker::default()),
+        target_workers: Arc::new(AtomicUsize::new(1)),
+        active_workers: Arc::new(AtomicUsize::new(1)),
     }
 }
 
