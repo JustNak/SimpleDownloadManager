@@ -206,8 +206,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -262,8 +261,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -536,8 +534,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -808,8 +805,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -848,8 +844,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 

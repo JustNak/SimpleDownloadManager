@@ -141,8 +141,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(TorrentSessionCacheClearState { snapshot, torrents })
     }
 
@@ -188,8 +187,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -258,8 +256,7 @@ impl SharedState {
 
         if let Some((snapshot, persisted, diagnostic_events)) = queued {
             persist_state(&self.storage_path, &persisted)?;
-            self.append_diagnostic_events_blocking(diagnostic_events)
-                .await;
+            self.append_diagnostic_events_in_background(diagnostic_events);
             return Ok(ExternalReseedAttempt::Queued(Box::new(snapshot)));
         }
 
@@ -316,8 +313,7 @@ impl SharedState {
             return Ok(None);
         };
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(Some(snapshot))
     }
 
@@ -382,8 +378,7 @@ impl SharedState {
             return Ok(None);
         };
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(Some(TorrentSeedingRestoreFailure {
             snapshot,
             retry_reseed,
@@ -472,8 +467,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -536,8 +530,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         self.clear_handoff_auth(id).await;
         self.wait_for_external_use_release(id, timeout, poll_interval)
             .await?;
@@ -624,8 +617,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -770,8 +762,7 @@ impl SharedState {
         if let Some(persisted) = persisted {
             persist_state_blocking(&self.storage_path, &persisted).await?;
         }
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok((delta, snapshot))
     }
 
@@ -824,8 +815,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -874,8 +864,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 
@@ -904,8 +893,7 @@ impl SharedState {
         };
 
         persist_state(&self.storage_path, &persisted)?;
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         Ok(snapshot)
     }
 }

@@ -3920,8 +3920,9 @@ fn hot_diagnostic_state_paths_use_blocking_append_helper() {
             "{name} should not append diagnostic events directly"
         );
         assert!(
-            source.contains("append_diagnostic_events_blocking"),
-            "{name} should flush diagnostic events through the blocking helper"
+            source.contains("append_diagnostic_events_in_background")
+                || source.contains("append_diagnostic_events_blocking"),
+            "{name} should flush diagnostic events through a blocking-safe helper"
         );
     }
 }
@@ -3969,10 +3970,21 @@ async fn scheduler_claim_diagnostic_is_memory_visible_and_persisted() {
             && event.message == "Starting job_1"
     }));
 
-    let history = state
-        .diagnostic_event_history()
-        .await
-        .expect("diagnostic event history should load");
+    let mut history = Vec::new();
+    for _ in 0..20 {
+        history = state
+            .diagnostic_event_history()
+            .await
+            .expect("diagnostic event history should load");
+        if history.iter().any(|event| {
+            event.category == "download"
+                && event.job_id.as_deref() == Some("job_1")
+                && event.message == "Starting job_1"
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(history.iter().any(|event| {
         event.category == "download"
             && event.job_id.as_deref() == Some("job_1")

@@ -479,8 +479,7 @@ impl SharedState {
         if let Some(persisted) = persisted {
             persist_state(&self.storage_path, &persisted)?;
         }
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
 
         Ok(claim)
     }
@@ -564,8 +563,7 @@ impl SharedState {
             let diagnostic_events = state.take_pending_diagnostic_events();
             (decision, diagnostic_events)
         };
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
         decision
     }
 }

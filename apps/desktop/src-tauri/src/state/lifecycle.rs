@@ -464,11 +464,20 @@ impl SharedState {
 
         let diagnostic_event_store = Arc::clone(&self.diagnostic_event_store);
         let _ = tokio::task::spawn_blocking(move || {
-            for event in events {
-                let _ = diagnostic_event_store.append(&event);
-            }
+            append_diagnostic_events_best_effort(diagnostic_event_store, events);
         })
         .await;
+    }
+
+    pub(super) fn append_diagnostic_events_in_background(&self, events: Vec<DiagnosticEvent>) {
+        if events.is_empty() {
+            return;
+        }
+
+        let diagnostic_event_store = Arc::clone(&self.diagnostic_event_store);
+        drop(tokio::task::spawn_blocking(move || {
+            append_diagnostic_events_best_effort(diagnostic_event_store, events);
+        }));
     }
 
     pub async fn record_diagnostic_event(
@@ -498,5 +507,14 @@ impl SharedState {
     pub(super) fn persist_current_state_sync(&self) -> Result<(), String> {
         let state = self.inner.blocking_read();
         persist_state(&self.storage_path, &state.persisted())
+    }
+}
+
+fn append_diagnostic_events_best_effort(
+    diagnostic_event_store: Arc<DiagnosticEventStore>,
+    events: Vec<DiagnosticEvent>,
+) {
+    for event in events {
+        let _ = diagnostic_event_store.append(&event);
     }
 }

@@ -290,8 +290,7 @@ impl SharedState {
         if let Some(persisted) = persisted {
             persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
         }
-        self.append_diagnostic_events_blocking(diagnostic_events)
-            .await;
+        self.append_diagnostic_events_in_background(diagnostic_events);
 
         Ok(results)
     }
@@ -328,8 +327,7 @@ impl SharedState {
 
         if result.status == EnqueueStatus::Queued {
             persist_state(&self.storage_path, &persisted).map_err(internal_error)?;
-            self.append_diagnostic_events_blocking(diagnostic_events)
-                .await;
+            self.append_diagnostic_events_in_background(diagnostic_events);
             if let Some(auth) = handoff_auth {
                 self.handoff_auth
                     .write()
