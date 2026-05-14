@@ -55,6 +55,17 @@ struct SegmentJournal {
     temp_path: PathBuf,
 }
 
+struct SegmentStateLoad {
+    state: Option<SegmentedDownloadState>,
+    issue: Option<SegmentResumeMetadataIssue>,
+}
+
+enum SegmentStateRead {
+    Missing,
+    Corrupt,
+    Loaded(SegmentedDownloadState),
+}
+
 impl SegmentJournal {
     fn new(temp_path: &Path) -> Self {
         Self {
@@ -66,35 +77,72 @@ impl SegmentJournal {
         &self,
         plan: &RangePlan,
         validators: &EntityValidators,
-    ) -> Result<Option<SegmentedDownloadState>, DownloadError> {
-        if let Some(state) = self
-            .load_state_from(&segment_meta_path(&self.temp_path))
+    ) -> Result<SegmentStateLoad, DownloadError> {
+        let issue = match self
+            .read_state_from(&segment_meta_path(&self.temp_path))
             .await?
         {
-            if let Some(state) = reconcile_segment_state(state, plan, validators) {
-                return Ok(Some(state));
+            SegmentStateRead::Loaded(state) => {
+                match reconcile_segment_state(state, plan, validators) {
+                    Ok(state) => {
+                        return Ok(SegmentStateLoad {
+                            state: Some(state),
+                            issue: None,
+                        });
+                    }
+                    Err(state_issue) => Some(state_issue),
+                }
             }
-        }
-
-        let Some(state) = self
-            .load_state_from(&segment_meta_backup_path(&self.temp_path))
-            .await?
-            .and_then(|state| reconcile_segment_state(state, plan, validators))
-        else {
-            return Ok(None);
+            SegmentStateRead::Corrupt => Some(SegmentResumeMetadataIssue::Corrupt),
+            SegmentStateRead::Missing => Some(SegmentResumeMetadataIssue::Missing),
         };
 
-        persist_segment_state(&self.temp_path, &state).await?;
-        Ok(Some(state))
+        match self
+            .read_state_from(&segment_meta_backup_path(&self.temp_path))
+            .await?
+        {
+            SegmentStateRead::Loaded(state) => {
+                match reconcile_segment_state(state, plan, validators) {
+                    Ok(state) => {
+                        persist_segment_state(&self.temp_path, &state).await?;
+                        Ok(SegmentStateLoad {
+                            state: Some(state),
+                            issue: None,
+                        })
+                    }
+                    Err(state_issue) => Ok(SegmentStateLoad {
+                        state: None,
+                        issue: Some(state_issue),
+                    }),
+                }
+            }
+            SegmentStateRead::Corrupt => Ok(SegmentStateLoad {
+                state: None,
+                issue: Some(SegmentResumeMetadataIssue::Corrupt),
+            }),
+            SegmentStateRead::Missing => Ok(SegmentStateLoad { state: None, issue }),
+        }
     }
 
     async fn load_state_from(
         &self,
         path: &Path,
     ) -> Result<Option<SegmentedDownloadState>, DownloadError> {
+        match self.read_state_from(path).await? {
+            SegmentStateRead::Loaded(state) => Ok(Some(state)),
+            SegmentStateRead::Missing | SegmentStateRead::Corrupt => Ok(None),
+        }
+    }
+
+    async fn read_state_from(&self, path: &Path) -> Result<SegmentStateRead, DownloadError> {
         match fs::read_to_string(path).await {
-            Ok(raw) => Ok(serde_json::from_str::<SegmentedDownloadState>(&raw).ok()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Ok(raw) => match serde_json::from_str::<SegmentedDownloadState>(&raw) {
+                Ok(state) => Ok(SegmentStateRead::Loaded(state)),
+                Err(_) => Ok(SegmentStateRead::Corrupt),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(SegmentStateRead::Missing)
+            }
             Err(error) => Err(disk_error(format!(
                 "Could not read segment metadata sidecar: {error}"
             ))),
@@ -663,9 +711,28 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
     profile: DownloadPerformanceProfile,
     validators: EntityValidators,
     segment_lease: Option<SegmentConnectionLeaseController>,
+    segment_pressure_key: String,
 ) -> Result<DownloadOutcome, DownloadError> {
-    let mut segment_state =
-        load_or_create_segment_state(&task.temp_path, &plan, &validators).await?;
+    let mut segment_state = match load_or_create_segment_state(&task.temp_path, &plan, &validators)
+        .await
+    {
+        Ok(state) => state,
+        Err(error) => {
+            if let Some(issue) = error.resume_metadata_issue {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "download",
+                        format!(
+                            "Segmented resume metadata could not be reused ({issue:?}); partial data was preserved and Restart is required."
+                        ),
+                        Some(task.id.clone()),
+                    )
+                    .await;
+            }
+            return Err(error);
+        }
+    };
     update_segment_recovery_metadata(
         &mut segment_state,
         &effective_url,
@@ -747,6 +814,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         client: client.clone(),
         job_id: task.id.clone(),
         url: effective_url,
+        segment_pressure_key,
         handoff_auth: request_auth,
         temp_path: task.temp_path.clone(),
         total_bytes: plan.total_bytes,
@@ -893,12 +961,31 @@ pub(super) async fn download_dynamic_segment_worker(
                     return Err(error);
                 }
                 context.ramp_blocked.store(true, Ordering::Relaxed);
-                record_segment_host_failure(
-                    &context.url,
-                    context.target_workers.load(Ordering::Relaxed),
-                    "segment reconnect",
+                let target_workers = context.target_workers.load(Ordering::Relaxed);
+                let pressure = record_segment_reconnect_pressure_for_error(
+                    &context.segment_pressure_key,
+                    target_workers,
+                    &error,
                     Instant::now(),
                 );
+                if let Some(reduced_target) = pressure.reduced_target {
+                    let previous_target = context.target_workers.load(Ordering::Relaxed);
+                    let applied_target = reduced_target.min(previous_target).max(1);
+                    if applied_target < previous_target {
+                        context
+                            .target_workers
+                            .store(applied_target, Ordering::Relaxed);
+                        record_segment_worker_diagnostic(
+                            &context,
+                            DiagnosticLevel::Warning,
+                            format!(
+                                "Segment rate-limit pressure reduced target workers from {previous_target} to {applied_target} after {} recent HTTP 429 reconnects.",
+                                pressure.recent_rate_limits
+                            ),
+                        )
+                        .await;
+                    }
+                }
                 context.reconnects.begin_reconnect();
                 record_segment_worker_diagnostic(
                     &context,
@@ -912,8 +999,13 @@ pub(super) async fn download_dynamic_segment_worker(
                     ),
                 )
                 .await;
-                tokio::time::sleep(retry_delay_for_attempt(attempt.saturating_sub(1) as usize))
-                    .await;
+                tokio::time::sleep(segment_reconnect_delay_for_error(
+                    &error,
+                    attempt,
+                    &context.job_id,
+                    &context.url,
+                ))
+                .await;
                 context.reconnects.end_reconnect();
             }
             Err(error) => {
@@ -950,6 +1042,22 @@ fn segment_error_allows_worker_reconnect(error: &DownloadError) -> bool {
             error.category,
             FailureCategory::Network | FailureCategory::Server | FailureCategory::Http
         )
+}
+
+pub(super) fn segment_reconnect_delay_for_error(
+    error: &DownloadError,
+    attempt: u32,
+    job_id: &str,
+    url: &str,
+) -> Duration {
+    let attempt = attempt.saturating_sub(1) as usize;
+    if error.http_status == Some(StatusCode::TOO_MANY_REQUESTS) {
+        return error
+            .retry_after
+            .unwrap_or_else(|| retry_delay_for_attempt_with_jitter(attempt, job_id, url));
+    }
+
+    retry_delay_for_attempt(attempt)
 }
 
 async fn record_segment_worker_diagnostic(
@@ -1815,11 +1923,14 @@ pub(super) async fn load_or_create_segment_state(
 ) -> Result<SegmentedDownloadState, DownloadError> {
     let partial_exists = temp_path.exists();
     let journal = SegmentJournal::new(temp_path);
-    if let Some(state) = journal.load_recoverable_state(plan, validators).await? {
+    let loaded = journal.load_recoverable_state(plan, validators).await?;
+    if let Some(state) = loaded.state {
         return Ok(state);
     }
     if partial_exists {
-        return Err(segmented_resume_metadata_required_error());
+        return Err(segmented_resume_metadata_required_error_for_issue(
+            loaded.issue.unwrap_or(SegmentResumeMetadataIssue::Missing),
+        ));
     }
 
     cleanup_partial_artifacts(temp_path).await;
@@ -1866,16 +1977,17 @@ fn reconcile_segment_state(
     mut state: SegmentedDownloadState,
     plan: &RangePlan,
     validators: &EntityValidators,
-) -> Option<SegmentedDownloadState> {
-    if !segment_state_compatible_with_plan(&state, plan)
-        || state.validators.conflicts_with(validators)
-    {
-        return None;
+) -> Result<SegmentedDownloadState, SegmentResumeMetadataIssue> {
+    if !segment_state_compatible_with_plan(&state, plan) {
+        return Err(SegmentResumeMetadataIssue::PlanIncompatible);
+    }
+    if state.validators.conflicts_with(validators) {
+        return Err(SegmentResumeMetadataIssue::ValidatorConflict);
     }
 
     state.schema_version = default_segment_state_schema_version();
     state.validators = state.validators.reconcile_with(validators);
-    Some(state)
+    Ok(state)
 }
 
 pub(super) fn segmented_resume_metadata_required_error() -> DownloadError {
@@ -1884,6 +1996,14 @@ pub(super) fn segmented_resume_metadata_required_error() -> DownloadError {
         SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE.into(),
         false,
     )
+}
+
+fn segmented_resume_metadata_required_error_for_issue(
+    issue: SegmentResumeMetadataIssue,
+) -> DownloadError {
+    let mut error = segmented_resume_metadata_required_error();
+    error.resume_metadata_issue = Some(issue);
+    error
 }
 
 fn segment_state_compatible_with_plan(state: &SegmentedDownloadState, plan: &RangePlan) -> bool {

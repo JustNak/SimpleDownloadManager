@@ -306,7 +306,11 @@ pub(super) async fn send_download_request(
                     continue;
                 }
 
-                return Err(error_for_http_status(status, handoff_auth.is_some()));
+                return Err(error_for_http_response(
+                    status,
+                    response.headers(),
+                    handoff_auth.is_some(),
+                ));
             }
             Err(error) => {
                 if should_retry_error(&error) && next_retry < REQUEST_RETRY_DELAYS.len() {

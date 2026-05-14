@@ -260,7 +260,17 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         .download_performance_mode_for_task(task.is_bulk_member)
         .await;
     let transfer_policy = HttpTransferPolicy::for_mode(performance_mode);
-    let profile = profile_for_effective_http_url(performance_mode, effective_url);
+    let segment_attempt =
+        segment_attempt_context_for_task(state, task, effective_url, performance_mode).await;
+    let segment_pressure_key = segment_attempt
+        .as_ref()
+        .map(|attempt| segment_pressure_key_for_task(task, effective_url, attempt));
+    let profile = profile_for_effective_http_url_with_pressure_key_at(
+        performance_mode,
+        effective_url,
+        segment_pressure_key.as_deref(),
+        Instant::now(),
+    );
     let mut segmented_client = if performance_mode == DownloadPerformanceMode::Fast {
         segmented_download_client()?
     } else {
@@ -285,9 +295,6 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         ),
     )
     .await;
-    let segment_attempt =
-        segment_attempt_context_for_task(state, task, effective_url, performance_mode).await;
-
     let mut preflight_metadata =
         preflight_download(&client, effective_url, request_auth.as_ref()).await;
 
@@ -357,6 +364,9 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                         request_auth.clone(),
                         segment_attempt,
                         profile,
+                        segment_pressure_key
+                            .clone()
+                            .unwrap_or_else(|| segment_pressure_fallback_key(effective_url)),
                     )
                     .await?
                     {
@@ -429,6 +439,9 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                             profile,
                             metadata.validators.clone(),
                             segment_lease,
+                            segment_pressure_key
+                                .clone()
+                                .unwrap_or_else(|| segment_pressure_fallback_key(effective_url)),
                         )
                         .await
                         {
@@ -1083,6 +1096,44 @@ impl SegmentAttemptContext {
     }
 }
 
+fn segment_pressure_key_for_task(
+    task: &crate::state::DownloadTask,
+    effective_url: &str,
+    attempt: &SegmentAttemptContext,
+) -> String {
+    if let Some(key) = attempt.backoff_key.as_deref() {
+        return key.to_string();
+    }
+    if let Some(key) = task
+        .resolved_from_url
+        .as_deref()
+        .and_then(segment_connection_origin_key)
+    {
+        return key;
+    }
+    if let Some(source) = task.source.as_ref() {
+        if let Some(key) = source
+            .page_url
+            .as_deref()
+            .and_then(segment_connection_origin_key)
+            .or_else(|| {
+                source
+                    .referrer
+                    .as_deref()
+                    .and_then(segment_connection_origin_key)
+            })
+        {
+            return key;
+        }
+    }
+
+    segment_pressure_fallback_key(effective_url)
+}
+
+fn segment_pressure_fallback_key(effective_url: &str) -> String {
+    segment_connection_origin_key(effective_url).unwrap_or_else(|| effective_url.to_string())
+}
+
 async fn segment_attempt_context_for_task(
     state: &SharedState,
     task: &crate::state::DownloadTask,
@@ -1290,6 +1341,7 @@ async fn try_low_cap_segmented_recovery_after_probe_failure<A: DownloadUi>(
     request_auth: Option<HandoffAuth>,
     attempt: &SegmentAttemptContext,
     profile: DownloadPerformanceProfile,
+    segment_pressure_key: String,
 ) -> Result<Option<DownloadOutcome>, DownloadError> {
     let Some(existing_state) = load_existing_segment_state(&task.temp_path).await? else {
         return Ok(None);
@@ -1333,6 +1385,7 @@ async fn try_low_cap_segmented_recovery_after_probe_failure<A: DownloadUi>(
         recovery_profile,
         existing_state.validators,
         segment_lease,
+        segment_pressure_key,
     )
     .await
     {

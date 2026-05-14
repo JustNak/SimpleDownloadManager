@@ -255,6 +255,9 @@ pub(super) fn download_error(
         category,
         message,
         retryable,
+        http_status: None,
+        retry_after: None,
+        resume_metadata_issue: None,
     }
 }
 
@@ -278,11 +281,23 @@ pub(super) fn error_for_http_status(
         ""
     };
 
-    download_error(
+    let mut error = download_error(
         category,
         format!("Download request failed with HTTP {status}.{auth_context}"),
         retryable,
-    )
+    );
+    error.http_status = Some(status);
+    error
+}
+
+pub(super) fn error_for_http_response(
+    status: StatusCode,
+    headers: &HeaderMap,
+    authenticated_handoff: bool,
+) -> DownloadError {
+    let mut error = error_for_http_status(status, authenticated_handoff);
+    error.retry_after = retry_after_delay(headers).map(|delay| delay.min(MAX_RETRY_AFTER_DELAY));
+    error
 }
 
 pub(super) fn request_error(error: reqwest::Error) -> DownloadError {

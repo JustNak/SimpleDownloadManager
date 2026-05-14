@@ -4,6 +4,7 @@ use crate::storage::{
     JobState, TorrentInfo, TorrentPeerConnectionWatchdogMode,
 };
 use std::future::pending;
+use std::sync::{Mutex as TestMutex, MutexGuard as TestMutexGuard, OnceLock as TestOnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -11,6 +12,15 @@ use tokio::net::TcpListener;
 mod recovery;
 #[path = "tests/scenarios.rs"]
 mod scenarios;
+
+static SEGMENT_HOST_SCORE_TEST_LOCK: TestOnceLock<TestMutex<()>> = TestOnceLock::new();
+
+fn segment_host_score_test_guard() -> TestMutexGuard<'static, ()> {
+    SEGMENT_HOST_SCORE_TEST_LOCK
+        .get_or_init(|| TestMutex::new(()))
+        .lock()
+        .unwrap()
+}
 
 fn torrent_runtime_update(
     uploaded_bytes: u64,
@@ -43,10 +53,51 @@ fn http_status_errors_are_classified_by_recoverability() {
     let unavailable = error_for_http_status(StatusCode::SERVICE_UNAVAILABLE, false);
     assert_eq!(unavailable.category, FailureCategory::Server);
     assert!(unavailable.retryable);
+    assert_eq!(
+        unavailable.http_status,
+        Some(StatusCode::SERVICE_UNAVAILABLE)
+    );
 
     let not_found = error_for_http_status(StatusCode::NOT_FOUND, false);
     assert_eq!(not_found.category, FailureCategory::Http);
     assert!(!not_found.retryable);
+    assert_eq!(not_found.http_status, Some(StatusCode::NOT_FOUND));
+}
+
+#[test]
+fn http_response_errors_preserve_retry_after_for_segment_reconnects() {
+    let mut headers = HeaderMap::new();
+    headers.insert(RETRY_AFTER, HeaderValue::from_static("120"));
+
+    let error = error_for_http_response(StatusCode::TOO_MANY_REQUESTS, &headers, false);
+
+    assert_eq!(error.http_status, Some(StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(error.retry_after, Some(MAX_RETRY_AFTER_DELAY));
+    assert_eq!(
+        segment_reconnect_delay_for_error(
+            &error,
+            1,
+            "job_rate_limited",
+            "https://cdn.example.com/file.bin"
+        ),
+        MAX_RETRY_AFTER_DELAY
+    );
+}
+
+#[test]
+fn rate_limited_segment_reconnects_use_stable_jitter_without_retry_after() {
+    let error = error_for_http_status(StatusCode::TOO_MANY_REQUESTS, false);
+    let first =
+        segment_reconnect_delay_for_error(&error, 2, "job_a", "https://cdn.example.com/file.bin");
+    let second =
+        segment_reconnect_delay_for_error(&error, 2, "job_b", "https://cdn.example.com/file.bin");
+
+    assert!(first >= REQUEST_RETRY_DELAYS[1]);
+    assert!(first <= REQUEST_RETRY_DELAYS[1] + MAX_RETRY_JITTER);
+    assert_ne!(
+        first, second,
+        "rate-limited segment reconnects should be de-synchronized"
+    );
 }
 
 #[test]
@@ -1905,6 +1956,7 @@ fn cached_torrent_metadata_source_is_preferred_for_resume() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        source: None,
         is_bulk_member: false,
         bulk_archive_id: None,
         retry_attempts: 0,
@@ -1939,6 +1991,7 @@ fn cached_torrent_metadata_source_falls_back_to_original_source_when_absent() {
         }),
         handoff_auth: None,
         resolved_from_url: None,
+        source: None,
         is_bulk_member: false,
         bulk_archive_id: None,
         retry_attempts: 0,
@@ -2538,6 +2591,7 @@ fn adaptive_admission_for_test(
         client: download_client().unwrap(),
         job_id: name.into(),
         url: "https://cdn.example.com/file.bin".into(),
+        segment_pressure_key: "https://cdn.example.com:443".into(),
         handoff_auth: None,
         temp_path,
         total_bytes: 1024 * 1024 * 1024,
@@ -2616,6 +2670,7 @@ async fn adaptive_segment_admission_blocks_after_throughput_regression() {
         client: download_client().unwrap(),
         job_id: "job_adaptive_regression".into(),
         url: "https://cdn.example.com/file.bin".into(),
+        segment_pressure_key: "https://cdn.example.com:443".into(),
         handoff_auth: None,
         temp_path,
         total_bytes: 1024 * 1024 * 1024,
@@ -2700,6 +2755,7 @@ async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression(
         client: download_client().unwrap(),
         job_id: "job_adaptive_moderate_regression".into(),
         url: "https://cdn.example.com/file.bin".into(),
+        segment_pressure_key: "https://cdn.example.com:443".into(),
         handoff_auth: None,
         temp_path,
         total_bytes: 1024 * 1024 * 1024,
@@ -4393,6 +4449,10 @@ async fn missing_segment_metadata_preserves_preallocated_partial_and_requires_re
 
     assert_eq!(error.category, FailureCategory::Resume);
     assert!(error.message.contains("Resume metadata is missing"));
+    assert_eq!(
+        error.resume_metadata_issue,
+        Some(SegmentResumeMetadataIssue::Missing)
+    );
     assert!(temp_path.exists());
 
     let _ = tokio::fs::remove_dir_all(root).await;
@@ -4417,6 +4477,10 @@ async fn corrupt_segment_metadata_preserves_preallocated_partial_and_requires_re
 
     assert_eq!(error.category, FailureCategory::Resume);
     assert!(error.message.contains("Resume metadata is missing"));
+    assert_eq!(
+        error.resume_metadata_issue,
+        Some(SegmentResumeMetadataIssue::Corrupt)
+    );
     assert!(temp_path.exists());
     assert!(segment_meta_path(&temp_path).exists());
 
@@ -4450,6 +4514,36 @@ async fn segment_state_preserves_partial_and_requires_restart_when_validators_ch
 
     assert_eq!(error.category, FailureCategory::Resume);
     assert!(error.message.contains("Resume metadata is missing"));
+    assert_eq!(
+        error.resume_metadata_issue,
+        Some(SegmentResumeMetadataIssue::ValidatorConflict)
+    );
+    assert!(temp_path.exists());
+    assert!(segment_meta_path(&temp_path).exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn segment_state_preserves_partial_and_reports_incompatible_metadata() {
+    let root = test_download_runtime_dir("segment-plan-incompatible");
+    let temp_path = root.join("download.bin.part");
+    let plan = three_segment_test_plan();
+    let mut state = new_segment_state_for_test(&plan, EntityValidators::default());
+    state.total_bytes = state.total_bytes.saturating_add(1);
+    tokio::fs::write(&temp_path, b"abcdefghijkl").await.unwrap();
+    persist_segment_state(&temp_path, &state).await.unwrap();
+
+    let error = load_or_create_segment_state(&temp_path, &plan, &EntityValidators::default())
+        .await
+        .expect_err("incompatible segment metadata should require restart");
+
+    assert_eq!(error.category, FailureCategory::Resume);
+    assert!(error.message.contains("Resume metadata is missing"));
+    assert_eq!(
+        error.resume_metadata_issue,
+        Some(SegmentResumeMetadataIssue::PlanIncompatible)
+    );
     assert!(temp_path.exists());
     assert!(segment_meta_path(&temp_path).exists());
 
@@ -4563,6 +4657,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         client: download_client().unwrap(),
         job_id: "job_segment_resume".into(),
         url,
+        segment_pressure_key: "http://127.0.0.1:80".into(),
         handoff_auth: None,
         temp_path: temp_path.clone(),
         total_bytes: 12,
@@ -4764,6 +4859,7 @@ fn gofile_fast_profile_uses_conservative_direct_cap() {
 
 #[test]
 fn host_score_temporarily_caps_fast_profile_after_reconnects() {
+    let _guard = segment_host_score_test_guard();
     reset_segment_host_scores_for_tests();
     let now = Instant::now();
     let url = "https://cdn.example.com/downloads/game.rar";
@@ -4789,6 +4885,114 @@ fn host_score_temporarily_caps_fast_profile_after_reconnects() {
     assert_eq!(profile.soft_max_segments, 16);
 
     assert!(segment_host_score_snapshot(url, now + Duration::from_secs(31 * 60)).is_none());
+}
+
+#[test]
+fn segment_pressure_requires_repeated_429_before_capping_fast_profile() {
+    let _guard = segment_host_score_test_guard();
+    reset_segment_host_scores_for_tests();
+    let now = Instant::now();
+    let key = "hoster:test-file";
+    let url = "https://rotating-cdn.example.com/downloads/game.rar";
+    let error = error_for_http_status(StatusCode::TOO_MANY_REQUESTS, false);
+
+    let first = record_segment_reconnect_pressure_for_error(key, 16, &error, now);
+    assert_eq!(first.reduced_target, None);
+
+    let uncapped = profile_for_effective_http_url_with_pressure_key_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        Some(key),
+        now + Duration::from_secs(1),
+    );
+    assert_eq!(uncapped.initial_segments, 16);
+    assert_eq!(uncapped.soft_max_segments, 32);
+    assert_eq!(uncapped.max_segments, 64);
+
+    record_segment_reconnect_pressure_for_error(key, 16, &error, now + Duration::from_secs(2));
+    let third =
+        record_segment_reconnect_pressure_for_error(key, 16, &error, now + Duration::from_secs(3));
+
+    assert_eq!(third.reduced_target, Some(8));
+    let capped = profile_for_effective_http_url_with_pressure_key_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        Some(key),
+        now + Duration::from_secs(4),
+    );
+    assert_eq!(capped.initial_segments, 8);
+    assert_eq!(capped.soft_max_segments, 8);
+    assert_eq!(capped.max_segments, 8);
+}
+
+#[test]
+fn non_rate_limit_segment_errors_do_not_reduce_future_fast_caps() {
+    let _guard = segment_host_score_test_guard();
+    reset_segment_host_scores_for_tests();
+    let now = Instant::now();
+    let key = "hoster:network-noise";
+    let error = download_error(
+        FailureCategory::Network,
+        "Download failed: error decoding response body".into(),
+        true,
+    );
+
+    for offset in 0..4 {
+        let decision = record_segment_reconnect_pressure_for_error(
+            key,
+            16,
+            &error,
+            now + Duration::from_secs(offset),
+        );
+        assert_eq!(decision.reduced_target, None);
+    }
+
+    let profile = profile_for_effective_http_url_with_pressure_key_at(
+        DownloadPerformanceMode::Fast,
+        "https://cdn.example.com/downloads/game.rar",
+        Some(key),
+        now + Duration::from_secs(5),
+    );
+    assert_eq!(profile.initial_segments, 16);
+    assert_eq!(profile.soft_max_segments, 32);
+    assert_eq!(profile.max_segments, 64);
+}
+
+#[test]
+fn segment_pressure_expires_and_allows_fast_profile_recovery() {
+    let _guard = segment_host_score_test_guard();
+    reset_segment_host_scores_for_tests();
+    let now = Instant::now();
+    let key = "hoster:ttl";
+    let url = "https://cdn.example.com/downloads/game.rar";
+    let error = error_for_http_status(StatusCode::TOO_MANY_REQUESTS, false);
+
+    for offset in 0..3 {
+        record_segment_reconnect_pressure_for_error(
+            key,
+            16,
+            &error,
+            now + Duration::from_secs(offset),
+        );
+    }
+
+    let capped = profile_for_effective_http_url_with_pressure_key_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        Some(key),
+        now + Duration::from_secs(4),
+    );
+    assert_eq!(capped.max_segments, 8);
+
+    let recovered = profile_for_effective_http_url_with_pressure_key_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        Some(key),
+        now + Duration::from_secs(31 * 60),
+    );
+    assert_eq!(recovered.initial_segments, 16);
+    assert_eq!(recovered.soft_max_segments, 32);
+    assert_eq!(recovered.max_segments, 64);
 }
 
 #[test]
@@ -5103,6 +5307,7 @@ fn http_segment_policy_task(
         torrent: None,
         handoff_auth: None,
         resolved_from_url: resolved_from_url.map(str::to_string),
+        source: None,
         is_bulk_member,
         bulk_archive_id: is_bulk_member.then_some("bulk_policy".into()),
         retry_attempts: 0,

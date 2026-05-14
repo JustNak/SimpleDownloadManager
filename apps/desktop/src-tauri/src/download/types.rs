@@ -168,6 +168,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) client: Client,
     pub(super) job_id: String,
     pub(super) url: String,
+    pub(super) segment_pressure_key: String,
     pub(super) handoff_auth: Option<HandoffAuth>,
     pub(super) temp_path: PathBuf,
     pub(super) total_bytes: u64,
@@ -348,6 +349,17 @@ pub(super) struct DownloadError {
     pub(super) category: FailureCategory,
     pub(super) message: String,
     pub(super) retryable: bool,
+    pub(super) http_status: Option<StatusCode>,
+    pub(super) retry_after: Option<Duration>,
+    pub(super) resume_metadata_issue: Option<SegmentResumeMetadataIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SegmentResumeMetadataIssue {
+    Missing,
+    Corrupt,
+    PlanIncompatible,
+    ValidatorConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

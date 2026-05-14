@@ -22,14 +22,19 @@ struct HttpPerformanceModeConfig {
 #[derive(Debug, Clone)]
 pub(super) struct SegmentHostScoreSnapshot {
     pub(super) best_cap: usize,
+    pub(super) rate_limited_cap: Option<usize>,
     pub(super) recent_reconnects: u32,
+    pub(super) recent_rate_limits: u32,
     pub(super) last_failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct SegmentHostScore {
-    best_cap: usize,
+    best_cap: Option<usize>,
+    rate_limited_cap: Option<usize>,
     recent_reconnects: u32,
+    recent_rate_limits: u32,
+    rate_limit_window_started_at: Option<Instant>,
     last_failure_reason: Option<String>,
     updated_at: Instant,
 }
@@ -37,6 +42,15 @@ struct SegmentHostScore {
 static SEGMENT_HOST_SCORES: OnceLock<StdMutex<HashMap<String, SegmentHostScore>>> = OnceLock::new();
 
 const SEGMENT_HOST_SCORE_TTL: Duration = Duration::from_secs(30 * 60);
+const SEGMENT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const SEGMENT_RATE_LIMIT_THRESHOLD: u32 = 3;
+const SEGMENT_PRESSURE_MIN_TARGET: usize = 2;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SegmentPressureDecision {
+    pub(super) recent_rate_limits: u32,
+    pub(super) reduced_target: Option<usize>,
+}
 
 const HTTP_PERFORMANCE_PROFILES: [HttpPerformanceModeConfig; 3] = [
     HttpPerformanceModeConfig {
@@ -115,16 +129,27 @@ pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerf
     HttpTransferPolicy::for_mode(mode).profile
 }
 
+#[cfg(test)]
 pub(super) fn profile_for_effective_http_url(
     mode: DownloadPerformanceMode,
     effective_url: &str,
 ) -> DownloadPerformanceProfile {
-    profile_for_effective_http_url_at(mode, effective_url, Instant::now())
+    profile_for_effective_http_url_with_pressure_key_at(mode, effective_url, None, Instant::now())
 }
 
+#[cfg(test)]
 pub(super) fn profile_for_effective_http_url_at(
     mode: DownloadPerformanceMode,
     effective_url: &str,
+    now: Instant,
+) -> DownloadPerformanceProfile {
+    profile_for_effective_http_url_with_pressure_key_at(mode, effective_url, None, now)
+}
+
+pub(super) fn profile_for_effective_http_url_with_pressure_key_at(
+    mode: DownloadPerformanceMode,
+    effective_url: &str,
+    pressure_key: Option<&str>,
     now: Instant,
 ) -> DownloadPerformanceProfile {
     let mut profile = HttpTransferPolicy::for_mode(mode).profile;
@@ -135,12 +160,25 @@ pub(super) fn profile_for_effective_http_url_at(
         profile.adaptive_ramp_step = profile.adaptive_ramp_step.min(4);
     }
     if mode == DownloadPerformanceMode::Fast {
-        if let Some(score) = segment_host_score_snapshot(effective_url, now) {
-            let _has_recent_failure =
-                score.recent_reconnects > 0 || score.last_failure_reason.is_some();
-            let scored_cap = score.best_cap.max(profile.initial_segments).max(1);
-            profile.max_segments = profile.max_segments.min(scored_cap);
-            profile.soft_max_segments = profile.soft_max_segments.min(profile.max_segments);
+        let score = pressure_key
+            .and_then(|key| segment_host_score_snapshot(key, now))
+            .or_else(|| segment_host_score_snapshot(effective_url, now));
+        if let Some(score) = score {
+            let _has_recent_failure = score.recent_reconnects > 0
+                || score.recent_rate_limits > 0
+                || score.last_failure_reason.is_some();
+            if let Some(rate_limited_cap) = score.rate_limited_cap {
+                let cap = rate_limited_cap
+                    .max(SEGMENT_PRESSURE_MIN_TARGET)
+                    .min(profile.max_segments);
+                profile.initial_segments = profile.initial_segments.min(cap).max(1);
+                profile.soft_max_segments = profile.soft_max_segments.min(cap).max(1);
+                profile.max_segments = profile.max_segments.min(cap).max(1);
+            } else if score.best_cap != usize::MAX {
+                let scored_cap = score.best_cap.max(profile.initial_segments).max(1);
+                profile.max_segments = profile.max_segments.min(scored_cap);
+                profile.soft_max_segments = profile.soft_max_segments.min(profile.max_segments);
+            }
         }
     }
     profile
@@ -169,12 +207,16 @@ pub(super) fn record_segment_host_success(raw_url: &str, cap: usize, now: Instan
     };
     expire_segment_host_scores_locked(&mut scores, now);
     let entry = scores.entry(key).or_insert_with(|| SegmentHostScore {
-        best_cap: cap.max(1),
+        best_cap: None,
+        rate_limited_cap: None,
         recent_reconnects: 0,
+        recent_rate_limits: 0,
+        rate_limit_window_started_at: None,
         last_failure_reason: None,
         updated_at: now,
     });
-    entry.best_cap = entry.best_cap.max(cap.max(1));
+    let cap = cap.max(1);
+    entry.best_cap = Some(entry.best_cap.map_or(cap, |best_cap| best_cap.max(cap)));
     entry.updated_at = now;
 }
 
@@ -194,15 +236,95 @@ pub(super) fn record_segment_host_failure(
     expire_segment_host_scores_locked(&mut scores, now);
     let cap = current_cap.max(1);
     let entry = scores.entry(key).or_insert_with(|| SegmentHostScore {
-        best_cap: cap,
+        best_cap: None,
+        rate_limited_cap: None,
         recent_reconnects: 0,
+        recent_rate_limits: 0,
+        rate_limit_window_started_at: None,
         last_failure_reason: None,
         updated_at: now,
     });
-    entry.best_cap = entry.best_cap.min(cap).max(1);
+    entry.best_cap = Some(
+        entry
+            .best_cap
+            .map_or(cap, |best_cap| best_cap.min(cap).max(1)),
+    );
     entry.recent_reconnects = entry.recent_reconnects.saturating_add(1);
     entry.last_failure_reason = Some(reason.to_string());
     entry.updated_at = now;
+}
+
+pub(super) fn record_segment_reconnect_pressure_for_error(
+    pressure_key: &str,
+    current_target: usize,
+    error: &DownloadError,
+    now: Instant,
+) -> SegmentPressureDecision {
+    if error.http_status != Some(StatusCode::TOO_MANY_REQUESTS) {
+        return SegmentPressureDecision::default();
+    }
+
+    record_segment_rate_limit_pressure(pressure_key, current_target, now)
+}
+
+fn record_segment_rate_limit_pressure(
+    pressure_key: &str,
+    current_target: usize,
+    now: Instant,
+) -> SegmentPressureDecision {
+    let Some(key) = segment_host_score_key(pressure_key) else {
+        return SegmentPressureDecision::default();
+    };
+    let scores = segment_host_scores();
+    let Ok(mut scores) = scores.lock() else {
+        return SegmentPressureDecision::default();
+    };
+    expire_segment_host_scores_locked(&mut scores, now);
+
+    let current_target = current_target.max(1);
+    let entry = scores.entry(key).or_insert_with(|| SegmentHostScore {
+        best_cap: None,
+        rate_limited_cap: None,
+        recent_reconnects: 0,
+        recent_rate_limits: 0,
+        rate_limit_window_started_at: None,
+        last_failure_reason: None,
+        updated_at: now,
+    });
+    if entry
+        .rate_limit_window_started_at
+        .is_none_or(|started| now.saturating_duration_since(started) > SEGMENT_RATE_LIMIT_WINDOW)
+    {
+        entry.recent_rate_limits = 0;
+        entry.rate_limit_window_started_at = Some(now);
+    }
+
+    entry.recent_rate_limits = entry.recent_rate_limits.saturating_add(1);
+    entry.recent_reconnects = entry.recent_reconnects.saturating_add(1);
+    entry.last_failure_reason = Some("HTTP 429 rate limit".into());
+    entry.updated_at = now;
+
+    let reduced_target = if entry.recent_rate_limits >= SEGMENT_RATE_LIMIT_THRESHOLD
+        && entry.recent_rate_limits % SEGMENT_RATE_LIMIT_THRESHOLD == 0
+        && current_target > SEGMENT_PRESSURE_MIN_TARGET
+    {
+        let reduced = (current_target / 2)
+            .max(SEGMENT_PRESSURE_MIN_TARGET)
+            .min(current_target.saturating_sub(1));
+        entry.rate_limited_cap = Some(
+            entry
+                .rate_limited_cap
+                .map_or(reduced, |cap| cap.min(reduced)),
+        );
+        Some(reduced)
+    } else {
+        None
+    };
+
+    SegmentPressureDecision {
+        recent_rate_limits: entry.recent_rate_limits,
+        reduced_target,
+    }
 }
 
 pub(super) fn segment_host_score_snapshot(
@@ -217,8 +339,15 @@ pub(super) fn segment_host_score_snapshot(
     expire_segment_host_scores_locked(&mut scores, now);
     let score = scores.get(&key)?;
     Some(SegmentHostScoreSnapshot {
-        best_cap: score.best_cap,
+        best_cap: score
+            .best_cap
+            .into_iter()
+            .chain(score.rate_limited_cap)
+            .min()
+            .unwrap_or(usize::MAX),
+        rate_limited_cap: score.rate_limited_cap,
         recent_reconnects: score.recent_reconnects,
+        recent_rate_limits: score.recent_rate_limits,
         last_failure_reason: score.last_failure_reason.clone(),
     })
 }
@@ -241,6 +370,10 @@ fn expire_segment_host_scores_locked(scores: &mut HashMap<String, SegmentHostSco
 }
 
 fn segment_host_score_key(raw_url: &str) -> Option<String> {
+    let trimmed = raw_url.trim();
+    if trimmed.starts_with("hoster:") {
+        return Some(trimmed.to_string());
+    }
     let parsed = reqwest::Url::parse(raw_url).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
     Some(format!(

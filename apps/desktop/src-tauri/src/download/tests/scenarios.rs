@@ -977,6 +977,7 @@ fn segment_context(
         client: download_client().unwrap(),
         job_id: task.id.clone(),
         url,
+        segment_pressure_key: "test:scenario".into(),
         handoff_auth: None,
         temp_path: task.temp_path.clone(),
         total_bytes: 12,

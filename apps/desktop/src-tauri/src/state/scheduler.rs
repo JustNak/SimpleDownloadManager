@@ -417,6 +417,7 @@ impl SharedState {
                         torrent: job.torrent.clone(),
                         handoff_auth: auth_by_job.get(&job.id).cloned(),
                         resolved_from_url: job.resolved_from_url.clone(),
+                        source: job.source.clone(),
                         is_bulk_member: is_bulk_member_job(job),
                         bulk_archive_id: job
                             .bulk_archive
