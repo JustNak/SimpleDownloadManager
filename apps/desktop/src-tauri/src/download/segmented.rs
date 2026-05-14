@@ -10,6 +10,7 @@ const FAST_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
 const FAST_TAIL_SMALL_LEASE_SIZE: u64 = 1024 * 1024;
 const FAST_TAIL_MEDIUM_LEASE_SIZE: u64 = 8 * 1024 * 1024;
 const FAST_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
+const FAST_TAIL_MIN_SEGMENTS: usize = 24;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
 const ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT: u64 = 90;
@@ -17,6 +18,7 @@ const ADAPTIVE_RAMP_PEAK_MIN_IMPROVEMENT_PERCENT: u64 = 108;
 const ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT: u64 = 88;
 const ADAPTIVE_RAMP_REGRESSION_WINDOW_LIMIT: usize = 2;
 const SEGMENT_RECONNECT_MAX_ATTEMPTS: u32 = 12;
+const SEGMENTED_FINALIZATION_SLOW_DIAGNOSTIC_THRESHOLD: Duration = Duration::from_secs(2);
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
     "Resume metadata is missing or no longer matches this partial download. Use Restart to download from zero.";
 
@@ -283,7 +285,7 @@ fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
 }
 
 fn profile_uses_fast_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
-    profile.max_segments >= 64 && profile.adaptive_ramp_step > 0
+    profile.adaptive_ramp_step > 0 && profile.max_segments >= FAST_TAIL_MIN_SEGMENTS
 }
 
 pub(super) fn dynamic_segment_tail_lease_size(
@@ -385,34 +387,6 @@ fn largest_pending_segment_position_bounded(
     best.map(|(position, _, _)| position)
 }
 
-fn largest_clean_pending_segment_position(
-    state: &SegmentedDownloadState,
-    active: &HashSet<usize>,
-    min_remaining_bytes: u64,
-) -> Option<usize> {
-    let mut best: Option<(usize, u64, u64)> = None;
-    for (position, segment) in state.segments.iter().enumerate() {
-        if active.contains(&segment.index) || segment.downloaded_bytes > 0 {
-            continue;
-        }
-        let remaining = segment_remaining_bytes(segment);
-        if remaining < min_remaining_bytes {
-            continue;
-        }
-        let key = (remaining, u64::MAX.saturating_sub(segment.range.start));
-        if best
-            .map(|(_, best_remaining, best_start_key)| {
-                key.0 > best_remaining || (key.0 == best_remaining && key.1 > best_start_key)
-            })
-            .unwrap_or(true)
-        {
-            best = Some((position, key.0, key.1));
-        }
-    }
-
-    best.map(|(position, _, _)| position)
-}
-
 fn next_segment_index(state: &SegmentedDownloadState) -> usize {
     state
         .segments
@@ -481,14 +455,14 @@ fn split_largest_pending_segment_by_halving(
     true
 }
 
-fn split_largest_clean_pending_segment_for_lease(
+fn split_largest_pending_segment_for_lease(
     state: &mut SegmentedDownloadState,
     active: &HashSet<usize>,
     lease_size: u64,
 ) -> bool {
     let lease_size = lease_size.max(1);
     let Some(position) =
-        largest_clean_pending_segment_position(state, active, lease_size.saturating_add(1))
+        largest_pending_segment_position(state, active, lease_size.saturating_add(1))
     else {
         return false;
     };
@@ -499,11 +473,11 @@ fn split_largest_clean_pending_segment_for_lease(
         return false;
     }
 
-    let split_end = segment
+    let remaining_start = segment
         .range
         .start
-        .saturating_add(lease_size)
-        .saturating_sub(1);
+        .saturating_add(segment.downloaded_bytes.min(segment.range.len()));
+    let split_end = remaining_start.saturating_add(lease_size).saturating_sub(1);
     if split_end >= segment.range.end {
         return false;
     }
@@ -527,7 +501,7 @@ fn fill_dynamic_segment_queue(
             if pending_lease_sized_segment_count(state, active, lease_size) >= target_depth {
                 break;
             }
-            if !split_largest_clean_pending_segment_for_lease(state, active, lease_size) {
+            if !split_largest_pending_segment_for_lease(state, active, lease_size) {
                 break;
             }
             changed = true;
@@ -665,20 +639,18 @@ fn segment_tail_leasing_diagnostic(
         "<256MiB"
     };
     let pending_lease_count = pending_lease_sized_segment_count(state, active, lease_size);
-    let clean_split_candidates = state
+    let split_candidates = state
         .segments
         .iter()
         .filter(|segment| {
-            !active.contains(&segment.index)
-                && segment.downloaded_bytes == 0
-                && segment_remaining_bytes(segment) > lease_size
+            !active.contains(&segment.index) && segment_remaining_bytes(segment) > lease_size
         })
         .count();
     let tail_active_floor = profile
         .max_segments
         .min(remaining_bytes.div_ceil(lease_size).min(usize::MAX as u64) as usize);
-    let reason = if clean_split_candidates == 0 && pending_lease_count < profile.max_segments {
-        "skipped: no clean pending range above lease size"
+    let reason = if split_candidates == 0 && pending_lease_count < profile.max_segments {
+        "skipped: no pending range above lease size"
     } else {
         "active"
     };
@@ -829,7 +801,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         priority_throttle,
         priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
-        reconnects,
+        reconnects: reconnects.clone(),
         target_workers: target_workers.clone(),
         active_workers: active_workers.clone(),
     };
@@ -895,18 +867,48 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         ));
     }
 
-    sync_direct_segment_file(&task.temp_path).await?;
-    cleanup_segment_artifacts(&task.temp_path, final_state.segments.len()).await;
-
     let snapshot = state
         .update_job_progress(&task.id, plan.total_bytes, Some(plan.total_bytes), 0, true)
         .await?;
     emit_download_update(app, &snapshot, &task.id);
 
+    let finalization_started = Instant::now();
+    let sync_started = Instant::now();
+    sync_direct_segment_file(&task.temp_path).await?;
+    let sync_elapsed = sync_started.elapsed();
+
+    let cleanup_started = Instant::now();
+    cleanup_segment_artifacts(&task.temp_path, final_state.segments.len()).await;
+    let cleanup_elapsed = cleanup_started.elapsed();
+
+    let rename_started = Instant::now();
     let final_path = move_to_final_path(&task.temp_path, &task.target_path)
         .await
         .map_err(disk_error)?;
+    let rename_elapsed = rename_started.elapsed();
+
+    let completion_started = Instant::now();
     complete_http_download(app, state, task, plan.total_bytes, &final_path).await?;
+    let completion_elapsed = completion_started.elapsed();
+    record_decode_body_reconnect_completion_diagnostic(state, &task.id, &reconnects).await;
+    let finalization_elapsed = finalization_started.elapsed();
+    if finalization_elapsed >= SEGMENTED_FINALIZATION_SLOW_DIAGNOSTIC_THRESHOLD {
+        let _ = state
+            .record_diagnostic_event(
+                DiagnosticLevel::Info,
+                "download",
+                format!(
+                    "Segmented download finalization took {} ms (sync {} ms, artifact cleanup {} ms, rename {} ms, completion handling {} ms).",
+                    finalization_elapsed.as_millis(),
+                    sync_elapsed.as_millis(),
+                    cleanup_elapsed.as_millis(),
+                    rename_elapsed.as_millis(),
+                    completion_elapsed.as_millis()
+                ),
+                Some(task.id.clone()),
+            )
+            .await;
+    }
     Ok(DownloadOutcome::Completed)
 }
 
@@ -959,6 +961,9 @@ pub(super) async fn download_dynamic_segment_worker(
                 if attempt > SEGMENT_RECONNECT_MAX_ATTEMPTS {
                     context.stop.store(true, Ordering::Relaxed);
                     return Err(error);
+                }
+                if segment_error_is_decode_body(&error) {
+                    context.reconnects.record_decode_body_reconnect(attempt);
                 }
                 context.ramp_blocked.store(true, Ordering::Relaxed);
                 let target_workers = context.target_workers.load(Ordering::Relaxed);
@@ -1042,6 +1047,36 @@ fn segment_error_allows_worker_reconnect(error: &DownloadError) -> bool {
             error.category,
             FailureCategory::Network | FailureCategory::Server | FailureCategory::Http
         )
+}
+
+fn segment_error_is_decode_body(error: &DownloadError) -> bool {
+    error.category == FailureCategory::Network
+        && error.message.contains("error decoding response body")
+}
+
+pub(super) async fn record_decode_body_reconnect_completion_diagnostic(
+    state: &SharedState,
+    job_id: &str,
+    reconnects: &SegmentReconnectTracker,
+) {
+    let Some(summary) = reconnects.decode_body_reconnect_summary() else {
+        return;
+    };
+    if summary.reconnects < 2 {
+        return;
+    }
+
+    let _ = state
+        .record_diagnostic_event(
+            DiagnosticLevel::Info,
+            "download",
+            format!(
+                "Segmented download completed after {} retryable decode-body reconnects (max segment attempt {}).",
+                summary.reconnects, summary.max_attempt
+            ),
+            Some(job_id.to_string()),
+        )
+        .await;
 }
 
 pub(super) fn segment_reconnect_delay_for_error(
@@ -2270,9 +2305,30 @@ pub(super) async fn cleanup_segment_artifacts(temp_path: &Path, segment_count: u
     cleanup_legacy_segment_files(temp_path, segment_count).await;
 }
 
-pub(super) async fn cleanup_legacy_segment_files(temp_path: &Path, segment_count: usize) {
-    for index in 0..segment_count {
-        let _ = fs::remove_file(segment_path(temp_path, index)).await;
+pub(super) async fn cleanup_legacy_segment_files(temp_path: &Path, _segment_count: usize) {
+    let Some(parent) = temp_path.parent() else {
+        return;
+    };
+    let Some(file_name) = temp_path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let segment_prefix = format!("{file_name}.seg");
+
+    let Ok(mut entries) = fs::read_dir(parent).await else {
+        return;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let should_remove = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(&segment_prefix))
+            .is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+            });
+        if should_remove {
+            let _ = fs::remove_file(entry.path()).await;
+        }
     }
 }
 
@@ -2324,6 +2380,7 @@ fn segment_meta_backup_path(temp_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta.bak", temp_path.display()))
 }
 
+#[cfg(test)]
 pub(super) fn segment_path(temp_path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.seg{index}", temp_path.display()))
 }

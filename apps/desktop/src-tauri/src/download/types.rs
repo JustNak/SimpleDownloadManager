@@ -192,6 +192,8 @@ pub(super) struct SegmentWorkerContext {
 pub(super) struct SegmentReconnectTracker {
     attempts: Mutex<HashMap<usize, u32>>,
     reconnecting: AtomicUsize,
+    decode_body_reconnects: AtomicUsize,
+    decode_body_max_attempt: AtomicUsize,
 }
 
 impl Default for SegmentReconnectTracker {
@@ -199,8 +201,16 @@ impl Default for SegmentReconnectTracker {
         Self {
             attempts: Mutex::new(HashMap::new()),
             reconnecting: AtomicUsize::new(0),
+            decode_body_reconnects: AtomicUsize::new(0),
+            decode_body_max_attempt: AtomicUsize::new(0),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SegmentDecodeBodyReconnectSummary {
+    pub(super) reconnects: usize,
+    pub(super) max_attempt: u32,
 }
 
 impl SegmentReconnectTracker {
@@ -213,6 +223,33 @@ impl SegmentReconnectTracker {
 
     pub(super) async fn clear_segment(&self, segment_index: usize) {
         self.attempts.lock().await.remove(&segment_index);
+    }
+
+    pub(super) fn record_decode_body_reconnect(&self, attempt: u32) {
+        self.decode_body_reconnects.fetch_add(1, Ordering::Relaxed);
+        let attempt = attempt as usize;
+        self.decode_body_max_attempt
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.max(attempt))
+            })
+            .ok();
+    }
+
+    pub(super) fn decode_body_reconnect_summary(
+        &self,
+    ) -> Option<SegmentDecodeBodyReconnectSummary> {
+        let reconnects = self.decode_body_reconnects.load(Ordering::Relaxed);
+        if reconnects == 0 {
+            return None;
+        }
+
+        Some(SegmentDecodeBodyReconnectSummary {
+            reconnects,
+            max_attempt: self
+                .decode_body_max_attempt
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as usize) as u32,
+        })
     }
 
     pub(super) fn begin_reconnect(&self) {

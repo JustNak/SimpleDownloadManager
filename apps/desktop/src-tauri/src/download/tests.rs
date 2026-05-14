@@ -2301,6 +2301,33 @@ fn fast_tail_lease_size_uses_remaining_byte_buckets() {
 }
 
 #[test]
+fn capped_fast_profiles_keep_tail_leasing_above_rescue_floor() {
+    let mut capped_fast = performance_profile(DownloadPerformanceMode::Fast);
+    capped_fast.max_segments = 24;
+    capped_fast.soft_max_segments = 24;
+
+    let mut heavily_capped_fast = capped_fast;
+    heavily_capped_fast.max_segments = 16;
+    heavily_capped_fast.soft_max_segments = 16;
+
+    assert_eq!(
+        dynamic_segment_tail_lease_size(2 * 1024 * 1024 * 1024, capped_fast),
+        Some(32 * 1024 * 1024)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(2 * 1024 * 1024 * 1024, heavily_capped_fast),
+        None
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(
+            2 * 1024 * 1024 * 1024,
+            performance_profile(DownloadPerformanceMode::Balanced)
+        ),
+        None
+    );
+}
+
+#[test]
 fn fast_tail_leasing_splits_clean_ranges_into_fixed_leases() {
     let profile = performance_profile(DownloadPerformanceMode::Fast);
     let mib = 1024 * 1024;
@@ -2339,10 +2366,13 @@ fn fast_tail_leasing_splits_clean_ranges_into_fixed_leases() {
 }
 
 #[test]
-fn fast_tail_leasing_does_not_split_partial_pending_ranges() {
+fn fast_tail_leasing_splits_partial_pending_remainders_without_losing_progress() {
     let profile = performance_profile(DownloadPerformanceMode::Fast);
     let mib = 1024 * 1024;
-    let mut state = segmented_state_for_test(96 * mib, vec![(0, 96 * mib - 1, 4 * mib, false)]);
+    let gib = 1024 * mib;
+    let total_bytes = 2 * gib;
+    let mut state =
+        segmented_state_for_test(total_bytes, vec![(0, total_bytes - 1, 4 * mib, false)]);
     let mut active = HashSet::new();
 
     let claimed = claim_largest_dynamic_segment_for_profile_tests(
@@ -2351,17 +2381,63 @@ fn fast_tail_leasing_does_not_split_partial_pending_ranges() {
         dynamic_segment_queue_depth(profile),
         profile,
     )
-    .expect("partial pending range should still be claimed");
+    .expect("partial pending remainder should be leased safely");
 
-    assert_eq!(state.segments.len(), 1);
+    assert_eq!(claimed.downloaded_bytes, 4 * mib);
     assert_eq!(
         claimed.range,
         ByteRange {
             start: 0,
-            end: 96 * mib - 1
+            end: 36 * mib - 1
         }
     );
-    assert_eq!(claimed.downloaded_bytes, 4 * mib);
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        total_bytes
+    );
+    assert_eq!(state.segments.first().unwrap().downloaded_bytes, 4 * mib);
+    assert!(state
+        .segments
+        .windows(2)
+        .all(|pair| pair[0].range.end.saturating_add(1) == pair[1].range.start));
+}
+
+#[test]
+fn fast_tail_leasing_does_not_split_active_partial_ranges() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let total_bytes = 512 * mib;
+    let mut state = segmented_state_for_test(
+        total_bytes,
+        vec![
+            (0, 256 * mib - 1, 8 * mib, false),
+            (256 * mib, total_bytes - 1, 0, false),
+        ],
+    );
+    let mut active = HashSet::from([0_usize]);
+
+    let claimed = claim_largest_dynamic_segment_for_profile_tests(
+        &mut state,
+        &mut active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    )
+    .expect("inactive pending range should still be claimable");
+
+    assert_ne!(claimed.index, 0);
+    assert_eq!(
+        state.segments[0].range,
+        ByteRange {
+            start: 0,
+            end: 256 * mib - 1
+        }
+    );
+    assert_eq!(state.segments[0].downloaded_bytes, 8 * mib);
+    assert!(active.contains(&0));
 }
 
 #[test]
@@ -3540,6 +3616,31 @@ fn segmented_hoster_workers_use_aggregate_priority_throttle_without_deferring() 
 }
 
 #[test]
+fn segmented_download_marks_bytes_complete_before_final_file_work() {
+    let source = include_str!("segmented.rs");
+    let attempt = source
+        .split("pub(super) async fn run_segmented_download_attempt")
+        .nth(1)
+        .expect("segmented attempt function should exist");
+    let progress = attempt
+        .find(".update_job_progress(&task.id, plan.total_bytes")
+        .expect("segmented attempt should mark final byte progress");
+    let sync = attempt
+        .find("sync_direct_segment_file")
+        .expect("segmented attempt should sync the partial file");
+    let cleanup = attempt
+        .find("cleanup_segment_artifacts")
+        .expect("segmented attempt should clean segment artifacts");
+    let move_to_final = attempt
+        .find("move_to_final_path")
+        .expect("segmented attempt should rename the completed file");
+
+    assert!(progress < sync);
+    assert!(progress < cleanup);
+    assert!(progress < move_to_final);
+}
+
+#[test]
 fn content_range_validation_rejects_mismatched_segments() {
     assert!(content_range_matches(
         "bytes 1048576-2097151/4194304",
@@ -4226,6 +4327,68 @@ async fn direct_segment_sidecar_tracks_progress_and_cleans_legacy_segments() {
     assert_eq!(reloaded.segments[2].downloaded_bytes, 0);
     assert!(!reloaded.segments[2].completed);
     assert!(!segment_path(&temp_path, 0).exists());
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn completed_segmented_download_records_repeated_decode_body_reconnect_summary() {
+    let state = SharedState::for_tests(
+        test_storage_path("segment-decode-reconnect-diagnostic"),
+        vec![torrent_job("job_decode_reconnect", JobState::Downloading)],
+    );
+    let reconnects = SegmentReconnectTracker::default();
+
+    reconnects.record_decode_body_reconnect(1);
+    reconnects.record_decode_body_reconnect(2);
+    record_decode_body_reconnect_completion_diagnostic(&state, "job_decode_reconnect", &reconnects)
+        .await;
+
+    let snapshot = state
+        .diagnostics_snapshot(crate::storage::HostRegistrationDiagnostics {
+            status: crate::storage::HostRegistrationStatus::Missing,
+            entries: Vec::new(),
+        })
+        .await;
+    let event = snapshot
+        .recent_events
+        .last()
+        .expect("decode-body reconnect completion diagnostic");
+
+    assert_eq!(event.level, DiagnosticLevel::Info);
+    assert_eq!(event.category, "download");
+    assert_eq!(event.job_id.as_deref(), Some("job_decode_reconnect"));
+    assert_eq!(
+        event.message,
+        "Segmented download completed after 2 retryable decode-body reconnects (max segment attempt 2)."
+    );
+}
+
+#[tokio::test]
+async fn cleanup_segment_artifacts_removes_scanned_legacy_segment_files_only() {
+    let root = test_download_runtime_dir("segment-cleanup-scan");
+    let temp_path = root.join("download.bin.part");
+    let stale_unplanned_segment = segment_path(&temp_path, 5);
+    let decoy_segment_prefix = root.join("download.bin.part.segment-note");
+    let decoy_non_numeric = root.join("download.bin.part.seg.tmp");
+
+    tokio::fs::write(segment_path(&temp_path, 0), b"old")
+        .await
+        .unwrap();
+    tokio::fs::write(&stale_unplanned_segment, b"stale")
+        .await
+        .unwrap();
+    tokio::fs::write(&decoy_segment_prefix, b"keep")
+        .await
+        .unwrap();
+    tokio::fs::write(&decoy_non_numeric, b"keep").await.unwrap();
+
+    cleanup_segment_artifacts(&temp_path, 1).await;
+
+    assert!(!segment_path(&temp_path, 0).exists());
+    assert!(!stale_unplanned_segment.exists());
+    assert!(decoy_segment_prefix.exists());
+    assert!(decoy_non_numeric.exists());
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
