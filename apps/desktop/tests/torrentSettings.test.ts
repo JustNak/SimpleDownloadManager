@@ -15,9 +15,10 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 0,
     portForwardingEnabled: false,
     portForwardingPort: 42000,
-    peerConnectionWatchdogMode: 'recover',
+    peerConnectionWatchdogMode: 'assist',
+    customTrackers: [],
   },
-  'torrent settings should default to enabled unlimited seeding with upload cap and port forwarding disabled',
+  'torrent settings should default to enabled unlimited seeding with safe peer assist',
 );
 
 assert.equal(
@@ -43,6 +44,12 @@ assert.deepEqual(
     portForwardingEnabled: true,
     portForwardingPort: 80,
     peerConnectionWatchdogMode: 'invalid',
+    customTrackers: [
+      ' https://tracker.example/announce ',
+      'HTTPS://tracker.example/announce',
+      'udp://tracker.example:1337/announce',
+      'ftp://tracker.example/announce',
+    ],
   }, 'E:\\Downloads'),
   {
     enabled: true,
@@ -53,9 +60,19 @@ assert.deepEqual(
     uploadLimitKibPerSecond: 0,
     portForwardingEnabled: true,
     portForwardingPort: 42000,
-    peerConnectionWatchdogMode: 'recover',
+    peerConnectionWatchdogMode: 'assist',
+    customTrackers: [
+      'https://tracker.example/announce',
+      'udp://tracker.example:1337/announce',
+    ],
   },
-  'torrent settings should clamp invalid numeric limits',
+  'torrent settings should clamp invalid numeric limits and normalize custom trackers',
+);
+
+assert.equal(
+  normalizeTorrentSettings({ peerConnectionWatchdogMode: 'diagnose' }).peerConnectionWatchdogMode,
+  'diagnose',
+  'torrent settings should keep diagnose-only mode as an explicit option',
 );
 
 assert.deepEqual(
@@ -66,6 +83,7 @@ assert.deepEqual(
     portForwardingEnabled: true,
     portForwardingPort: 43000,
     peerConnectionWatchdogMode: 'experimental',
+    customTrackers: Array.from({ length: 70 }, (_, index) => `https://tracker-${index}.example/announce`),
   }),
   {
     enabled: true,
@@ -77,6 +95,7 @@ assert.deepEqual(
     portForwardingEnabled: true,
     portForwardingPort: 43000,
     peerConnectionWatchdogMode: 'recover',
+    customTrackers: Array.from({ length: 64 }, (_, index) => `https://tracker-${index}.example/announce`),
   },
   'torrent settings should keep valid forwarding ports, cap upload limit, and migrate experimental watchdog mode to recover',
 );

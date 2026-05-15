@@ -10,6 +10,8 @@ const batchPopupSource = await readFile(new URL('../src/BatchProgressWindow.svel
 const queueSource = await readFile(new URL('../src/QueueView.svelte', import.meta.url), 'utf8');
 const promptSource = await readFile(new URL('../src/DownloadPromptWindow.svelte', import.meta.url), 'utf8');
 const commandsSource = await readFile(new URL('../src-tauri/src/commands/mod.rs', import.meta.url), 'utf8');
+const commandsEventsSource = await readFile(new URL('../src-tauri/src/commands/events.rs', import.meta.url), 'utf8');
+const commandsRuntimeSource = `${commandsSource}\n${commandsEventsSource}`;
 const downloadSource = await readFile(new URL('../src-tauri/src/download/mod.rs', import.meta.url), 'utf8');
 const httpDownloadSource = await readFile(new URL('../src-tauri/src/download/http.rs', import.meta.url), 'utf8');
 const segmentedDownloadSource = await readFile(new URL('../src-tauri/src/download/segmented.rs', import.meta.url), 'utf8');
@@ -70,19 +72,19 @@ assert.match(promptSource, /const nextPromptDispose = await subscribeToDownloadP
 assert.equal(tauriConfig.build.removeUnusedCommands, true, 'Tauri should prune unused commands during build');
 
 for (const rustSymbol of ['ProgressJobSnapshot', 'BatchProgressSnapshot', 'SettingsSnapshot', 'DownloadUpdateBatch']) {
-  assert.match(commandsSource, new RegExp(`struct ${rustSymbol}`), `commands should define ${rustSymbol}`);
+  assert.match(commandsRuntimeSource, new RegExp(`struct ${rustSymbol}`), `commands should define ${rustSymbol}`);
 }
 
 for (const command of ['pause_jobs', 'resume_jobs', 'cancel_jobs', 'delete_jobs']) {
   assert.match(commandsSource, new RegExp(`pub async fn ${command}\\(`), `commands should expose ${command}`);
 }
 
-assert.match(commandsSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');
-assert.match(commandsSource, /DOWNLOADS_UPDATE_BATCH_EVENT/, 'commands should define a batched download update event');
-assert.match(commandsSource, /emit_progress_delta/, 'commands should define a lightweight progress delta emitter');
-assert.match(commandsSource, /emit_popup_snapshots\(app,\s*snapshot\)/, 'snapshot emission should fan out targeted popup payloads');
-assert.match(commandsSource, /fn progress_job_for_window_label[\s\S]*strip_prefix\("download-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Http[\s\S]*strip_prefix\("torrent-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Torrent/, 'single progress popup snapshots should be scoped by label family and transfer kind');
-assert.doesNotMatch(commandsSource, /progress_window_label\(&job\.id\)[\s\S]*\|\|[\s\S]*torrent_progress_window_label\(&job\.id\)/, 'download and torrent progress labels should not share an OR-matched snapshot lookup');
+assert.match(commandsRuntimeSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');
+assert.match(commandsRuntimeSource, /DOWNLOADS_UPDATE_BATCH_EVENT/, 'commands should define a batched download update event');
+assert.match(commandsRuntimeSource, /emit_progress_delta/, 'commands should define a lightweight progress delta emitter');
+assert.match(commandsRuntimeSource, /emit_popup_snapshots\(app,\s*snapshot\)/, 'snapshot emission should fan out targeted popup payloads');
+assert.match(commandsRuntimeSource, /fn progress_job_for_window_label[\s\S]*strip_prefix\("download-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Http[\s\S]*strip_prefix\("torrent-progress-"\)[\s\S]*job\.transfer_kind == TransferKind::Torrent/, 'single progress popup snapshots should be scoped by label family and transfer kind');
+assert.doesNotMatch(commandsRuntimeSource, /progress_window_label\(&job\.id\)[\s\S]*\|\|[\s\S]*torrent_progress_window_label\(&job\.id\)/, 'download and torrent progress labels should not share an OR-matched snapshot lookup');
 assert.doesNotMatch(downloadSource, /powershell\.exe|Compress-Archive/, 'bulk archive creation should not shell out to PowerShell');
 assert.match(httpDownloadSource, /update_job_progress_delta/, 'single-stream HTTP progress ticks should use lightweight progress deltas');
 assert.match(segmentedDownloadSource, /update_segmented_job_progress_delta/, 'segmented HTTP progress ticks should use lightweight progress deltas');

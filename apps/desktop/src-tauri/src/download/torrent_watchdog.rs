@@ -4,8 +4,10 @@ use std::time::{Duration, Instant};
 
 use super::{
     TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL, TORRENT_LOW_THROUGHPUT_REPORT_WINDOW,
-    TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND, TORRENT_PEER_WATCHDOG_WINDOW,
-    TORRENT_RESTORE_RECHECK_IDLE_WINDOW, TORRENT_RESTORE_STALLED_IDLE_WINDOW,
+    TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND, TORRENT_PEER_LOW_RAMP_ASSIST_WINDOW,
+    TORRENT_PEER_STARTUP_ACTIVE_CONNECTION_LIMIT, TORRENT_PEER_STARTUP_ASSIST_WINDOW,
+    TORRENT_PEER_WATCHDOG_WINDOW, TORRENT_RESTORE_RECHECK_IDLE_WINDOW,
+    TORRENT_RESTORE_STALLED_IDLE_WINDOW,
 };
 
 #[derive(Debug, Default)]
@@ -161,30 +163,36 @@ pub(super) enum TorrentPeerConnectionWatchdogDecision {
     Continue,
     Report,
     RefreshPeers,
-    ReaddTorrent,
-    ResetEngine,
 }
 
 #[derive(Debug)]
 pub(super) struct TorrentPeerConnectionWatchdog {
     pub(super) mode: TorrentPeerConnectionWatchdogMode,
+    pub(super) started_at: Instant,
     pub(super) stall_window: TorrentThroughputWindow,
     pub(super) last_reported_at: Option<Instant>,
-    pub(super) refreshed: bool,
-    pub(super) readded: bool,
-    pub(super) reset_engine: bool,
+    pub(super) startup_refreshed: bool,
+    pub(super) ramp_refreshed: bool,
+    pub(super) recover_refreshed: bool,
+    pub(super) last_recovery_action: Option<&'static str>,
 }
 
 impl TorrentPeerConnectionWatchdog {
     pub(super) fn new(mode: TorrentPeerConnectionWatchdogMode, now: Instant) -> Self {
         Self {
             mode,
+            started_at: now,
             stall_window: TorrentThroughputWindow::started(now),
             last_reported_at: None,
-            refreshed: false,
-            readded: false,
-            reset_engine: false,
+            startup_refreshed: false,
+            ramp_refreshed: false,
+            recover_refreshed: false,
+            last_recovery_action: None,
         }
+    }
+
+    pub(super) fn last_recovery_action_label(&self) -> &'static str {
+        self.last_recovery_action.unwrap_or("none")
     }
 
     pub(super) fn observe(
@@ -192,6 +200,10 @@ impl TorrentPeerConnectionWatchdog {
         update: &TorrentRuntimeSnapshot,
         now: Instant,
     ) -> TorrentPeerConnectionWatchdogDecision {
+        if let Some(decision) = self.observe_fast_start(update, now) {
+            return decision;
+        }
+
         if !self
             .stall_window
             .has_sustained_stall(update, now, TORRENT_PEER_WATCHDOG_WINDOW)
@@ -199,22 +211,30 @@ impl TorrentPeerConnectionWatchdog {
             return TorrentPeerConnectionWatchdogDecision::Continue;
         }
 
-        if matches!(self.mode, TorrentPeerConnectionWatchdogMode::Recover) {
-            if !self.refreshed {
-                self.refreshed = true;
-                self.stall_window.restart(update, now);
-                return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
+        match self.mode {
+            TorrentPeerConnectionWatchdogMode::Assist => {
+                if !self.startup_refreshed && torrent_is_before_first_payload(update) {
+                    self.startup_refreshed = true;
+                    self.last_recovery_action = Some("startup_refresh_peers");
+                    self.stall_window.restart(update, now);
+                    return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
+                }
+                if !self.ramp_refreshed && torrent_needs_low_ramp_assist(update) {
+                    self.ramp_refreshed = true;
+                    self.last_recovery_action = Some("low_ramp_refresh_peers");
+                    self.stall_window.restart(update, now);
+                    return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
+                }
             }
-            if !self.readded {
-                self.readded = true;
-                self.stall_window.restart(update, now);
-                return TorrentPeerConnectionWatchdogDecision::ReaddTorrent;
+            TorrentPeerConnectionWatchdogMode::Recover => {
+                if !self.recover_refreshed {
+                    self.recover_refreshed = true;
+                    self.last_recovery_action = Some("refresh_peers");
+                    self.stall_window.restart(update, now);
+                    return TorrentPeerConnectionWatchdogDecision::RefreshPeers;
+                }
             }
-            if !self.reset_engine {
-                self.reset_engine = true;
-                self.stall_window.restart(update, now);
-                return TorrentPeerConnectionWatchdogDecision::ResetEngine;
-            }
+            TorrentPeerConnectionWatchdogMode::Diagnose => {}
         }
 
         if self.last_reported_at.is_some_and(|reported_at| {
@@ -227,9 +247,85 @@ impl TorrentPeerConnectionWatchdog {
         TorrentPeerConnectionWatchdogDecision::Report
     }
 
-    pub(super) fn rearm_engine_reset(&mut self) {
-        self.reset_engine = false;
+    fn observe_fast_start(
+        &mut self,
+        update: &TorrentRuntimeSnapshot,
+        now: Instant,
+    ) -> Option<TorrentPeerConnectionWatchdogDecision> {
+        if !matches!(update.phase, TorrentRuntimePhase::Live) {
+            return None;
+        }
+        let elapsed = now.duration_since(self.started_at);
+        match self.mode {
+            TorrentPeerConnectionWatchdogMode::Assist => {
+                if !self.startup_refreshed
+                    && elapsed >= TORRENT_PEER_STARTUP_ASSIST_WINDOW
+                    && torrent_needs_startup_peer_assist(update)
+                {
+                    self.startup_refreshed = true;
+                    self.last_recovery_action = Some("startup_refresh_peers");
+                    self.stall_window.restart(update, now);
+                    return Some(TorrentPeerConnectionWatchdogDecision::RefreshPeers);
+                }
+                if !self.ramp_refreshed
+                    && elapsed >= TORRENT_PEER_LOW_RAMP_ASSIST_WINDOW
+                    && torrent_needs_low_ramp_assist(update)
+                {
+                    self.ramp_refreshed = true;
+                    self.last_recovery_action = Some("low_ramp_refresh_peers");
+                    self.stall_window.restart(update, now);
+                    return Some(TorrentPeerConnectionWatchdogDecision::RefreshPeers);
+                }
+            }
+            TorrentPeerConnectionWatchdogMode::Diagnose => {
+                if !self.startup_refreshed
+                    && elapsed >= TORRENT_PEER_STARTUP_ASSIST_WINDOW
+                    && torrent_needs_startup_peer_assist(update)
+                {
+                    self.startup_refreshed = true;
+                    return Some(TorrentPeerConnectionWatchdogDecision::Report);
+                }
+                if !self.ramp_refreshed
+                    && elapsed >= TORRENT_PEER_LOW_RAMP_ASSIST_WINDOW
+                    && torrent_needs_low_ramp_assist(update)
+                {
+                    self.ramp_refreshed = true;
+                    return Some(TorrentPeerConnectionWatchdogDecision::Report);
+                }
+            }
+            TorrentPeerConnectionWatchdogMode::Recover => {}
+        }
+
+        None
     }
+}
+
+fn torrent_is_before_first_payload(update: &TorrentRuntimeSnapshot) -> bool {
+    update.fetched_bytes == 0 && update.downloaded_bytes == 0
+}
+
+fn torrent_needs_low_ramp_assist(update: &TorrentRuntimeSnapshot) -> bool {
+    if torrent_is_before_first_payload(update) {
+        return false;
+    }
+
+    update.diagnostics.as_ref().is_some_and(|diagnostics| {
+        diagnostics.contributing_peers <= 1
+            && diagnostics.live_peers <= 2
+            && update.download_speed < TORRENT_LOW_THROUGHPUT_SPEED_THRESHOLD_BYTES_PER_SECOND
+    })
+}
+
+fn torrent_needs_startup_peer_assist(update: &TorrentRuntimeSnapshot) -> bool {
+    if !torrent_is_before_first_payload(update) {
+        return false;
+    }
+
+    update.diagnostics.as_ref().is_some_and(|diagnostics| {
+        diagnostics.live_peers == 0
+            && diagnostics.contributing_peers == 0
+            && diagnostics.connecting_peers <= TORRENT_PEER_STARTUP_ACTIVE_CONNECTION_LIMIT
+    })
 }
 
 pub(super) fn is_torrent_low_throughput_sample(update: &TorrentRuntimeSnapshot) -> bool {
@@ -283,6 +379,10 @@ pub(super) fn torrent_low_throughput_message(update: &TorrentRuntimeSnapshot) ->
         .listen_port
         .map(|port| format!("listen port {port}"))
         .unwrap_or_else(|| "listen port unavailable".into());
+    let dht_nodes = diagnostics
+        .dht_nodes
+        .map(|nodes| format!(", DHT nodes {nodes}"))
+        .unwrap_or_default();
     let listener_state = if diagnostics.listener_fallback {
         "listener fallback active"
     } else {
@@ -291,7 +391,7 @@ pub(super) fn torrent_low_throughput_message(update: &TorrentRuntimeSnapshot) ->
     let classification = torrent_low_throughput_classification(update);
 
     format!(
-        "Torrent throughput low ({classification}): {} live peers, {} seen, {} queued, {} connecting, {} contributing, {} peer error events across {} peers, {} connection attempts, {} dead, {} not needed, job down {} B/s, session down {} B/s, session up {} B/s, {listen_port}, {listener_state}",
+        "Torrent throughput low ({classification}): {} live peers, {} seen, {} queued, {} connecting, {} contributing, {} peer error events across {} peers, {} connection attempts, {} dead, {} not needed, job down {} B/s, session down {} B/s, session up {} B/s, {listen_port}{dht_nodes}, {listener_state}",
         diagnostics.live_peers,
         diagnostics.seen_peers,
         diagnostics.queued_peers,

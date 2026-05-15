@@ -44,7 +44,8 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       uploadLimitKibPerSecond: 0,
       portForwardingEnabled: false,
       portForwardingPort: 42000,
-      peerConnectionWatchdogMode: 'recover',
+      peerConnectionWatchdogMode: 'assist',
+      customTrackers: [],
     },
     bulk: {
       outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),

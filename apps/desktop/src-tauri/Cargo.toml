@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-desktop-backend"
-version = "0.8.1-beta"
+version = "0.8.2-beta"
 edition = "2021"
 build = "build.rs"
 autobins = false

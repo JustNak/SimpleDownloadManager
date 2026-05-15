@@ -15,7 +15,8 @@ const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   uploadLimitKibPerSecond: 0,
   portForwardingEnabled: false,
   portForwardingPort: 42000,
-  peerConnectionWatchdogMode: 'recover',
+  peerConnectionWatchdogMode: 'assist',
+  customTrackers: [],
 };
 
 export function normalizeTorrentSettings(
@@ -37,6 +38,7 @@ export function normalizeTorrentSettings(
     portForwardingEnabled: value?.portForwardingEnabled ?? DEFAULT_TORRENT_SETTINGS.portForwardingEnabled,
     portForwardingPort: normalizeForwardingPort(value?.portForwardingPort),
     peerConnectionWatchdogMode: normalizePeerConnectionWatchdogMode(value?.peerConnectionWatchdogMode),
+    customTrackers: normalizeCustomTrackers(value?.customTrackers),
   };
 }
 
@@ -67,6 +69,7 @@ function isSeedMode(value: unknown): value is TorrentSettings['seedMode'] {
 }
 
 function normalizePeerConnectionWatchdogMode(value: unknown): TorrentSettings['peerConnectionWatchdogMode'] {
+  if (value === 'assist') return 'assist';
   if (value === 'diagnose') return 'diagnose';
   if (value === 'recover' || value === 'experimental') return 'recover';
   return DEFAULT_TORRENT_SETTINGS.peerConnectionWatchdogMode;
@@ -81,6 +84,39 @@ function normalizeForwardingPort(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TORRENT_SETTINGS.portForwardingPort;
   const port = Math.round(value);
   return port >= 1024 && port <= 65534 ? port : DEFAULT_TORRENT_SETTINGS.portForwardingPort;
+}
+
+function normalizeCustomTrackers(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const trackers: string[] = [];
+
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const normalized = normalizeTrackerUrl(item);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    trackers.push(normalized);
+    if (trackers.length >= 64) break;
+  }
+
+  return trackers;
+}
+
+function normalizeTrackerUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol !== 'udp:' && url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (!url.hostname) return null;
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function normalizeTorrentDownloadDirectory(value: unknown, downloadDirectory: string): string {

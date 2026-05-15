@@ -20,6 +20,9 @@ const GATE_FIRST_BYTE_MS: u64 = 60_000;
 const GATE_ZERO_STALL_MS: u64 = 30_000;
 const GATE_QBIT_SPEED_RATIO_NUMERATOR: u64 = 70;
 const GATE_QBIT_SPEED_RATIO_DENOMINATOR: u64 = 100;
+const GATE_QBIT_STARTUP_RATIO_NUMERATOR: u64 = 150;
+const GATE_QBIT_STARTUP_RATIO_DENOMINATOR: u64 = 100;
+const GATE_QBIT_STARTUP_GRACE_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,12 +39,14 @@ pub struct BenchmarkSpeedSample {
     pub fetched_bytes: u64,
     pub download_bps: u64,
     pub connected_peers: Option<u32>,
+    pub contributing_peers: Option<u32>,
     pub seeds: Option<u32>,
     pub dht_nodes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BenchmarkSpeedAggregate {
+    pub first_contributing_peer_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub average_download_bps_3m: u64,
     pub longest_zero_bps_stall_ms: u64,
@@ -64,6 +69,7 @@ pub struct BenchmarkSourceSummary {
 pub struct BenchmarkEngineReport {
     pub engine: BenchmarkEngine,
     pub metadata_time_ms: Option<u64>,
+    pub first_contributing_peer_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub original_tracker_count: Option<usize>,
     pub effective_tracker_count: Option<usize>,
@@ -82,6 +88,7 @@ pub struct BenchmarkEngineReport {
 #[serde(rename_all = "camelCase")]
 pub struct QbittorrentReference {
     pub metadata_time_ms: Option<u64>,
+    pub first_contributing_peer_time_ms: Option<u64>,
     pub first_byte_time_ms: Option<u64>,
     pub average_download_bps_3m: Option<u64>,
     pub longest_zero_bps_stall_ms: Option<u64>,
@@ -173,10 +180,15 @@ pub fn aggregate_speed_samples(samples: &[BenchmarkSpeedSample]) -> BenchmarkSpe
         .iter()
         .find(|sample| sample_progress(sample) > 0)
         .map(|sample| sample.elapsed_ms);
+    let first_contributing_peer_time_ms = ordered
+        .iter()
+        .find(|sample| sample.contributing_peers.is_some_and(|peers| peers > 0))
+        .map(|sample| sample.elapsed_ms);
     let longest_zero_bps_stall_ms = longest_no_progress_stall_ms(&ordered);
     let average_download_bps_3m = average_download_bps(&ordered, Duration::from_secs(180));
 
     BenchmarkSpeedAggregate {
+        first_contributing_peer_time_ms,
         first_byte_time_ms,
         average_download_bps_3m,
         longest_zero_bps_stall_ms,
@@ -388,8 +400,9 @@ async fn collect_librqbit_samples(
                 connected_peers: snapshot
                     .peers
                     .or_else(|| diagnostics.map(|diagnostics| diagnostics.live_peers)),
+                contributing_peers: diagnostics.map(|diagnostics| diagnostics.contributing_peers),
                 seeds: snapshot.seeds,
-                dht_nodes: None,
+                dht_nodes: diagnostics.and_then(|diagnostics| diagnostics.dht_nodes),
             });
         }
         sleep(SAMPLE_INTERVAL).await;
@@ -511,6 +524,7 @@ async fn collect_aria2_samples(
                     fetched_bytes: status.completed_length,
                     download_bps: status.download_speed_bps,
                     connected_peers: status.connections,
+                    contributing_peers: None,
                     seeds: status.seeders,
                     dht_nodes: None,
                 });
@@ -532,6 +546,7 @@ fn blank_engine_report(
     BenchmarkEngineReport {
         engine,
         metadata_time_ms: None,
+        first_contributing_peer_time_ms: None,
         first_byte_time_ms: None,
         original_tracker_count: Some(source_summary.original_tracker_count),
         effective_tracker_count: Some(source_summary.effective_tracker_count),
@@ -549,6 +564,7 @@ fn blank_engine_report(
 
 fn apply_sample_aggregate(report: &mut BenchmarkEngineReport, samples: Vec<BenchmarkSpeedSample>) {
     let aggregate = aggregate_speed_samples(&samples);
+    report.first_contributing_peer_time_ms = aggregate.first_contributing_peer_time_ms;
     report.first_byte_time_ms = aggregate.first_byte_time_ms;
     report.average_download_bps_3m = aggregate.average_download_bps_3m;
     report.longest_zero_bps_stall_ms = aggregate.longest_zero_bps_stall_ms;
@@ -569,16 +585,25 @@ fn engine_passes_decision_gate(
     if report.error.is_some() {
         return false;
     }
-    if report
-        .metadata_time_ms
-        .is_none_or(|metadata_ms| metadata_ms > GATE_METADATA_MS)
-    {
+    if !engine_time_passes_startup_gate(
+        report.metadata_time_ms,
+        qbit.metadata_time_ms,
+        GATE_METADATA_MS,
+    ) {
         return false;
     }
-    if report
-        .first_byte_time_ms
-        .is_none_or(|first_byte_ms| first_byte_ms > GATE_FIRST_BYTE_MS)
-    {
+    if !engine_time_passes_startup_gate(
+        report.first_contributing_peer_time_ms,
+        qbit.first_contributing_peer_time_ms,
+        GATE_FIRST_BYTE_MS,
+    ) {
+        return false;
+    }
+    if !engine_time_passes_startup_gate(
+        report.first_byte_time_ms,
+        qbit.first_byte_time_ms,
+        GATE_FIRST_BYTE_MS,
+    ) {
         return false;
     }
     if report.longest_zero_bps_stall_ms > GATE_ZERO_STALL_MS {
@@ -591,6 +616,27 @@ fn engine_passes_decision_gate(
         / GATE_QBIT_SPEED_RATIO_DENOMINATOR;
 
     report.average_download_bps_3m >= required_bps
+}
+
+fn engine_time_passes_startup_gate(
+    engine_ms: Option<u64>,
+    qbit_ms: Option<u64>,
+    absolute_gate_ms: u64,
+) -> bool {
+    let Some(engine_ms) = engine_ms else {
+        return false;
+    };
+    if engine_ms > absolute_gate_ms {
+        return false;
+    }
+
+    let Some(qbit_ms) = qbit_ms.filter(|value| *value > 0) else {
+        return true;
+    };
+    let relative_gate = qbit_ms.saturating_mul(GATE_QBIT_STARTUP_RATIO_NUMERATOR)
+        / GATE_QBIT_STARTUP_RATIO_DENOMINATOR
+        + GATE_QBIT_STARTUP_GRACE_MS;
+    engine_ms <= relative_gate
 }
 
 fn qbittorrent_succeeded(qbit: &QbittorrentReference) -> bool {
@@ -909,6 +955,7 @@ mod tests {
             fetched_bytes,
             download_bps,
             connected_peers: Some(6),
+            contributing_peers: (fetched_bytes > 0).then_some(1),
             seeds: Some(2),
             dht_nodes: None,
         }
@@ -925,6 +972,7 @@ mod tests {
         BenchmarkEngineReport {
             engine,
             metadata_time_ms,
+            first_contributing_peer_time_ms: first_byte_time_ms.map(|ms| ms.saturating_sub(2_000)),
             first_byte_time_ms,
             original_tracker_count: Some(1),
             effective_tracker_count: Some(1 + FALLBACK_TORRENT_TRACKERS.len()),
@@ -954,7 +1002,9 @@ mod tests {
             FALLBACK_TORRENT_TRACKERS.len()
         );
         assert!(summary.source_redacted.contains("0123456789ab..."));
-        assert!(summary.source_redacted.contains("tr=1+8"));
+        assert!(summary
+            .source_redacted
+            .contains(&format!("tr=1+{}", FALLBACK_TORRENT_TRACKERS.len())));
         assert!(!summary.source_redacted.contains("Private"));
         assert!(!summary.source_redacted.contains("tracker.example"));
     }
@@ -972,9 +1022,25 @@ mod tests {
         let aggregate = aggregate_speed_samples(&samples);
 
         assert_eq!(aggregate.first_byte_time_ms, Some(90_000));
+        assert_eq!(aggregate.first_contributing_peer_time_ms, Some(90_000));
         assert_eq!(aggregate.longest_zero_bps_stall_ms, 90_000);
         assert_eq!(aggregate.average_download_bps_3m, 1_000);
         assert_eq!(aggregate.final_bytes, 120_000);
+    }
+
+    #[test]
+    fn sample_aggregation_tracks_first_contributing_peer_before_payload() {
+        let mut samples = vec![
+            sample(0, 0, 0),
+            sample(8_000, 0, 0),
+            sample(12_000, 32_768, 512),
+        ];
+        samples[1].contributing_peers = Some(1);
+
+        let aggregate = aggregate_speed_samples(&samples);
+
+        assert_eq!(aggregate.first_contributing_peer_time_ms, Some(8_000));
+        assert_eq!(aggregate.first_byte_time_ms, Some(12_000));
     }
 
     #[test]
@@ -1014,6 +1080,7 @@ mod tests {
     fn decision_gate_prefers_aria2_when_it_matches_qbittorrent_reference() {
         let qbit = QbittorrentReference {
             metadata_time_ms: Some(12_000),
+            first_contributing_peer_time_ms: Some(18_000),
             first_byte_time_ms: Some(24_000),
             average_download_bps_3m: Some(3_000_000),
             longest_zero_bps_stall_ms: Some(8_000),
@@ -1051,6 +1118,7 @@ mod tests {
     fn decision_gate_keeps_librqbit_when_it_passes_and_aria2_does_not() {
         let qbit = QbittorrentReference {
             metadata_time_ms: Some(8_000),
+            first_contributing_peer_time_ms: Some(14_000),
             first_byte_time_ms: Some(18_000),
             average_download_bps_3m: Some(2_000_000),
             longest_zero_bps_stall_ms: Some(6_000),
@@ -1080,6 +1148,43 @@ mod tests {
         assert_eq!(
             decision.action,
             BenchmarkDecisionAction::KeepLibrqbitAndFixDiagnostics
+        );
+    }
+
+    #[test]
+    fn decision_gate_rejects_librqbit_when_qbittorrent_is_much_faster_to_start() {
+        let qbit = QbittorrentReference {
+            metadata_time_ms: Some(5_000),
+            first_contributing_peer_time_ms: Some(7_000),
+            first_byte_time_ms: Some(10_000),
+            average_download_bps_3m: Some(1_000_000),
+            longest_zero_bps_stall_ms: Some(5_000),
+            connected_peers: Some(12),
+            seeds: Some(8),
+            notes: None,
+        };
+        let librqbit = engine_report(
+            BenchmarkEngine::Librqbit,
+            Some(25_000),
+            Some(50_000),
+            900_000,
+            10_000,
+            None,
+        );
+        let aria2 = engine_report(
+            BenchmarkEngine::Aria2,
+            None,
+            None,
+            0,
+            180_000,
+            Some("aria2c failed"),
+        );
+
+        let decision = benchmark_decision(&[librqbit, aria2], Some(&qbit));
+
+        assert_eq!(
+            decision.action,
+            BenchmarkDecisionAction::PlanLibtorrentHelperProcessSpike
         );
     }
 
@@ -1122,6 +1227,7 @@ mod tests {
                 .expect("example qBittorrent reference JSON should parse");
 
         assert_eq!(reference.metadata_time_ms, Some(12_000));
+        assert_eq!(reference.first_contributing_peer_time_ms, Some(18_000));
         assert_eq!(reference.first_byte_time_ms, Some(24_000));
         assert_eq!(reference.average_download_bps_3m, Some(3_000_000));
         assert_eq!(reference.longest_zero_bps_stall_ms, Some(8_000));

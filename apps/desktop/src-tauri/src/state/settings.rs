@@ -124,6 +124,9 @@ pub(super) fn normalize_torrent_settings(settings: &mut TorrentSettings) {
     {
         settings.port_forwarding_port = default_torrent_port_forwarding_port();
     }
+
+    settings.custom_trackers =
+        crate::torrent::normalize_custom_torrent_trackers(&settings.custom_trackers);
 }
 
 pub(super) fn normalize_torrent_settings_for_download_directory(

@@ -1,5 +1,6 @@
 {
   "metadataTimeMs": 12000,
+  "firstContributingPeerTimeMs": 18000,
   "firstByteTimeMs": 24000,
   "averageDownloadBps3m": 3000000,
   "longestZeroBpsStallMs": 8000,

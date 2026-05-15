@@ -149,6 +149,24 @@ pub struct TorrentRuntimeDiagnostics {
     pub session_download_speed: u64,
     pub session_upload_speed: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dht_nodes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dht_warmup_age_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_cache_hits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milliseconds_since_metadata_resolved: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_live_peer_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_contributing_peer_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_payload_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dht_nodes_at_metadata_resolved: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_peer_discovery_assist_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub average_piece_download_millis: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
@@ -428,8 +446,9 @@ pub enum TorrentSeedMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TorrentPeerConnectionWatchdogMode {
-    Diagnose,
     #[default]
+    Assist,
+    Diagnose,
     Recover,
 }
 
@@ -440,11 +459,12 @@ impl<'de> Deserialize<'de> for TorrentPeerConnectionWatchdogMode {
     {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
+            "assist" => Ok(Self::Assist),
             "diagnose" => Ok(Self::Diagnose),
             "recover" | "experimental" => Ok(Self::Recover),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
-                &["diagnose", "recover"],
+                &["assist", "diagnose", "recover"],
             )),
         }
     }
@@ -471,6 +491,8 @@ pub struct TorrentSettings {
     pub port_forwarding_port: u32,
     #[serde(default)]
     pub peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode,
+    #[serde(default)]
+    pub custom_trackers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -896,7 +918,8 @@ impl Default for TorrentSettings {
             upload_limit_kib_per_second: 0,
             port_forwarding_enabled: false,
             port_forwarding_port: default_torrent_port_forwarding_port(),
-            peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Recover,
+            peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Assist,
+            custom_trackers: Vec::new(),
         }
     }
 }

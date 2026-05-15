@@ -118,6 +118,7 @@
   let excludedSearchQuery = $state('');
   let isExcludedSitesDialogOpen = $state(false);
   let accentColorInput = $state(initialAccentColor());
+  let customTrackersInput = $state(initialCustomTrackersInput());
   let isClearingTorrentSessionCache = $state(false);
 
   const isDirty = $derived(!settingsEqual(completeSettingsDraft(), settings));
@@ -143,6 +144,7 @@
       excludedSearchQuery = '';
       isExcludedSitesDialogOpen = false;
       accentColorInput = normalizeAccentColor(nextSettings.accentColor);
+      customTrackersInput = formatCustomTrackersInput(nextSettings.torrent.customTrackers);
     });
   });
 
@@ -171,11 +173,27 @@
     return normalizeAccentColor(settings.accentColor);
   }
 
+  function initialCustomTrackersInput(): string {
+    return formatCustomTrackersInput(settings.torrent.customTrackers);
+  }
+
   function completeSettingsDraft(): Settings {
+    const torrent = normalizeTorrentSettings(
+      {
+        ...formData.torrent,
+        customTrackers: customTrackersInput.split('\n'),
+      },
+      formData.downloadDirectory,
+    );
     return {
       ...cloneSettings(formData),
       accentColor: normalizeAccentColor(accentColorInput),
+      torrent,
     };
+  }
+
+  function formatCustomTrackersInput(trackers: string[] | undefined): string {
+    return (trackers ?? []).join('\n');
   }
 
   function submit(event: SubmitEvent) {
@@ -411,6 +429,7 @@
       {@render FieldRow('Forwarded Port', 'Router listen port.', forwardingPortControl)}
     {/if}
     {@render FieldRow('Peer Watchdog', 'Peer connection diagnostics.', peerWatchdogControl)}
+    {@render FieldRow('Additional trackers', 'Advanced tracker list.', additionalTrackersControl, 'Advanced tracker list.', true)}
     <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
       <div class="text-sm text-muted-foreground">
         {hasActiveTorrentJobs ? 'Active torrents are running. Clearing the cache may require a restart.' : 'Clear stale torrent engine session data.'}
@@ -739,9 +758,19 @@
 
 {#snippet peerWatchdogControl()}
   <select bind:value={formData.torrent.peerConnectionWatchdogMode} onchange={() => updateTorrentSettings({ peerConnectionWatchdogMode: formData.torrent.peerConnectionWatchdogMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
-    <option value="recover">Recover</option>
+    <option value="assist">Safe assist</option>
     <option value="diagnose">Diagnose only</option>
+    <option value="recover">Refresh peers</option>
   </select>
+{/snippet}
+
+{#snippet additionalTrackersControl()}
+  <textarea
+    bind:value={customTrackersInput}
+    rows="4"
+    spellcheck="false"
+    class="min-h-24 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+  ></textarea>
 {/snippet}
 
 {#snippet themeControl()}

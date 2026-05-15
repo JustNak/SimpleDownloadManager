@@ -46,7 +46,7 @@ export type BulkHosterAccelerationMode = 'safe' | 'off';
 export type HosterPreflightStatus = 'unchecked' | 'checking' | 'ready' | 'failed';
 export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
-export type TorrentPeerConnectionWatchdogMode = 'diagnose' | 'recover';
+export type TorrentPeerConnectionWatchdogMode = 'assist' | 'diagnose' | 'recover';
 export type QueueRowSize = 'compact' | 'small' | 'medium' | 'large' | 'damn';
 
 export interface DownloadSource {
@@ -162,6 +162,7 @@ export interface TorrentSettings {
   portForwardingEnabled: boolean;
   portForwardingPort: number;
   peerConnectionWatchdogMode: TorrentPeerConnectionWatchdogMode;
+  customTrackers: string[];
 }
 
 export interface BulkDownloadSettings {
@@ -251,6 +252,15 @@ export interface TorrentRuntimeDiagnostics {
   peerConnectionAttempts: number;
   sessionDownloadSpeed: number;
   sessionUploadSpeed: number;
+  dhtNodes?: number;
+  dhtWarmupAgeMillis?: number;
+  peerCacheHits?: number;
+  millisecondsSinceMetadataResolved?: number;
+  firstLivePeerMillis?: number;
+  firstContributingPeerMillis?: number;
+  firstPayloadMillis?: number;
+  dhtNodesAtMetadataResolved?: number;
+  lastPeerDiscoveryAssistAction?: string;
   averagePieceDownloadMillis?: number;
   listenPort?: number;
   listenerFallback: boolean;

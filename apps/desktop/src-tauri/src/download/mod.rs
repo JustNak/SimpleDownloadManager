@@ -6,12 +6,12 @@ use crate::state::{
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode,
     BulkHosterAccelerationMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory,
-    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TransferKind,
+    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
+    TransferKind,
 };
 use crate::torrent::{
-    cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, prepare_torrent_source,
-    PreparedTorrentSource, TorrentAddSessionOutcome, TorrentEngine, TorrentSourceKind,
-    TrackerFirstMetadataOutcome,
+    cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, PreparedTorrentSource,
+    TorrentAddSessionOutcome, TorrentEngine, TorrentSourceKind, TrackerFirstMetadataOutcome,
 };
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
@@ -156,6 +156,9 @@ const TORRENT_LOW_THROUGHPUT_REPORT_INTERVAL: Duration = Duration::from_secs(60)
 const TORRENT_RESTORE_RECHECK_IDLE_WINDOW: Duration = Duration::from_secs(45);
 const TORRENT_RESTORE_STALLED_IDLE_WINDOW: Duration = Duration::from_secs(90);
 const TORRENT_PEER_WATCHDOG_WINDOW: Duration = Duration::from_secs(60);
+const TORRENT_PEER_STARTUP_ASSIST_WINDOW: Duration = Duration::from_secs(5);
+const TORRENT_PEER_LOW_RAMP_ASSIST_WINDOW: Duration = Duration::from_secs(20);
+const TORRENT_PEER_STARTUP_ACTIVE_CONNECTION_LIMIT: u32 = 2;
 const TORRENT_METADATA_TIMEOUT: Duration = Duration::from_secs(20);
 const TORRENT_METADATA_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 pub const EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS: u64 = 60;
@@ -217,6 +220,20 @@ async fn run_scheduler_once<A: DownloadUi>(app: &A, state: &SharedState) {
         Ok(claim) => {
             if let Some(snapshot) = &claim.snapshot {
                 emit_snapshot(app, snapshot);
+            }
+
+            if let Err(error) = torrent_engine_manager()
+                .warm_for_torrent_tasks(state, &claim.tasks)
+                .await
+            {
+                let _ = state
+                    .record_diagnostic_event(
+                        DiagnosticLevel::Warning,
+                        "torrent",
+                        format!("Could not warm torrent engine before starting queued torrent work: {error}"),
+                        None,
+                    )
+                    .await;
             }
 
             for task in claim.tasks {
@@ -393,6 +410,24 @@ impl TorrentEngineManager {
         let mut slot = self.slot.lock().await;
         *slot = None;
         Ok(true)
+    }
+
+    async fn warm_for_torrent_tasks(
+        &self,
+        state: &SharedState,
+        tasks: &[crate::state::DownloadTask],
+    ) -> Result<bool, String> {
+        if !tasks
+            .iter()
+            .any(|task| task.transfer_kind == TransferKind::Torrent)
+        {
+            return Ok(false);
+        }
+        let settings = state.settings().await;
+        if !settings.torrent.enabled {
+            return Ok(false);
+        }
+        self.get_or_create(state).await.map(|_| true)
     }
 
     async fn current_engine(&self) -> Option<Arc<TorrentEngine>> {

@@ -193,7 +193,14 @@ impl SharedState {
                 job.retry_attempts = retry_attempts;
                 job.speed = 0;
                 job.eta = 0;
-                format!("Retry attempt {retry_attempts} for {}", job.filename)
+                if job.transfer_kind == TransferKind::Torrent {
+                    format!(
+                        "Torrent retry attempt {retry_attempts} for {}",
+                        job.filename
+                    )
+                } else {
+                    format!("Retry attempt {retry_attempts} for {}", job.filename)
+                }
             };
             state.push_diagnostic_event(
                 DiagnosticLevel::Warning,

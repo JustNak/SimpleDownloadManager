@@ -47,6 +47,33 @@ export function formatDiagnosticsReport(diagnostics: DiagnosticsSnapshot): strin
       lines.push(`  Not Needed Peers: ${torrentDiagnostics.notNeededPeers}`);
       lines.push(`  Session Download Speed: ${torrentDiagnostics.sessionDownloadSpeed} B/s`);
       lines.push(`  Session Upload Speed: ${torrentDiagnostics.sessionUploadSpeed} B/s`);
+      if (typeof torrentDiagnostics.dhtNodes === 'number') {
+        lines.push(`  DHT Nodes: ${torrentDiagnostics.dhtNodes}`);
+      }
+      if (typeof torrentDiagnostics.dhtWarmupAgeMillis === 'number') {
+        lines.push(`  DHT Warmup Age: ${torrentDiagnostics.dhtWarmupAgeMillis} ms`);
+      }
+      if (typeof torrentDiagnostics.peerCacheHits === 'number') {
+        lines.push(`  Peer Cache Hits: ${torrentDiagnostics.peerCacheHits}`);
+      }
+      if (typeof torrentDiagnostics.millisecondsSinceMetadataResolved === 'number') {
+        lines.push(`  Since Metadata Resolved: ${torrentDiagnostics.millisecondsSinceMetadataResolved} ms`);
+      }
+      if (typeof torrentDiagnostics.firstLivePeerMillis === 'number') {
+        lines.push(`  First Live Peer: ${torrentDiagnostics.firstLivePeerMillis} ms`);
+      }
+      if (typeof torrentDiagnostics.firstContributingPeerMillis === 'number') {
+        lines.push(`  First Contributing Peer: ${torrentDiagnostics.firstContributingPeerMillis} ms`);
+      }
+      if (typeof torrentDiagnostics.firstPayloadMillis === 'number') {
+        lines.push(`  First Payload: ${torrentDiagnostics.firstPayloadMillis} ms`);
+      }
+      if (typeof torrentDiagnostics.dhtNodesAtMetadataResolved === 'number') {
+        lines.push(`  DHT Nodes At Metadata: ${torrentDiagnostics.dhtNodesAtMetadataResolved}`);
+      }
+      if (torrentDiagnostics.lastPeerDiscoveryAssistAction) {
+        lines.push(`  Last Peer Assist: ${torrentDiagnostics.lastPeerDiscoveryAssistAction}`);
+      }
       if (typeof torrentDiagnostics.averagePieceDownloadMillis === 'number') {
         lines.push(`  Average Piece Download: ${torrentDiagnostics.averagePieceDownloadMillis} ms`);
       }

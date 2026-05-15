@@ -36,6 +36,15 @@ const diagnostics: DiagnosticsSnapshot = {
         peerConnectionAttempts: 7,
         sessionDownloadSpeed: 65_536,
         sessionUploadSpeed: 8_192,
+        dhtNodes: 88,
+        dhtWarmupAgeMillis: 12_500,
+        peerCacheHits: 4,
+        millisecondsSinceMetadataResolved: 15_000,
+        firstLivePeerMillis: 3_000,
+        firstContributingPeerMillis: 6_000,
+        firstPayloadMillis: 8_000,
+        dhtNodesAtMetadataResolved: 80,
+        lastPeerDiscoveryAssistAction: 'startup_refresh_peers',
         listenPort: 42000,
         listenerFallback: true,
         peerSamples: [
@@ -58,6 +67,13 @@ const diagnostics: DiagnosticsSnapshot = {
       message: 'Completed file.zip',
       jobId: 'job_1',
     },
+    {
+      timestamp: 1_714_000_001_000,
+      level: 'info',
+      category: 'torrent',
+      message: 'Torrent metadata source summary: original 1, custom 2, bundled 12, protocols http=2, https=3, udp=10, DHT nodes 80, tracker-first initial peer handoff enabled',
+      jobId: 'job_torrent',
+    },
   ],
 };
 
@@ -71,5 +87,15 @@ assert.match(report, /Live Peers: 12/, 'torrent diagnostics should include live 
 assert.match(report, /Peer Error Events: 1/, 'torrent diagnostics should include peer error event totals');
 assert.match(report, /Peers With Errors: 1/, 'torrent diagnostics should include errored peer totals');
 assert.match(report, /Peer Connection Attempts: 7/, 'torrent diagnostics should include peer connection attempts');
+assert.match(report, /DHT Nodes: 88/, 'torrent diagnostics should include DHT routing table size when available');
+assert.match(report, /DHT Warmup Age: 12500 ms/, 'torrent diagnostics should include DHT warmup age when available');
+assert.match(report, /Peer Cache Hits: 4/, 'torrent diagnostics should include peer cache hit count when available');
+assert.match(report, /Since Metadata Resolved: 15000 ms/, 'torrent diagnostics should include elapsed time after metadata resolution');
+assert.match(report, /First Live Peer: 3000 ms/, 'torrent diagnostics should include first live peer timing');
+assert.match(report, /First Contributing Peer: 6000 ms/, 'torrent diagnostics should include first contributing peer timing');
+assert.match(report, /First Payload: 8000 ms/, 'torrent diagnostics should include first payload timing');
+assert.match(report, /DHT Nodes At Metadata: 80/, 'torrent diagnostics should include DHT nodes at metadata resolution');
+assert.match(report, /Last Peer Assist: startup_refresh_peers/, 'torrent diagnostics should include the last safe peer assist action');
 assert.match(report, /Listen Port: 42000 \(fallback active\)/, 'torrent diagnostics should include listener fallback state');
 assert.match(report, /Peer Samples:/, 'torrent diagnostics should include bounded peer samples');
+assert.match(report, /Torrent metadata source summary: original 1, custom 2, bundled 12, protocols http=2, https=3, udp=10/, 'diagnostics report should render tracker source summaries from torrent events');
