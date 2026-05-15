@@ -1,7 +1,7 @@
 import type { Settings } from './types';
 
 export type NotificationSoundKind = 'success' | 'failed' | 'update';
-export type NotificationSoundSettings = Pick<Settings, 'notificationsEnabled' | 'notificationSoundsEnabled'>;
+export type NotificationSoundSettings = Pick<Settings, 'notificationSoundsEnabled'>;
 
 export interface NotificationAudio {
   currentTime: number;
@@ -18,7 +18,7 @@ export const NOTIFICATION_SOUND_ASSETS: Record<NotificationSoundKind, string> = 
 };
 
 export function canPlayNotificationSound(settings: NotificationSoundSettings): boolean {
-  return settings.notificationsEnabled && settings.notificationSoundsEnabled;
+  return settings.notificationSoundsEnabled;
 }
 
 export function createNotificationSoundPlayer(
@@ -41,6 +41,12 @@ export function createNotificationSoundPlayer(
   }
 
   return {
+    preload(): void {
+      for (const kind of Object.keys(NOTIFICATION_SOUND_ASSETS) as NotificationSoundKind[]) {
+        audioFor(kind);
+      }
+    },
+
     play(kind: NotificationSoundKind, settings: NotificationSoundSettings): boolean {
       if (!canPlayNotificationSound(settings)) return false;
 

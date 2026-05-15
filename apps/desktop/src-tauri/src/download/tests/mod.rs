@@ -15,12 +15,12 @@ mod scenarios;
 
 #[path = "bulk_finalize.rs"]
 mod bulk_finalize;
-#[path = "torrent_metadata.rs"]
-mod torrent_metadata;
-#[path = "segmented.rs"]
-mod segmented;
 #[path = "http.rs"]
 mod http;
+#[path = "segmented.rs"]
+mod segmented;
+#[path = "torrent_metadata.rs"]
+mod torrent_metadata;
 
 static SEGMENT_HOST_SCORE_TEST_LOCK: TestOnceLock<TestMutex<()>> = TestOnceLock::new();
 
@@ -287,8 +287,23 @@ fn adaptive_admission_for_test(
     job.target_path = root.join("download.bin").display().to_string();
     let state = SharedState::for_tests(test_storage_path(name), vec![job]);
     let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let stable_workers = if admitted_workers > profile.soft_max_segments {
+        profile.soft_max_segments
+    } else {
+        admitted_workers
+    }
+    .max(1);
+    let seeded_stable_samples = if admitted_workers >= profile.soft_max_segments && previous_bps > 0
+    {
+        2
+    } else {
+        0
+    };
     let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
     progress.store_segment_bytes(0, current_downloaded);
+    let host = name.replace('_', "-");
+    let url = format!("https://{host}.example.test/file.bin");
+    let pressure_key = format!("https://{host}.example.test:443");
     let active_segments = Arc::new(Mutex::new((0_usize..active_count).collect::<HashSet<_>>()));
     let ramp_blocked = Arc::new(AtomicBool::new(false));
     let target_workers = Arc::new(AtomicUsize::new(admitted_workers));
@@ -317,8 +332,8 @@ fn adaptive_admission_for_test(
         state,
         client: download_client().unwrap(),
         job_id: name.into(),
-        url: "https://cdn.example.com/file.bin".into(),
-        segment_pressure_key: "https://cdn.example.com:443".into(),
+        url,
+        segment_pressure_key: pressure_key,
         handoff_auth: None,
         temp_path,
         total_bytes: 1024 * 1024 * 1024,
@@ -336,6 +351,7 @@ fn adaptive_admission_for_test(
         reconnects: Arc::new(SegmentReconnectTracker::default()),
         target_workers: target_workers.clone(),
         active_workers: Arc::new(AtomicUsize::new(admitted_workers)),
+        tail_lease_probe_cap: Arc::new(AtomicU64::new(0)),
     };
     let admission = AdaptiveSegmentAdmission {
         context,
@@ -350,6 +366,41 @@ fn adaptive_admission_for_test(
         last_ramp_total_bytes: AtomicU64::new(previous_downloaded),
         last_ramp_speed_bps: AtomicU64::new(previous_bps),
         regression_windows: AtomicUsize::new(0),
+        stable_workers: AtomicUsize::new(stable_workers),
+        stable_warmup_samples: AtomicUsize::new((seeded_stable_samples > 0) as usize),
+        stable_sample_count: AtomicUsize::new(seeded_stable_samples),
+        stable_sample_total_bps: AtomicU64::new(
+            (seeded_stable_samples > 0)
+                .then_some(previous_bps)
+                .unwrap_or(0),
+        ),
+        startup_probe_attempted: AtomicBool::new(false),
+        pending_startup_probe: AtomicBool::new(false),
+        startup_probe_trial_workers: AtomicUsize::new(0),
+        post_accept_guard_workers: AtomicUsize::new(0),
+        post_accept_guard_previous_workers: AtomicUsize::new(0),
+        post_accept_guard_previous_baseline_bps: AtomicU64::new(0),
+        post_accept_guard_accepted_average_bps: AtomicU64::new(0),
+        post_accept_guard_healthy_windows_remaining: AtomicUsize::new(0),
+        post_accept_guard_bad_sample_count: AtomicUsize::new(0),
+        trigger_sample_count: AtomicUsize::new(0),
+        trigger_target_workers: AtomicUsize::new(0),
+        trigger_required_bps: AtomicU64::new(0),
+        trial_workers: AtomicUsize::new(
+            (admitted_workers > stable_workers)
+                .then_some(admitted_workers)
+                .unwrap_or(0),
+        ),
+        trial_baseline_bps: AtomicU64::new(
+            (admitted_workers > stable_workers)
+                .then_some(previous_bps)
+                .unwrap_or(0),
+        ),
+        trial_sample_count: AtomicUsize::new(0),
+        trial_sample_total_bps: AtomicU64::new(0),
+        pending_trial_baseline_bps: AtomicU64::new(0),
+        pending_trial_trigger_bps: AtomicU64::new(0),
+        rejected_trial_caps: Mutex::new(HashMap::new()),
     };
 
     (root, ramp_blocked, target_workers, admission)

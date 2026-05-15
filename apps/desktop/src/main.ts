@@ -1,9 +1,16 @@
 import { mount, type Component } from 'svelte';
 import './app.css';
+import { revealPopupWhenReady } from './popupReady';
 
 type RootComponent = Component;
 
 const windowMode = new URLSearchParams(window.location.search).get('window');
+const POPUP_WINDOW_MODES = new Set([
+  'download-prompt',
+  'download-progress',
+  'torrent-progress',
+  'batch-progress',
+]);
 
 async function resolveRootComponent(): Promise<RootComponent> {
   if (windowMode === 'download-prompt') {
@@ -22,11 +29,40 @@ async function resolveRootComponent(): Promise<RootComponent> {
   return (await import('./App.svelte')).default;
 }
 
-void resolveRootComponent().then((RootComponent) => {
+void start();
+
+async function start() {
   const target = document.getElementById('root');
   if (!target) {
     throw new Error('Root element was not found.');
   }
 
-  mount(RootComponent, { target });
-});
+  if (isPopupRoute()) {
+    document.documentElement.classList.add('popup-window');
+  }
+
+  try {
+    const RootComponent = await resolveRootComponent();
+    mount(RootComponent, { target });
+  } catch (error) {
+    if (!isPopupRoute()) {
+      throw error;
+    }
+    console.error('Failed to load popup window.', error);
+    renderPopupLoadFailure(target);
+    await revealPopupWhenReady();
+  }
+}
+
+function isPopupRoute(): boolean {
+  return windowMode !== null && POPUP_WINDOW_MODES.has(windowMode);
+}
+
+function renderPopupLoadFailure(target: HTMLElement) {
+  target.innerHTML = `
+    <div class="app-window popup-load-failure" role="alert">
+      <div class="popup-load-failure-title">Popup failed to load</div>
+      <div class="popup-load-failure-message">Close this window and try again.</div>
+    </div>
+  `;
+}

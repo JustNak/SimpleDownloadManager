@@ -29,8 +29,8 @@ assert.equal(settings.notificationSoundsEnabled, true, 'custom notification soun
 assert.equal(canPlayNotificationSound(settings), true, 'sound playback should be enabled when notifications and sounds are both enabled');
 assert.equal(
   canPlayNotificationSound({ ...settings, notificationsEnabled: false }),
-  false,
-  'sound playback should stop when desktop notifications are disabled',
+  true,
+  'sound playback should remain enabled when desktop notifications are disabled',
 );
 assert.equal(
   canPlayNotificationSound({ ...settings, notificationSoundsEnabled: false }),
@@ -39,14 +39,26 @@ assert.equal(
 );
 
 const playedSources: string[] = [];
-const player = createNotificationSoundPlayer((src) => ({
-  currentTime: 0,
-  preload: '',
-  play: () => {
-    playedSources.push(src);
-    return Promise.resolve();
-  },
-}));
+const createdSources: string[] = [];
+const player = createNotificationSoundPlayer((src) => {
+  createdSources.push(src);
+  return {
+    currentTime: 0,
+    preload: '',
+    play: () => {
+      playedSources.push(src);
+      return Promise.resolve();
+    },
+  };
+});
+
+player.preload();
+assert.deepEqual(
+  [...createdSources].sort(),
+  soundKinds.map((kind) => NOTIFICATION_SOUND_ASSETS[kind]).sort(),
+  'preloading notification sounds should create every bundled audio element',
+);
+assert.deepEqual(playedSources, [], 'preloading notification sounds should not attempt playback');
 
 assert.equal(player.play('failed', settings), true, 'enabled player should play failure sounds');
 assert.deepEqual(playedSources, [NOTIFICATION_SOUND_ASSETS.failed]);
@@ -70,3 +82,11 @@ assert.deepEqual(
   ],
   'update sound gate should only add one sound per version',
 );
+
+const backendSource = await import('node:fs/promises')
+  .then(({ readFile }) => readFile(new URL('../src/backend.ts', import.meta.url), 'utf8'));
+const rustEventsSource = await import('node:fs/promises')
+  .then(({ readFile }) => readFile(new URL('../src-tauri/src/commands/events.rs', import.meta.url), 'utf8'));
+
+assert.match(backendSource, /kind:\s*'success' \| 'failed' \| 'update'/, 'frontend notification sound event type should include the update sound kind');
+assert.match(rustEventsSource, /enum NotificationSoundKind \{[\s\S]*Success,[\s\S]*Failed,[\s\S]*Update,[\s\S]*\}/, 'Rust notification sound kind should stay in parity with frontend sound assets');

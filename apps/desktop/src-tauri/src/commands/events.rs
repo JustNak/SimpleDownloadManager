@@ -33,6 +33,7 @@ pub struct SettingsSnapshot {
 pub enum NotificationSoundKind {
     Success,
     Failed,
+    Update,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

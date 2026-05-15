@@ -40,6 +40,7 @@
   import { getErrorMessage } from './errors';
   import { applyAppearance } from './appearance';
   import { runPopupAction } from './popupActions';
+  import { revealPopupWhenReady } from './popupReady';
   import { createDefaultSettings } from './defaultSettings';
   import { getVirtualQueueWindow } from './queueVirtualization';
   import { detectMultipartArchivePart } from './bulkArchiveNaming';
@@ -119,6 +120,8 @@
         applySnapshotAppearance(snapshot);
         jobs = orderedBatchJobs(snapshot.context, snapshot.jobs);
       }
+      await revealPopupWhenReady();
+      if (disposed) return;
 
       const nextDispose = await subscribeToBatchProgressSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
@@ -133,7 +136,10 @@
     }
 
     void initialize().catch((error) => {
-      if (!disposed) errorMessage = getErrorMessage(error, 'Could not load batch progress.');
+      if (!disposed) {
+        errorMessage = getErrorMessage(error, 'Could not load batch progress.');
+        void revealPopupWhenReady();
+      }
     });
 
     return () => {

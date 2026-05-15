@@ -4,18 +4,18 @@ use crate::storage::{
     TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
 };
 
-#[path = "scheduler.rs"]
-mod scheduler;
+#[path = "destructive_cleanup.rs"]
+mod destructive_cleanup;
+#[path = "diagnostics.rs"]
+mod diagnostics;
 #[path = "enqueue_settings.rs"]
 mod enqueue_settings;
 #[path = "progress.rs"]
 mod progress;
+#[path = "scheduler.rs"]
+mod scheduler;
 #[path = "torrent.rs"]
 mod torrent;
-#[path = "diagnostics.rs"]
-mod diagnostics;
-#[path = "destructive_cleanup.rs"]
-mod destructive_cleanup;
 
 #[tokio::test]
 async fn reveal_completed_job_errors_when_file_is_missing_even_if_parent_exists() {

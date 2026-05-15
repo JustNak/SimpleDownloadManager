@@ -36,7 +36,7 @@ export interface SettingsSnapshot {
 }
 
 export interface NotificationSoundEvent {
-  kind: 'success' | 'failed';
+  kind: 'success' | 'failed' | 'update';
 }
 
 export type AddJobStatus = 'queued' | 'duplicate_existing_job';
@@ -113,6 +113,11 @@ export async function getBatchProgressSnapshot(batchId: string): Promise<BatchPr
 export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
   if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockSettingsSnapshot();
   return invokeCommand<SettingsSnapshot>('get_settings_snapshot');
+}
+
+export async function markPopupReady(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invokeCommand('mark_popup_ready');
 }
 
 export async function getDiagnostics(): Promise<DiagnosticsSnapshot> {

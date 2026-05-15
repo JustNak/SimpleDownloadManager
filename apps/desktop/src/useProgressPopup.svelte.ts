@@ -12,6 +12,7 @@ import {
   type ProgressSample,
 } from './downloadProgressMetrics';
 import { runPopupAction } from './popupActions';
+import { revealPopupWhenReady } from './popupReady';
 import type { DownloadJob, Settings, TransferKind } from './types';
 
 export type PopupActionRunner = (
@@ -75,6 +76,8 @@ export function useProgressPopup({ expectedTransferKind }: UseProgressPopupOptio
       if (disposed) return;
       applySnapshotAppearance(snapshot);
       applySnapshotJob(snapshot);
+      await revealPopupWhenReady();
+      if (disposed) return;
       const nextDispose = await subscribeToProgressJobSnapshot((nextSnapshot) => {
         applySnapshotAppearance(nextSnapshot);
         applySnapshotJob(nextSnapshot);

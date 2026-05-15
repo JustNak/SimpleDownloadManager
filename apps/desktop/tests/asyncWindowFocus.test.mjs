@@ -65,6 +65,20 @@ for (const signature of [
   );
 }
 
+for (const signature of [
+  'pub async fn show_download_prompt_window',
+  'pub async fn show_progress_window',
+  'pub async fn show_torrent_progress_window',
+  'pub async fn show_batch_progress_window',
+]) {
+  const body = bodyAfter(windowsSource, signature);
+  assert.doesNotMatch(
+    body,
+    /settings_sync|blocking_read|blocking_write/,
+    `${signature} must not call synchronous Tokio state accessors while opening popup webviews`,
+  );
+}
+
 assert.match(
   windowsSource,
   /pub async fn focus_main_window_async\(app:\s*&AppHandle\)/,
@@ -113,3 +127,28 @@ assert.match(
   /focus_job_in_main_window_async\(&worker_app,\s*&job\.id\)\.await/,
   'async test handoff duplicate prompt flow should await async selected-job focus',
 );
+
+for (const signature of [
+  'async fn complete_prompt_action',
+  'pub async fn open_progress_window',
+  'pub async fn open_batch_progress_window',
+  'pub async fn test_extension_handoff',
+]) {
+  const body = bodyAfter(commandsSource, signature);
+  assert.match(
+    body,
+    /show_(?:download_prompt_window|progress_window_for_transfer_kind|batch_progress_window)\([^;]+\.await/,
+    `${signature} should await async popup window creation`,
+  );
+}
+
+for (const signature of [
+  'async fn run_prompt_download',
+]) {
+  const body = bodyAfter(ipcSource, signature);
+  assert.match(
+    body,
+    /show_(?:download_prompt_window|progress_window_for_transfer_kind)\([^;]+\.await/,
+    `${signature} should await async popup window creation`,
+  );
+}

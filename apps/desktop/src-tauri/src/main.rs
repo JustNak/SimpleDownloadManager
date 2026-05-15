@@ -77,6 +77,7 @@ fn main() {
             commands::get_progress_job_snapshot,
             commands::get_batch_progress_snapshot,
             commands::get_settings_snapshot,
+            commands::mark_popup_ready,
             commands::get_diagnostics,
             commands::export_diagnostics_report,
             commands::add_job,

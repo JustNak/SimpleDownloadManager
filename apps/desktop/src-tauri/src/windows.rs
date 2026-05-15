@@ -1,10 +1,17 @@
 use crate::state::SharedState;
 use crate::storage::{Theme, TransferKind};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+use tauri::utils::config::Color;
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, Position,
-    Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+    Runtime, Size, Theme as TauriTheme, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
+#[cfg(windows)]
+use winreg::enums::HKEY_CURRENT_USER;
+#[cfg(windows)]
+use winreg::RegKey;
 
 pub const DOWNLOAD_PROMPT_WINDOW: &str = "download-prompt";
 pub const SELECT_JOB_EVENT: &str = "app://select-job";
@@ -12,6 +19,8 @@ const PROGRESS_WINDOW_PREFIX: &str = "download-progress-";
 const TORRENT_PROGRESS_WINDOW_PREFIX: &str = "torrent-progress-";
 const BATCH_PROGRESS_WINDOW_PREFIX: &str = "batch-progress-";
 const PROGRESS_WINDOW_STACK_OFFSET: f64 = 28.0;
+const POPUP_READY_TIMEOUT: Duration = Duration::from_millis(1500);
+const DEFAULT_POPUP_ACCENT_COLOR: &str = "#3b82f6";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PopupWindowPosition {
@@ -60,33 +69,44 @@ enum PopupRestoreFocus {
     Preserve,
 }
 
-pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
+#[derive(Debug, Clone)]
+struct PopupAppearanceQuery {
+    theme: Theme,
+    accent_color: String,
+    native_theme: TauriTheme,
+    background_color: Color,
+}
+
+pub async fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
         return show_existing_popup_window(&window, download_prompt_window_geometry());
     }
 
     let policy = download_prompt_window_policy();
     let geometry = download_prompt_window_geometry();
-    let url = popup_window_url(app, "download-prompt", &[]);
+    let appearance = popup_window_appearance_query(app).await;
+    let url = popup_window_url("download-prompt", &[], appearance.as_ref());
+    let popup_init_script =
+        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
 
-    WebviewWindowBuilder::new(
-        app,
-        DOWNLOAD_PROMPT_WINDOW,
-        WebviewUrl::App(url.into()),
-    )
-    .title("New download detected")
-    .inner_size(geometry.width, geometry.height)
-    .min_inner_size(geometry.min_width, geometry.min_height)
-    .max_inner_size(geometry.width, geometry.height)
-    .resizable(false)
-    .minimizable(policy.minimizable)
-    .maximizable(false)
-    .decorations(false)
-    .always_on_top(policy.always_on_top)
-    .center()
-    .build()
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    let builder =
+        WebviewWindowBuilder::new(app, DOWNLOAD_PROMPT_WINDOW, WebviewUrl::App(url.into()))
+            .title("New download detected")
+            .inner_size(geometry.width, geometry.height)
+            .min_inner_size(geometry.min_width, geometry.min_height)
+            .max_inner_size(geometry.width, geometry.height)
+            .resizable(false)
+            .minimizable(policy.minimizable)
+            .maximizable(false)
+            .decorations(false)
+            .always_on_top(policy.always_on_top)
+            .center()
+            .initialization_script(popup_init_script.clone())
+            .visible(false);
+    let builder = apply_popup_native_appearance(builder, appearance.as_ref());
+    let window = builder.build().map_err(|error| error.to_string())?;
+    schedule_popup_ready_timeout(&window, geometry);
+    Ok(())
 }
 
 pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
@@ -103,7 +123,7 @@ pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
     }
 }
 
-pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
+pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
         return show_existing_popup_window(&window, progress_window_geometry());
@@ -112,7 +132,14 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_position =
         current_download_prompt_position(app).or_else(last_download_prompt_position);
-    let url = popup_window_url(app, "download-progress", &[("jobId", job_id)]);
+    let appearance = popup_window_appearance_query(app).await;
+    let url = popup_window_url(
+        "download-progress",
+        &[("jobId", job_id)],
+        appearance.as_ref(),
+    );
+    let popup_init_script =
+        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
     let geometry = progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -125,7 +152,10 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
         .minimizable(policy.minimizable)
         .maximizable(false)
         .decorations(false)
-        .always_on_top(policy.always_on_top);
+        .always_on_top(policy.always_on_top)
+        .initialization_script(popup_init_script.clone())
+        .visible(false);
+    let builder = apply_popup_native_appearance(builder, appearance.as_ref());
 
     let builder =
         if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
@@ -134,23 +164,29 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
             builder.center()
         };
 
-    builder
-        .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let window = builder.build().map_err(|error| error.to_string())?;
+    schedule_popup_ready_timeout(&window, geometry);
+    Ok(())
 }
 
-pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
+pub async fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
     let label = torrent_progress_window_label(job_id);
     if let Some(window) = app.get_webview_window(&label) {
         return show_existing_popup_window(&window, torrent_progress_window_geometry());
     }
 
-    let url = popup_window_url(app, "torrent-progress", &[("jobId", job_id)]);
+    let appearance = popup_window_appearance_query(app).await;
+    let url = popup_window_url(
+        "torrent-progress",
+        &[("jobId", job_id)],
+        appearance.as_ref(),
+    );
+    let popup_init_script =
+        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
     let geometry = torrent_progress_window_geometry();
     let policy = progress_window_policy();
 
-    WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("Torrent session")
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(geometry.min_width, geometry.min_height)
@@ -161,23 +197,26 @@ pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(),
         .decorations(false)
         .always_on_top(policy.always_on_top)
         .center()
-        .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .initialization_script(popup_init_script.clone())
+        .visible(false);
+    let builder = apply_popup_native_appearance(builder, appearance.as_ref());
+    let window = builder.build().map_err(|error| error.to_string())?;
+    schedule_popup_ready_timeout(&window, geometry);
+    Ok(())
 }
 
-pub fn show_progress_window_for_transfer_kind(
+pub async fn show_progress_window_for_transfer_kind(
     app: &AppHandle,
     job_id: &str,
     transfer_kind: TransferKind,
 ) -> Result<(), String> {
     match transfer_kind {
-        TransferKind::Torrent => show_torrent_progress_window(app, job_id),
-        TransferKind::Http => show_progress_window(app, job_id),
+        TransferKind::Torrent => show_torrent_progress_window(app, job_id).await,
+        TransferKind::Http => show_progress_window(app, job_id).await,
     }
 }
 
-pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
+pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
     let label = batch_progress_window_label(batch_id);
     if let Some(window) = app.get_webview_window(&label) {
         return show_existing_popup_window(&window, batch_progress_window_geometry());
@@ -186,7 +225,14 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_position =
         current_download_prompt_position(app).or_else(last_download_prompt_position);
-    let url = popup_window_url(app, "batch-progress", &[("batchId", batch_id)]);
+    let appearance = popup_window_appearance_query(app).await;
+    let url = popup_window_url(
+        "batch-progress",
+        &[("batchId", batch_id)],
+        appearance.as_ref(),
+    );
+    let popup_init_script =
+        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
     let geometry = batch_progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -199,7 +245,10 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
         .minimizable(policy.minimizable)
         .maximizable(false)
         .decorations(false)
-        .always_on_top(policy.always_on_top);
+        .always_on_top(policy.always_on_top)
+        .initialization_script(popup_init_script.clone())
+        .visible(false);
+    let builder = apply_popup_native_appearance(builder, appearance.as_ref());
 
     let builder =
         if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
@@ -208,10 +257,9 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
             builder.center()
         };
 
-    builder
-        .build()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    let window = builder.build().map_err(|error| error.to_string())?;
+    schedule_popup_ready_timeout(&window, geometry);
+    Ok(())
 }
 
 pub fn focus_main_window(app: &AppHandle) {
@@ -274,27 +322,194 @@ pub fn handle_popup_window_event<R: Runtime>(window: &Window<R>, event: &WindowE
     repair_existing_popup_window(&webview_window, geometry, PopupRestoreFocus::Preserve);
 }
 
-fn popup_window_url(app: &AppHandle, window_mode: &str, params: &[(&str, &str)]) -> String {
+pub fn mark_popup_ready<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+    let Some(geometry) = popup_window_geometry_for_label(window.label()) else {
+        return Ok(());
+    };
+
+    reveal_popup_window(window, geometry)
+}
+
+async fn popup_window_appearance_query(app: &AppHandle) -> Option<PopupAppearanceQuery> {
+    let state = app
+        .try_state::<SharedState>()
+        .map(|state| state.inner().clone())?;
+    let settings = state.settings().await;
+    let native_theme = resolve_popup_native_theme(app, &settings.theme);
+    let background_color = popup_background_color(&settings.theme, native_theme);
+    Some(PopupAppearanceQuery {
+        theme: settings.theme,
+        accent_color: settings.accent_color,
+        native_theme,
+        background_color,
+    })
+}
+
+fn apply_popup_native_appearance<'a, R: Runtime, M: Manager<R>>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+    appearance: Option<&PopupAppearanceQuery>,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let Some(appearance) = appearance else {
+        return builder;
+    };
+
+    builder
+        .theme(Some(appearance.native_theme))
+        .background_color(appearance.background_color)
+}
+
+fn resolve_popup_native_theme(app: &AppHandle, theme: &Theme) -> TauriTheme {
+    match theme {
+        Theme::Light => TauriTheme::Light,
+        Theme::Dark | Theme::OledDark => TauriTheme::Dark,
+        Theme::System => resolve_system_native_theme(app),
+    }
+}
+
+fn resolve_system_native_theme(app: &AppHandle) -> TauriTheme {
+    app.webview_windows()
+        .values()
+        .find_map(|window| window.theme().ok())
+        .or_else(system_theme_from_registry)
+        .unwrap_or(TauriTheme::Light)
+}
+
+#[cfg(windows)]
+fn system_theme_from_registry() -> Option<TauriTheme> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+        .ok()?;
+    let uses_light_theme: u32 = key.get_value("AppsUseLightTheme").ok()?;
+    Some(if uses_light_theme == 0 {
+        TauriTheme::Dark
+    } else {
+        TauriTheme::Light
+    })
+}
+
+#[cfg(not(windows))]
+fn system_theme_from_registry() -> Option<TauriTheme> {
+    None
+}
+
+fn popup_background_color(theme: &Theme, native_theme: TauriTheme) -> Color {
+    match (theme, native_theme) {
+        (Theme::OledDark, _) => Color(0, 0, 0, 255),
+        (_, TauriTheme::Dark) => Color(18, 23, 31, 255),
+        _ => Color(250, 251, 253, 255),
+    }
+}
+
+fn popup_initialization_script(appearance: Option<&PopupAppearanceQuery>) -> Option<String> {
+    let appearance = appearance?;
+    let accent_color = normalize_popup_accent_color(&appearance.accent_color);
+    let accent_foreground = popup_accent_foreground(&accent_color);
+    let selected_color = format!("color-mix(in srgb, {accent_color} 16%, transparent)");
+    let primary_soft = format!("color-mix(in srgb, {accent_color} 12%, transparent)");
+    let is_dark = popup_theme_is_dark(&appearance.theme, appearance.native_theme);
+    let is_oled_dark = matches!(appearance.theme, Theme::OledDark);
+
+    Some(format!(
+        "(function(){{try{{var root=document.documentElement;root.classList.toggle('dark',{is_dark});root.classList.toggle('oled-dark',{is_oled_dark});root.style.setProperty('--color-primary',{accent});root.style.setProperty('--color-accent',{accent});root.style.setProperty('--color-ring',{accent});root.style.setProperty('--color-selected',{selected});root.style.setProperty('--color-primary-soft',{primary_soft});root.style.setProperty('--color-primary-foreground',{foreground});root.style.setProperty('--color-accent-foreground',{foreground});}}catch(error){{console.error('Failed to apply popup appearance bootstrap.',error);}}}})();",
+        is_dark = javascript_bool(is_dark),
+        is_oled_dark = javascript_bool(is_oled_dark),
+        accent = javascript_string_literal(&accent_color),
+        selected = javascript_string_literal(&selected_color),
+        primary_soft = javascript_string_literal(&primary_soft),
+        foreground = javascript_string_literal(accent_foreground),
+    ))
+}
+
+fn popup_theme_is_dark(theme: &Theme, native_theme: TauriTheme) -> bool {
+    match theme {
+        Theme::Light => false,
+        Theme::Dark | Theme::OledDark => true,
+        Theme::System => native_theme == TauriTheme::Dark,
+    }
+}
+
+fn normalize_popup_accent_color(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() == 7
+        && trimmed.starts_with('#')
+        && trimmed
+            .chars()
+            .skip(1)
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return trimmed.to_ascii_lowercase();
+    }
+
+    DEFAULT_POPUP_ACCENT_COLOR.to_string()
+}
+
+fn popup_accent_foreground(accent_color: &str) -> &'static str {
+    let Some((red, green, blue)) = parse_rgb_hex_color(accent_color) else {
+        return "#ffffff";
+    };
+
+    let luminance = 0.299 * f64::from(red) + 0.587 * f64::from(green) + 0.114 * f64::from(blue);
+    if luminance > 160.0 {
+        "#0f172a"
+    } else {
+        "#ffffff"
+    }
+}
+
+fn parse_rgb_hex_color(value: &str) -> Option<(u8, u8, u8)> {
+    if value.len() != 7 || !value.starts_with('#') {
+        return None;
+    }
+
+    let red = u8::from_str_radix(&value[1..3], 16).ok()?;
+    let green = u8::from_str_radix(&value[3..5], 16).ok()?;
+    let blue = u8::from_str_radix(&value[5..7], 16).ok()?;
+    Some((red, green, blue))
+}
+
+fn javascript_bool(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn javascript_string_literal(value: &str) -> String {
+    match serde_json::to_string(value) {
+        Ok(serialized) => serialized,
+        Err(_) => "\"\"".to_string(),
+    }
+}
+
+fn popup_window_url(
+    window_mode: &str,
+    params: &[(&str, &str)],
+    appearance: Option<&PopupAppearanceQuery>,
+) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair("window", window_mode);
     for (name, value) in params {
         query.append_pair(name, value);
     }
-    append_appearance_query_params(&mut query, app);
+    append_appearance_query_params(&mut query, appearance);
     format!("index.html?{}", query.finish())
 }
 
 fn append_appearance_query_params(
     query: &mut url::form_urlencoded::Serializer<'_, String>,
-    app: &AppHandle,
+    appearance: Option<&PopupAppearanceQuery>,
 ) {
-    let Some(state) = app.try_state::<SharedState>() else {
+    let Some(appearance) = appearance else {
         return;
     };
 
-    let settings = state.settings_sync();
-    query.append_pair("theme", theme_query_value(&settings.theme));
-    query.append_pair("accentColor", &settings.accent_color);
+    query.append_pair("theme", theme_query_value(&appearance.theme));
+    query.append_pair(
+        "accentColor",
+        &normalize_popup_accent_color(&appearance.accent_color),
+    );
 }
 
 fn theme_query_value(theme: &Theme) -> &'static str {
@@ -388,6 +603,44 @@ fn show_existing_popup_window(
     window.show().map_err(|error| error.to_string())?;
     repair_popup_window_bounds(window, geometry);
     window.set_focus().map_err(|error| error.to_string())
+}
+
+fn schedule_popup_ready_timeout<R: Runtime>(
+    window: &WebviewWindow<R>,
+    geometry: PopupWindowGeometry,
+) {
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(POPUP_READY_TIMEOUT).await;
+        match window.is_visible() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("failed to inspect popup visibility before timeout reveal: {error}")
+            }
+        }
+
+        if let Err(error) = reveal_popup_window(&window, geometry) {
+            eprintln!("failed to reveal popup window after readiness timeout: {error}");
+        }
+    });
+}
+
+fn reveal_popup_window<R: Runtime>(
+    window: &WebviewWindow<R>,
+    geometry: PopupWindowGeometry,
+) -> Result<(), String> {
+    let _ = window.unminimize();
+    window.show().map_err(|error| error.to_string())?;
+    repair_popup_window_bounds(window, geometry);
+    if should_focus_ready_popup(window.label()) {
+        window.set_focus().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn should_focus_ready_popup(label: &str) -> bool {
+    label == DOWNLOAD_PROMPT_WINDOW
 }
 
 fn repair_existing_popup_window<R: Runtime>(
@@ -752,5 +1005,48 @@ mod tests {
 
         assert!(policy.minimizable);
         assert!(!policy.always_on_top);
+    }
+
+    #[test]
+    fn popup_initialization_script_applies_dark_oled_and_accent() {
+        let appearance = super::PopupAppearanceQuery {
+            theme: crate::storage::Theme::OledDark,
+            accent_color: "#06b6d4".to_string(),
+            native_theme: tauri::Theme::Dark,
+            background_color: tauri::utils::config::Color(0, 0, 0, 255),
+        };
+
+        let script = match super::popup_initialization_script(Some(&appearance)) {
+            Some(script) => script,
+            None => panic!("popup initialization script should be generated"),
+        };
+
+        assert!(script.contains("document.documentElement"));
+        assert!(script.contains("classList.toggle('dark',true)"));
+        assert!(script.contains("classList.toggle('oled-dark',true)"));
+        assert!(script.contains("setProperty('--color-primary',\"#06b6d4\")"));
+        assert!(script.contains(
+            "setProperty('--color-selected',\"color-mix(in srgb, #06b6d4 16%, transparent)\")"
+        ));
+    }
+
+    #[test]
+    fn popup_initialization_script_sanitizes_accent_before_javascript() {
+        let appearance = super::PopupAppearanceQuery {
+            theme: crate::storage::Theme::System,
+            accent_color: "#06b6d4';window.__bad=true;//".to_string(),
+            native_theme: tauri::Theme::Dark,
+            background_color: tauri::utils::config::Color(18, 23, 31, 255),
+        };
+
+        let script = match super::popup_initialization_script(Some(&appearance)) {
+            Some(script) => script,
+            None => panic!("popup initialization script should be generated"),
+        };
+
+        assert!(!script.contains("window.__bad"));
+        assert!(script.contains("classList.toggle('dark',true)"));
+        assert!(script.contains("classList.toggle('oled-dark',false)"));
+        assert!(script.contains("setProperty('--color-primary',\"#3b82f6\")"));
     }
 }

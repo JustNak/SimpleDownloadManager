@@ -108,6 +108,25 @@ impl SegmentConnectionLeaseController {
         }
         next_segments
     }
+
+    pub(super) fn shrink_to(&self, desired_segments: usize) -> usize {
+        if desired_segments < 2 {
+            return self.current_segments();
+        }
+
+        let now = Instant::now();
+        let desired_cap = desired_segments.min(self.adaptive_cap).max(1);
+        let leases = segment_connection_leases();
+        let Ok(mut leases) = leases.lock() else {
+            return self.current_segments();
+        };
+        let Some(lease) = leases.get_mut(&self.guard.job_id) else {
+            return 0;
+        };
+        lease.segments = lease.segments.min(desired_cap);
+        lease.leased_at = now;
+        lease.segments
+    }
 }
 
 struct SegmentBudgetBroker;
@@ -265,12 +284,25 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
     let segment_pressure_key = segment_attempt
         .as_ref()
         .map(|attempt| segment_pressure_key_for_task(task, effective_url, attempt));
-    let profile = profile_for_effective_http_url_with_pressure_key_at(
-        performance_mode,
-        effective_url,
-        segment_pressure_key.as_deref(),
-        Instant::now(),
-    );
+    let profile = segment_attempt
+        .as_ref()
+        .map(|attempt| {
+            profile_for_segment_admission_at(
+                performance_mode,
+                effective_url,
+                segment_pressure_key.as_deref(),
+                attempt.admission,
+                Instant::now(),
+            )
+        })
+        .unwrap_or_else(|| {
+            profile_for_effective_http_url_with_pressure_key_at(
+                performance_mode,
+                effective_url,
+                segment_pressure_key.as_deref(),
+                Instant::now(),
+            )
+        });
     let mut segmented_client = if performance_mode == DownloadPerformanceMode::Fast {
         segmented_download_client()?
     } else {
@@ -1065,6 +1097,44 @@ impl DownloadAdmission {
             SegmentBudgetWaitAction::FallbackSingleStream
         }
     }
+
+    fn allows_normal_fast_startup_boost(self) -> bool {
+        matches!(
+            self.kind,
+            DownloadAdmissionKind::Normal | DownloadAdmissionKind::DirectBulk
+        )
+    }
+}
+
+pub(super) fn profile_for_segment_admission_at(
+    mode: DownloadPerformanceMode,
+    effective_url: &str,
+    pressure_key: Option<&str>,
+    admission: DownloadAdmission,
+    now: Instant,
+) -> DownloadPerformanceProfile {
+    let mut profile =
+        profile_for_effective_http_url_with_pressure_key_at(mode, effective_url, pressure_key, now);
+    if normal_fast_startup_boost_applies(mode, admission, profile) {
+        profile.initial_segments = profile.soft_max_segments;
+    }
+    profile
+}
+
+fn normal_fast_startup_boost_applies(
+    mode: DownloadPerformanceMode,
+    admission: DownloadAdmission,
+    profile: DownloadPerformanceProfile,
+) -> bool {
+    if mode != DownloadPerformanceMode::Fast || !admission.allows_normal_fast_startup_boost() {
+        return false;
+    }
+
+    let base = HttpTransferPolicy::for_mode(DownloadPerformanceMode::Fast).profile;
+    profile.initial_segments == base.initial_segments
+        && profile.soft_max_segments == base.soft_max_segments
+        && profile.max_segments == base.max_segments
+        && profile.initial_segments < profile.soft_max_segments
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

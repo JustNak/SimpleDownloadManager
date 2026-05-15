@@ -105,3 +105,7 @@ for (const file of [
 const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 assert.match(indexHtml, /<style>[\s\S]*--color-background[\s\S]*body[\s\S]*background-color:\s*var\(--color-background\)/, 'desktop shell should include boot theme CSS before Svelte loads');
 assert.match(indexHtml, /src="\/appearance-preload\.js"[\s\S]*src="\/src\/main\.ts"/, 'desktop shell should run appearance preload before the Svelte entry module');
+
+const appCss = readFileSync(new URL('../src/app.css', import.meta.url), 'utf8');
+assert.match(appCss, /@keyframes popup-window-enter[\s\S]*opacity[\s\S]*transform/, 'popup shells should have a lightweight themed entrance animation');
+assert.match(appCss, /@media \(prefers-reduced-motion: reduce\)[\s\S]*html\.popup-window\.popup-ready \.app-window[\s\S]*animation:\s*none/, 'popup entrance animation should respect reduced-motion preferences');

@@ -43,21 +43,27 @@ fn fast_profile_uses_fast_plus_initial_and_adaptive_segment_caps() {
 }
 
 #[test]
-fn fast_range_plan_uses_fast_plus_initial_fanout() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn fast_range_plan_uses_normal_fast_soft_cap_initial_fanout() {
+    let profile = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        "https://fast-startup-plan.example.test/downloads/game.rar",
+        None,
+        DownloadAdmission::normal(),
+        Instant::now(),
+    );
     let minimum_plan =
         plan_segmented_ranges(16 * 1024 * 1024, ResumeSupport::Supported, None, profile)
             .expect("fast mode should segment range-capable files at 16 MiB");
     let ramp_plan =
         plan_segmented_ranges(256 * 1024 * 1024, ResumeSupport::Supported, None, profile)
-            .expect("large fast downloads should immediately fan out across the fast initial cap");
+            .expect("large normal fast downloads should immediately fan out to the soft cap");
     let capped_plan =
         plan_segmented_ranges(1024 * 1024 * 1024, ResumeSupport::Supported, None, profile)
             .expect("large fast downloads should use capped segmented downloading");
 
     assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(ramp_plan.segments.len(), 16);
-    assert_eq!(capped_plan.segments.len(), 16);
+    assert_eq!(ramp_plan.segments.len(), 32);
+    assert_eq!(capped_plan.segments.len(), 32);
 }
 
 #[test]
@@ -92,6 +98,26 @@ fn fast_tail_lease_size_uses_remaining_byte_buckets() {
             performance_profile(DownloadPerformanceMode::Balanced)
         ),
         None
+    );
+}
+
+#[test]
+fn fast_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket() {
+    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let mib = 1024 * 1024;
+    let gib = 1024 * mib;
+
+    assert_eq!(
+        dynamic_segment_tail_lease_size(2 * gib, profile),
+        Some(32 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size_with_probe_cap(2 * gib, profile, Some(8 * mib)),
+        Some(8 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size_with_probe_cap(255 * mib, profile, Some(8 * mib)),
+        Some(mib)
     );
 }
 
@@ -410,80 +436,16 @@ fn dynamic_segment_queue_does_not_reassign_completed_spans() {
 }
 
 #[tokio::test]
-async fn adaptive_segment_admission_blocks_after_throughput_regression() {
-    let root = test_download_runtime_dir("adaptive-ramp-regression");
-    let temp_path = root.join("download.part");
-    let mut job = torrent_job("job_adaptive_regression", JobState::Downloading);
-    job.transfer_kind = TransferKind::Http;
-    job.torrent = None;
-    job.temp_path = temp_path.display().to_string();
-    job.target_path = root.join("download.bin").display().to_string();
-    let state = SharedState::for_tests(test_storage_path("adaptive-ramp-regression"), vec![job]);
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
-    progress.store_segment_bytes(0, 128 * 1024 * 1024);
-    let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
-    let ramp_blocked = Arc::new(AtomicBool::new(false));
-    let target_workers = Arc::new(AtomicUsize::new(32));
-    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
-        schema_version: default_segment_state_schema_version(),
-        total_bytes: 1024 * 1024 * 1024,
-        validators: EntityValidators::default(),
-        effective_url: None,
-        target_path: None,
-        temp_path: None,
-        last_verified_file_len: 0,
-        retry_generation: 0,
-        segments: (0_u64..96)
-            .map(|index| SegmentProgress {
-                index: index as usize,
-                range: ByteRange {
-                    start: index * 8 * 1024 * 1024,
-                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
-                },
-                downloaded_bytes: 0,
-                completed: false,
-            })
-            .collect(),
-    }));
-    let context = SegmentWorkerContext {
-        state,
-        client: download_client().unwrap(),
-        job_id: "job_adaptive_regression".into(),
-        url: "https://cdn.example.com/file.bin".into(),
-        segment_pressure_key: "https://cdn.example.com:443".into(),
-        handoff_auth: None,
-        temp_path,
-        total_bytes: 1024 * 1024 * 1024,
-        profile,
-        validators: EntityValidators::default(),
-        progress: progress.clone(),
-        metadata: metadata.clone(),
-        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
-        stop: Arc::new(AtomicBool::new(false)),
-        control_signal: WorkerControlSignal::default(),
-        ramp_blocked: ramp_blocked.clone(),
-        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
-        priority_throttle_enabled: false,
-        stall_timeout: None,
-        reconnects: Arc::new(SegmentReconnectTracker::default()),
-        target_workers: target_workers.clone(),
-        active_workers: Arc::new(AtomicUsize::new(32)),
-    };
-    let admission = AdaptiveSegmentAdmission {
-        context,
-        active_segments,
-        metadata,
-        progress,
-        admitted_workers: Arc::new(AtomicUsize::new(32)),
-        target_workers,
-        segment_lease: None,
-        queue_depth: 128,
-        min_split_size: 1024 * 1024,
-        last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
-        last_ramp_speed_bps: AtomicU64::new(64 * 1024 * 1024),
-        regression_windows: AtomicUsize::new(0),
-    };
+async fn adaptive_segment_admission_blocks_below_soft_cap_after_throughput_regression() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, _target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-regression",
+        28,
+        27,
+        120 * mib,
+        128 * mib,
+        64 * mib,
+    );
 
     assert!(!admission.can_admit_more().await);
     assert!(ramp_blocked.load(Ordering::Relaxed));
@@ -492,100 +454,157 @@ async fn adaptive_segment_admission_blocks_after_throughput_regression() {
 }
 
 #[tokio::test]
-async fn adaptive_segment_admission_blocks_after_moderate_throughput_regression() {
-    let root = test_download_runtime_dir("adaptive-ramp-moderate-regression");
-    let temp_path = root.join("download.part");
-    let mut job = torrent_job("job_adaptive_moderate_regression", JobState::Downloading);
-    job.transfer_kind = TransferKind::Http;
-    job.torrent = None;
-    job.temp_path = temp_path.display().to_string();
-    job.target_path = root.join("download.bin").display().to_string();
-    let state = SharedState::for_tests(
-        test_storage_path("adaptive-ramp-moderate-regression"),
-        vec![job],
+async fn adaptive_segment_admission_blocks_below_soft_cap_after_moderate_regression() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, _target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-moderate-regression",
+        28,
+        27,
+        120 * mib,
+        154 * mib,
+        40 * mib,
     );
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
-    progress.store_segment_bytes(0, 154 * 1024 * 1024);
-    let active_segments = Arc::new(Mutex::new((0_usize..31).collect::<HashSet<_>>()));
-    let ramp_blocked = Arc::new(AtomicBool::new(false));
-    let target_workers = Arc::new(AtomicUsize::new(32));
-    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
-        schema_version: default_segment_state_schema_version(),
-        total_bytes: 1024 * 1024 * 1024,
-        validators: EntityValidators::default(),
-        effective_url: None,
-        target_path: None,
-        temp_path: None,
-        last_verified_file_len: 0,
-        retry_generation: 0,
-        segments: (0_u64..96)
-            .map(|index| SegmentProgress {
-                index: index as usize,
-                range: ByteRange {
-                    start: index * 8 * 1024 * 1024,
-                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
-                },
-                downloaded_bytes: 0,
-                completed: false,
-            })
-            .collect(),
-    }));
-    let context = SegmentWorkerContext {
-        state,
-        client: download_client().unwrap(),
-        job_id: "job_adaptive_moderate_regression".into(),
-        url: "https://cdn.example.com/file.bin".into(),
-        segment_pressure_key: "https://cdn.example.com:443".into(),
-        handoff_auth: None,
-        temp_path,
-        total_bytes: 1024 * 1024 * 1024,
-        profile,
-        validators: EntityValidators::default(),
-        progress: progress.clone(),
-        metadata: metadata.clone(),
-        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
-        stop: Arc::new(AtomicBool::new(false)),
-        control_signal: WorkerControlSignal::default(),
-        ramp_blocked: ramp_blocked.clone(),
-        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
-        priority_throttle_enabled: false,
-        stall_timeout: None,
-        reconnects: Arc::new(SegmentReconnectTracker::default()),
-        target_workers: target_workers.clone(),
-        active_workers: Arc::new(AtomicUsize::new(32)),
-    };
-    let admission = AdaptiveSegmentAdmission {
-        context,
-        active_segments,
-        metadata,
-        progress,
-        admitted_workers: Arc::new(AtomicUsize::new(32)),
-        target_workers,
-        segment_lease: None,
-        queue_depth: 128,
-        min_split_size: 1024 * 1024,
-        last_ramp_total_bytes: AtomicU64::new(120 * 1024 * 1024),
-        last_ramp_speed_bps: AtomicU64::new(40 * 1024 * 1024),
-        regression_windows: AtomicUsize::new(0),
-    };
 
     assert!(!admission.can_admit_more().await);
     assert!(ramp_blocked.load(Ordering::Relaxed));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+fn seed_fast_stable_baseline(
+    admission: &AdaptiveSegmentAdmission,
+    workers: usize,
+    baseline_bps: u64,
+) {
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
+    admission.stable_workers.store(workers, Ordering::Relaxed);
+    admission.stable_warmup_samples.store(1, Ordering::Relaxed);
+    admission.stable_sample_count.store(2, Ordering::Relaxed);
+    admission
+        .stable_sample_total_bps
+        .store(baseline_bps, Ordering::Relaxed);
+    admission.trigger_sample_count.store(0, Ordering::Relaxed);
+    admission.trigger_target_workers.store(0, Ordering::Relaxed);
+    admission.trigger_required_bps.store(0, Ordering::Relaxed);
+}
+
+fn force_fast_trial(
+    admission: &AdaptiveSegmentAdmission,
+    stable_workers: usize,
+    trial_workers: usize,
+    baseline_bps: u64,
+) {
+    seed_fast_stable_baseline(admission, stable_workers, baseline_bps);
+    admission
+        .admitted_workers
+        .store(trial_workers, Ordering::Relaxed);
+    admission
+        .target_workers
+        .store(trial_workers, Ordering::Relaxed);
+    admission
+        .trial_workers
+        .store(trial_workers, Ordering::Relaxed);
+    admission
+        .trial_baseline_bps
+        .store(baseline_bps, Ordering::Relaxed);
+    admission.trial_sample_count.store(0, Ordering::Relaxed);
+    admission.trial_sample_total_bps.store(0, Ordering::Relaxed);
+}
+
+fn force_startup_fast_trial(admission: &AdaptiveSegmentAdmission, trial_workers: usize) {
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
+    admission
+        .startup_probe_trial_workers
+        .store(trial_workers, Ordering::Relaxed);
+}
+
+fn advance_fast_sample(admission: &AdaptiveSegmentAdmission, downloaded: &mut u64, bps: u64) {
+    *downloaded = downloaded.saturating_add(bps.saturating_mul(2));
+    admission.progress.store_segment_bytes(0, *downloaded);
+}
+
+#[tokio::test]
+async fn fast_adaptive_startup_probe_starts_on_first_nonzero_soft_cap_sample() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, mut admission) = adaptive_admission_for_test(
+        "adaptive-ramp-soft-cap-first-sample",
+        32,
+        31,
+        120 * mib,
+        208 * mib,
+        0,
+    );
+    admission.context.profile.initial_segments = 32;
+
+    assert!(admission.can_admit_more().await);
+    assert_eq!(admission.admit_worker_target().await, 36);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(
+        admission.last_ramp_speed_bps.load(Ordering::Relaxed),
+        44 * mib
+    );
+    assert!(admission.startup_probe_attempted.load(Ordering::Relaxed));
+    assert_eq!(admission.trial_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(
+        admission.trial_baseline_bps.load(Ordering::Relaxed),
+        44 * mib
+    );
+    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.stable_sample_total_bps.load(Ordering::Relaxed), 0);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_uses_stable_peak_baseline_after_warmup() {
+    let mib = 1024 * 1024;
+    let (root, _ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-soft-cap-warmup-safe-baseline",
+        32,
+        31,
+        0,
+        40 * mib,
+        0,
+    );
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 106 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 170 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        admission.stable_sample_total_bps.load(Ordering::Relaxed),
+        33 * mib
+    );
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]
 async fn fast_adaptive_sustain_holds_at_soft_cap_without_clear_improvement() {
+    let mib = 1024 * 1024;
     let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
         "adaptive-ramp-soft-cap-hold",
         32,
         31,
-        120 * 1024 * 1024,
-        204 * 1024 * 1024,
-        40 * 1024 * 1024,
+        120 * mib,
+        204 * mib,
+        40 * mib,
     );
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
 
     assert!(!admission.can_admit_more().await);
     assert!(!ramp_blocked.load(Ordering::Relaxed));
@@ -595,19 +614,427 @@ async fn fast_adaptive_sustain_holds_at_soft_cap_without_clear_improvement() {
 }
 
 #[tokio::test]
-async fn fast_adaptive_sustain_allows_peak_cap_after_clear_improvement() {
+async fn fast_adaptive_sustain_uses_baseline_before_testing_triggers() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) =
+        adaptive_admission_for_test("adaptive-ramp-soft-cap-two-samples", 32, 31, 0, 80 * mib, 0);
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 168 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 232 * mib);
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_does_not_trial_below_established_baseline_threshold() {
+    let mib = 1024 * 1024;
     let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-grow",
+        "adaptive-ramp-soft-cap-baseline-threshold",
         32,
         31,
-        120 * 1024 * 1024,
-        208 * 1024 * 1024,
-        40 * 1024 * 1024,
+        120 * mib,
+        183 * mib,
+        33 * mib,
     );
+    seed_fast_stable_baseline(&admission, 32, 33 * mib);
 
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_requires_two_consecutive_trigger_samples() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-soft-cap-trigger-samples",
+        32,
+        31,
+        120 * mib,
+        194 * mib,
+        33 * mib,
+    );
+    seed_fast_stable_baseline(&admission, 32, 33 * mib);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 268 * mib);
     assert!(admission.can_admit_more().await);
     assert!(!ramp_blocked.load(Ordering::Relaxed));
     assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_startup_probe_rolls_back_and_blocks_immediate_retry() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-probe-rollback",
+        36,
+        35,
+        120 * mib,
+        180 * mib,
+        44 * mib,
+    );
+    admission
+        .startup_probe_attempted
+        .store(true, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 32);
+
+    seed_fast_stable_baseline(&admission, 32, 44 * mib);
+    admission.progress.store_segment_bytes(0, 268 * mib);
+    assert!(!admission.can_admit_more().await);
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_startup_probe_accept_resets_accepted_cap_baseline_collection() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-probe-accept-resets-baseline",
+        36,
+        35,
+        120 * mib,
+        212 * mib,
+        42 * mib,
+    );
+    force_startup_fast_trial(&admission, 36);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 304 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(admission.stable_warmup_samples.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 0);
+    assert_eq!(admission.stable_sample_total_bps.load(Ordering::Relaxed), 0);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_after_startup_accept_requires_clean_baseline_before_next_cap() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-clean-baseline-before-40",
+        36,
+        35,
+        120 * mib,
+        212 * mib,
+        42 * mib,
+    );
+    force_startup_fast_trial(&admission, 36);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 304 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    admission.progress.store_segment_bytes(0, 384 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 464 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 544 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 632 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 720 * mib);
+    assert!(admission.can_admit_more().await);
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(
+        admission.stable_sample_total_bps.load(Ordering::Relaxed),
+        40 * mib
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_rolls_back_failed_trial_without_backoff() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-trial-rollback",
+        36,
+        35,
+        120 * mib,
+        180 * mib,
+        44 * mib,
+    );
+
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
+    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 32);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_blocks_rejected_cap_immediate_retry() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-trial-retry-blocked",
+        40,
+        39,
+        120 * mib,
+        180 * mib,
+        34 * mib,
+    );
+    admission.stable_workers.store(36, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    seed_fast_stable_baseline(&admission, 36, 34 * mib);
+    admission.progress.store_segment_bytes(0, 258 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_retry_after_cooldown_requires_stronger_two_sample_trigger() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-trial-retry-strict-trigger",
+        40,
+        39,
+        120 * mib,
+        180 * mib,
+        34 * mib,
+    );
+    admission.stable_workers.store(36, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    seed_fast_stable_baseline(&admission, 36, 34 * mib);
+    let mut downloaded = 180 * mib;
+    for _ in 0..8 {
+        advance_fast_sample(&admission, &mut downloaded, 39 * mib);
+        assert!(!admission.can_admit_more().await);
+    }
+
+    advance_fast_sample(&admission, &mut downloaded, 39 * mib);
+    assert!(!admission.can_admit_more().await);
+    advance_fast_sample(&admission, &mut downloaded, 39 * mib);
+    assert!(admission.can_admit_more().await);
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_accepts_strong_trial_as_stable_cap() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-trial-accept",
+        36,
+        35,
+        120 * mib,
+        212 * mib,
+        42 * mib,
+    );
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 304 * mib);
+    assert!(!admission.can_admit_more().await);
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
+
+    admission.progress.store_segment_bytes(0, 408 * mib);
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 512 * mib);
+    assert!(admission.can_admit_more().await);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_accepted_cap_rolls_back_after_post_accept_regression() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-post-accept-rollback",
+        40,
+        39,
+        120 * mib,
+        204 * mib,
+        36 * mib,
+    );
+    force_fast_trial(&admission, 36, 40, 36 * mib);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 288 * mib);
+    assert!(!admission.can_admit_more().await);
+    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 40);
+    assert_eq!(
+        admission.post_accept_guard_workers.load(Ordering::Relaxed),
+        40
+    );
+
+    admission.progress.store_segment_bytes(0, 354 * mib);
+    assert!(!admission.can_admit_more().await);
+    assert_eq!(target_workers.load(Ordering::Relaxed), 40);
+    admission.progress.store_segment_bytes(0, 420 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
+    assert_eq!(
+        admission.post_accept_guard_workers.load(Ordering::Relaxed),
+        0
+    );
+    assert!(admission
+        .rejected_trial_caps
+        .lock()
+        .await
+        .get(&40)
+        .is_some_and(|rejected| rejected.cooldown_windows_remaining > 0));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_accepted_cap_guard_clears_after_healthy_windows() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-post-accept-guard-clears",
+        40,
+        39,
+        120 * mib,
+        204 * mib,
+        36 * mib,
+    );
+    force_fast_trial(&admission, 36, 40, 36 * mib);
+
+    assert!(!admission.can_admit_more().await);
+    admission.progress.store_segment_bytes(0, 288 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    let mut downloaded = 288 * mib;
+    for _ in 0..4 {
+        advance_fast_sample(&admission, &mut downloaded, 42 * mib);
+        assert!(!admission.can_admit_more().await);
+        assert_eq!(target_workers.load(Ordering::Relaxed), 40);
+    }
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 40);
+    assert_eq!(
+        admission.post_accept_guard_workers.load(Ordering::Relaxed),
+        0
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_startup_probe_excludes_non_normal_uncapped_profiles() {
+    let mib = 1024 * 1024;
+    let (protected_root, _blocked, protected_target, mut protected) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-protected-exclusion",
+        32,
+        31,
+        120 * mib,
+        208 * mib,
+        0,
+    );
+    protected.context.profile = performance_profile(DownloadPerformanceMode::Fast);
+
+    assert!(!protected.can_admit_more().await);
+    assert_eq!(protected_target.load(Ordering::Relaxed), 32);
+
+    let (gofile_root, _blocked, gofile_target, mut gofile) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-gofile-exclusion",
+        16,
+        15,
+        120 * mib,
+        208 * mib,
+        0,
+    );
+    gofile.context.profile = profile_for_effective_http_url(
+        DownloadPerformanceMode::Fast,
+        "https://store1.gofile.io/download/web/file-token/game.rar",
+    );
+
+    assert!(!gofile.can_admit_more().await);
+    assert_eq!(gofile_target.load(Ordering::Relaxed), 16);
+
+    let (capped_root, _blocked, capped_target, mut capped) = adaptive_admission_for_test(
+        "adaptive-ramp-startup-pressure-exclusion",
+        8,
+        7,
+        120 * mib,
+        208 * mib,
+        0,
+    );
+    let mut capped_profile = performance_profile(DownloadPerformanceMode::Fast);
+    capped_profile.initial_segments = 8;
+    capped_profile.soft_max_segments = 8;
+    capped_profile.max_segments = 8;
+    capped.context.profile = capped_profile;
+
+    assert!(!capped.can_admit_more().await);
+    assert_eq!(capped_target.load(Ordering::Relaxed), 8);
+
+    let _ = tokio::fs::remove_dir_all(protected_root).await;
+    let _ = tokio::fs::remove_dir_all(gofile_root).await;
+    let _ = tokio::fs::remove_dir_all(capped_root).await;
+}
+
+#[tokio::test]
+async fn fast_adaptive_sustain_repeated_rejected_cap_extends_cooldown() {
+    let mib = 1024 * 1024;
+    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
+        "adaptive-ramp-trial-repeat-reject",
+        40,
+        39,
+        120 * mib,
+        180 * mib,
+        34 * mib,
+    );
+    admission.stable_workers.store(36, Ordering::Relaxed);
+
+    assert!(!admission.can_admit_more().await);
+    force_fast_trial(&admission, 36, 40, 34 * mib);
+    admission
+        .last_ramp_total_bytes
+        .store(220 * mib, Ordering::Relaxed);
+    admission.progress.store_segment_bytes(0, 280 * mib);
+    assert!(!admission.can_admit_more().await);
+
+    seed_fast_stable_baseline(&admission, 36, 34 * mib);
+    let mut downloaded = 280 * mib;
+    for _ in 0..8 {
+        advance_fast_sample(&admission, &mut downloaded, 39 * mib);
+        assert!(!admission.can_admit_more().await);
+    }
+
+    assert!(!ramp_blocked.load(Ordering::Relaxed));
+    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
 
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -1160,6 +1587,39 @@ fn rolling_speed_smoothing_avoids_one_sample_collapse() {
 }
 
 #[test]
+fn segmented_progress_zero_byte_ticks_do_not_dilute_first_displayed_speed() {
+    let mut speed = RollingSpeed::with_alpha(1.0);
+    let first_tick = Instant::now();
+    let mut sample_started = first_tick - Duration::from_secs(2);
+
+    assert_eq!(
+        record_segmented_progress_speed_sample(
+            &mut speed,
+            &mut sample_started,
+            0,
+            first_tick,
+            false,
+        ),
+        None
+    );
+
+    let second_tick = first_tick + Duration::from_millis(750);
+    let displayed = record_segmented_progress_speed_sample(
+        &mut speed,
+        &mut sample_started,
+        750 * 1024,
+        second_tick,
+        false,
+    )
+    .expect("non-zero sample should emit a displayed speed");
+
+    assert!(
+        displayed >= 950 * 1024,
+        "first non-zero sample should use the recent reporting interval, got {displayed} B/s"
+    );
+}
+
+#[test]
 fn segmented_progress_counters_track_totals_without_shared_mutex() {
     let counters = SegmentedProgressCounters::new(vec![10, 20, 0]);
 
@@ -1436,6 +1896,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         reconnects: Arc::new(SegmentReconnectTracker::default()),
         target_workers: Arc::new(AtomicUsize::new(1)),
         active_workers: Arc::new(AtomicUsize::new(1)),
+        tail_lease_probe_cap: Arc::new(AtomicU64::new(0)),
     };
 
     let outcome = download_segment_worker(context, segment).await.unwrap();
@@ -1546,6 +2007,49 @@ fn fast_profile_uses_adaptive_sustain_defaults() {
 }
 
 #[test]
+fn normal_and_direct_fast_profiles_start_at_soft_cap() {
+    let now = Instant::now();
+    let url = "https://fast-startup-profile.example.test/downloads/game.rar";
+
+    let normal = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        None,
+        DownloadAdmission::normal(),
+        now,
+    );
+    let direct = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        None,
+        DownloadAdmission::direct_bulk(),
+        now,
+    );
+
+    assert_eq!(normal.initial_segments, 32);
+    assert_eq!(normal.soft_max_segments, 32);
+    assert_eq!(normal.max_segments, 64);
+    assert_eq!(direct.initial_segments, 32);
+    assert_eq!(direct.soft_max_segments, 32);
+    assert_eq!(direct.max_segments, 64);
+}
+
+#[test]
+fn protected_hoster_fast_profile_does_not_receive_normal_startup_boost() {
+    let profile = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        "https://s1.datanodes.to/d/abc123/file.rar",
+        None,
+        DownloadAdmission::protected_hoster_bulk(),
+        Instant::now(),
+    );
+
+    assert_eq!(profile.initial_segments, 16);
+    assert_eq!(profile.soft_max_segments, 32);
+    assert_eq!(profile.max_segments, 64);
+}
+
+#[test]
 fn gofile_fast_profile_uses_conservative_direct_cap() {
     let profile = profile_for_effective_http_url(
         DownloadPerformanceMode::Fast,
@@ -1556,6 +2060,21 @@ fn gofile_fast_profile_uses_conservative_direct_cap() {
     assert_eq!(profile.soft_max_segments, 16);
     assert_eq!(profile.max_segments, 16);
     assert_eq!(profile.adaptive_ramp_step, 4);
+}
+
+#[test]
+fn gofile_fast_profile_does_not_receive_normal_startup_boost() {
+    let profile = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        "https://store1.gofile.io/download/web/file-token/BeamNG-drive-SteamRIP.com.rar",
+        None,
+        DownloadAdmission::normal(),
+        Instant::now(),
+    );
+
+    assert_eq!(profile.initial_segments, 8);
+    assert_eq!(profile.soft_max_segments, 16);
+    assert_eq!(profile.max_segments, 16);
 }
 
 #[test]
@@ -1624,6 +2143,17 @@ fn segment_pressure_requires_repeated_429_before_capping_fast_profile() {
     assert_eq!(capped.initial_segments, 8);
     assert_eq!(capped.soft_max_segments, 8);
     assert_eq!(capped.max_segments, 8);
+
+    let capped_admission_profile = profile_for_segment_admission_at(
+        DownloadPerformanceMode::Fast,
+        url,
+        Some(key),
+        DownloadAdmission::normal(),
+        now + Duration::from_secs(4),
+    );
+    assert_eq!(capped_admission_profile.initial_segments, 8);
+    assert_eq!(capped_admission_profile.soft_max_segments, 8);
+    assert_eq!(capped_admission_profile.max_segments, 8);
 }
 
 #[test]

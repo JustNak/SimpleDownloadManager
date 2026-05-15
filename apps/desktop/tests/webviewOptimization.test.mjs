@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const mainSource = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const appSource = await readFile(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const backendSource = await readFile(new URL('../src/backend.ts', import.meta.url), 'utf8');
+const popupReadySource = await readFile(new URL('../src/popupReady.ts', import.meta.url), 'utf8').catch(() => '');
 const batchProgressSource = await readFile(new URL('../src/batchProgress.ts', import.meta.url), 'utf8');
 const progressPopupSource = await readFile(new URL('../src/useProgressPopup.svelte.ts', import.meta.url), 'utf8');
 const batchPopupSource = await readFile(new URL('../src/BatchProgressWindow.svelte', import.meta.url), 'utf8');
@@ -54,6 +55,10 @@ assert.match(backendSource, /applyDownloadUpdateBatch/, 'backend should expose a
 assert.match(backendSource, /app:\/\/progress-job-snapshot/, 'backend should define a lightweight progress job event');
 assert.match(backendSource, /app:\/\/batch-progress-snapshot/, 'backend should define a lightweight batch progress event');
 assert.match(backendSource, /app:\/\/settings-snapshot/, 'backend should define a lightweight settings event');
+assert.match(backendSource, /export async function markPopupReady\(\): Promise<void>[\s\S]*invokeCommand\('mark_popup_ready'\)/, 'backend should expose a narrow popup-ready command without a state snapshot');
+assert.match(popupReadySource, /import \{ tick \} from 'svelte'/, 'popup readiness helper should wait for Svelte DOM flush');
+assert.match(popupReadySource, /import \{ markPopupReady \} from '\.\/backend'/, 'popup readiness helper should own the native ready command call');
+assert.match(popupReadySource, /await tick\(\)[\s\S]*requestAnimationFrame[\s\S]*await markPopupReady\(\)[\s\S]*classList\.add\('popup-ready'\)/, 'popup readiness helper should reveal after a DOM flush and a browser paint');
 assert.doesNotMatch(backendSource, /^import\s+\*\s+as\s+previewBackend\s+from\s+['"]\.\/backendPreview['"]/m, 'backend should not eagerly import browser-preview mocks into production webview chunks');
 assert.match(backendSource, /import\(['"]\.\/backendPreview['"]\)/, 'backend should lazy-load browser-preview mocks only when preview mode is active');
 assert.match(batchProgressSource, /export function createStoredProgressBatchContext/, 'batch progress should provide a lightweight stored-context helper outside preview mocks');
@@ -70,6 +75,28 @@ assert.match(progressPopupSource, /const nextDispose = await subscribeToProgress
 assert.match(batchPopupSource, /const nextDispose = await subscribeToBatchProgressSnapshot[\s\S]*if \(disposed\) \{[\s\S]*void nextDispose\(\);[\s\S]*return;[\s\S]*dispose = nextDispose/, 'batch popup should immediately release late async subscriptions after teardown');
 assert.match(promptSource, /const nextPromptDispose = await subscribeToDownloadPromptChanged[\s\S]*if \(disposed\) \{[\s\S]*void nextPromptDispose\(\);[\s\S]*return;[\s\S]*promptDispose = nextPromptDispose/, 'download prompt should immediately release late prompt subscriptions after teardown');
 assert.equal(tauriConfig.build.removeUnusedCommands, true, 'Tauri should prune unused commands during build');
+
+assert.match(mainSource, /const POPUP_WINDOW_MODES = new Set\(\[[\s\S]*download-prompt[\s\S]*download-progress[\s\S]*torrent-progress[\s\S]*batch-progress[\s\S]*\]\)/, 'main entry should identify popup-only routes for readiness gating');
+assert.doesNotMatch(mainSource, /finally \{[\s\S]*signalPopupReady\(\);[\s\S]*\}/, 'main route should not reveal successful popup mounts before their initial snapshots apply theme');
+assert.doesNotMatch(mainSource, /markPopupReady\(\)[\s\S]*document\.documentElement\.classList\.add\('popup-ready'\)/, 'main route should not own normal popup readiness');
+assert.match(mainSource, /catch \(error\)[\s\S]*renderPopupLoadFailure\(target\);[\s\S]*await revealPopupWhenReady\(\);/, 'popup route import or mount failures should still reveal the themed fallback shell');
+assert.match(mainSource, /function renderPopupLoadFailure[\s\S]*Popup failed to load[\s\S]*popup-load-failure/, 'popup route import or mount failures should render a themed fallback shell');
+
+assert.match(
+  progressPopupSource,
+  /import \{ revealPopupWhenReady \} from '\.\/popupReady'[\s\S]*applySnapshotAppearance\(snapshot\);[\s\S]*applySnapshotJob\(snapshot\);[\s\S]*await revealPopupWhenReady\(\);[\s\S]*const nextDispose = await subscribeToProgressJobSnapshot/,
+  'single progress popups should reveal only after initial snapshot appearance and job state are applied',
+);
+assert.match(
+  batchPopupSource,
+  /import \{ revealPopupWhenReady \} from '\.\/popupReady'[\s\S]*applySnapshotAppearance\(snapshot\);[\s\S]*jobs = orderedBatchJobs\(snapshot\.context, snapshot\.jobs\);[\s\S]*await revealPopupWhenReady\(\);[\s\S]*const nextDispose = await subscribeToBatchProgressSnapshot/,
+  'batch progress popup should reveal only after initial snapshot appearance and job state are applied',
+);
+assert.match(
+  promptSource,
+  /import \{ revealPopupWhenReady \} from '\.\/popupReady'[\s\S]*applySnapshotAppearance\(settingsSnapshot\);[\s\S]*prompt = currentPrompt;[\s\S]*await revealPopupWhenReady\(\);[\s\S]*const nextPromptDispose = await subscribeToDownloadPromptChanged/,
+  'download prompt should reveal only after initial settings appearance and prompt state are applied',
+);
 
 for (const rustSymbol of ['ProgressJobSnapshot', 'BatchProgressSnapshot', 'SettingsSnapshot', 'DownloadUpdateBatch']) {
   assert.match(commandsRuntimeSource, new RegExp(`struct ${rustSymbol}`), `commands should define ${rustSymbol}`);

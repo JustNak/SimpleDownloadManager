@@ -186,6 +186,7 @@ pub(super) struct SegmentWorkerContext {
     pub(super) reconnects: Arc<SegmentReconnectTracker>,
     pub(super) target_workers: Arc<AtomicUsize>,
     pub(super) active_workers: Arc<AtomicUsize>,
+    pub(super) tail_lease_probe_cap: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]

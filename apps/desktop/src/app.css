@@ -144,6 +144,34 @@
     border-radius: 10px;
   }
 
+  html.popup-window.popup-ready .app-window {
+    animation: popup-window-enter 120ms ease-out both;
+  }
+
+  .popup-load-failure {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-background);
+    color: var(--color-foreground);
+    box-shadow: 0 18px 50px color-mix(in oklch, var(--color-foreground) 20%, transparent);
+  }
+
+  .popup-load-failure-title {
+    font-size: 0.875rem;
+    font-weight: 650;
+  }
+
+  .popup-load-failure-message {
+    color: var(--color-muted-foreground);
+    font-size: 0.75rem;
+  }
+
   .download-sidebar,
   .command-bar,
   .status-bar,
@@ -155,6 +183,24 @@
 
   .file-badge {
     box-shadow: 0 1px 1px color-mix(in oklch, var(--color-foreground) 8%, transparent);
+  }
+}
+
+@keyframes popup-window-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.popup-window.popup-ready .app-window {
+    animation: none;
   }
 }
 

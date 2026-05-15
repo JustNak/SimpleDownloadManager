@@ -10,7 +10,7 @@ use crate::storage::{
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -998,6 +998,7 @@ fn segment_context(
         reconnects: Arc::new(SegmentReconnectTracker::default()),
         target_workers: Arc::new(AtomicUsize::new(1)),
         active_workers: Arc::new(AtomicUsize::new(1)),
+        tail_lease_probe_cap: Arc::new(AtomicU64::new(0)),
     }
 }
 

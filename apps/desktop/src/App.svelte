@@ -180,6 +180,7 @@
   let addDownloadModalLoad: Promise<void> | null = null;
   const notificationSoundPlayer = createNotificationSoundPlayer();
   const updateNotificationSoundGate = createUpdateNotificationSoundGate();
+  let notificationSoundsPreloaded = false;
 
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
@@ -214,6 +215,13 @@
   $effect(() => {
     let isMounted = true;
     const disposers: Array<() => void | Promise<void>> = [];
+    const preloadOnInteraction = () => preloadNotificationSounds();
+    window.addEventListener('pointerdown', preloadOnInteraction, { once: true, passive: true });
+    window.addEventListener('keydown', preloadOnInteraction, { once: true });
+    disposers.push(() => {
+      window.removeEventListener('pointerdown', preloadOnInteraction);
+      window.removeEventListener('keydown', preloadOnInteraction);
+    });
 
     async function initialize() {
       try {
@@ -225,6 +233,7 @@
         }
 
         applyDesktopSnapshot(initialData.snapshot);
+        preloadNotificationSounds();
         if (initialData.diagnostics) {
           lastDiagnosticsRefreshAt = Date.now();
           diagnostics = initialData.diagnostics;
@@ -300,6 +309,12 @@
       }
     };
   });
+
+  function preloadNotificationSounds() {
+    if (notificationSoundsPreloaded) return;
+    notificationSoundsPreloaded = true;
+    notificationSoundPlayer.preload();
+  }
 
   $effect(() => {
     if (!deferredStartupUpdateCheck || startupUpdateCheckStarted || bulkUpdateBlocker) return;

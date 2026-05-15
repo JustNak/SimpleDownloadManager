@@ -13,10 +13,24 @@ const FAST_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
 const FAST_TAIL_MIN_SEGMENTS: usize = 24;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
+const ADAPTIVE_STABLE_WARMUP_SAMPLE_TARGET: usize = 1;
+const ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET: usize = 2;
+const ADAPTIVE_TRIGGER_SAMPLE_TARGET: usize = 2;
+const ADAPTIVE_TRIAL_SAMPLE_TARGET: usize = 2;
 const ADAPTIVE_RAMP_MIN_THROUGHPUT_RETENTION_PERCENT: u64 = 90;
 const ADAPTIVE_RAMP_PEAK_MIN_IMPROVEMENT_PERCENT: u64 = 108;
+const ADAPTIVE_RETRY_BASELINE_IMPROVEMENT_PERCENT: u64 = 112;
+const ADAPTIVE_RETRY_REJECTED_BASELINE_PERCENT: u64 = 110;
+const ADAPTIVE_TRIAL_ACCEPT_IMPROVEMENT_PERCENT: u64 = 105;
+const ADAPTIVE_TRIAL_ROLLBACK_RETENTION_PERCENT: u64 = 95;
 const ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT: u64 = 88;
 const ADAPTIVE_RAMP_REGRESSION_WINDOW_LIMIT: usize = 2;
+const ADAPTIVE_RETRY_COOLDOWN_INITIAL_WINDOWS: usize = 8;
+const ADAPTIVE_RETRY_COOLDOWN_MAX_WINDOWS: usize = 32;
+const ADAPTIVE_POST_ACCEPT_GUARD_HEALTHY_WINDOWS: usize = 4;
+const ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT: usize = 2;
+const ADAPTIVE_POST_ACCEPT_ACCEPTED_RETENTION_PERCENT: u64 = 95;
+const FAST_TRIAL_TAIL_LEASE_CAP: u64 = FAST_TAIL_MEDIUM_LEASE_SIZE;
 const SEGMENT_RECONNECT_MAX_ATTEMPTS: u32 = 12;
 const SEGMENTED_FINALIZATION_SLOW_DIAGNOSTIC_THRESHOLD: Duration = Duration::from_secs(2);
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
@@ -305,6 +319,19 @@ pub(super) fn dynamic_segment_tail_lease_size(
     })
 }
 
+pub(super) fn dynamic_segment_tail_lease_size_with_probe_cap(
+    remaining_bytes: u64,
+    profile: DownloadPerformanceProfile,
+    probe_cap: Option<u64>,
+) -> Option<u64> {
+    let lease_size = dynamic_segment_tail_lease_size(remaining_bytes, profile)?;
+    Some(
+        probe_cap
+            .map(|cap| lease_size.min(cap.max(1)))
+            .unwrap_or(lease_size),
+    )
+}
+
 fn segment_remaining_bytes(segment: &SegmentProgress) -> u64 {
     if segment.completed {
         return 0;
@@ -493,10 +520,32 @@ fn fill_dynamic_segment_queue(
     min_split_size: u64,
     lease_profile: Option<DownloadPerformanceProfile>,
 ) -> bool {
+    fill_dynamic_segment_queue_with_probe_cap(
+        state,
+        active,
+        target_depth,
+        min_split_size,
+        lease_profile,
+        None,
+    )
+}
+
+fn fill_dynamic_segment_queue_with_probe_cap(
+    state: &mut SegmentedDownloadState,
+    active: &HashSet<usize>,
+    target_depth: usize,
+    min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
+    lease_probe_cap: Option<u64>,
+) -> bool {
     let mut changed = false;
     loop {
         if let Some(lease_size) = lease_profile.and_then(|profile| {
-            dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile)
+            dynamic_segment_tail_lease_size_with_probe_cap(
+                state_remaining_bytes(state),
+                profile,
+                lease_probe_cap,
+            )
         }) {
             if pending_lease_sized_segment_count(state, active, lease_size) >= target_depth {
                 break;
@@ -519,6 +568,7 @@ fn fill_dynamic_segment_queue(
     changed
 }
 
+#[cfg(test)]
 fn claim_largest_dynamic_segment(
     state: &mut SegmentedDownloadState,
     active: &mut HashSet<usize>,
@@ -526,10 +576,39 @@ fn claim_largest_dynamic_segment(
     min_split_size: u64,
     lease_profile: Option<DownloadPerformanceProfile>,
 ) -> (Option<SegmentProgress>, bool) {
-    let changed =
-        fill_dynamic_segment_queue(state, active, target_depth, min_split_size, lease_profile);
-    let lease_size = lease_profile
-        .and_then(|profile| dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile));
+    claim_largest_dynamic_segment_with_probe_cap(
+        state,
+        active,
+        target_depth,
+        min_split_size,
+        lease_profile,
+        None,
+    )
+}
+
+fn claim_largest_dynamic_segment_with_probe_cap(
+    state: &mut SegmentedDownloadState,
+    active: &mut HashSet<usize>,
+    target_depth: usize,
+    min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
+    lease_probe_cap: Option<u64>,
+) -> (Option<SegmentProgress>, bool) {
+    let changed = fill_dynamic_segment_queue_with_probe_cap(
+        state,
+        active,
+        target_depth,
+        min_split_size,
+        lease_profile,
+        lease_probe_cap,
+    );
+    let lease_size = lease_profile.and_then(|profile| {
+        dynamic_segment_tail_lease_size_with_probe_cap(
+            state_remaining_bytes(state),
+            profile,
+            lease_probe_cap,
+        )
+    });
     let position = lease_size
         .and_then(|max| largest_pending_segment_position_bounded(state, active, 1, Some(max)))
         .or_else(|| largest_pending_segment_position(state, active, 1));
@@ -585,6 +664,7 @@ pub(super) fn fill_dynamic_segment_queue_for_profile_tests(
     )
 }
 
+#[cfg(test)]
 pub(super) async fn claim_dynamic_segment_work(
     temp_path: &Path,
     metadata: &Arc<Mutex<SegmentedDownloadState>>,
@@ -593,14 +673,36 @@ pub(super) async fn claim_dynamic_segment_work(
     min_split_size: u64,
     lease_profile: Option<DownloadPerformanceProfile>,
 ) -> Result<Option<SegmentProgress>, DownloadError> {
+    claim_dynamic_segment_work_with_probe_cap(
+        temp_path,
+        metadata,
+        active,
+        target_depth,
+        min_split_size,
+        lease_profile,
+        None,
+    )
+    .await
+}
+
+async fn claim_dynamic_segment_work_with_probe_cap(
+    temp_path: &Path,
+    metadata: &Arc<Mutex<SegmentedDownloadState>>,
+    active: &Arc<Mutex<HashSet<usize>>>,
+    target_depth: usize,
+    min_split_size: u64,
+    lease_profile: Option<DownloadPerformanceProfile>,
+    lease_probe_cap: Option<u64>,
+) -> Result<Option<SegmentProgress>, DownloadError> {
     let mut active = active.lock().await;
     let mut metadata = metadata.lock().await;
-    let (segment, changed) = claim_largest_dynamic_segment(
+    let (segment, changed) = claim_largest_dynamic_segment_with_probe_cap(
         &mut metadata,
         &mut active,
         target_depth,
         min_split_size,
         lease_profile,
+        lease_probe_cap,
     );
     let _ = (temp_path, changed);
 
@@ -729,6 +831,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
     let admitted_workers = Arc::new(AtomicUsize::new(worker_count));
     let target_workers = Arc::new(AtomicUsize::new(worker_count));
     let active_workers = Arc::new(AtomicUsize::new(worker_count));
+    let tail_lease_probe_cap = Arc::new(AtomicU64::new(0));
     let reconnects = Arc::new(SegmentReconnectTracker::default());
     let planned_segments = worker_count.min(u32::MAX as usize) as u32;
     if let Some(message) =
@@ -804,6 +907,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         reconnects: reconnects.clone(),
         target_workers: target_workers.clone(),
         active_workers: active_workers.clone(),
+        tail_lease_probe_cap: tail_lease_probe_cap.clone(),
     };
 
     let mut handles = tokio::task::JoinSet::new();
@@ -831,6 +935,29 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         last_ramp_total_bytes: AtomicU64::new(initial_downloaded),
         last_ramp_speed_bps: AtomicU64::new(0),
         regression_windows: AtomicUsize::new(0),
+        stable_workers: AtomicUsize::new(worker_count),
+        stable_warmup_samples: AtomicUsize::new(0),
+        stable_sample_count: AtomicUsize::new(0),
+        stable_sample_total_bps: AtomicU64::new(0),
+        startup_probe_attempted: AtomicBool::new(false),
+        pending_startup_probe: AtomicBool::new(false),
+        startup_probe_trial_workers: AtomicUsize::new(0),
+        post_accept_guard_workers: AtomicUsize::new(0),
+        post_accept_guard_previous_workers: AtomicUsize::new(0),
+        post_accept_guard_previous_baseline_bps: AtomicU64::new(0),
+        post_accept_guard_accepted_average_bps: AtomicU64::new(0),
+        post_accept_guard_healthy_windows_remaining: AtomicUsize::new(0),
+        post_accept_guard_bad_sample_count: AtomicUsize::new(0),
+        trigger_sample_count: AtomicUsize::new(0),
+        trigger_target_workers: AtomicUsize::new(0),
+        trigger_required_bps: AtomicU64::new(0),
+        trial_workers: AtomicUsize::new(0),
+        trial_baseline_bps: AtomicU64::new(0),
+        trial_sample_count: AtomicUsize::new(0),
+        trial_sample_total_bps: AtomicU64::new(0),
+        pending_trial_baseline_bps: AtomicU64::new(0),
+        pending_trial_trigger_bps: AtomicU64::new(0),
+        rejected_trial_caps: Mutex::new(HashMap::new()),
     };
     let (worker_outcome, mut worker_error) =
         await_segment_workers_with_adaptive_ramp(handles, worker_stop, adaptive).await;
@@ -924,13 +1051,15 @@ pub(super) async fn download_dynamic_segment_worker(
             return Ok(DownloadOutcome::Paused);
         }
 
-        let Some(segment) = claim_dynamic_segment_work(
+        let lease_probe_cap = tail_lease_probe_cap(&context);
+        let Some(segment) = claim_dynamic_segment_work_with_probe_cap(
             &context.temp_path,
             &context.metadata,
             &active_segments,
             queue_depth,
             min_split_size,
             Some(context.profile),
+            lease_probe_cap,
         )
         .await?
         else {
@@ -1019,6 +1148,15 @@ pub(super) async fn download_dynamic_segment_worker(
             }
         }
     }
+}
+
+fn tail_lease_probe_cap(context: &SegmentWorkerContext) -> Option<u64> {
+    let cap = context.tail_lease_probe_cap.load(Ordering::Relaxed);
+    (cap > 0).then_some(cap)
+}
+
+fn format_bps_as_mib(bytes_per_second: u64) -> String {
+    format!("{:.1} MiB/s", bytes_per_second as f64 / 1024.0 / 1024.0)
 }
 
 struct ActiveSegmentWorkerGuard {
@@ -1600,17 +1738,15 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
 
         let stopping = stop.load(Ordering::Relaxed);
         let sample_bytes = progress.drain_sample_bytes();
-        if sample_bytes == 0 && !stopping {
+        let Some(speed) = record_segmented_progress_speed_sample(
+            &mut rolling_speed,
+            &mut sample_started,
+            sample_bytes,
+            Instant::now(),
+            stopping,
+        ) else {
             continue;
-        }
-
-        let elapsed = sample_started.elapsed();
-        let speed = if elapsed.as_secs_f64() > 0.0 {
-            rolling_speed.record_sample(sample_bytes, elapsed)
-        } else {
-            0
         };
-        sample_started = Instant::now();
 
         let downloaded_bytes = progress.total_downloaded();
         let should_persist = stopping || last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL;
@@ -1655,6 +1791,35 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
     Ok(())
 }
 
+pub(super) fn record_segmented_progress_speed_sample(
+    rolling_speed: &mut RollingSpeed,
+    sample_started: &mut Instant,
+    sample_bytes: u64,
+    now: Instant,
+    stopping: bool,
+) -> Option<u64> {
+    let elapsed = now.saturating_duration_since(*sample_started);
+    if sample_bytes == 0 && !stopping {
+        *sample_started = now;
+        return None;
+    }
+
+    let speed = if elapsed.as_secs_f64() > 0.0 {
+        rolling_speed.record_sample(sample_bytes, elapsed)
+    } else {
+        0
+    };
+    *sample_started = now;
+    Some(speed)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RejectedTrialCap {
+    pub(super) cooldown_windows_remaining: usize,
+    pub(super) next_cooldown_windows: usize,
+    pub(super) rejected_baseline_bps: u64,
+}
+
 pub(super) struct AdaptiveSegmentAdmission {
     pub(super) context: SegmentWorkerContext,
     pub(super) active_segments: Arc<Mutex<HashSet<usize>>>,
@@ -1668,16 +1833,40 @@ pub(super) struct AdaptiveSegmentAdmission {
     pub(super) last_ramp_total_bytes: AtomicU64,
     pub(super) last_ramp_speed_bps: AtomicU64,
     pub(super) regression_windows: AtomicUsize,
+    pub(super) stable_workers: AtomicUsize,
+    pub(super) stable_warmup_samples: AtomicUsize,
+    pub(super) stable_sample_count: AtomicUsize,
+    pub(super) stable_sample_total_bps: AtomicU64,
+    pub(super) startup_probe_attempted: AtomicBool,
+    pub(super) pending_startup_probe: AtomicBool,
+    pub(super) startup_probe_trial_workers: AtomicUsize,
+    pub(super) post_accept_guard_workers: AtomicUsize,
+    pub(super) post_accept_guard_previous_workers: AtomicUsize,
+    pub(super) post_accept_guard_previous_baseline_bps: AtomicU64,
+    pub(super) post_accept_guard_accepted_average_bps: AtomicU64,
+    pub(super) post_accept_guard_healthy_windows_remaining: AtomicUsize,
+    pub(super) post_accept_guard_bad_sample_count: AtomicUsize,
+    pub(super) trigger_sample_count: AtomicUsize,
+    pub(super) trigger_target_workers: AtomicUsize,
+    pub(super) trigger_required_bps: AtomicU64,
+    pub(super) trial_workers: AtomicUsize,
+    pub(super) trial_baseline_bps: AtomicU64,
+    pub(super) trial_sample_count: AtomicUsize,
+    pub(super) trial_sample_total_bps: AtomicU64,
+    pub(super) pending_trial_baseline_bps: AtomicU64,
+    pub(super) pending_trial_trigger_bps: AtomicU64,
+    pub(super) rejected_trial_caps: Mutex<HashMap<usize, RejectedTrialCap>>,
 }
 
 impl AdaptiveSegmentAdmission {
     pub(super) async fn can_admit_more(&self) -> bool {
         let profile = self.context.profile;
         let admitted = self.admitted_workers.load(Ordering::Relaxed);
+        let trial_active = self.is_trial_active(admitted);
         if profile.adaptive_ramp_step == 0
-            || admitted >= profile.max_segments
             || self.context.stop.load(Ordering::Relaxed)
             || self.context.ramp_blocked.load(Ordering::Relaxed)
+            || (admitted >= profile.max_segments && !trial_active)
         {
             return false;
         }
@@ -1715,6 +1904,14 @@ impl AdaptiveSegmentAdmission {
                 .as_secs_f64()
                 .max(0.001)) as u64;
         let previous_bps = self.last_ramp_speed_bps.swap(sample_bps, Ordering::Relaxed);
+        if admitted >= self.context.profile.soft_max_segments {
+            if !self.evaluate_post_soft_sample(admitted, sample_bps).await {
+                return false;
+            }
+            let metadata = self.metadata.lock().await;
+            return pending_segment_count(&metadata, &active) > 0;
+        }
+
         if previous_bps > 0 {
             if sample_bps.saturating_mul(100)
                 < previous_bps.saturating_mul(ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT)
@@ -1770,7 +1967,685 @@ impl AdaptiveSegmentAdmission {
         pending_segment_count(&metadata, &active) > 0
     }
 
-    async fn admit_worker_target(&self) -> usize {
+    async fn evaluate_post_soft_sample(&self, admitted: usize, sample_bps: u64) -> bool {
+        if self.is_trial_active(admitted) {
+            self.evaluate_trial_sample(admitted, sample_bps).await;
+            return false;
+        }
+
+        self.evaluate_stable_sample_for_trial(admitted, sample_bps)
+            .await
+    }
+
+    async fn evaluate_stable_sample_for_trial(&self, admitted: usize, sample_bps: u64) -> bool {
+        if self.startup_probe_can_start(admitted) {
+            return self
+                .evaluate_startup_probe_sample(admitted, sample_bps)
+                .await;
+        }
+
+        let post_accept_guard_active = self.post_accept_guard_active_for(admitted);
+        if post_accept_guard_active
+            && self
+                .evaluate_post_accept_guard_sample(admitted, sample_bps)
+                .await
+        {
+            return false;
+        }
+
+        let desired = self.next_trial_worker_target(admitted);
+        let cooldown_tick = self.tick_rejected_trial_cooldown(desired).await;
+
+        if self.stable_warmup_samples.load(Ordering::Relaxed) < ADAPTIVE_STABLE_WARMUP_SAMPLE_TARGET
+        {
+            self.stable_warmup_samples.fetch_add(1, Ordering::Relaxed);
+            self.stable_sample_count.store(0, Ordering::Relaxed);
+            self.stable_sample_total_bps.store(0, Ordering::Relaxed);
+            self.reset_trigger_sequence();
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast ignored warmup sample at {admitted} workers before baseline: sample {}.",
+                    format_bps_as_mib(sample_bps)
+                ),
+            )
+            .await;
+            return false;
+        }
+
+        let sample_count = self.stable_sample_count.load(Ordering::Relaxed);
+        if sample_count < ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET {
+            let new_count = self
+                .stable_sample_count
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            self.record_stable_baseline_sample(sample_bps);
+            self.reset_trigger_sequence();
+            let baseline_bps = self.stable_sample_total_bps.load(Ordering::Relaxed);
+            let message = if new_count >= ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET {
+                format!(
+                    "Adaptive Fast stable baseline established at {admitted} workers: baseline {} from {ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} stable samples after warmup.",
+                    format_bps_as_mib(baseline_bps)
+                )
+            } else {
+                format!(
+                    "Adaptive Fast stable baseline sample {new_count}/{ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} at {admitted} workers: sample {}.",
+                    format_bps_as_mib(sample_bps)
+                )
+            };
+            record_segment_worker_diagnostic(&self.context, DiagnosticLevel::Info, message).await;
+            return false;
+        }
+
+        let baseline_bps = self.stable_baseline_bps();
+        if baseline_bps == 0 || desired <= admitted {
+            self.reset_trigger_sequence();
+            return false;
+        }
+
+        if post_accept_guard_active {
+            self.reset_trigger_sequence();
+            return false;
+        }
+
+        if let Some((remaining_windows, rejected_baseline_bps)) = cooldown_tick {
+            self.reset_trigger_sequence();
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast blocked {desired}-worker retry after rollback; cooldown {remaining_windows} windows remaining (sample {}, baseline {}, rejected baseline {}).",
+                    format_bps_as_mib(sample_bps),
+                    format_bps_as_mib(baseline_bps),
+                    format_bps_as_mib(rejected_baseline_bps)
+                ),
+            )
+            .await;
+            return false;
+        }
+
+        let rejected_baseline_bps = self.rejected_baseline_for_target(desired).await;
+        let retrying_rejected_cap = rejected_baseline_bps > 0;
+        let required_bps = if retrying_rejected_cap {
+            Self::bps_threshold(baseline_bps, ADAPTIVE_RETRY_BASELINE_IMPROVEMENT_PERCENT).max(
+                Self::bps_threshold(
+                    rejected_baseline_bps,
+                    ADAPTIVE_RETRY_REJECTED_BASELINE_PERCENT,
+                ),
+            )
+        } else {
+            Self::bps_threshold(baseline_bps, ADAPTIVE_RAMP_PEAK_MIN_IMPROVEMENT_PERCENT)
+        };
+
+        if sample_bps < required_bps {
+            self.reset_trigger_sequence();
+            if retrying_rejected_cap {
+                record_segment_worker_diagnostic(
+                    &self.context,
+                    DiagnosticLevel::Info,
+                    format!(
+                        "Adaptive Fast stricter retry trigger for {desired} workers not met (sample {}, required {}, baseline {}, rejected baseline {}).",
+                        format_bps_as_mib(sample_bps),
+                        format_bps_as_mib(required_bps),
+                        format_bps_as_mib(baseline_bps),
+                        format_bps_as_mib(rejected_baseline_bps)
+                    ),
+                )
+                .await;
+            }
+            return false;
+        }
+
+        let trigger_count = self.advance_trigger_sequence(desired, required_bps);
+        let trigger_kind = if retrying_rejected_cap {
+            "retry trigger"
+        } else {
+            "trigger"
+        };
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            format!(
+                "Adaptive Fast {trigger_kind} sample {trigger_count}/{ADAPTIVE_TRIGGER_SAMPLE_TARGET} for {admitted}->{desired} workers (sample {}, required {}, baseline {}).",
+                format_bps_as_mib(sample_bps),
+                format_bps_as_mib(required_bps),
+                format_bps_as_mib(baseline_bps)
+            ),
+        )
+        .await;
+
+        if trigger_count < ADAPTIVE_TRIGGER_SAMPLE_TARGET {
+            return false;
+        }
+
+        self.pending_trial_baseline_bps
+            .store(baseline_bps, Ordering::Relaxed);
+        self.pending_trial_trigger_bps
+            .store(sample_bps, Ordering::Relaxed);
+        true
+    }
+
+    async fn evaluate_startup_probe_sample(&self, admitted: usize, sample_bps: u64) -> bool {
+        let desired = self.next_trial_worker_target(admitted);
+        if desired <= admitted {
+            return false;
+        }
+
+        self.pending_startup_probe.store(true, Ordering::Relaxed);
+        self.pending_trial_baseline_bps
+            .store(sample_bps, Ordering::Relaxed);
+        self.pending_trial_trigger_bps
+            .store(sample_bps, Ordering::Relaxed);
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            format!(
+                "Adaptive Fast startup sample at {admitted} workers: sample {}; probing {desired} workers immediately.",
+                format_bps_as_mib(sample_bps)
+            ),
+        )
+        .await;
+        true
+    }
+
+    async fn evaluate_trial_sample(&self, admitted: usize, sample_bps: u64) {
+        let stable = self.stable_worker_target(admitted);
+        let baseline_bps = self.trial_baseline_bps(admitted);
+        if baseline_bps > 0
+            && sample_bps.saturating_mul(100)
+                < baseline_bps.saturating_mul(ADAPTIVE_TRIAL_ROLLBACK_RETENTION_PERCENT)
+        {
+            self.rollback_trial(
+                stable,
+                admitted,
+                sample_bps,
+                baseline_bps,
+                "sample below 95% of baseline",
+            )
+            .await;
+            return;
+        }
+
+        let sample_count = self
+            .trial_sample_count
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let total_bps = self
+            .trial_sample_total_bps
+            .fetch_add(sample_bps, Ordering::Relaxed)
+            .saturating_add(sample_bps);
+        if sample_count < ADAPTIVE_TRIAL_SAMPLE_TARGET {
+            return;
+        }
+
+        let average_bps = total_bps / sample_count.max(1) as u64;
+        if baseline_bps == 0
+            || average_bps.saturating_mul(100)
+                >= baseline_bps.saturating_mul(ADAPTIVE_TRIAL_ACCEPT_IMPROVEMENT_PERCENT)
+        {
+            self.accept_trial(admitted, average_bps, baseline_bps).await;
+        } else {
+            self.rollback_trial(
+                stable,
+                admitted,
+                average_bps,
+                baseline_bps,
+                "average below 105% of baseline",
+            )
+            .await;
+        }
+    }
+
+    async fn evaluate_post_accept_guard_sample(&self, admitted: usize, sample_bps: u64) -> bool {
+        let previous_workers = self
+            .post_accept_guard_previous_workers
+            .load(Ordering::Relaxed)
+            .max(1)
+            .min(admitted.max(1));
+        let previous_baseline_bps = self
+            .post_accept_guard_previous_baseline_bps
+            .load(Ordering::Relaxed);
+        let accepted_average_bps = self
+            .post_accept_guard_accepted_average_bps
+            .load(Ordering::Relaxed);
+        let accepted_floor_bps = Self::bps_threshold(
+            accepted_average_bps,
+            ADAPTIVE_POST_ACCEPT_ACCEPTED_RETENTION_PERCENT,
+        );
+        let below_accepted_floor = accepted_average_bps > 0 && sample_bps < accepted_floor_bps;
+        let below_previous_baseline =
+            previous_baseline_bps > 0 && sample_bps < previous_baseline_bps;
+
+        if below_accepted_floor || below_previous_baseline {
+            let bad_samples = self
+                .post_accept_guard_bad_sample_count
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            if bad_samples >= ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT {
+                let reason = if below_previous_baseline {
+                    "sample below previous stable baseline"
+                } else {
+                    "sample below 95% of accepted average"
+                };
+                self.rollback_post_accept_guard(
+                    previous_workers,
+                    admitted,
+                    sample_bps,
+                    previous_baseline_bps,
+                    accepted_average_bps,
+                    reason,
+                )
+                .await;
+                return true;
+            }
+
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast post-accept guard sample {bad_samples}/{ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT} below threshold at {admitted} workers (sample {}, accepted average {}, previous baseline {}).",
+                    format_bps_as_mib(sample_bps),
+                    format_bps_as_mib(accepted_average_bps),
+                    format_bps_as_mib(previous_baseline_bps)
+                ),
+            )
+            .await;
+            return false;
+        }
+
+        self.post_accept_guard_bad_sample_count
+            .store(0, Ordering::Relaxed);
+        let remaining = self
+            .post_accept_guard_healthy_windows_remaining
+            .load(Ordering::Relaxed);
+        if remaining <= 1 {
+            self.clear_post_accept_guard();
+            record_segment_worker_diagnostic(
+                &self.context,
+                DiagnosticLevel::Info,
+                format!(
+                    "Adaptive Fast accepted {admitted}-worker cap after sustained post-accept guard samples (accepted average {}, previous baseline {}).",
+                    format_bps_as_mib(accepted_average_bps),
+                    format_bps_as_mib(previous_baseline_bps)
+                ),
+            )
+            .await;
+        } else {
+            self.post_accept_guard_healthy_windows_remaining
+                .store(remaining.saturating_sub(1), Ordering::Relaxed);
+        }
+        false
+    }
+
+    async fn rollback_post_accept_guard(
+        &self,
+        stable: usize,
+        admitted: usize,
+        sample_bps: u64,
+        previous_baseline_bps: u64,
+        accepted_average_bps: u64,
+        reason: &str,
+    ) {
+        let rejected_baseline_bps = accepted_average_bps.max(previous_baseline_bps);
+        let cooldown_windows = self
+            .record_rejected_trial_cap(admitted, rejected_baseline_bps)
+            .await;
+        if let Some(lease) = self.segment_lease.as_ref() {
+            let _ = lease.shrink_to(stable);
+        }
+        self.target_workers.store(stable, Ordering::Relaxed);
+        self.admitted_workers.store(stable, Ordering::Relaxed);
+        if previous_baseline_bps > 0 {
+            self.establish_stable_baseline(stable, previous_baseline_bps);
+        } else {
+            self.reset_stable_measurement(stable);
+        }
+        self.clear_post_accept_guard();
+        self.clear_trial_state();
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            format!(
+                "Adaptive Fast rolled back accepted {admitted}-worker cap to {stable} workers (sample {}, accepted average {}, previous baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                format_bps_as_mib(sample_bps),
+                format_bps_as_mib(accepted_average_bps),
+                format_bps_as_mib(previous_baseline_bps)
+            ),
+        )
+        .await;
+    }
+
+    fn is_trial_active(&self, admitted: usize) -> bool {
+        let trial_workers = self.trial_workers.load(Ordering::Relaxed);
+        let stable_workers = self.stable_worker_target(admitted);
+        trial_workers > 0 || admitted > stable_workers
+    }
+
+    fn stable_worker_target(&self, admitted: usize) -> usize {
+        let stable = self.stable_workers.load(Ordering::Relaxed);
+        if stable == 0 || stable > admitted {
+            admitted.min(self.context.profile.soft_max_segments).max(1)
+        } else {
+            stable.max(1)
+        }
+    }
+
+    fn stable_baseline_bps(&self) -> u64 {
+        if self.stable_sample_count.load(Ordering::Relaxed) < ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET {
+            return 0;
+        }
+        self.stable_sample_total_bps.load(Ordering::Relaxed)
+    }
+
+    fn post_accept_guard_active_for(&self, admitted: usize) -> bool {
+        self.post_accept_guard_workers.load(Ordering::Relaxed) == admitted
+            && self
+                .post_accept_guard_healthy_windows_remaining
+                .load(Ordering::Relaxed)
+                > 0
+    }
+
+    fn startup_probe_can_start(&self, admitted: usize) -> bool {
+        let profile = self.context.profile;
+        profile.adaptive_ramp_step > 0
+            && profile.initial_segments == profile.soft_max_segments
+            && profile.soft_max_segments < profile.max_segments
+            && admitted == profile.soft_max_segments
+            && !self.startup_probe_attempted.load(Ordering::Relaxed)
+            && !self.pending_startup_probe.load(Ordering::Relaxed)
+    }
+
+    fn record_stable_baseline_sample(&self, sample_bps: u64) {
+        let mut current = self.stable_sample_total_bps.load(Ordering::Relaxed);
+        while sample_bps > current {
+            match self.stable_sample_total_bps.compare_exchange_weak(
+                current,
+                sample_bps,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn next_trial_worker_target(&self, admitted: usize) -> usize {
+        admitted
+            .saturating_add(self.context.profile.adaptive_ramp_step)
+            .min(self.context.profile.max_segments)
+    }
+
+    fn bps_threshold(bps: u64, percent: u64) -> u64 {
+        bps.saturating_mul(percent).div_ceil(100)
+    }
+
+    fn reset_trigger_sequence(&self) {
+        self.trigger_sample_count.store(0, Ordering::Relaxed);
+        self.trigger_target_workers.store(0, Ordering::Relaxed);
+        self.trigger_required_bps.store(0, Ordering::Relaxed);
+        self.pending_trial_baseline_bps.store(0, Ordering::Relaxed);
+        self.pending_trial_trigger_bps.store(0, Ordering::Relaxed);
+    }
+
+    fn advance_trigger_sequence(&self, target_workers: usize, required_bps: u64) -> usize {
+        let previous_target = self.trigger_target_workers.load(Ordering::Relaxed);
+        let previous_required = self.trigger_required_bps.load(Ordering::Relaxed);
+        if previous_target != target_workers || previous_required != required_bps {
+            self.trigger_target_workers
+                .store(target_workers, Ordering::Relaxed);
+            self.trigger_required_bps
+                .store(required_bps, Ordering::Relaxed);
+            self.trigger_sample_count.store(1, Ordering::Relaxed);
+            1
+        } else {
+            self.trigger_sample_count
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1)
+        }
+    }
+
+    async fn tick_rejected_trial_cooldown(&self, target_workers: usize) -> Option<(usize, u64)> {
+        let mut rejected = self.rejected_trial_caps.lock().await;
+        let rejected_cap = rejected.get_mut(&target_workers)?;
+        if rejected_cap.cooldown_windows_remaining == 0 {
+            return None;
+        }
+        rejected_cap.cooldown_windows_remaining =
+            rejected_cap.cooldown_windows_remaining.saturating_sub(1);
+        Some((
+            rejected_cap.cooldown_windows_remaining,
+            rejected_cap.rejected_baseline_bps,
+        ))
+    }
+
+    async fn rejected_baseline_for_target(&self, target_workers: usize) -> u64 {
+        self.rejected_trial_caps
+            .lock()
+            .await
+            .get(&target_workers)
+            .map(|rejected| rejected.rejected_baseline_bps)
+            .unwrap_or(0)
+    }
+
+    fn trial_baseline_bps(&self, admitted: usize) -> u64 {
+        let trial_baseline = self.trial_baseline_bps.load(Ordering::Relaxed);
+        if trial_baseline > 0 {
+            return trial_baseline;
+        }
+        let stable_baseline = self.stable_baseline_bps();
+        if stable_baseline > 0 {
+            return stable_baseline;
+        }
+        if admitted > self.context.profile.soft_max_segments {
+            return self.last_ramp_speed_bps.load(Ordering::Relaxed);
+        }
+        0
+    }
+
+    async fn start_trial(&self, current: usize, admitted: usize) {
+        let baseline_bps = self.pending_trial_baseline_bps.swap(0, Ordering::Relaxed);
+        let trigger_bps = self.pending_trial_trigger_bps.swap(0, Ordering::Relaxed);
+        let startup_probe = self.pending_startup_probe.swap(false, Ordering::Relaxed);
+        if startup_probe {
+            self.startup_probe_attempted.store(true, Ordering::Relaxed);
+            self.startup_probe_trial_workers
+                .store(admitted, Ordering::Relaxed);
+        }
+        self.stable_workers.store(current.max(1), Ordering::Relaxed);
+        self.reset_trigger_sequence();
+        self.trial_workers.store(admitted, Ordering::Relaxed);
+        self.trial_baseline_bps
+            .store(baseline_bps, Ordering::Relaxed);
+        self.trial_sample_count.store(0, Ordering::Relaxed);
+        self.trial_sample_total_bps.store(0, Ordering::Relaxed);
+        self.context
+            .tail_lease_probe_cap
+            .store(FAST_TRIAL_TAIL_LEASE_CAP, Ordering::Relaxed);
+        let trial_label = if startup_probe {
+            "startup throughput probe"
+        } else {
+            "throughput trial"
+        };
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            format!(
+                "Adaptive Fast starting {trial_label} from {current} to {admitted} workers (baseline {}, trigger sample {}).",
+                format_bps_as_mib(baseline_bps),
+                format_bps_as_mib(trigger_bps)
+            ),
+        )
+        .await;
+    }
+
+    async fn accept_trial(&self, admitted: usize, average_bps: u64, baseline_bps: u64) {
+        let startup_probe = self.startup_probe_trial_workers.load(Ordering::Relaxed) == admitted;
+        let previous_stable = self.stable_worker_target(admitted);
+        if startup_probe {
+            self.reset_stable_measurement(admitted);
+        } else {
+            self.establish_stable_baseline(admitted, average_bps);
+        }
+        if previous_stable > self.context.profile.soft_max_segments && admitted > previous_stable {
+            self.start_post_accept_guard(admitted, previous_stable, baseline_bps, average_bps);
+        } else {
+            self.clear_post_accept_guard();
+        }
+        self.clear_trial_state();
+        self.rejected_trial_caps.lock().await.remove(&admitted);
+        record_segment_host_success(&self.context.url, admitted, Instant::now());
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            if startup_probe {
+                format!(
+                    "Adaptive Fast accepted {admitted}-worker startup probe (trial average {}, baseline {}).",
+                    format_bps_as_mib(average_bps),
+                    format_bps_as_mib(baseline_bps)
+                )
+            } else {
+                format!(
+                    "Adaptive Fast accepted {admitted}-worker trial (trial average {}, baseline {}).",
+                format_bps_as_mib(average_bps),
+                format_bps_as_mib(baseline_bps)
+                )
+            },
+        )
+        .await;
+    }
+
+    async fn rollback_trial(
+        &self,
+        stable: usize,
+        admitted: usize,
+        sample_bps: u64,
+        baseline_bps: u64,
+        reason: &str,
+    ) {
+        let stable = stable.max(1).min(admitted.max(1));
+        let startup_probe = self.startup_probe_trial_workers.load(Ordering::Relaxed) == admitted;
+        let cooldown_windows = self.record_rejected_trial_cap(admitted, baseline_bps).await;
+        if let Some(lease) = self.segment_lease.as_ref() {
+            let _ = lease.shrink_to(stable);
+        }
+        self.target_workers.store(stable, Ordering::Relaxed);
+        self.admitted_workers.store(stable, Ordering::Relaxed);
+        self.reset_stable_measurement(stable);
+        self.clear_post_accept_guard();
+        self.clear_trial_state();
+        record_segment_worker_diagnostic(
+            &self.context,
+            DiagnosticLevel::Info,
+            if startup_probe {
+                format!(
+                    "Adaptive Fast rolled back startup throughput probe from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                    format_bps_as_mib(sample_bps),
+                    format_bps_as_mib(baseline_bps)
+                )
+            } else {
+                format!(
+                    "Adaptive Fast rolled back throughput trial from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                format_bps_as_mib(sample_bps),
+                format_bps_as_mib(baseline_bps)
+                )
+            },
+        )
+        .await;
+    }
+
+    async fn record_rejected_trial_cap(&self, admitted: usize, baseline_bps: u64) -> usize {
+        let mut rejected = self.rejected_trial_caps.lock().await;
+        let entry = rejected.entry(admitted).or_insert(RejectedTrialCap {
+            cooldown_windows_remaining: 0,
+            next_cooldown_windows: 0,
+            rejected_baseline_bps: 0,
+        });
+        let cooldown_windows = if entry.next_cooldown_windows == 0 {
+            ADAPTIVE_RETRY_COOLDOWN_INITIAL_WINDOWS
+        } else {
+            entry
+                .next_cooldown_windows
+                .saturating_mul(2)
+                .min(ADAPTIVE_RETRY_COOLDOWN_MAX_WINDOWS)
+        };
+        entry.cooldown_windows_remaining = cooldown_windows;
+        entry.next_cooldown_windows = cooldown_windows;
+        entry.rejected_baseline_bps = entry.rejected_baseline_bps.max(baseline_bps);
+        cooldown_windows
+    }
+
+    fn reset_stable_measurement(&self, stable: usize) {
+        self.stable_workers.store(stable.max(1), Ordering::Relaxed);
+        self.stable_warmup_samples.store(0, Ordering::Relaxed);
+        self.stable_sample_count.store(0, Ordering::Relaxed);
+        self.stable_sample_total_bps.store(0, Ordering::Relaxed);
+        self.reset_trigger_sequence();
+    }
+
+    fn establish_stable_baseline(&self, stable: usize, baseline_bps: u64) {
+        self.stable_workers.store(stable.max(1), Ordering::Relaxed);
+        self.stable_warmup_samples
+            .store(ADAPTIVE_STABLE_WARMUP_SAMPLE_TARGET, Ordering::Relaxed);
+        self.stable_sample_count
+            .store(ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET, Ordering::Relaxed);
+        self.stable_sample_total_bps
+            .store(baseline_bps, Ordering::Relaxed);
+        self.reset_trigger_sequence();
+    }
+
+    fn start_post_accept_guard(
+        &self,
+        admitted: usize,
+        previous_stable: usize,
+        previous_baseline_bps: u64,
+        accepted_average_bps: u64,
+    ) {
+        self.post_accept_guard_workers
+            .store(admitted.max(1), Ordering::Relaxed);
+        self.post_accept_guard_previous_workers
+            .store(previous_stable.max(1), Ordering::Relaxed);
+        self.post_accept_guard_previous_baseline_bps
+            .store(previous_baseline_bps, Ordering::Relaxed);
+        self.post_accept_guard_accepted_average_bps
+            .store(accepted_average_bps, Ordering::Relaxed);
+        self.post_accept_guard_healthy_windows_remaining.store(
+            ADAPTIVE_POST_ACCEPT_GUARD_HEALTHY_WINDOWS,
+            Ordering::Relaxed,
+        );
+        self.post_accept_guard_bad_sample_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    fn clear_post_accept_guard(&self) {
+        self.post_accept_guard_workers.store(0, Ordering::Relaxed);
+        self.post_accept_guard_previous_workers
+            .store(0, Ordering::Relaxed);
+        self.post_accept_guard_previous_baseline_bps
+            .store(0, Ordering::Relaxed);
+        self.post_accept_guard_accepted_average_bps
+            .store(0, Ordering::Relaxed);
+        self.post_accept_guard_healthy_windows_remaining
+            .store(0, Ordering::Relaxed);
+        self.post_accept_guard_bad_sample_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    fn clear_trial_state(&self) {
+        self.trial_workers.store(0, Ordering::Relaxed);
+        self.trial_baseline_bps.store(0, Ordering::Relaxed);
+        self.trial_sample_count.store(0, Ordering::Relaxed);
+        self.trial_sample_total_bps.store(0, Ordering::Relaxed);
+        self.pending_startup_probe.store(false, Ordering::Relaxed);
+        self.startup_probe_trial_workers.store(0, Ordering::Relaxed);
+        self.reset_trigger_sequence();
+        self.context
+            .tail_lease_probe_cap
+            .store(0, Ordering::Relaxed);
+    }
+
+    pub(super) async fn admit_worker_target(&self) -> usize {
         let current = self.admitted_workers.load(Ordering::Relaxed);
         let desired = current
             .saturating_add(self.context.profile.adaptive_ramp_step)
@@ -1791,6 +2666,7 @@ impl AdaptiveSegmentAdmission {
             )
             .await;
         } else if desired > current {
+            self.pending_startup_probe.store(false, Ordering::Relaxed);
             record_segment_worker_diagnostic(
                 &self.context,
                 DiagnosticLevel::Info,
@@ -1800,7 +2676,11 @@ impl AdaptiveSegmentAdmission {
             )
             .await;
         }
-        record_segment_host_success(&self.context.url, admitted, Instant::now());
+        if admitted > current && current >= self.context.profile.soft_max_segments {
+            self.start_trial(current, admitted).await;
+        } else {
+            record_segment_host_success(&self.context.url, admitted, Instant::now());
+        }
         self.target_workers.store(admitted, Ordering::Relaxed);
         admitted
     }

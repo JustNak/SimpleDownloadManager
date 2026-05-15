@@ -1612,7 +1612,8 @@ async fn enqueue_handoff_download(
             if result.status == EnqueueStatus::Queued {
                 if show_progress {
                     let _ =
-                        show_progress_window_for_transfer_kind(app, &result.job_id, transfer_kind);
+                        show_progress_window_for_transfer_kind(app, &result.job_id, transfer_kind)
+                            .await;
                 }
                 schedule_downloads(app.clone(), state);
             }
@@ -1636,7 +1637,7 @@ async fn run_prompt_download(
     handoff_auth: Option<HandoffAuth>,
 ) -> HostResponse {
     let receiver = prompts.enqueue(prompt.clone()).await;
-    if let Err(error) = show_download_prompt_window(app) {
+    if let Err(error) = show_download_prompt_window(app).await {
         let _ = prompts.resolve(&prompt.id, PromptDecision::Cancel).await;
         return HostResponse::error(
             request_id,
@@ -1708,7 +1709,8 @@ async fn run_prompt_download(
                                 app,
                                 &result.job_id,
                                 transfer_kind,
-                            );
+                            )
+                            .await;
                         }
                         schedule_downloads(app.clone(), state);
                     }

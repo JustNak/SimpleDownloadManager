@@ -19,6 +19,7 @@
   import { getErrorMessage } from './errors';
   import { applyAppearance } from './appearance';
   import { categoryFolderForFilename } from './downloadCategories';
+  import { revealPopupWhenReady } from './popupReady';
 
   let prompt = $state<DownloadPrompt | null>(null);
   let directoryOverride = $state<string | null>(null);
@@ -71,6 +72,8 @@
       const currentPrompt = await getCurrentDownloadPrompt();
       if (disposed) return;
       prompt = currentPrompt;
+      await revealPopupWhenReady();
+      if (disposed) return;
 
       const nextPromptDispose = await subscribeToDownloadPromptChanged((nextPrompt) => {
         directoryOverride = null;

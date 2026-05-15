@@ -13,8 +13,8 @@ use crate::state::{
 };
 use crate::storage::{
     BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
-    DownloadPrompt, DownloadSource, HosterPreflightInfo,
-    HosterPreflightStatus, JobState, Settings, TransferKind,
+    DownloadPrompt, DownloadSource, HosterPreflightInfo, HosterPreflightStatus, JobState, Settings,
+    TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window_async, show_batch_progress_window,
@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 
 mod events;
 mod native_host;
@@ -38,9 +38,9 @@ pub use self::events::{
     NotificationSoundKind, ProgressBatchContext, ProgressBatchKind, ProgressBatchRegistry,
     ProgressJobSnapshot, SettingsSnapshot,
 };
-use self::native_host::{register_native_host, resolve_install_resource_path};
 #[cfg(windows)]
 use self::native_host::ensure_native_host_registration;
+use self::native_host::{register_native_host, resolve_install_resource_path};
 use self::shell::{open_path, open_url, reveal_path};
 
 pub const STATE_CHANGED_EVENT: &str = "app://state-changed";
@@ -116,7 +116,7 @@ async fn complete_prompt_action(
     let remember_prompt_position = matches!(&decision, PromptDecision::Download { .. });
     let next_prompt = prompts.resolve(id, decision).await?;
     if let Some(prompt) = next_prompt {
-        show_download_prompt_window(app)?;
+        show_download_prompt_window(app).await?;
         app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, prompt)
             .map_err(|error| error.to_string())?;
     } else {
@@ -164,6 +164,11 @@ pub async fn get_settings_snapshot(
     Ok(SettingsSnapshot {
         settings: state.settings().await,
     })
+}
+
+#[tauri::command]
+pub fn mark_popup_ready(window: WebviewWindow) -> Result<(), String> {
+    crate::windows::mark_popup_ready(&window)
 }
 
 #[tauri::command]
@@ -993,7 +998,7 @@ pub async fn open_progress_window(
         .await
         .map(|job| job.transfer_kind)
         .ok_or_else(|| "Download job is no longer available.".to_string())?;
-    show_progress_window_for_transfer_kind(&app, &id, transfer_kind)
+    show_progress_window_for_transfer_kind(&app, &id, transfer_kind).await
 }
 
 #[tauri::command]
@@ -1004,7 +1009,7 @@ pub async fn open_batch_progress_window(
 ) -> Result<(), String> {
     let batch_id = context.batch_id.clone();
     registry.store(context);
-    show_batch_progress_window(&app, &batch_id)
+    show_batch_progress_window(&app, &batch_id).await
 }
 
 #[tauri::command]
@@ -1229,7 +1234,7 @@ pub async fn test_extension_handoff(
         .map_err(|error| error.message)?;
 
     let receiver = prompts.enqueue(prompt.clone()).await;
-    show_download_prompt_window(&app)?;
+    show_download_prompt_window(&app).await?;
     if let Some(active_prompt) = prompts.active_prompt().await {
         app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt)
             .map_err(|error| error.to_string())?;
@@ -1293,7 +1298,8 @@ pub async fn test_extension_handoff(
                                     &worker_app,
                                     &result.job_id,
                                     transfer_kind,
-                                );
+                                )
+                                .await;
                             }
                             schedule_downloads(worker_app, worker_state);
                         }
