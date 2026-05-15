@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  APPEARANCE_CACHE_KEY,
+  DEFAULT_APPEARANCE_SETTINGS,
   DEFAULT_ACCENT_COLOR,
   applyAppearanceToElement,
+  appearanceSettingsFromSearchParams,
+  cachedAppearanceSettingsFromJson,
   normalizeAccentColor,
   readableForegroundForHex,
   resolveThemeClasses,
+  serializeAppearanceSettings,
 } from '../src/appearance.ts';
 
 class FakeClassList {
@@ -49,6 +54,26 @@ assert.equal(normalizeAccentColor('not-a-color'), DEFAULT_ACCENT_COLOR);
 assert.equal(normalizeAccentColor('#F43F5E'), '#f43f5e');
 assert.equal(readableForegroundForHex('#ffffff'), '#0a0f14');
 assert.equal(readableForegroundForHex('#111111'), '#ffffff');
+assert.equal(APPEARANCE_CACHE_KEY, 'simple-download-manager-appearance');
+assert.deepEqual(DEFAULT_APPEARANCE_SETTINGS, { theme: 'system', accentColor: DEFAULT_ACCENT_COLOR });
+assert.equal(
+  serializeAppearanceSettings({ theme: 'dark', accentColor: '#06B6D4' }),
+  '{"theme":"dark","accentColor":"#06b6d4"}',
+);
+assert.deepEqual(
+  cachedAppearanceSettingsFromJson('{"theme":"oled_dark","accentColor":"#14B8A6"}'),
+  { theme: 'oled_dark', accentColor: '#14b8a6' },
+);
+assert.deepEqual(cachedAppearanceSettingsFromJson('not-json'), DEFAULT_APPEARANCE_SETTINGS);
+assert.deepEqual(
+  appearanceSettingsFromSearchParams('?window=download-progress&theme=dark&accentColor=%23f97316'),
+  { theme: 'dark', accentColor: '#f97316' },
+);
+assert.deepEqual(
+  appearanceSettingsFromSearchParams('?window=download-progress&theme=nope&accentColor=bad'),
+  DEFAULT_APPEARANCE_SETTINGS,
+);
+assert.equal(appearanceSettingsFromSearchParams('?window=download-progress'), null);
 
 assert.deepEqual(resolveThemeClasses('light', true), { dark: false, oledDark: false });
 assert.deepEqual(resolveThemeClasses('dark', false), { dark: true, oledDark: false });
@@ -76,3 +101,7 @@ for (const file of [
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
   assert.equal(source.includes("classList.add('dark')"), false, `${file} should use shared appearance settings instead of forcing dark mode`);
 }
+
+const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+assert.match(indexHtml, /<style>[\s\S]*--color-background[\s\S]*body[\s\S]*background-color:\s*var\(--color-background\)/, 'desktop shell should include boot theme CSS before Svelte loads');
+assert.match(indexHtml, /src="\/appearance-preload\.js"[\s\S]*src="\/src\/main\.ts"/, 'desktop shell should run appearance preload before the Svelte entry module');

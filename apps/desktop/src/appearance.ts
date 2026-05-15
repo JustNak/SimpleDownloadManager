@@ -1,8 +1,13 @@
 import type { Settings } from './types';
 
 export const DEFAULT_ACCENT_COLOR = '#3b82f6';
+export const APPEARANCE_CACHE_KEY = 'simple-download-manager-appearance';
 
 export type AppearanceSettings = Pick<Settings, 'theme' | 'accentColor'>;
+export const DEFAULT_APPEARANCE_SETTINGS: AppearanceSettings = {
+  theme: 'system',
+  accentColor: DEFAULT_ACCENT_COLOR,
+};
 
 export interface ThemeClassState {
   dark: boolean;
@@ -21,6 +26,57 @@ interface AppearanceElement {
 export function normalizeAccentColor(rawColor: string | undefined): string {
   const color = rawColor?.trim() ?? '';
   return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_ACCENT_COLOR;
+}
+
+export function normalizeAppearanceSettings(settings?: Partial<AppearanceSettings>): AppearanceSettings {
+  return {
+    theme: normalizeTheme(settings?.theme),
+    accentColor: normalizeAccentColor(settings?.accentColor),
+  };
+}
+
+export function serializeAppearanceSettings(settings?: Partial<AppearanceSettings>): string {
+  return JSON.stringify(normalizeAppearanceSettings(settings));
+}
+
+export function cachedAppearanceSettingsFromJson(rawValue: string | null | undefined): AppearanceSettings {
+  if (!rawValue) {
+    return DEFAULT_APPEARANCE_SETTINGS;
+  }
+
+  try {
+    return normalizeAppearanceSettings(JSON.parse(rawValue) as Partial<AppearanceSettings>);
+  } catch {
+    return DEFAULT_APPEARANCE_SETTINGS;
+  }
+}
+
+export function appearanceSettingsFromSearchParams(
+  search: string | URLSearchParams,
+): AppearanceSettings | null {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search;
+  if (!params.has('theme') && !params.has('accentColor')) {
+    return null;
+  }
+
+  const theme = params.get('theme') ?? undefined;
+  return normalizeAppearanceSettings({
+    theme: theme as AppearanceSettings['theme'] | undefined,
+    accentColor: params.get('accentColor') ?? undefined,
+  });
+}
+
+export function resolveInitialAppearanceSettings(
+  options: { search?: string | URLSearchParams; cachedJson?: string | null } = {},
+): AppearanceSettings {
+  const search = options.search ?? (typeof window !== 'undefined' ? window.location.search : '');
+  const urlSettings = appearanceSettingsFromSearchParams(search);
+  if (urlSettings) {
+    return urlSettings;
+  }
+
+  const cachedJson = options.cachedJson ?? readCachedAppearanceSettings();
+  return cachedAppearanceSettingsFromJson(cachedJson);
 }
 
 export function readableForegroundForHex(hex: string): string {
@@ -72,9 +128,43 @@ export function getSystemPrefersDark(): boolean {
 
 export function applyAppearance(
   settings: AppearanceSettings,
-  options: { root?: AppearanceElement; systemPrefersDark?: boolean } = {},
+  options: { root?: AppearanceElement; systemPrefersDark?: boolean; cache?: boolean } = {},
 ): ThemeClassState {
   const root = options.root ?? document.documentElement;
   const systemPrefersDark = options.systemPrefersDark ?? getSystemPrefersDark();
-  return applyAppearanceToElement(root, settings, systemPrefersDark);
+  const normalized = normalizeAppearanceSettings(settings);
+  if (options.cache !== false) {
+    cacheAppearanceSettings(normalized);
+  }
+  return applyAppearanceToElement(root, normalized, systemPrefersDark);
+}
+
+function normalizeTheme(theme: AppearanceSettings['theme'] | null | undefined): AppearanceSettings['theme'] {
+  return theme === 'light' || theme === 'dark' || theme === 'oled_dark' || theme === 'system'
+    ? theme
+    : DEFAULT_APPEARANCE_SETTINGS.theme;
+}
+
+function readCachedAppearanceSettings(): string | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    return window.localStorage?.getItem(APPEARANCE_CACHE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheAppearanceSettings(settings: AppearanceSettings): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage?.setItem(APPEARANCE_CACHE_KEY, serializeAppearanceSettings(settings));
+  } catch {
+    // Tauri webviews can still render correctly if storage is unavailable.
+  }
 }

@@ -28,6 +28,14 @@ assert.match(buildSource, /appearance-preload\.js/, 'extension build should copy
 assert.match(popupSource, /applyExtensionAppearance/, 'popup script should apply the synced desktop appearance');
 assert.match(popupSource, /sync-button/, 'popup script should wire the manual sync action');
 assert.match(popupSource, /state\.connection === 'connected' && state\.appearanceSettings/, 'popup should only cache/apply desktop appearance after a successful sync');
+{
+  const refreshStateStart = popupSource.indexOf('async function refreshState');
+  assert.notEqual(refreshStateStart, -1, 'popup script should define refreshState');
+  const refreshStateSource = popupSource.slice(refreshStateStart);
+  const cachedStateReadIndex = refreshStateSource.indexOf("sendMessage<PopupStateResponse>({ type: 'popup_get_state' })");
+  const pingIndex = refreshStateSource.indexOf("sendMessage({ type: 'popup_ping' })");
+  assert.ok(cachedStateReadIndex !== -1 && pingIndex !== -1 && cachedStateReadIndex < pingIndex, 'popup should render cached background state before pinging the native host');
+}
 assert.doesNotMatch(popupSource, /captureModeLabelText|captureModeDescription|Ask Before Sending|Ask before sending downloads|Browser Only/, 'popup script should not transition quick-toggle copy between handoff modes');
 assert.match(popupSource, /downloadHandoffMode:\s*silentDownloadToggle\.checked \? 'auto' : 'ask'/, 'silent download off should keep the default ask-before-download behavior');
 assert.match(optionsSource, /applyExtensionAppearance/, 'options script should apply the synced desktop appearance');

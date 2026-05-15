@@ -29,6 +29,27 @@ assert.match(
 
 assert.match(
   windowsSource,
+  /fn popup_window_url\([\s\S]*append_pair\("window"[\s\S]*append_appearance_query_params/,
+  'native popup URLs should be built through one helper that always includes appearance parameters',
+);
+
+assert.match(
+  windowsSource,
+  /fn append_appearance_query_params\([\s\S]*settings_sync\(\)[\s\S]*append_pair\("theme"[\s\S]*append_pair\("accentColor"/,
+  'native popup URLs should carry the current desktop theme and accent color before the webview paints',
+);
+
+for (const staleUrlPattern of [
+  /WebviewUrl::App\("index\.html\?window=download-prompt"\.into\(\)\)/,
+  /format!\("index\.html\?window=download-progress&jobId=\{job_id\}"\)/,
+  /format!\("index\.html\?window=torrent-progress&jobId=\{job_id\}"\)/,
+  /format!\("index\.html\?window=batch-progress&batchId=\{batch_id\}"\)/,
+]) {
+  assert.doesNotMatch(windowsSource, staleUrlPattern, 'popup builders should not use raw unthemed index.html popup URLs');
+}
+
+assert.match(
+  windowsSource,
   /fn repair_popup_window_bounds<R: Runtime>[\s\S]*\.set_size\(Size::Logical\(LogicalSize::new[\s\S]*geometry\.width[\s\S]*geometry\.height[\s\S]*popup_rect_is_visible_on_any_monitor[\s\S]*\.set_position\(Position::Physical\(centered_popup_position/,
   'popup bounds repair should restore fixed size and recenter invalid or offscreen popup rectangles',
 );

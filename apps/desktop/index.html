@@ -4,6 +4,36 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simple Download Manager</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --color-background: oklch(98.5% 0.003 247);
+        --color-foreground: oklch(20% 0.012 247);
+      }
+
+      :root.dark {
+        color-scheme: dark;
+        --color-background: oklch(16% 0.008 247);
+        --color-foreground: oklch(94% 0.005 247);
+      }
+
+      :root.oled-dark {
+        color-scheme: dark;
+        --color-background: #000000;
+        --color-foreground: oklch(96% 0.004 247);
+      }
+
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background-color: var(--color-background);
+        color: var(--color-foreground);
+      }
+    </style>
+    <script src="/appearance-preload.js"></script>
   </head>
   <body>
     <div id="root"></div>

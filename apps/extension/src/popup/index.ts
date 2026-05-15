@@ -130,6 +130,8 @@ async function refreshState() {
   if (currentState) renderState(currentState);
 
   try {
+    const cachedState = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
+    renderState(cachedState);
     await sendMessage({ type: 'popup_ping' });
     const state = await sendMessage<PopupStateResponse>({ type: 'popup_get_state' });
     renderState(state);

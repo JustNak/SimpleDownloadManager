@@ -1,4 +1,5 @@
-use crate::storage::TransferKind;
+use crate::state::SharedState;
+use crate::storage::{Theme, TransferKind};
 use std::sync::{Mutex, OnceLock};
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, Monitor, PhysicalPosition, PhysicalSize, Position,
@@ -66,11 +67,12 @@ pub fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
 
     let policy = download_prompt_window_policy();
     let geometry = download_prompt_window_geometry();
+    let url = popup_window_url(app, "download-prompt", &[]);
 
     WebviewWindowBuilder::new(
         app,
         DOWNLOAD_PROMPT_WINDOW,
-        WebviewUrl::App("index.html?window=download-prompt".into()),
+        WebviewUrl::App(url.into()),
     )
     .title("New download detected")
     .inner_size(geometry.width, geometry.height)
@@ -110,7 +112,7 @@ pub fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String>
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_position =
         current_download_prompt_position(app).or_else(last_download_prompt_position);
-    let url = format!("index.html?window=download-progress&jobId={job_id}");
+    let url = popup_window_url(app, "download-progress", &[("jobId", job_id)]);
     let geometry = progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -144,7 +146,7 @@ pub fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(),
         return show_existing_popup_window(&window, torrent_progress_window_geometry());
     }
 
-    let url = format!("index.html?window=torrent-progress&jobId={job_id}");
+    let url = popup_window_url(app, "torrent-progress", &[("jobId", job_id)]);
     let geometry = torrent_progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -184,7 +186,7 @@ pub fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(),
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_position =
         current_download_prompt_position(app).or_else(last_download_prompt_position);
-    let url = format!("index.html?window=batch-progress&batchId={batch_id}");
+    let url = popup_window_url(app, "batch-progress", &[("batchId", batch_id)]);
     let geometry = batch_progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -270,6 +272,38 @@ pub fn handle_popup_window_event<R: Runtime>(window: &Window<R>, event: &WindowE
     };
 
     repair_existing_popup_window(&webview_window, geometry, PopupRestoreFocus::Preserve);
+}
+
+fn popup_window_url(app: &AppHandle, window_mode: &str, params: &[(&str, &str)]) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("window", window_mode);
+    for (name, value) in params {
+        query.append_pair(name, value);
+    }
+    append_appearance_query_params(&mut query, app);
+    format!("index.html?{}", query.finish())
+}
+
+fn append_appearance_query_params(
+    query: &mut url::form_urlencoded::Serializer<'_, String>,
+    app: &AppHandle,
+) {
+    let Some(state) = app.try_state::<SharedState>() else {
+        return;
+    };
+
+    let settings = state.settings_sync();
+    query.append_pair("theme", theme_query_value(&settings.theme));
+    query.append_pair("accentColor", &settings.accent_color);
+}
+
+fn theme_query_value(theme: &Theme) -> &'static str {
+    match theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::OledDark => "oled_dark",
+        Theme::System => "system",
+    }
 }
 
 pub fn progress_window_label(job_id: &str) -> String {
