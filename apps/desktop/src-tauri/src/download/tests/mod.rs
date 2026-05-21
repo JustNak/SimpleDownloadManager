@@ -369,11 +369,11 @@ fn adaptive_admission_for_test(
         stable_workers: AtomicUsize::new(stable_workers),
         stable_warmup_samples: AtomicUsize::new((seeded_stable_samples > 0) as usize),
         stable_sample_count: AtomicUsize::new(seeded_stable_samples),
-        stable_sample_total_bps: AtomicU64::new(
-            (seeded_stable_samples > 0)
-                .then_some(previous_bps)
-                .unwrap_or(0),
-        ),
+        stable_sample_total_bps: AtomicU64::new(if seeded_stable_samples > 0 {
+            previous_bps
+        } else {
+            0
+        }),
         startup_probe_attempted: AtomicBool::new(false),
         pending_startup_probe: AtomicBool::new(false),
         startup_probe_trial_workers: AtomicUsize::new(0),
@@ -386,16 +386,16 @@ fn adaptive_admission_for_test(
         trigger_sample_count: AtomicUsize::new(0),
         trigger_target_workers: AtomicUsize::new(0),
         trigger_required_bps: AtomicU64::new(0),
-        trial_workers: AtomicUsize::new(
-            (admitted_workers > stable_workers)
-                .then_some(admitted_workers)
-                .unwrap_or(0),
-        ),
-        trial_baseline_bps: AtomicU64::new(
-            (admitted_workers > stable_workers)
-                .then_some(previous_bps)
-                .unwrap_or(0),
-        ),
+        trial_workers: AtomicUsize::new(if admitted_workers > stable_workers {
+            admitted_workers
+        } else {
+            0
+        }),
+        trial_baseline_bps: AtomicU64::new(if admitted_workers > stable_workers {
+            previous_bps
+        } else {
+            0
+        }),
         trial_sample_count: AtomicUsize::new(0),
         trial_sample_total_bps: AtomicU64::new(0),
         pending_trial_baseline_bps: AtomicU64::new(0),
@@ -1179,14 +1179,17 @@ fn archive_test_entry(root: &Path, name: &str, contents: &[u8]) -> crate::state:
 
 #[derive(Default)]
 struct RecordingArchiveExtractor {
-    calls: std::cell::RefCell<Vec<PathBuf>>,
-    output_dirs: std::cell::RefCell<Vec<PathBuf>>,
+    calls: TestMutex<Vec<PathBuf>>,
+    output_dirs: TestMutex<Vec<PathBuf>>,
 }
 
 impl ArchiveExtractor for RecordingArchiveExtractor {
     fn extract(&self, first_part: &Path, output_dir: &Path) -> Result<(), String> {
-        self.calls.borrow_mut().push(first_part.to_path_buf());
-        self.output_dirs.borrow_mut().push(output_dir.to_path_buf());
+        self.calls.lock().unwrap().push(first_part.to_path_buf());
+        self.output_dirs
+            .lock()
+            .unwrap()
+            .push(output_dir.to_path_buf());
         let stem = first_part
             .file_name()
             .and_then(|value| value.to_str())
@@ -1234,12 +1237,12 @@ fn create_file_symlink_for_test(target: &Path, link: &Path) -> Result<(), String
 
 #[derive(Default)]
 struct LockOnceArchiveExtractor {
-    calls: std::cell::RefCell<usize>,
+    calls: TestMutex<usize>,
 }
 
 impl ArchiveExtractor for LockOnceArchiveExtractor {
     fn extract(&self, first_part: &Path, output_dir: &Path) -> Result<(), String> {
-        let mut calls = self.calls.borrow_mut();
+        let mut calls = self.calls.lock().unwrap();
         *calls += 1;
         if *calls == 1 {
             return Err(seven_zip_failure_message(

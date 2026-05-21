@@ -389,6 +389,23 @@ fn validate_settings_creates_download_category_directories() {
 }
 
 #[test]
+fn validate_settings_still_rejects_unavailable_download_directory() {
+    let runtime_dir = test_runtime_dir("category-settings-blocked");
+    let blocking_file = runtime_dir.join("blocked-parent");
+    std::fs::write(&blocking_file, "not a directory").unwrap();
+    let mut settings = Settings {
+        download_directory: blocking_file.join("Downloads").display().to_string(),
+        ..Settings::default()
+    };
+
+    let error =
+        validate_settings(&mut settings).expect_err("settings save should reject invalid paths");
+
+    assert!(error.contains("Could not create download directory"));
+    let _ = std::fs::remove_dir_all(runtime_dir);
+}
+
+#[test]
 fn validate_settings_creates_default_bulk_output_directory_and_preserves_custom_bulk_path() {
     let download_dir = test_runtime_dir("bulk-settings-default-output");
     let mut settings = Settings {
@@ -539,6 +556,7 @@ fn prepare_download_prompt_marks_duplicate_job() {
             None,
             Some("archive.zip".into()),
             Some(4096),
+            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 
@@ -569,6 +587,7 @@ fn prepare_torrent_download_prompt_uses_torrent_directory_without_category_folde
             None,
             None,
             None,
+            BrowserFallback::Replay,
         )
         .expect("torrent prompt should use the torrent directory");
 
@@ -607,6 +626,7 @@ fn prepare_download_prompt_marks_duplicate_target_job_for_same_filename() {
             None,
             Some("guide.pdf".into()),
             None,
+            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 
@@ -647,6 +667,7 @@ fn prepare_download_prompt_marks_duplicate_existing_target_file() {
             None,
             Some("guide.pdf".into()),
             None,
+            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 

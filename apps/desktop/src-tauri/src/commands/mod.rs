@@ -12,9 +12,9 @@ use crate::state::{
     SharedState, TorrentSessionCacheClearResult,
 };
 use crate::storage::{
-    BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
-    DownloadPrompt, DownloadSource, HosterPreflightInfo, HosterPreflightStatus, JobState, Settings,
-    TransferKind,
+    BrowserFallback, BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot,
+    DownloadJob, DownloadPrompt, DownloadSource, HosterPreflightInfo, HosterPreflightStatus,
+    JobState, LocalRecoveryPreview, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window_async, show_batch_progress_window,
@@ -128,6 +128,31 @@ async fn complete_prompt_action(
 #[tauri::command]
 pub async fn get_app_snapshot(state: State<'_, SharedState>) -> Result<DesktopSnapshot, String> {
     Ok(state.snapshot().await)
+}
+
+#[tauri::command]
+pub async fn preview_local_recovery(
+    state: State<'_, SharedState>,
+    root: Option<String>,
+) -> Result<LocalRecoveryPreview, String> {
+    state
+        .preview_local_recovery(root)
+        .await
+        .map_err(|error| error.message)
+}
+
+#[tauri::command]
+pub async fn import_local_recovery(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    candidate_ids: Vec<String>,
+) -> Result<DesktopSnapshot, String> {
+    let snapshot = state
+        .import_local_recovery(candidate_ids)
+        .await
+        .map_err(|error| error.message)?;
+    emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -1229,6 +1254,7 @@ pub async fn test_extension_handoff(
             }),
             Some("simple-download-manager-test.bin".into()),
             Some(1_048_576),
+            BrowserFallback::Replay,
         )
         .await
         .map_err(|error| error.message)?;

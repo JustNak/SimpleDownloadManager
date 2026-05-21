@@ -1,4 +1,4 @@
-import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
+import { isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
 import {
   browserDownloadUrl,
@@ -27,9 +27,9 @@ import {
 } from './browserDownloads';
 import {
   captureHandoffAuthHeaders,
-  clearCapturedHandoffAuth,
+  hasCapturedBrowserSessionHeaders,
   hasCapturedHandoffAuth,
-  takeCapturedHandoffAuth,
+  resolveBrowserHandoffAuth,
   type HandoffAuthRequestDetails,
 } from './handoffAuth';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
@@ -393,8 +393,8 @@ async function handOffBrowserDownload(
     url,
     incognito: item.incognito,
   };
-  if (!settings.authenticatedHandoffEnabled && hasCapturedHandoffAuth(handoffDetails)) {
-    clearCapturedHandoffAuth();
+  const authResolution = resolveBrowserHandoffAuth(handoffDetails, settings);
+  if (authResolution.status === 'protected_auth_required') {
     return {
       ok: false,
       requestId: 'protected_downloads_disabled',
@@ -404,9 +404,7 @@ async function handOffBrowserDownload(
     };
   }
 
-  const handoffAuth = takeCapturedHandoffAuth(handoffDetails, settings);
-
-  const metadata = createBrowserDownloadHandoffMetadata(item, handoffAuth);
+  const metadata = createBrowserDownloadHandoffMetadata(item, authResolution.handoffAuth);
   const transferKind = browserDownloadTransferKind(item);
 
   if (transferKind === 'torrent') {
@@ -465,14 +463,18 @@ async function handleFirefoxWebRequestDownload(
     const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
-      await restoreFirefoxWebRequestFallback(candidate);
+      if (canReplayBrowserFallback(candidate)) {
+        await restoreFirefoxWebRequestFallback(candidate);
+      }
       return;
     }
 
     rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload({ url: candidate.url, filename: candidate.filename }, settings)) {
-      await restoreFirefoxWebRequestFallback(candidate);
+      if (canReplayBrowserFallback(candidate)) {
+        await restoreFirefoxWebRequestFallback(candidate);
+      }
       return;
     }
 
@@ -481,13 +483,15 @@ async function handleFirefoxWebRequestDownload(
     const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
     if (handoffResolution.action === 'record_error_and_restore') {
       await recordHostError(handoffResolution.response);
-      await restoreFirefoxWebRequestFallback(candidate);
+      if (canReplayBrowserFallback(candidate)) {
+        await restoreFirefoxWebRequestFallback(candidate);
+      }
       return;
     }
 
     const state = rememberStateSettings(await setLastResult('connected', response));
     await updateBrowserBadge(state);
-    if (handoffResolution.action === 'restore') {
+    if (handoffResolution.action === 'restore' && canReplayBrowserFallback(candidate)) {
       await restoreFirefoxWebRequestFallback(candidate);
     }
   } catch (error) {
@@ -497,7 +501,9 @@ async function handleFirefoxWebRequestDownload(
       'error',
     );
     await updateBrowserBadge(state);
-    await restoreFirefoxWebRequestFallback(candidate);
+    if (canReplayBrowserFallback(candidate)) {
+      await restoreFirefoxWebRequestFallback(candidate);
+    }
   }
 }
 
@@ -682,11 +688,28 @@ async function handleFirefoxWebRequestHeadersReceived(
       return {};
     }
 
-    void handleFirefoxWebRequestDownload(candidate, settings);
+    const protectedDetails = {
+      requestId: candidate.requestId,
+      url: candidate.url,
+      incognito: candidate.incognito,
+    };
+    if (hasCapturedBrowserSessionHeaders(protectedDetails) && !hasCapturedHandoffAuth(protectedDetails)) {
+      return {};
+    }
+
+    const browserFallback: BrowserFallback = hasCapturedBrowserSessionHeaders(protectedDetails)
+      ? 'unavailable'
+      : 'replay';
+
+    void handleFirefoxWebRequestDownload({ ...candidate, browserFallback }, settings);
     return { cancel: true };
   } catch {
     return {};
   }
+}
+
+function canReplayBrowserFallback(item: { browserFallback?: BrowserFallback }): boolean {
+  return item.browserFallback !== 'unavailable';
 }
 
 function markFirefoxWebRequestBypass(url: string): () => void {
@@ -760,6 +783,7 @@ type BrowserDownloadHandoffItem = {
   filename?: string;
   totalBytes?: number;
   incognito?: boolean;
+  browserFallback?: BrowserFallback;
 };
 
 type FirefoxWebRequestApi = {

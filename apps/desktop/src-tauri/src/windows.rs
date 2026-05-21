@@ -86,8 +86,7 @@ pub async fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> 
     let geometry = download_prompt_window_geometry();
     let appearance = popup_window_appearance_query(app).await;
     let url = popup_window_url("download-prompt", &[], appearance.as_ref());
-    let popup_init_script =
-        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
+    let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
 
     let builder =
         WebviewWindowBuilder::new(app, DOWNLOAD_PROMPT_WINDOW, WebviewUrl::App(url.into()))
@@ -138,8 +137,7 @@ pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), S
         &[("jobId", job_id)],
         appearance.as_ref(),
     );
-    let popup_init_script =
-        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
+    let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
     let geometry = progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -181,8 +179,7 @@ pub async fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Resu
         &[("jobId", job_id)],
         appearance.as_ref(),
     );
-    let popup_init_script =
-        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
+    let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
     let geometry = torrent_progress_window_geometry();
     let policy = progress_window_policy();
 
@@ -231,8 +228,7 @@ pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Resu
         &[("batchId", batch_id)],
         appearance.as_ref(),
     );
-    let popup_init_script =
-        popup_initialization_script(appearance.as_ref()).map_or_else(String::new, |script| script);
+    let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
     let geometry = batch_progress_window_geometry();
     let policy = progress_window_policy();
 

@@ -429,6 +429,78 @@ async fn scenario_protected_browser_handoff_uses_auth_without_persisting_secret(
 }
 
 #[tokio::test]
+async fn scenario_protected_browser_handoff_follows_signed_cdn_redirect_without_leaking_auth() {
+    let (root, state) = scenario_state("protected-handoff-redirect").await;
+    let mut settings = state.settings().await;
+    settings.extension_integration.authenticated_handoff_enabled = true;
+    settings.extension_integration.protected_download_auth_scope =
+        ProtectedDownloadAuthScope::LegacyGlobal;
+    state.save_settings(settings).await.unwrap();
+
+    let auth = HandoffAuth {
+        headers: vec![HandoffAuthHeader {
+            name: "Cookie".into(),
+            value: "session=abc".into(),
+        }],
+    };
+    let source = DownloadSource {
+        entry_point: "browser_download".into(),
+        browser: "firefox".into(),
+        extension_version: "scenario-test".into(),
+        page_url: Some("https://example.test/protected".into()),
+        page_title: Some("Protected fixture".into()),
+        referrer: None,
+        incognito: Some(false),
+    };
+    let body = b"redirected protected bytes";
+    let (url, request_handle) =
+        spawn_cookie_redirect_download_server(body, "protected-redirect.bin").await;
+
+    let enqueued = state
+        .enqueue_download_with_options(
+            url.clone(),
+            EnqueueOptions {
+                source: Some(source),
+                filename_hint: Some("protected-redirect.bin".into()),
+                handoff_auth: Some(auth),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("protected redirect handoff should enqueue with allowed auth");
+
+    let (_snapshot, tasks) = state.claim_schedulable_jobs().await.unwrap();
+    let task = only_task(tasks);
+    assert_eq!(task.id, enqueued.job_id);
+    assert!(task.handoff_auth.is_some());
+
+    let app = NoopDownloadUi;
+    let outcome = run_http_download_attempt(&app, &state, &task)
+        .await
+        .expect("protected redirect handoff should complete through the HTTP engine");
+    assert_eq!(outcome, DownloadOutcome::Completed);
+
+    let requests = request_handle.await.unwrap();
+    assert_eq!(requests.len(), 6);
+    for (index, request) in requests.iter().enumerate() {
+        let request_lower = request.to_ascii_lowercase();
+        if index % 2 == 0 {
+            assert!(request_lower.contains("cookie: session=abc"));
+        } else {
+            assert!(
+                !request_lower.contains("cookie:"),
+                "browser credentials must not be forwarded to the redirected CDN origin",
+            );
+        }
+    }
+
+    let snapshot = state.snapshot().await;
+    let final_path = PathBuf::from(&snapshot_job(&snapshot, &task.id).target_path);
+    assert_eq!(tokio::fs::read(final_path).await.unwrap(), body);
+    assert!(!persisted_state_text(&root).contains("session=abc"));
+}
+
+#[tokio::test]
 async fn scenario_bulk_download_retry_finalize_and_cleanup_flow() {
     let (_root, state) = scenario_state("bulk-download").await;
     let entries = vec![
@@ -910,6 +982,71 @@ async fn spawn_cookie_download_server(
     });
 
     (format!("http://{address}/download.bin"), handle)
+}
+
+async fn spawn_cookie_redirect_download_server(
+    body: &'static [u8],
+    filename: &'static str,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirect_address = redirect_listener.local_addr().unwrap();
+    let target_address = target_listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let mut requests = Vec::with_capacity(6);
+        for _ in 0..3 {
+            let Ok(Ok((mut redirect_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(30), redirect_listener.accept()).await
+            else {
+                break;
+            };
+            let mut redirect_buffer = vec![0_u8; 8192];
+            let redirect_read = redirect_socket.read(&mut redirect_buffer).await.unwrap();
+            let redirect_request =
+                String::from_utf8_lossy(&redirect_buffer[..redirect_read]).to_string();
+            let redirect_response = if redirect_request
+                .to_ascii_lowercase()
+                .contains("cookie: session=abc")
+            {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/cdn.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string()
+            };
+            requests.push(redirect_request);
+            redirect_socket
+                .write_all(redirect_response.as_bytes())
+                .await
+                .unwrap();
+
+            let Ok(Ok((mut target_socket, _))) =
+                tokio::time::timeout(Duration::from_secs(30), target_listener.accept()).await
+            else {
+                break;
+            };
+            let mut target_buffer = vec![0_u8; 8192];
+            let target_read = target_socket.read(&mut target_buffer).await.unwrap();
+            let target_request = String::from_utf8_lossy(&target_buffer[..target_read]).to_string();
+            let target_request_lower = target_request.to_ascii_lowercase();
+            let target_response = if target_request.starts_with("HEAD ") {
+                http_head_response(body.len(), filename)
+            } else if target_request_lower.contains("range: bytes=0-0") {
+                http_range_rejected_response()
+            } else {
+                http_ok_response(body, filename)
+            };
+            requests.push(target_request);
+            target_socket
+                .write_all(target_response.as_bytes())
+                .await
+                .unwrap();
+        }
+        requests
+    });
+
+    (format!("http://{redirect_address}/download.bin"), handle)
 }
 
 fn http_head_response(content_length: usize, filename: &str) -> String {

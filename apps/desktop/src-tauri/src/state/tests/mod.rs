@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::{
     BulkDownloadSettings, HostRegistrationStatus, HosterPreflightInfo, HosterPreflightStatus,
-    TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
+    StartupRecoveryStatus, TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
 };
 
 #[path = "destructive_cleanup.rs"]
@@ -10,6 +10,8 @@ mod destructive_cleanup;
 mod diagnostics;
 #[path = "enqueue_settings.rs"]
 mod enqueue_settings;
+#[path = "local_recovery.rs"]
+mod local_recovery;
 #[path = "progress.rs"]
 mod progress;
 #[path = "scheduler.rs"]
@@ -451,6 +453,7 @@ fn runtime_state_with_jobs(jobs: Vec<DownloadJob>) -> RuntimeState {
         main_window: None,
         diagnostic_events: Vec::new(),
         pending_diagnostic_events: Vec::new(),
+        startup_recovery: None,
         next_job_number: 99,
         job_indexes,
         active_workers: HashSet::new(),

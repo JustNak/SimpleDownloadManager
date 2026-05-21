@@ -1,5 +1,32 @@
 use super::*;
 
+fn myapp_data_dir_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+struct MyappDataDirGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl MyappDataDirGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("MYAPP_DATA_DIR");
+        std::env::set_var("MYAPP_DATA_DIR", path);
+        Self { previous }
+    }
+}
+
+impl Drop for MyappDataDirGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.take() {
+            std::env::set_var("MYAPP_DATA_DIR", value);
+        } else {
+            std::env::remove_var("MYAPP_DATA_DIR");
+        }
+    }
+}
+
 #[tokio::test]
 async fn diagnostics_keep_newest_five_hundred_events() {
     let download_dir = test_runtime_dir("diagnostic-events");
@@ -38,6 +65,144 @@ async fn diagnostics_keep_newest_five_hundred_events() {
     assert_eq!(export.event_history.len(), 600);
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
+fn startup_recovers_from_corrupt_state_json_with_diagnostic() {
+    let _lock = myapp_data_dir_test_lock().lock().unwrap();
+    let data_dir = test_runtime_dir("startup-corrupt-state");
+    let state_path = data_dir.join("state.json");
+    std::fs::write(&state_path, "{not-json").unwrap();
+    let _env = MyappDataDirGuard::set(&data_dir);
+
+    let state = SharedState::new().expect("corrupt persisted state should not abort startup");
+    let runtime = state.inner.blocking_read();
+
+    assert!(
+        !state_path.exists(),
+        "startup should not overwrite a corrupt state file with defaults"
+    );
+    assert!(
+        runtime.diagnostic_events.iter().any(|event| {
+            event.category == "startup" && event.message.contains("Could not parse persisted state")
+        }),
+        "startup diagnostics should include the persisted-state parse failure"
+    );
+    assert_eq!(
+        runtime
+            .snapshot()
+            .startup_recovery
+            .as_ref()
+            .map(|recovery| recovery.status),
+        Some(StartupRecoveryStatus::NeedsLocalRecovery)
+    );
+    drop(runtime);
+    let quarantined = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("state.invalid-") && name.ends_with(".json"))
+        })
+        .expect("corrupt state should be preserved as a quarantine file");
+    assert_eq!(std::fs::read_to_string(quarantined).unwrap(), "{not-json");
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn startup_restores_zero_filled_state_from_last_good_snapshot() {
+    let _lock = myapp_data_dir_test_lock().lock().unwrap();
+    let data_dir = test_runtime_dir("startup-zero-filled-last-good");
+    let state_path = data_dir.join("state.json");
+    std::fs::write(&state_path, vec![0; 256]).unwrap();
+    let mut persisted = PersistedState::default();
+    persisted.jobs = vec![download_job(
+        "job_recovered",
+        JobState::Completed,
+        ResumeSupport::Supported,
+        100,
+    )];
+    std::fs::write(
+        data_dir.join("state.last-good.json"),
+        serde_json::to_string_pretty(&persisted).unwrap(),
+    )
+    .unwrap();
+    let _env = MyappDataDirGuard::set(&data_dir);
+
+    let state = SharedState::new().expect("last-good state should recover startup");
+    let snapshot = state.inner.blocking_read().snapshot();
+
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].id, "job_recovered");
+    let recovery = snapshot
+        .startup_recovery
+        .expect("startup recovery should be visible in the app snapshot");
+    assert_eq!(recovery.status, StartupRecoveryStatus::Recovered);
+    assert!(recovery.quarantined_path.is_some());
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn startup_warns_for_unrecoverable_zero_filled_state_without_overwriting_it() {
+    let _lock = myapp_data_dir_test_lock().lock().unwrap();
+    let data_dir = test_runtime_dir("startup-zero-filled-needs-local-recovery");
+    let state_path = data_dir.join("state.json");
+    std::fs::write(&state_path, vec![0; 64]).unwrap();
+    let _env = MyappDataDirGuard::set(&data_dir);
+
+    let state = SharedState::new().expect("unrecoverable state should not abort startup");
+    let snapshot = state.inner.blocking_read().snapshot();
+
+    assert!(snapshot.jobs.is_empty());
+    let recovery = snapshot
+        .startup_recovery
+        .expect("startup recovery warning should be visible in the app snapshot");
+    assert_eq!(recovery.status, StartupRecoveryStatus::NeedsLocalRecovery);
+    assert!(
+        !state_path.exists(),
+        "unrecoverable state.json should stay quarantined instead of being overwritten by defaults"
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn startup_keeps_unavailable_saved_directories_nonfatal_with_diagnostic() {
+    let _lock = myapp_data_dir_test_lock().lock().unwrap();
+    let data_dir = test_runtime_dir("startup-unavailable-directories");
+    let blocking_file = data_dir.join("blocked-parent");
+    std::fs::write(&blocking_file, "not a directory").unwrap();
+    let download_dir = blocking_file.join("Downloads");
+    let torrent_dir = blocking_file.join("Torrent");
+    let bulk_dir = blocking_file.join("Bulk");
+    let mut persisted = PersistedState::default();
+    persisted.settings.download_directory = download_dir.display().to_string();
+    persisted.settings.torrent.download_directory = torrent_dir.display().to_string();
+    persisted.settings.bulk.output_directory = bulk_dir.display().to_string();
+    persist_state(&data_dir.join("state.json"), &persisted).unwrap();
+    let _env = MyappDataDirGuard::set(&data_dir);
+
+    let state = SharedState::new().expect("unavailable saved directories should not abort startup");
+    let settings = state.settings_sync();
+    let runtime = state.inner.blocking_read();
+
+    assert_eq!(PathBuf::from(settings.download_directory), download_dir);
+    assert_eq!(
+        PathBuf::from(settings.torrent.download_directory),
+        torrent_dir
+    );
+    assert_eq!(PathBuf::from(settings.bulk.output_directory), bulk_dir);
+    assert!(
+        runtime.diagnostic_events.iter().any(|event| {
+            event.category == "startup" && event.message.contains("saved download directory")
+        }),
+        "startup diagnostics should explain the unavailable saved download directory"
+    );
+
+    let _ = std::fs::remove_dir_all(data_dir);
 }
 
 #[test]

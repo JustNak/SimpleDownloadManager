@@ -14,6 +14,14 @@ export interface BulkFinalizingStep {
   label: string;
 }
 
+export interface BulkFinalizationProgress {
+  progress: number;
+  processedBytes: number;
+  totalBytes: number;
+  knownTotal: boolean;
+  active: boolean;
+}
+
 export interface BulkReviewStartSelection {
   includedJobs: DownloadJob[];
   excludedJobs: DownloadJob[];
@@ -242,6 +250,25 @@ export function bulkFinalizingSteps(jobs: DownloadJob[]): BulkFinalizingStep[] {
   steps.push({ id: 'combining', label: 'Combining' });
 
   return steps;
+}
+
+export function bulkFinalizationProgress(jobs: DownloadJob[]): BulkFinalizationProgress {
+  const archive = jobs.find((job) => job.bulkArchive)?.bulkArchive;
+  const status = archive?.archiveStatus ?? 'pending';
+  const active = status === 'extracting'
+    || status === 'combining'
+    || status === 'creating_folder'
+    || status === 'compressing';
+  const totalBytes = Math.max(0, archive?.finalizeTotalBytes ?? 0);
+  const processedBytes = Math.min(totalBytes, Math.max(0, archive?.finalizeProcessedBytes ?? 0));
+  const knownTotal = totalBytes > 0;
+  return {
+    progress: knownTotal ? clampProgress((processedBytes / totalBytes) * 100) : 0,
+    processedBytes,
+    totalBytes,
+    knownTotal,
+    active,
+  };
 }
 
 export function activeBulkFinalizingStepId(phase: BulkPhase | null): BulkFinalizingStepId | null {

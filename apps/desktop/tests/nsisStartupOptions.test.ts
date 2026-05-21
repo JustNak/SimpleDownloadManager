@@ -123,6 +123,16 @@ assert.match(
 );
 assert.match(
   hooks,
+  /simple-download-manager-native-host-x86_64-pc-windows-msvc\.exe/,
+  'postinstall hook should recognize the x64 native-host sidecar name',
+);
+assert.match(
+  hooks,
+  /simple-download-manager-native-host-aarch64-pc-windows-msvc\.exe/,
+  'postinstall hook should recognize the ARM64 native-host sidecar name',
+);
+assert.match(
+  hooks,
   /"\$INSTDIR\\\$\{MAINBINARYNAME\}\.exe" --installer-configure --installer-startup/,
   'installer should apply startup settings through the installed app binary',
 );

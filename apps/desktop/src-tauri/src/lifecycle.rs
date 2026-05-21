@@ -16,6 +16,8 @@ use std::io::{Error as IoError, ErrorKind, Write};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
+use std::path::PathBuf;
+#[cfg(windows)]
 use std::time::Duration;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
@@ -116,6 +118,22 @@ pub enum MainWindowCloseAction {
     Destroy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
 #[cfg(windows)]
 pub fn acquire_single_instance_or_notify() -> Result<Option<SingleInstanceGuard>, String> {
     let mutex_name = wide_null(SINGLE_INSTANCE_MUTEX_NAME);
@@ -131,7 +149,9 @@ pub fn acquire_single_instance_or_notify() -> Result<Option<SingleInstanceGuard>
         }
         Ok(SingleInstanceMutexDecision::NotifyExisting) => {
             if let Err(error) = notify_existing_instance_show_window() {
-                eprintln!("failed to notify existing app instance: {error}");
+                let message = format!("failed to notify existing app instance: {error}");
+                eprintln!("{message}");
+                log_startup_error(&message);
             }
             unsafe {
                 CloseHandle(handle);
@@ -220,6 +240,33 @@ fn is_retryable_existing_instance_wake_error(error: &IoError) -> bool {
 #[cfg(windows)]
 fn format_existing_instance_wake_error(error: IoError) -> String {
     format!("Could not notify existing app instance: {error}")
+}
+
+#[cfg(windows)]
+fn log_startup_error(message: &str) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let line = format!("{timestamp} {message}\n");
+    let path = startup_log_path();
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+}
+
+#[cfg(windows)]
+fn startup_log_path() -> PathBuf {
+    dirs::data_local_dir()
+        .map(|path| path.join("SimpleDownloadManager"))
+        .unwrap_or_else(|| std::env::temp_dir().join("SimpleDownloadManager"))
+        .join("startup.log")
 }
 
 pub fn single_instance_show_window_request() -> String {
@@ -754,10 +801,60 @@ fn restore_main_window_state<R: Runtime>(window: &WebviewWindow<R>, state: &Main
         let _ = window.set_size(Size::Physical(PhysicalSize::new(state.width, state.height)));
     }
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(state.x, state.y)));
+    repair_restored_main_window_bounds(window);
     if state.maximized {
         let _ = window.maximize();
     } else {
         let _ = window.unmaximize();
+    }
+}
+
+fn repair_restored_main_window_bounds<R: Runtime>(window: &WebviewWindow<R>) {
+    let size = match window.outer_size() {
+        Ok(size) if size.width > 0 && size.height > 0 => size,
+        _ => return,
+    };
+    let monitors = match window.available_monitors() {
+        Ok(monitors) => monitors,
+        Err(error) => {
+            eprintln!("failed to inspect monitors for main-window restore: {error}");
+            return;
+        }
+    };
+    if monitors.is_empty() {
+        return;
+    }
+
+    let rect = match window.outer_position() {
+        Ok(position) => WindowRect {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+        Err(_) => {
+            let monitor = preferred_main_window_monitor_rect(window, &monitors);
+            if let Some(monitor) = monitor {
+                let _ = window.set_position(Position::Physical(
+                    centered_main_window_position_for_rect(size, monitor),
+                ));
+            }
+            return;
+        }
+    };
+
+    let monitor_rects = monitors
+        .iter()
+        .map(MonitorRect::from_monitor)
+        .collect::<Vec<_>>();
+    if main_window_rect_is_visible_on_any_monitor(rect, &monitor_rects) {
+        return;
+    }
+
+    if let Some(monitor) = preferred_main_window_monitor_rect(window, &monitors) {
+        let _ = window.set_position(Position::Physical(centered_main_window_position_for_rect(
+            size, monitor,
+        )));
     }
 }
 
@@ -783,21 +880,75 @@ fn preferred_main_window_monitor<R: Runtime>(
         .next())
 }
 
+fn preferred_main_window_monitor_rect<R: Runtime>(
+    window: &WebviewWindow<R>,
+    monitors: &[Monitor],
+) -> Option<MonitorRect> {
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        return Some(MonitorRect::from_monitor(&monitor));
+    }
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        return Some(MonitorRect::from_monitor(&monitor));
+    }
+    monitors.first().map(MonitorRect::from_monitor)
+}
+
 fn centered_main_window_position(
     size: PhysicalSize<u32>,
     monitor: Monitor,
 ) -> PhysicalPosition<i32> {
-    let monitor_position = monitor.position();
-    let monitor_size = monitor.size();
-    let x =
-        monitor_position.x as i64 + ((monitor_size.width as i64 - size.width as i64) / 2).max(0);
-    let y =
-        monitor_position.y as i64 + ((monitor_size.height as i64 - size.height as i64) / 2).max(0);
+    centered_main_window_position_for_rect(size, MonitorRect::from_monitor(&monitor))
+}
+
+fn main_window_rect_is_visible_on_any_monitor(rect: WindowRect, monitors: &[MonitorRect]) -> bool {
+    monitors
+        .iter()
+        .copied()
+        .any(|monitor| main_window_rect_is_visible_on_monitor(rect, monitor))
+}
+
+fn main_window_rect_is_visible_on_monitor(rect: WindowRect, monitor: MonitorRect) -> bool {
+    const MIN_VISIBLE_WIDTH: i64 = 160;
+    const MIN_VISIBLE_HEIGHT: i64 = 90;
+
+    let visible_width = intersection_length(rect.x, rect.width, monitor.x, monitor.width);
+    let visible_height = intersection_length(rect.y, rect.height, monitor.y, monitor.height);
+    visible_width >= MIN_VISIBLE_WIDTH.min(rect.width as i64)
+        && visible_height >= MIN_VISIBLE_HEIGHT.min(rect.height as i64)
+}
+
+fn intersection_length(a_start: i32, a_length: u32, b_start: i32, b_length: u32) -> i64 {
+    let a_start = a_start as i64;
+    let b_start = b_start as i64;
+    let a_end = a_start + a_length as i64;
+    let b_end = b_start + b_length as i64;
+    (a_end.min(b_end) - a_start.max(b_start)).max(0)
+}
+
+fn centered_main_window_position_for_rect(
+    size: PhysicalSize<u32>,
+    monitor: MonitorRect,
+) -> PhysicalPosition<i32> {
+    let x = monitor.x as i64 + ((monitor.width as i64 - size.width as i64) / 2).max(0);
+    let y = monitor.y as i64 + ((monitor.height as i64 - size.height as i64) / 2).max(0);
     PhysicalPosition::new(clamp_i64_to_i32(x), clamp_i64_to_i32(y))
 }
 
 fn clamp_i64_to_i32(value: i64) -> i32 {
     value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+impl MonitorRect {
+    fn from_monitor(monitor: &Monitor) -> Self {
+        let position = monitor.position();
+        let size = monitor.size();
+        Self {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -980,6 +1131,50 @@ mod tests {
     }
 
     #[test]
+    fn main_window_restore_requires_visible_bounds_on_a_monitor() {
+        let monitor = super::MonitorRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+
+        assert!(super::main_window_rect_is_visible_on_any_monitor(
+            super::WindowRect {
+                x: 100,
+                y: 100,
+                width: 1360,
+                height: 860,
+            },
+            &[monitor],
+        ));
+        assert!(!super::main_window_rect_is_visible_on_any_monitor(
+            super::WindowRect {
+                x: -4000,
+                y: 100,
+                width: 1360,
+                height: 860,
+            },
+            &[monitor],
+        ));
+    }
+
+    #[test]
+    fn offscreen_main_window_restore_recenters_on_monitor_bounds() {
+        let position = super::centered_main_window_position_for_rect(
+            tauri::PhysicalSize::new(1360, 860),
+            super::MonitorRect {
+                x: -1920,
+                y: 120,
+                width: 1920,
+                height: 1080,
+            },
+        );
+
+        assert_eq!(position, tauri::PhysicalPosition::new(-1640, 230));
+    }
+
+    #[test]
     fn startup_creation_policy_skips_autostart_tray_webview() {
         assert!(super::should_create_main_window_on_startup(
             false,
@@ -1044,6 +1239,14 @@ mod tests {
         assert_eq!(value["requestId"], super::SINGLE_INSTANCE_REQUEST_ID);
         assert_eq!(value["type"], "show_window");
         assert_eq!(value["payload"]["reason"], "user_request");
+    }
+
+    #[test]
+    fn duplicate_instance_wake_failures_are_logged_best_effort() {
+        let source = include_str!("lifecycle.rs");
+
+        assert!(source.contains("log_startup_error(&message)"));
+        assert!(source.contains("startup.log"));
     }
 
     #[test]

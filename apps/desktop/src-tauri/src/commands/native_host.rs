@@ -89,6 +89,7 @@ fn resolve_host_binary_path() -> Result<PathBuf, String> {
 
     candidate_names.push("simple-download-manager-native-host.exe".into());
     candidate_names.push("simple-download-manager-native-host-x86_64-pc-windows-msvc.exe".into());
+    candidate_names.push("simple-download-manager-native-host-aarch64-pc-windows-msvc.exe".into());
 
     for candidate_name in candidate_names {
         let candidate_path = install_root.join(&candidate_name);

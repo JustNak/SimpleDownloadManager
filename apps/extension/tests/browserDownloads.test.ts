@@ -288,12 +288,14 @@ async function main() {
       {
         filename: 'C:\\Users\\Downloads\\html_css_basic_guide (2).pdf',
         totalBytes: 95437.8,
+        browserFallback: 'unavailable',
       },
       { headers: [{ name: 'Cookie', value: 'session=abc' }] },
     ),
     {
       suggestedFilename: 'html_css_basic_guide (2).pdf',
       totalBytes: 95437,
+      browserFallback: 'unavailable',
       handoffAuth: { headers: [{ name: 'Cookie', value: 'session=abc' }] },
     },
     'browser auto handoffs should include the resolved filename and size for desktop duplicate checks',

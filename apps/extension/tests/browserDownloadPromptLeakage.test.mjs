@@ -7,11 +7,16 @@ const backgroundSource = await readFile(path.join(repoRoot, 'apps/extension/src/
 
 const handlerStart = backgroundSource.indexOf('async function handleBrowserDownloadDeterminingFilename');
 const handlerEnd = backgroundSource.indexOf('browser.runtime.onInstalled', handlerStart);
+const handoffStart = backgroundSource.indexOf('async function handOffBrowserDownload');
+const handoffEnd = backgroundSource.indexOf('async function recordHostError', handoffStart);
 
 assert.notEqual(handlerStart, -1, 'filename interception handler should exist');
 assert.notEqual(handlerEnd, -1, 'filename interception handler should be sliceable');
+assert.notEqual(handoffStart, -1, 'browser download handoff helper should exist');
+assert.notEqual(handoffEnd, -1, 'browser download handoff helper should be sliceable');
 
 const handlerSource = backgroundSource.slice(handlerStart, handlerEnd);
+const handoffSource = backgroundSource.slice(handoffStart, handoffEnd);
 const detachIndex = handlerSource.indexOf('await detachBrowserDownloadForDesktopPrompt');
 const pingIndex = handlerSource.indexOf('const pingResponse = await pingNativeHost');
 const handoffIndex = handlerSource.indexOf('const response = await handOffBrowserDownload');
@@ -56,4 +61,14 @@ assert.match(
   handlerSource,
   /if \(handoffResolution\.action === 'record_error_and_restore'\) \{[\s\S]*?await recordHostError\(handoffResolution\.response\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
   'native handoff errors after detachment should record the error and restore the browser download',
+);
+assert.match(
+  handoffSource,
+  /const authResolution = resolveBrowserHandoffAuth\(handoffDetails, settings\);/,
+  'Chrome-style browser download handoffs should resolve captured auth before queuing',
+);
+assert.match(
+  handoffSource,
+  /authResolution\.status === 'protected_auth_required'[\s\S]*?PROTECTED_DOWNLOAD_AUTH_REQUIRED/,
+  'Chrome-style browser download handoffs should reject protected downloads when auth cannot be attached',
 );

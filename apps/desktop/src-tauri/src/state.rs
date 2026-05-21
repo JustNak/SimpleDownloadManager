@@ -1,16 +1,19 @@
+#[cfg(test)]
+use crate::storage::load_persisted_state;
 use crate::storage::{
     default_download_directory, default_extension_listen_port,
     default_torrent_download_directory_for, default_torrent_port_forwarding_port,
-    load_persisted_state, normalize_bulk_settings_for_download_directory, persist_state,
-    persist_state_blocking, BulkArchiveInfo, BulkArchiveOutputKind, BulkArchiveStatus,
-    BulkFinalizeMode, BulkHosterAccelerationMode, BulkHosterFairnessMode, ConnectionState,
-    DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsExport, DiagnosticsSnapshot,
-    DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
+    load_persisted_state_with_recovery, normalize_bulk_settings_for_download_directory,
+    persist_state, persist_state_blocking, BrowserFallback, BulkArchiveInfo, BulkArchiveOutputKind,
+    BulkArchiveStatus, BulkFinalizeMode, BulkHosterAccelerationMode, BulkHosterFairnessMode,
+    ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsExport,
+    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
     ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
     HostRegistrationDiagnostics, HosterPreflightInfo, HosterPreflightStatus, IntegrityAlgorithm,
-    IntegrityCheck, IntegrityStatus, JobState, MainWindowState, PersistedState,
-    ProtectedDownloadAuthScope, QueueSummary, RemovalState, ResumeSupport, Settings, TorrentInfo,
-    TorrentJobDiagnostics, TorrentSeedMode, TorrentSettings, TransferKind,
+    IntegrityCheck, IntegrityStatus, JobState, LocalRecoveryCandidate, LocalRecoveryPreview,
+    MainWindowState, PersistedState, ProtectedDownloadAuthScope, QueueSummary, RemovalState,
+    ResumeSupport, Settings, StartupRecoverySummary, TorrentInfo, TorrentJobDiagnostics,
+    TorrentSeedMode, TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +27,7 @@ mod diagnostics;
 mod enqueue;
 mod jobs;
 mod lifecycle;
+mod local_recovery;
 mod paths;
 mod progress;
 mod runtime;
@@ -33,6 +37,7 @@ mod torrent;
 mod types;
 use diagnostics::*;
 use jobs::*;
+use local_recovery::*;
 use paths::*;
 #[cfg(test)]
 use progress::*;
@@ -115,6 +120,7 @@ struct RuntimeState {
     main_window: Option<MainWindowState>,
     diagnostic_events: Vec<DiagnosticEvent>,
     pending_diagnostic_events: Vec<DiagnosticEvent>,
+    startup_recovery: Option<StartupRecoverySummary>,
     next_job_number: u64,
     job_indexes: HashMap<String, usize>,
     active_workers: HashSet<String>,

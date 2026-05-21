@@ -200,6 +200,52 @@ const completedRows = groupBulkQueueRows([
 assert.equal(completedRows[0].state, 'completed', 'completed archive rows should represent the archive status');
 assert.equal(completedRows[0].targetPath, 'C:\\Downloads\\bulk-download.zip', 'completed aggregate target should be the archive output path');
 
+const finalizingRows = groupBulkQueueRows([
+  job({
+    id: 'part_finalizing_1',
+    filename: 'Game.part01.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    bulkArchive: {
+      id: 'bulk_finalizing',
+      name: 'Game',
+      archiveStatus: 'combining',
+      outputKind: 'folder',
+      finalizeTotalBytes: 1_000,
+      finalizeProcessedBytes: 400,
+    },
+  }),
+  job({
+    id: 'part_finalizing_2',
+    filename: 'Game.part02.rar',
+    state: 'completed',
+    progress: 100,
+    totalBytes: 500,
+    downloadedBytes: 500,
+    bulkArchive: {
+      id: 'bulk_finalizing',
+      name: 'Game',
+      archiveStatus: 'combining',
+      outputKind: 'folder',
+      finalizeTotalBytes: 1_000,
+      finalizeProcessedBytes: 400,
+    },
+  }),
+]);
+
+assert.equal(
+  finalizingRows[0].state,
+  'downloading',
+  'finalizing aggregate rows should remain active while combining files',
+);
+assert.equal(
+  finalizingRows[0].progress,
+  40,
+  'finalizing aggregate rows should reflect archive finalization progress',
+);
+
 const removingRows = groupBulkQueueRows([
   job({
     id: 'part_removing',

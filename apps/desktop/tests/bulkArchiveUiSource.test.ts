@@ -61,6 +61,8 @@ assert.match(bulkExpansionSource, /py-1/, 'bulk inline member rows should use co
 assert.doesNotMatch(batchSource, /Reveal completed/, 'bulk progress popup should not expose the old Reveal completed action');
 assert.match(batchSource, /Uncompressing/, 'bulk progress popup should show uncompressing as a distinct finalizing phase');
 assert.match(batchSource, /Combining/, 'bulk progress popup should show combining as a distinct finalizing phase');
+assert.match(batchSource, /bulkFinalizationProgress/, 'bulk progress popup should render finalization byte progress while extracting or combining');
+assert.match(batchSource, /finalizationProgress\.processedBytes[\s\S]*finalizationProgress\.totalBytes/, 'bulk finalization strip should show processed and total finalization bytes separately from download progress');
 assert.doesNotMatch(batchSource, /Compressing/, 'bulk folder output should not expose a compression finalizing phase');
 assert.match(batchSource, /Review links/, 'bulk progress popup should show the pre-download review phase');
 assert.match(batchSource, /deleteJobs/, 'bulk progress popup should let the initial review state cancel the queued batch');

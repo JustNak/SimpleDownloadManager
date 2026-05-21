@@ -79,6 +79,9 @@ FunctionEnd
 
   StrCpy $0 "$INSTDIR\simple-download-manager-native-host-x86_64-pc-windows-msvc.exe"
   IfFileExists "$0" found_sidecar 0
+
+  StrCpy $0 "$INSTDIR\simple-download-manager-native-host-aarch64-pc-windows-msvc.exe"
+  IfFileExists "$0" found_sidecar 0
   Goto done_postinstall
 
   found_sidecar:

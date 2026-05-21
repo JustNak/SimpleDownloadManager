@@ -31,6 +31,7 @@ impl RuntimeState {
             connection_state: self.connection_state,
             jobs: self.jobs.clone(),
             settings: self.settings.clone(),
+            startup_recovery: self.startup_recovery.clone(),
         }
     }
 

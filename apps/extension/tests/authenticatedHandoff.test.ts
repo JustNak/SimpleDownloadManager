@@ -8,7 +8,9 @@ import {
   buildHandoffAuthForUrl,
   captureHandoffAuthHeaders,
   filterHandoffAuthHeaders,
+  hasCapturedBrowserSessionHeaders,
   hasCapturedHandoffAuth,
+  resolveBrowserHandoffAuth,
   takeCapturedHandoffAuth,
 } from '../src/background/handoffAuth.ts';
 
@@ -103,6 +105,66 @@ assert.equal(
 
 captureHandoffAuthHeaders(
   {
+    requestId: 'disabled-session-marker',
+    url: 'https://chatgpt.com/file.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'session=abc' }],
+  },
+  disabledSettings,
+  900,
+);
+assert.equal(
+  hasCapturedBrowserSessionHeaders(
+    {
+      requestId: 'disabled-session-marker',
+      url: 'https://chatgpt.com/file.zip',
+      incognito: false,
+    },
+    950,
+  ),
+  true,
+  'browser session markers should be retained even when Protected Downloads is disabled',
+);
+assert.equal(
+  hasCapturedHandoffAuth(
+    {
+      requestId: 'disabled-session-marker',
+      url: 'https://chatgpt.com/file.zip',
+      incognito: false,
+    },
+    950,
+  ),
+  false,
+  'disabled Protected Downloads should not retain replayable handoff auth',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'accept-only-marker',
+    url: 'https://chatgpt.com/public.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Accept', value: 'application/zip' }],
+  },
+  allowlistSettings,
+  975,
+);
+assert.equal(
+  hasCapturedBrowserSessionHeaders(
+    {
+      requestId: 'accept-only-marker',
+      url: 'https://chatgpt.com/public.zip',
+      incognito: false,
+    },
+    1_000,
+  ),
+  false,
+  'generic browser headers should not mark a download as session-protected',
+);
+
+captureHandoffAuthHeaders(
+  {
     requestId: 'request-1',
     url: 'https://download-cdn.other.test/file.zip',
     method: 'GET',
@@ -123,6 +185,70 @@ assert.equal(
   ),
   false,
   'capture should ignore browser session headers for hosts outside the allowlist',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'chrome-protected-unavailable',
+    url: 'https://file-ap-sgp-3.gofile.io/download/web/file.rar',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'accountToken=secret' }],
+  },
+  allowlistSettings,
+  1_300,
+);
+assert.deepEqual(
+  resolveBrowserHandoffAuth(
+    {
+      requestId: 'chrome-protected-unavailable',
+      url: 'https://file-ap-sgp-3.gofile.io/download/web/file.rar',
+      incognito: false,
+    },
+    allowlistSettings,
+    1_350,
+  ),
+  { status: 'protected_auth_required' },
+  'Chrome browser handoffs with session headers but no allowed captured auth should restore to the browser',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'chrome-protected-allowed',
+    url: 'https://chatgpt.com/file.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'session=abc' }],
+  },
+  allowlistSettings,
+  1_400,
+);
+assert.deepEqual(
+  resolveBrowserHandoffAuth(
+    {
+      requestId: 'chrome-protected-allowed',
+      url: 'https://chatgpt.com/file.zip',
+      incognito: false,
+    },
+    allowlistSettings,
+    1_450,
+  ),
+  { status: 'ready', handoffAuth: { headers: [{ name: 'Cookie', value: 'session=abc' }] } },
+  'Chrome browser handoffs should keep allowed memory-only auth when it was captured',
+);
+
+assert.deepEqual(
+  resolveBrowserHandoffAuth(
+    {
+      requestId: 'chrome-public-download',
+      url: 'https://public.example.org/file.zip',
+      incognito: false,
+    },
+    allowlistSettings,
+    1_500,
+  ),
+  { status: 'ready' },
+  'public browser downloads without session headers should still hand off normally',
 );
 
 captureHandoffAuthHeaders(
@@ -310,10 +436,13 @@ const request = createEnqueueDownloadRequest(
   source,
   'request-1',
   {
-    headers: [
-      { name: 'Cookie', value: 'oai-did=1' },
-      { name: 'Range', value: 'bytes=0-' },
-    ],
+    browserFallback: 'unavailable',
+    handoffAuth: {
+      headers: [
+        { name: 'Cookie', value: 'oai-did=1' },
+        { name: 'Range', value: 'bytes=0-' },
+      ],
+    },
   },
 );
 assert.equal(request.ok, true);
@@ -321,4 +450,9 @@ if (request.ok) {
   assert.deepEqual(request.value.payload.handoffAuth, {
     headers: [{ name: 'Cookie', value: 'oai-did=1' }],
   });
+  assert.equal(
+    request.value.payload.browserFallback,
+    'unavailable',
+    'browser fallback metadata should survive request validation',
+  );
 }

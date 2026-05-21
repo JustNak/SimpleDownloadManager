@@ -66,6 +66,24 @@ The full Windows release pipeline is:
 npm run release:windows
 ```
 
+By default this builds both supported Windows architectures:
+
+- x64: `x86_64-pc-windows-msvc`, updater platform `windows-x86_64`
+- ARM64: `aarch64-pc-windows-msvc`, updater platform `windows-aarch64`
+
+For targeted local checks, pass one or more targets to the release script:
+
+```powershell
+pwsh -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Targets x64
+pwsh -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 -Targets arm64
+```
+
+ARM64 release builds require the Rust target and Visual Studio C++ ARM64 build tools:
+
+```powershell
+rustup target add aarch64-pc-windows-msvc
+```
+
 Signed updater artifacts require the Tauri updater private key. The release script reads it from the first available source:
 
 - `TAURI_SIGNING_PRIVATE_KEY`
@@ -78,13 +96,13 @@ That command will:
 
 - build Chromium and Firefox extension bundles
 - build the desktop frontend
-- build the native host in release mode
+- build x64 and ARM64 native hosts in release mode
 - stage the native host as a Tauri sidecar
-- bundle installer resources and native-host manifest templates
-- build the Tauri NSIS installer
+- bundle installer resources, native-host manifest templates, and architecture-specific 7-Zip helpers
+- build x64 and ARM64 Tauri NSIS installers
 - zip the extension outputs into the top-level `release/` directory
-- write `release/latest-beta.json` for the beta updater feed
-- write `release/latest-alpha.json` as a one-time alpha-to-beta migration bridge
+- write `release/latest-beta.json` for the beta updater feed with both Windows platforms
+- write `release/latest-alpha.json` as a one-time alpha-to-beta migration bridge with both Windows platforms
 
 Publish the beta updater feed after a successful release build:
 

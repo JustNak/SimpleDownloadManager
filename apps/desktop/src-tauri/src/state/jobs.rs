@@ -288,6 +288,9 @@ impl SharedState {
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 ensure_not_removing(job)?;
+                if is_recovered_local_job(job) {
+                    return Err(recovered_local_action_error());
+                }
                 job.state = JobState::Queued;
                 job.removal_state = None;
                 job.speed = 0;
@@ -328,6 +331,9 @@ impl SharedState {
             let event_message = {
                 let job = find_job_mut(&mut state.jobs, id)?;
                 ensure_not_removing(job)?;
+                if is_recovered_local_job(job) {
+                    return Err(recovered_local_action_error());
+                }
                 remove_partial_artifacts(Path::new(&job.temp_path)).map_err(internal_error)?;
                 reset_job_for_restart(job);
                 format!("Restart queued for {}", job.filename)
@@ -590,7 +596,10 @@ impl SharedState {
             let mut state = self.inner.write().await;
 
             for job in &mut state.jobs {
-                if job.state == JobState::Failed && job.removal_state.is_none() {
+                if job.state == JobState::Failed
+                    && job.removal_state.is_none()
+                    && !is_recovered_local_job(job)
+                {
                     job.state = JobState::Queued;
                     job.removal_state = None;
                     job.speed = 0;

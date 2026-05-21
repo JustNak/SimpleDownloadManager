@@ -41,7 +41,7 @@
   const duplicateLabel = $derived(prompt?.duplicateJob?.filename ?? prompt?.duplicateFilename ?? prompt?.duplicatePath ?? '');
   const duplicateMessage = $derived(prompt?.duplicateJob ? 'Already in queue: ' : 'Destination exists: ');
   const overwriteLabel = $derived(prompt?.duplicateJob ? 'replace queue' : 'replace file');
-  const canSwapToBrowser = $derived(prompt?.source?.entryPoint === 'browser_download' && !isDuplicate);
+  const canSwapToBrowser = $derived(prompt?.source?.entryPoint === 'browser_download' && prompt?.browserFallback !== 'unavailable' && !isDuplicate);
   const sourceLabel = $derived(prompt?.source
     ? `${prompt.source.browser} ${prompt.source.entryPoint.replaceAll('_', ' ')}`
     : 'Browser download');

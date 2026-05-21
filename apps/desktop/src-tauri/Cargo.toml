@@ -1,6 +1,6 @@
 [package]
 name = "simple-download-manager-desktop-backend"
-version = "0.8.2-beta"
+version = "0.8.3-beta"
 edition = "2021"
 build = "build.rs"
 autobins = false
@@ -28,7 +28,7 @@ dirs = "6.0.0"
 percent-encoding = "2.3.1"
 tauri-plugin-notification = "2"
 winreg = "0.52.0"
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 tauri-plugin-updater = "2"
 
 [build-dependencies]

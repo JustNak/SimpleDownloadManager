@@ -60,14 +60,11 @@ export async function ensureUpdaterRelease(channel, repoRoot = defaultRoot) {
 export async function publishUpdaterBeta(repoRoot = defaultRoot) {
   const packageJson = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
   const paths = updaterReleasePaths(repoRoot, packageJson.version, releaseChannels.beta);
+  const uploadPaths = updaterBetaUploadPaths(paths);
 
   await assertGitHubCliAvailable((args, options) => runGh(args, { ...options, cwd: repoRoot }));
 
-  await Promise.all([
-    access(paths.installerPath),
-    access(paths.signaturePath),
-    access(paths.metadataPath),
-  ]);
+  await Promise.all(uploadPaths.map((uploadPath) => access(uploadPath)));
 
   await ensureUpdaterRelease(releaseChannels.beta, repoRoot);
 
@@ -75,13 +72,21 @@ export async function publishUpdaterBeta(repoRoot = defaultRoot) {
     'release',
     'upload',
     releaseChannels.beta.metadataReleaseTag,
-    paths.installerPath,
-    paths.signaturePath,
-    paths.metadataPath,
+    ...uploadPaths,
     '--clobber',
   ], { cwd: repoRoot });
 
   console.log(`Uploaded ${releaseChannels.beta.metadataFilename}, installer, and signature to ${releaseChannels.beta.metadataReleaseTag}.`);
+}
+
+export function updaterBetaUploadPaths(paths) {
+  return [
+    ...paths.installers.flatMap((installer) => [
+      installer.installerPath,
+      installer.signaturePath,
+    ]),
+    paths.metadataPath,
+  ];
 }
 
 export function runGh(args, options = {}) {

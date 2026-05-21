@@ -70,6 +70,9 @@ Supported request types:
 ```json
 {
   "url": "https://example.com/file.zip",
+  "suggestedFilename": "file.zip",
+  "totalBytes": 1048576,
+  "browserFallback": "replay",
   "source": {
     "entryPoint": "context_menu",
     "browser": "firefox",
@@ -105,7 +108,8 @@ URL handling is intentionally narrow:
 - Manual/context-menu/popup requests accept `http:`, `https:`, and `magnet:` URLs.
 - Browser download interception uses `http:`/`https:` download items and hands `.torrent` URLs or filenames to the desktop app as torrent jobs.
 - Torrent browser handoffs include optional `transferKind: "torrent"` metadata so opaque download URLs with `.torrent` filenames bypass the normal download prompt and use the torrent progress popup.
-- The envelope version stays `1`; `transferKind` is optional for backward compatibility.
+- Browser download handoffs may include optional `browserFallback: "replay" | "unavailable"` metadata. Omitted means `"replay"`, where the extension may restore the browser flow by starting a new browser download if the app rejects or the user chooses Swap. `"unavailable"` means replaying would be unsafe and the app should hide Swap.
+- The envelope version stays `1`; `transferKind` and `browserFallback` are optional for backward compatibility.
 
 Torrent lifecycle behavior:
 
@@ -120,6 +124,7 @@ Manual sends, popup sends, and context-menu sends are still allowed.
 `protectedDownloadAuthScope` is the current Protected Downloads authority: `off` disables captured auth, `allowlist` allows only exact allowlisted hosts, and `legacy_global` preserves older global-auth settings during migration.
 When Protected Downloads is enabled, exact browser download handoffs may include bounded, memory-only request headers in `handoffAuth`; auth header values are never persisted or written to diagnostics.
 Captured auth is globally capped in extension memory, cleared when Protected Downloads is disabled, and only matched by URL when exactly one fresh request capture exists.
+Firefox protected downloads are preserved in the original browser request when session headers were seen but no exact captured auth can be attached. If Firefox already canceled the original protected request for an exact app handoff, the extension sends `browserFallback: "unavailable"` so the desktop prompt does not offer or replay a new browser download.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
 `appearanceSettings` is returned with status responses so the popup and options UI can mirror the desktop theme and accent color. It is display-only for the extension and is not part of `save_extension_settings`.
 

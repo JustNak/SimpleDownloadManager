@@ -7,7 +7,7 @@ use crate::state::{
     BackendError, DuplicatePolicy, EnqueueOptions, EnqueueResult, EnqueueStatus, SharedState,
 };
 use crate::storage::{
-    AppearanceSettings, ConnectionState, DiagnosticLevel, DownloadSource,
+    AppearanceSettings, BrowserFallback, ConnectionState, DiagnosticLevel, DownloadSource,
     ExtensionIntegrationSettings, HandoffAuth, HostRegistrationDiagnostics, HostRegistrationEntry,
     HostRegistrationStatus, QueueSummary, TransferKind,
 };
@@ -105,6 +105,8 @@ struct EnqueuePayload {
     total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
     transfer_kind: Option<TransferKind>,
+    #[serde(default)]
+    browser_fallback: BrowserFallback,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +118,8 @@ struct PromptDownloadPayload {
     total_bytes: Option<u64>,
     handoff_auth: Option<HandoffAuth>,
     transfer_kind: Option<TransferKind>,
+    #[serde(default)]
+    browser_fallback: BrowserFallback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,6 +569,7 @@ async fn handle_request(
                     Some(source.clone()),
                     payload.suggested_filename,
                     payload.total_bytes,
+                    payload.browser_fallback,
                 )
                 .await
             {
@@ -627,6 +632,7 @@ async fn handle_request(
                         Some(source.clone()),
                         payload.suggested_filename.clone(),
                         payload.total_bytes,
+                        payload.browser_fallback,
                     )
                     .await
                 {
@@ -1650,7 +1656,13 @@ async fn run_prompt_download(
         let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
     }
 
-    match receiver.await.unwrap_or(PromptDecision::SwapToBrowser) {
+    let fallback_decision = if prompt.browser_fallback == BrowserFallback::Unavailable {
+        PromptDecision::Cancel
+    } else {
+        PromptDecision::SwapToBrowser
+    };
+
+    match receiver.await.unwrap_or(fallback_decision) {
         PromptDecision::Cancel => HostResponse::prompt_dismissed(request_id),
         PromptDecision::SwapToBrowser => HostResponse::prompt_canceled(request_id),
         PromptDecision::ShowExisting => {

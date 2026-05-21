@@ -13,6 +13,30 @@ export interface DesktopSnapshot {
   connectionState: ConnectionState;
   jobs: DownloadJob[];
   settings: Settings;
+  startupRecovery?: StartupRecoverySummary;
+}
+
+export type StartupRecoveryStatus = 'none' | 'recovered' | 'needs_local_recovery' | 'reset_to_defaults';
+
+export interface StartupRecoverySummary {
+  status: StartupRecoveryStatus;
+  message: string;
+  sourcePath?: string;
+  quarantinedPath?: string;
+}
+
+export interface LocalRecoveryCandidate {
+  id: string;
+  path: string;
+  filename: string;
+  sizeBytes: number;
+  modifiedAt?: number;
+}
+
+export interface LocalRecoveryPreview {
+  root: string;
+  candidates: LocalRecoveryCandidate[];
+  skippedCount: number;
 }
 
 export interface DownloadUpdateBatch {
@@ -98,6 +122,16 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 export async function getAppSnapshot(): Promise<DesktopSnapshot> {
   if (!isTauriRuntime()) return (await loadPreviewBackend()).getMockAppSnapshot();
   return invokeCommand<DesktopSnapshot>('get_app_snapshot');
+}
+
+export async function previewLocalRecovery(root?: string): Promise<LocalRecoveryPreview> {
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).previewMockLocalRecovery(root);
+  return invokeCommand<LocalRecoveryPreview>('preview_local_recovery', { root });
+}
+
+export async function importLocalRecovery(candidateIds: string[]): Promise<DesktopSnapshot> {
+  if (!isTauriRuntime()) return (await loadPreviewBackend()).importMockLocalRecovery(candidateIds);
+  return invokeCommand<DesktopSnapshot>('import_local_recovery', { candidateIds });
 }
 
 export async function getProgressJobSnapshot(id: string): Promise<ProgressJobSnapshot> {

@@ -22,7 +22,11 @@ impl SharedState {
         let diagnostic_event_store = Arc::new(DiagnosticEventStore::new(
             diagnostic_event_log_path_for(&storage_path),
         ));
-        let mut persisted = load_persisted_state(&storage_path)?;
+        let persisted_load = load_persisted_state_with_recovery(&storage_path);
+        let allow_initial_persist = persisted_load.allow_initial_persist;
+        let startup_recovery = persisted_load.startup_recovery.clone();
+        let mut startup_recovery_messages = persisted_load.recovery_events;
+        let mut persisted = persisted_load.state;
 
         if should_reset_download_directory(
             &persisted.settings.download_directory,
@@ -42,11 +46,7 @@ impl SharedState {
             &mut persisted.settings.bulk,
             &persisted.settings.download_directory,
         );
-        ensure_download_category_directories(Path::new(&persisted.settings.download_directory))?;
-        std::fs::create_dir_all(&persisted.settings.torrent.download_directory)
-            .map_err(|error| format!("Could not create torrent download directory: {error}"))?;
-        std::fs::create_dir_all(&persisted.settings.bulk.output_directory)
-            .map_err(|error| format!("Could not create bulk download directory: {error}"))?;
+        startup_recovery_messages.extend(startup_directory_recovery_messages(&persisted.settings));
 
         let legacy_diagnostic_events = normalize_diagnostic_events(persisted.diagnostic_events);
         let file_diagnostic_events = diagnostic_event_store
@@ -66,6 +66,14 @@ impl SharedState {
             events.extend(legacy_diagnostic_events);
             normalize_diagnostic_events(events)
         };
+        let startup_recovery_events = startup_recovery_messages
+            .into_iter()
+            .map(startup_diagnostic_event)
+            .collect::<Vec<_>>();
+        for event in &startup_recovery_events {
+            let _ = diagnostic_event_store.append(event);
+        }
+        diagnostic_events.extend(startup_recovery_events);
         let jobs = persisted
             .jobs
             .into_iter()
@@ -102,6 +110,7 @@ impl SharedState {
                 main_window: persisted.main_window,
                 diagnostic_events,
                 pending_diagnostic_events: Vec::new(),
+                startup_recovery,
                 next_job_number,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -120,7 +129,9 @@ impl SharedState {
             scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
         };
 
-        state.persist_current_state_sync()?;
+        if allow_initial_persist {
+            state.persist_current_state_sync()?;
+        }
         Ok(state)
     }
 
@@ -138,6 +149,7 @@ impl SharedState {
                 main_window: None,
                 diagnostic_events: Vec::new(),
                 pending_diagnostic_events: Vec::new(),
+                startup_recovery: None,
                 next_job_number: 99,
                 job_indexes,
                 active_workers: HashSet::new(),
@@ -517,4 +529,62 @@ fn append_diagnostic_events_best_effort(
     for event in events {
         let _ = diagnostic_event_store.append(&event);
     }
+}
+
+fn startup_diagnostic_event(message: String) -> DiagnosticEvent {
+    DiagnosticEvent {
+        timestamp: current_unix_timestamp_millis(),
+        level: DiagnosticLevel::Warning,
+        category: "startup".into(),
+        message,
+        job_id: None,
+    }
+}
+
+fn startup_directory_recovery_messages(settings: &Settings) -> Vec<String> {
+    [
+        (
+            "saved download directory",
+            settings.download_directory.as_str(),
+        ),
+        (
+            "saved torrent download directory",
+            settings.torrent.download_directory.as_str(),
+        ),
+        (
+            "saved bulk output directory",
+            settings.bulk.output_directory.as_str(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| startup_directory_recovery_message(label, value))
+    .collect()
+}
+
+fn startup_directory_recovery_message(label: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_dir() {
+        return None;
+    }
+    if path.exists() {
+        return Some(format!(
+            "The {label} is not a directory and was left unchanged for startup: {}",
+            path.display()
+        ));
+    }
+
+    let blocking_ancestor = path
+        .ancestors()
+        .skip(1)
+        .find(|ancestor| ancestor.exists() && !ancestor.is_dir())?;
+    Some(format!(
+        "The {label} is unavailable because {} is not a directory; startup continued without creating {}",
+        blocking_ancestor.display(),
+        path.display()
+    ))
 }

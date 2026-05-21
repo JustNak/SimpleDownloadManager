@@ -90,7 +90,14 @@ function buildBulkAggregateRow(members: readonly DownloadJob[]): BulkAggregateDo
     orderedMembers.filter((job) => job.state === DOWNLOADING),
     (job) => Math.max(0, job.speed),
   );
-  const progress = deriveAggregateProgress(orderedMembers, downloadedBytes, totalBytes);
+  const progress = deriveAggregateProgress(
+    orderedMembers,
+    downloadedBytes,
+    totalBytes,
+    archive?.archiveStatus,
+    archive?.finalizeProcessedBytes,
+    archive?.finalizeTotalBytes,
+  );
   const state = deriveAggregateState(orderedMembers, archive?.archiveStatus);
   const removalState = deriveAggregateRemovalState(orderedMembers);
   const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
@@ -175,7 +182,13 @@ function deriveAggregateProgress(
   members: readonly DownloadJob[],
   downloadedBytes: number,
   totalBytes: number,
+  archiveStatus: BulkArchiveStatus | undefined,
+  finalizeProcessedBytes: number | undefined,
+  finalizeTotalBytes: number | undefined,
 ): number {
+  if (isFinalizingBulkArchive(archiveStatus) && (finalizeTotalBytes ?? 0) > 0) {
+    return clampProgress(((finalizeProcessedBytes ?? 0) / (finalizeTotalBytes ?? 0)) * 100);
+  }
   if (totalBytes > 0) return clampProgress((downloadedBytes / totalBytes) * 100);
   if (members.length === 0) return 0;
   const terminalCount = members.filter((job) => (
@@ -184,6 +197,13 @@ function deriveAggregateProgress(
     || job.state === CANCELED
   )).length;
   return clampProgress((terminalCount / members.length) * 100);
+}
+
+function isFinalizingBulkArchive(status: BulkArchiveStatus | undefined): boolean {
+  return status === 'extracting'
+    || status === 'combining'
+    || status === 'creating_folder'
+    || status === 'compressing';
 }
 
 function firstCreatedAt(members: readonly DownloadJob[]): number | undefined {

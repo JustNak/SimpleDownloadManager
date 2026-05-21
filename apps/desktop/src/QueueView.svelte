@@ -34,6 +34,7 @@
   import { nextSortModeForColumn, sortModeDirection, sortModeKey } from './downloadSorting';
   import {
     canRemoveDownloadImmediately,
+    canRetryJob,
     canShowProgressPopup,
     canSwapFailedDownloadToBrowser,
     deleteActionLabelForJob,
@@ -1203,7 +1204,7 @@
 {#snippet RowMenu(job: QueueDisplayJob)}
   {@const menuJobs = selectedJobsFor(job)}
   {@const removableJobs = menuJobs.filter((candidate) => !isBulkAggregateJob(candidate) && canRemoveDownloadImmediately(candidate))}
-  {@const canRetry = [JobState.Failed, JobState.Canceled].includes(job.state)}
+  {@const canRetry = canRetryJob(job)}
   {@const canCancel = ![JobState.Completed, JobState.Canceled, JobState.Failed].includes(job.state)}
   {#if isRemoving(job)}
     {@render MenuItem(Trash2, 'Removing files', () => undefined, true, true)}

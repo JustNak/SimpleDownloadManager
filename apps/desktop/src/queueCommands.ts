@@ -14,14 +14,24 @@ const progressPopupStates = new Set<string>([
 ]);
 
 export function canRetryFailedDownloads(jobs: DownloadJob[]): boolean {
-  return jobs.some((job) => job.state === 'failed');
+  return jobs.some((job) => job.state === 'failed' && canRetryJob(job));
+}
+
+export function canRetryJob(job: DownloadJob): boolean {
+  return (job.state === 'failed' || job.state === 'canceled') && !isRecoveredLocalJob(job);
 }
 
 export function canSwapFailedDownloadToBrowser(job: DownloadJob): boolean {
   return job.state === 'failed'
     && job.transferKind === 'http'
+    && !isRecoveredLocalJob(job)
     && job.source?.entryPoint === 'browser_download'
     && isHttpUrl(job.url);
+}
+
+export function isRecoveredLocalJob(job: DownloadJob): boolean {
+  return job.url.startsWith('recovered://local-file/')
+    || job.source?.entryPoint === 'local_recovery';
 }
 
 export function canClearCompletedDownloads(jobs: DownloadJob[]): boolean {

@@ -233,23 +233,13 @@ pub(super) async fn send_download_request(
         if let Some(if_range) = if_range {
             request = request.header(IF_RANGE, if_range);
         }
-        request = apply_handoff_auth_headers(request, handoff_auth)?;
+        let request_auth = handoff_auth_for_request_origin(url, &current_url, handoff_auth);
+        request = apply_handoff_auth_headers(request, request_auth)?;
 
         match request.send().await {
             Ok(response) => {
                 if response.status().is_redirection() {
                     let next_url = redirect_location(response.url().as_str(), &response)?;
-                    if handoff_auth.is_some()
-                        && !redirect_keeps_origin(response.url().as_str(), &next_url)
-                    {
-                        return Err(download_error(
-                            FailureCategory::Http,
-                            "Authenticated download redirected to another origin; refusing to forward browser credentials."
-                                .into(),
-                            false,
-                        ));
-                    }
-
                     redirects += 1;
                     if redirects > 10 {
                         return Err(download_error(
@@ -309,7 +299,7 @@ pub(super) async fn send_download_request(
                 return Err(error_for_http_response(
                     status,
                     response.headers(),
-                    handoff_auth.is_some(),
+                    request_auth.is_some(),
                 ));
             }
             Err(error) => {
@@ -327,6 +317,22 @@ pub(super) async fn send_download_request(
                 return Err(request_error(error));
             }
         }
+    }
+}
+
+pub(super) fn handoff_auth_for_request_origin<'a>(
+    original_url: &str,
+    request_url: &str,
+    handoff_auth: Option<&'a HandoffAuth>,
+) -> Option<&'a HandoffAuth> {
+    if handoff_auth.is_none() {
+        return None;
+    }
+
+    if request_url == original_url || redirect_keeps_origin(original_url, request_url) {
+        handoff_auth
+    } else {
+        None
     }
 }
 
@@ -425,16 +431,14 @@ pub(super) async fn preflight_download(
             .head(&current_url)
             .timeout(PREFLIGHT_TIMEOUT)
             .header(ACCEPT_ENCODING, "identity");
-        let request = apply_handoff_auth_headers(request, handoff_auth).ok()?;
+        let request_auth = handoff_auth_for_request_origin(url, &current_url, handoff_auth);
+        let request = apply_handoff_auth_headers(request, request_auth).ok()?;
         let response = request.send().await.ok()?;
         if !response.status().is_redirection() {
             break response;
         }
 
         let next_url = redirect_location(response.url().as_str(), &response).ok()?;
-        if handoff_auth.is_some() && !redirect_keeps_origin(response.url().as_str(), &next_url) {
-            return None;
-        }
         redirects += 1;
         if redirects > 10 {
             return None;
@@ -478,6 +482,108 @@ pub(super) fn derive_preflight_metadata_from_parts(
             .or_else(|| derive_filename_from_url(final_url)),
         validators,
     }
+}
+
+pub(super) fn unusable_download_response_error_for_parts(
+    raw_url: &str,
+    headers: &HeaderMap,
+    browser_handoff: bool,
+    resolved_hoster: bool,
+) -> Option<DownloadError> {
+    let content_type = normalized_content_type(headers);
+    let is_html = content_type
+        .as_deref()
+        .is_some_and(is_html_content_type);
+    let is_json = content_type
+        .as_deref()
+        .is_some_and(is_json_content_type);
+    let attachment_filename = attachment_filename_from_headers(headers);
+    let explicit_html_attachment = attachment_filename
+        .as_deref()
+        .is_some_and(filename_has_html_extension);
+
+    if is_gofile_direct_http_url(raw_url) && (is_html || is_json) && attachment_filename.is_none()
+    {
+        return Some(download_error(
+            FailureCategory::Http,
+            "Gofile direct link returned a hoster response instead of file content. Reopen the source page or capture a fresh download link."
+                .into(),
+            false,
+        ));
+    }
+
+    if resolved_hoster && is_html {
+        return Some(download_error(
+            FailureCategory::Http,
+            "Hoster direct link returned HTML instead of file content.".into(),
+            true,
+        ));
+    }
+
+    if browser_handoff && is_html && !explicit_html_attachment {
+        return Some(download_error(
+            FailureCategory::Http,
+            "Browser download handoff returned HTML instead of file content. Let the browser handle this download or enable Protected Downloads for this site."
+                .into(),
+            false,
+        ));
+    }
+
+    None
+}
+
+pub(super) fn unusable_browser_handoff_access_error(
+    response: &reqwest::Response,
+) -> Option<BrowserHandoffAccessError> {
+    let error = unusable_download_response_error_for_parts(
+        response.url().as_str(),
+        response.headers(),
+        true,
+        false,
+    )?;
+
+    Some(BrowserHandoffAccessError {
+        code: PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE,
+        message: error.message,
+        status: Some(response.status().as_u16()),
+    })
+}
+
+fn normalized_content_type(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn is_html_content_type(content_type: &str) -> bool {
+    matches!(content_type, "text/html" | "application/xhtml+xml")
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type == "application/json" || content_type.ends_with("+json")
+}
+
+fn attachment_filename_from_headers(headers: &HeaderMap) -> Option<String> {
+    let content_disposition = headers
+        .get(CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())?;
+    let has_attachment_disposition = content_disposition
+        .split(';')
+        .any(|segment| segment.trim().eq_ignore_ascii_case("attachment"));
+    if !has_attachment_disposition {
+        return None;
+    }
+
+    parse_content_disposition_filename(content_disposition)
+}
+
+fn filename_has_html_extension(filename: &str) -> bool {
+    let filename = filename.trim().to_ascii_lowercase();
+    filename.ends_with(".html") || filename.ends_with(".htm")
 }
 
 pub(super) fn entity_validators_from_headers(

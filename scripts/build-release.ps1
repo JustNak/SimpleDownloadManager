@@ -1,3 +1,7 @@
+param(
+  [string[]] $Targets = @('x64', 'arm64')
+)
+
 $ErrorActionPreference = 'Stop'
 
 $workspaceRoot = Split-Path -Parent $PSScriptRoot
@@ -44,12 +48,77 @@ function Invoke-ReleaseCommand {
   }
 }
 
+function Resolve-WindowsReleaseTarget {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Target
+  )
+
+  switch ($Target.ToLowerInvariant()) {
+    { $_ -in @('x64', 'amd64', 'x86_64', 'x86_64-pc-windows-msvc') } {
+      return [PSCustomObject]@{
+        Name = 'x64'
+        RustTarget = 'x86_64-pc-windows-msvc'
+        VsArch = 'amd64'
+      }
+    }
+    { $_ -in @('arm64', 'aarch64', 'aarch64-pc-windows-msvc') } {
+      return [PSCustomObject]@{
+        Name = 'arm64'
+        RustTarget = 'aarch64-pc-windows-msvc'
+        VsArch = 'arm64'
+      }
+    }
+    default {
+      throw "Unsupported Windows release target: $Target"
+    }
+  }
+}
+
+function Import-VsDevEnvironment {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Architecture
+  )
+
+  $programFilesX86 = ${env:ProgramFiles(x86)}
+  $vsDevCmd = Join-Path $programFilesX86 'Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat'
+  if (!(Test-Path -LiteralPath $vsDevCmd)) {
+    throw "Visual Studio Build Tools developer command file was not found: $vsDevCmd"
+  }
+
+  $environment = & cmd.exe /d /s /c "`"$vsDevCmd`" -arch=$Architecture -host_arch=amd64 >nul && set"
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not load Visual Studio developer environment for $Architecture."
+  }
+
+  foreach ($line in $environment) {
+    $separatorIndex = $line.IndexOf('=')
+    if ($separatorIndex -le 0) {
+      continue
+    }
+
+    $name = $line.Substring(0, $separatorIndex)
+    $value = $line.Substring($separatorIndex + 1)
+    Set-Item -Path "Env:$name" -Value $value
+  }
+}
+
+$releaseTargets = @(
+  $Targets |
+    ForEach-Object { $_ -split ',' } |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ } |
+    ForEach-Object { Resolve-WindowsReleaseTarget -Target $_ }
+)
+
 if (Test-Path $releaseRoot) {
   Remove-Item -Path $releaseRoot -Recurse -Force
 }
 
 New-Item -ItemType Directory -Path $releaseRoot | Out-Null
 New-Item -ItemType Directory -Path $releaseTempRoot -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $releaseRoot 'bundle\nsis') -Force | Out-Null
 $env:TMP = $releaseTempRoot
 $env:TEMP = $releaseTempRoot
 
@@ -58,24 +127,62 @@ try {
   Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:extension')
   Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:desktop')
 
-  Invoke-ReleaseCommand -FilePath 'cargo' -ArgumentList @('build', '--release', '--manifest-path', "$hostRoot\Cargo.toml")
-  Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @('.\scripts\prepare-release.mjs')
+  foreach ($target in $releaseTargets) {
+    Import-VsDevEnvironment -Architecture $target.VsArch
 
-  $bundleDir = Join-Path $desktopTauriRoot 'target\release\bundle'
-  if (Test-Path $bundleDir) {
-    Remove-Item -Path $bundleDir -Recurse -Force
+    Invoke-ReleaseCommand -FilePath 'cargo' -ArgumentList @(
+      'build',
+      '--release',
+      '--manifest-path',
+      "$hostRoot\Cargo.toml",
+      '--target',
+      $target.RustTarget
+    )
+
+    $targetConfigPath = Join-Path $releaseTempRoot "tauri-$($target.Name).conf.json"
+    Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @(
+      '.\scripts\prepare-release.mjs',
+      '--target',
+      $target.RustTarget,
+      '--config-out',
+      $targetConfigPath
+    )
+
+    $bundleDir = Join-Path $desktopTauriRoot "target\$($target.RustTarget)\release\bundle"
+    if (Test-Path $bundleDir) {
+      Remove-Item -Path $bundleDir -Recurse -Force
+    }
+
+    Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @(
+      'run',
+      'tauri:build',
+      '--workspace',
+      '@myapp/desktop',
+      '--',
+      '--target',
+      $target.RustTarget,
+      '--bundles',
+      'nsis',
+      '--config',
+      $targetConfigPath,
+      '--',
+      '--bin',
+      'simple-download-manager-desktop-backend'
+    )
+
+    $targetNsisDir = Join-Path $bundleDir 'nsis'
+    if (Test-Path $targetNsisDir) {
+      Copy-Item -Path "$targetNsisDir\*" -Destination (Join-Path $releaseRoot 'bundle\nsis') -Force
+    } else {
+      throw "Tauri NSIS bundle directory was not produced: $targetNsisDir"
+    }
+
+    $targetHostBinary = Join-Path $hostRoot "target\$($target.RustTarget)\release\simple-download-manager-native-host.exe"
+    Copy-Item -Path $targetHostBinary -Destination (Join-Path $releaseRoot "simple-download-manager-native-host-$($target.RustTarget).exe")
+    if ($target.Name -eq 'x64') {
+      Copy-Item -Path $targetHostBinary -Destination (Join-Path $releaseRoot 'simple-download-manager-native-host.exe')
+    }
   }
-
-  Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @(
-    'run',
-    'tauri:build',
-    '--workspace',
-    '@myapp/desktop',
-    '--',
-    '--',
-    '--bin',
-    'simple-download-manager-desktop-backend'
-  )
 
   $chromiumZip = Join-Path $releaseRoot 'simple-download-manager-chromium-extension.zip'
   $firefoxZip = Join-Path $releaseRoot 'simple-download-manager-firefox-extension.zip'
@@ -83,13 +190,6 @@ try {
   Compress-Archive -Path "$extensionRoot\dist\chromium\*" -DestinationPath $chromiumZip
   Compress-Archive -Path "$extensionRoot\dist\firefox\*" -DestinationPath $firefoxZip
 
-  if (Test-Path $bundleDir) {
-    Copy-Item -Path $bundleDir -Destination (Join-Path $releaseRoot 'bundle') -Recurse
-  } else {
-    throw "Tauri bundle directory was not produced: $bundleDir"
-  }
-
-  Copy-Item -Path "$hostRoot\target\release\simple-download-manager-native-host.exe" -Destination $releaseRoot
   Copy-Item -Path "$workspaceRoot\config\release.json" -Destination $releaseRoot
   Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @('.\scripts\updater-release.mjs')
 

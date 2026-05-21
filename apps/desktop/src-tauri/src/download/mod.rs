@@ -854,7 +854,8 @@ pub async fn probe_browser_handoff_access(
             .timeout(PREFLIGHT_TIMEOUT)
             .header(ACCEPT_ENCODING, "identity")
             .header(RANGE, "bytes=0-0");
-        let request = apply_handoff_auth_headers(request, handoff_auth)
+        let request_auth = handoff_auth_for_request_origin(url, &current_url, handoff_auth);
+        let request = apply_handoff_auth_headers(request, request_auth)
             .map_err(access_probe_download_error)?;
 
         let response = request
@@ -869,15 +870,6 @@ pub async fn probe_browser_handoff_access(
         if response.status().is_redirection() {
             let next_url = redirect_location(response.url().as_str(), &response)
                 .map_err(access_probe_download_error)?;
-            if handoff_auth.is_some() && !redirect_keeps_origin(response.url().as_str(), &next_url)
-            {
-                return Err(BrowserHandoffAccessError {
-                    code: "DOWNLOAD_FAILED",
-                    message: "Authenticated download redirected to another origin; refusing to forward browser credentials."
-                        .into(),
-                    status: Some(response.status().as_u16()),
-                });
-            }
             redirects += 1;
             if redirects > 10 {
                 return Err(BrowserHandoffAccessError {
@@ -892,6 +884,9 @@ pub async fn probe_browser_handoff_access(
 
         let status = response.status();
         if status.is_success() {
+            if let Some(error) = unusable_browser_handoff_access_error(&response) {
+                return Err(error);
+            }
             return Ok(BrowserHandoffAccessProbe {
                 status: status.as_u16(),
             });

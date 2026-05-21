@@ -1,8 +1,18 @@
 import { readFile as readFileFromDisk, writeFile as writeFileToDisk } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  windowsInstallerName,
+  windowsReleaseTargetList,
+  windowsReleaseTargets,
+} from './windows-release-targets.mjs';
 
 export const updaterRepository = 'JustNak/SimpleDownloadManager';
+export {
+  windowsInstallerName,
+  windowsReleaseTargetList,
+  windowsReleaseTargets,
+};
 
 export const releaseChannels = Object.freeze({
   beta: Object.freeze({
@@ -34,10 +44,6 @@ export function requireSigningEnvironment(env = process.env) {
   }
 }
 
-export function windowsInstallerName(version) {
-  return `Simple Download Manager_${version}_x64-setup.exe`;
-}
-
 export function updaterAssetUrl(repository, releaseTag, assetName) {
   return `https://github.com/${repository}/releases/download/${releaseTag}/${encodeURIComponent(assetName)}`;
 }
@@ -52,31 +58,56 @@ export function createUpdaterMetadata({
   pubDate,
   url,
   signature,
+  platformAssets,
 }) {
+  const assets = platformAssets ?? [{
+    target: windowsReleaseTargets.x64,
+    url,
+    signature,
+  }];
+
   return {
     version,
     notes,
     pub_date: pubDate,
-    platforms: {
-      'windows-x86_64': {
-        url,
-        signature,
-      },
-    },
+    platforms: Object.fromEntries(
+      assets.map((asset) => [
+        asset.target.updaterPlatform,
+        {
+          url: asset.url,
+          signature: asset.signature,
+        },
+      ]),
+    ),
   };
 }
 
 export const createLatestAlphaJson = createUpdaterMetadata;
 
-export function updaterReleasePaths(root, version, channel = releaseChannels.beta) {
+export function updaterReleasePaths(
+  root,
+  version,
+  channel = releaseChannels.beta,
+  targets = windowsReleaseTargetList,
+) {
   const releaseRoot = path.join(root, 'release');
-  const installerName = windowsInstallerName(version);
-  const installerPath = path.join(releaseRoot, 'bundle', 'nsis', installerName);
+  const installers = targets.map((target) => {
+    const installerName = windowsInstallerName(version, target);
+    const installerPath = path.join(releaseRoot, 'bundle', 'nsis', installerName);
+    return {
+      target,
+      installerName,
+      installerPath,
+      signaturePath: `${installerPath}.sig`,
+    };
+  });
+  const [defaultInstaller] = installers;
   return {
     releaseRoot,
-    installerName,
-    installerPath,
-    signaturePath: `${installerPath}.sig`,
+    installers,
+    installerName: defaultInstaller.installerName,
+    installerPath: defaultInstaller.installerPath,
+    signaturePath: defaultInstaller.signaturePath,
     metadataPath: path.join(releaseRoot, channel.metadataFilename),
   };
 }
@@ -89,21 +120,59 @@ export async function writeReleaseUpdaterMetadata({
   pubDate = new Date().toISOString(),
   version,
   signature,
+  signatures,
   readFile = readFileFromDisk,
   writeFile = writeFileToDisk,
 } = {}) {
   const resolvedVersion = version ?? JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
   const paths = updaterReleasePaths(root, resolvedVersion, channel);
-  const resolvedSignature = signature ?? (await readFile(paths.signaturePath, 'utf8')).trim();
+  const platformAssets = await Promise.all(paths.installers.map(async (installer) => ({
+    target: installer.target,
+    url: updaterAssetUrl(
+      repository,
+      channel.assetReleaseTag,
+      githubReleaseAssetName(installer.installerName),
+    ),
+    signature: await resolveInstallerSignature({
+      installer,
+      signature,
+      signatures,
+      readFile,
+    }),
+  })));
   const metadata = createUpdaterMetadata({
     version: resolvedVersion,
     notes,
     pubDate,
-    url: updaterAssetUrl(repository, channel.assetReleaseTag, githubReleaseAssetName(paths.installerName)),
-    signature: resolvedSignature,
+    platformAssets,
   });
   await writeFile(paths.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
   return { metadata, paths };
+}
+
+async function resolveInstallerSignature({
+  installer,
+  signature,
+  signatures,
+  readFile,
+}) {
+  if (signatures instanceof Map) {
+    const mapped = signatures.get(installer.target.name)
+      ?? signatures.get(installer.target.rustTarget)
+      ?? signatures.get(installer.target.updaterPlatform);
+    if (mapped) return mapped;
+  } else if (signatures && typeof signatures === 'object') {
+    const mapped = signatures[installer.target.name]
+      ?? signatures[installer.target.rustTarget]
+      ?? signatures[installer.target.updaterPlatform];
+    if (mapped) return mapped;
+  }
+
+  if (signature && installer.target === windowsReleaseTargets.x64) {
+    return signature;
+  }
+
+  return (await readFile(installer.signaturePath, 'utf8')).trim();
 }
 
 export async function writeAllReleaseUpdaterMetadata({

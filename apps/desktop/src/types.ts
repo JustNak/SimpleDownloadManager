@@ -129,6 +129,7 @@ export interface DownloadPrompt {
   url: string;
   filename: string;
   source?: DownloadSource;
+  browserFallback?: 'replay' | 'unavailable';
   totalBytes?: number;
   defaultDirectory: string;
   targetPath: string;

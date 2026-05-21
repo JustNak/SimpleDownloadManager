@@ -146,7 +146,7 @@ fn prepare_bulk_archive_sources_extracts_multiple_sets_into_staging() {
         .expect("archive sets should be extracted into staging");
 
     assert_eq!(
-        extractor.calls.borrow().clone(),
+        extractor.calls.lock().unwrap().clone(),
         vec![root.join("Game.part01.rar"), root.join("Patch.001")]
     );
     assert_eq!(
@@ -271,6 +271,64 @@ fn finish_bulk_folder_sources_moves_raw_files_without_cleanup_warnings() {
 }
 
 #[test]
+fn folder_combine_reports_monotonic_progress_and_reaches_total() {
+    let root = test_download_runtime_dir("bulk-folder-progress");
+    let readme = archive_test_entry(&root, "readme.txt", b"readme");
+    let cover = archive_test_entry(&root, "cover.jpg", b"cover");
+    let prepared = PreparedBulkArchive {
+        output_path: root.join("Bundle"),
+        entries: vec![readme, cover],
+        cleanup_paths: Vec::new(),
+        staging_root: None,
+    };
+    let sink = std::sync::Arc::new(RecordingBulkFinalizeProgress::default());
+    let progress = BulkFinalizeProgressReporter::new(11, sink.clone());
+
+    let outcome = finish_prepared_bulk_archive_sync_with_progress(prepared, progress)
+        .expect("folder output should finalize with progress");
+
+    assert!(outcome.output_path.is_dir());
+    assert_progress_is_monotonic_and_complete(&sink.updates(), 11);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn same_volume_moves_update_progress_without_copy_cleanup() {
+    let root = test_download_runtime_dir("bulk-folder-move-progress");
+    let output_root = root.join("Bundle");
+    std::fs::create_dir_all(&output_root).unwrap();
+    let readme = archive_test_entry(&root, "readme.txt", b"readme");
+    let cover = archive_test_entry(&root, "cover.jpg", b"cover");
+    let readme_source = readme.source_path.clone();
+    let cover_source = cover.source_path.clone();
+    let sink = std::sync::Arc::new(RecordingBulkFinalizeProgress::default());
+    let progress = BulkFinalizeProgressReporter::new(11, sink.clone());
+
+    let outcome = move_or_copy_entries_to_folder_with_progress(
+        &[readme, cover],
+        &output_root,
+        None,
+        &progress,
+    )
+    .expect("same-volume raw entries should move into the output folder");
+
+    assert_eq!(outcome.copy_cleanup_paths.len(), 0);
+    assert_eq!(outcome.moved_entries.len(), 2);
+    assert!(!readme_source.exists());
+    assert!(!cover_source.exists());
+    assert_eq!(
+        std::fs::read(output_root.join("readme.txt")).unwrap(),
+        b"readme"
+    );
+    assert_eq!(
+        std::fs::read(output_root.join("cover.jpg")).unwrap(),
+        b"cover"
+    );
+    assert_progress_is_monotonic_and_complete(&sink.updates(), 11);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn legacy_archive_output_kind_finalizes_as_folder_output() {
     let root = test_download_runtime_dir("bulk-folder-legacy-archive-output");
     let readme = root.join("readme.txt");
@@ -315,6 +373,43 @@ fn legacy_archive_output_kind_finalizes_as_folder_output() {
 }
 
 #[test]
+fn forced_copy_failure_preserves_originals_and_removes_temp_output() {
+    let root = test_download_runtime_dir("bulk-folder-copy-failure-preserves-sources");
+    let source = archive_test_entry(&root, "source.txt", b"source");
+    let source_path = source.source_path.clone();
+    let missing_path = root.join("missing.txt");
+    let prepared = PreparedBulkArchive {
+        output_path: root.join("Bundle"),
+        entries: vec![
+            source,
+            crate::state::BulkArchiveEntry {
+                source_path: missing_path,
+                archive_name: "missing.txt".into(),
+            },
+        ],
+        cleanup_paths: Vec::new(),
+        staging_root: None,
+    };
+    let options = BulkFolderFinalizeOptions::force_copy_for_test();
+    let sink = std::sync::Arc::new(RecordingBulkFinalizeProgress::default());
+    let progress = BulkFinalizeProgressReporter::new(12, sink);
+
+    let error =
+        finish_prepared_bulk_archive_sync_with_options_for_test(prepared, progress, options)
+            .expect_err("copy failure should fail finalization");
+
+    assert!(error.contains("missing.txt"));
+    assert_eq!(std::fs::read(source_path).unwrap(), b"source");
+    assert!(!root.join("Bundle").exists());
+    assert!(
+        extracting_staging_dirs(&root).is_empty(),
+        "failed copy finalization should remove incomplete temp output folders"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn folder_combine_failure_keeps_original_sources_and_removes_incomplete_output() {
     let root = test_download_runtime_dir("bulk-folder-finish-failure-keeps-sources");
     let source = root.join("source.txt");
@@ -348,6 +443,48 @@ fn folder_combine_failure_keeps_original_sources_and_removes_incomplete_output()
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn assert_progress_is_monotonic_and_complete(updates: &[BulkFinalizeProgressUpdate], total: u64) {
+    assert!(
+        !updates.is_empty(),
+        "finalization should emit at least one progress update"
+    );
+    let mut previous = 0;
+    for update in updates {
+        assert!(
+            update.processed_bytes >= previous,
+            "progress should be monotonic: {updates:?}"
+        );
+        assert!(
+            update.processed_bytes <= update.total_bytes,
+            "processed bytes should not exceed total bytes: {updates:?}"
+        );
+        previous = update.processed_bytes;
+    }
+    assert_eq!(
+        updates
+            .last()
+            .map(|update| (update.processed_bytes, update.total_bytes)),
+        Some((total, total))
+    );
+}
+
+#[derive(Default)]
+struct RecordingBulkFinalizeProgress {
+    updates: std::sync::Mutex<Vec<BulkFinalizeProgressUpdate>>,
+}
+
+impl RecordingBulkFinalizeProgress {
+    fn updates(&self) -> Vec<BulkFinalizeProgressUpdate> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+impl BulkFinalizeProgressListener for RecordingBulkFinalizeProgress {
+    fn report(&self, update: BulkFinalizeProgressUpdate) {
+        self.updates.lock().unwrap().push(update);
+    }
 }
 
 #[test]
@@ -575,7 +712,7 @@ fn archive_extraction_retries_transient_file_locks() {
     let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
         .expect("transient lock should be retried before failing extraction");
 
-    assert_eq!(*extractor.calls.borrow(), 2);
+    assert_eq!(*extractor.calls.lock().unwrap(), 2);
     assert_eq!(prepared.entries.len(), 1);
 
     let _ = std::fs::remove_dir_all(root);
@@ -600,7 +737,7 @@ fn extraction_uses_isolated_staging_directory_per_archive_set() {
     let prepared = prepare_bulk_archive_sources_with_extractor(archive, &extractor)
         .expect("archive sets should extract into isolated staging directories");
 
-    let output_dirs = extractor.output_dirs.borrow();
+    let output_dirs = extractor.output_dirs.lock().unwrap();
     assert_eq!(output_dirs.len(), 2);
     assert_ne!(output_dirs[0], output_dirs[1]);
     assert!(output_dirs[0].ends_with("set-0"));

@@ -1,9 +1,13 @@
 use super::*;
 use crate::commands::NotificationSoundKind;
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use std::future::Future;
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 static BULK_FAILURE_SOUND_ARCHIVES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static BULK_FINALIZATION_IO_GOVERNOR: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 pub(super) async fn notify_download_completed<A: DownloadUi>(
     app: &A,
@@ -48,13 +52,14 @@ pub(super) async fn notify_bulk_archive_completed<A: DownloadUi>(
     emit_notification_sound_if_enabled(app, state, NotificationSoundKind::Success).await;
 }
 
-pub(super) async fn prepare_bulk_archive_sources(
+pub(super) async fn prepare_bulk_archive_sources_with_progress(
     archive: BulkArchiveReady,
     seven_zip_path: Option<PathBuf>,
+    progress: BulkFinalizeProgressReporter,
 ) -> Result<PreparedBulkArchive, String> {
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(seven_zip_path) = seven_zip_path {
-            prepare_bulk_archive_sources_with_7zip(archive, seven_zip_path)
+            prepare_bulk_archive_sources_with_7zip_and_progress(archive, seven_zip_path, progress)
         } else {
             prepare_bulk_archive_sources_without_extraction(archive)
         }
@@ -71,12 +76,36 @@ pub(super) async fn plan_bulk_archive_finalization(
         .map_err(|error| format!("Could not plan bulk archive task: {error}"))?
 }
 
-pub(super) async fn finish_prepared_bulk_archive(
+pub(super) async fn finish_prepared_bulk_archive_with_progress(
     prepared: PreparedBulkArchive,
+    progress: BulkFinalizeProgressReporter,
 ) -> Result<BulkArchiveCreateOutcome, String> {
-    tauri::async_runtime::spawn_blocking(move || finish_prepared_bulk_archive_sync(prepared))
+    tauri::async_runtime::spawn_blocking(move || {
+        finish_prepared_bulk_archive_sync_with_progress(prepared, progress)
+    })
+    .await
+    .map_err(|error| format!("Could not create bulk archive task: {error}"))?
+}
+
+pub(super) async fn acquire_bulk_finalization_io_permit() -> OwnedSemaphorePermit {
+    bulk_finalization_io_governor()
+        .clone()
+        .acquire_owned()
         .await
-        .map_err(|error| format!("Could not create bulk archive task: {error}"))?
+        .expect("bulk finalization I/O governor should not be closed")
+}
+
+#[cfg(test)]
+pub(super) async fn with_bulk_finalization_io_permit<F, T>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let _permit = acquire_bulk_finalization_io_permit().await;
+    future.await
+}
+
+fn bulk_finalization_io_governor() -> &'static Arc<Semaphore> {
+    BULK_FINALIZATION_IO_GOVERNOR.get_or_init(|| Arc::new(Semaphore::new(1)))
 }
 
 pub(super) async fn notify_download_failure<A: DownloadUi>(
@@ -214,5 +243,56 @@ mod tests {
             &mut played_bulk_archives,
             NotificationFailureSoundKey::BulkArchive("bulk_1".into())
         ));
+    }
+
+    #[tokio::test]
+    async fn bulk_finalization_io_governor_allows_one_heavy_task_at_a_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(2));
+
+        let first = {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                with_bulk_finalization_io_permit(async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await;
+            })
+        };
+        let second = {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                with_bulk_finalization_io_permit(async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await;
+            })
+        };
+
+        first.await.unwrap();
+        second.await.unwrap();
+
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            1,
+            "bulk finalization governor should serialize heavy finalizers by default"
+        );
     }
 }

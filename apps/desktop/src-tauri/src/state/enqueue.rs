@@ -365,9 +365,17 @@ impl SharedState {
         source: Option<DownloadSource>,
         filename_hint: Option<String>,
         total_bytes: Option<u64>,
+        browser_fallback: BrowserFallback,
     ) -> Result<DownloadPrompt, BackendError> {
         let state = self.inner.read().await;
-        state.prepare_download_prompt(id, url, source, filename_hint, total_bytes)
+        state.prepare_download_prompt(
+            id,
+            url,
+            source,
+            filename_hint,
+            total_bytes,
+            browser_fallback,
+        )
     }
 }
 
@@ -608,6 +616,7 @@ impl RuntimeState {
         source: Option<DownloadSource>,
         filename_hint: Option<String>,
         total_bytes: Option<u64>,
+        browser_fallback: BrowserFallback,
     ) -> Result<DownloadPrompt, BackendError> {
         let url = normalize_download_url(url)?;
         let transfer_kind = transfer_kind_for_url(&url);
@@ -662,6 +671,7 @@ impl RuntimeState {
             url,
             filename,
             source,
+            browser_fallback,
             total_bytes: total_bytes.filter(|bytes| *bytes > 0),
             default_directory,
             target_path,

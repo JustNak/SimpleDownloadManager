@@ -20,7 +20,7 @@ assert.match(promptSource, /#snippet BrowserWindowIcon/, 'prompt should include 
 assert.match(promptSource, /\bSwap\b/, 'prompt should still render a Swap button for non-duplicate browser prompts');
 assert.match(promptSource, /bg-foreground px-3 text-xs font-semibold text-background/, 'Swap button should use inverse high-contrast foreground/background styling');
 assert.match(promptSource, /bg-destructive px-3 text-xs font-semibold text-destructive-foreground/, 'Cancel button should use destructive red styling');
-assert.match(promptSource, /prompt\?\.source\?\.entryPoint === 'browser_download' && !isDuplicate/, 'Swap button should only be shown for non-duplicate browser download prompts');
+assert.match(promptSource, /prompt\?\.source\?\.entryPoint === 'browser_download' && prompt\?\.browserFallback !== 'unavailable' && !isDuplicate/, 'Swap button should only be shown for non-duplicate browser download prompts with replay fallback');
 assert.match(promptSource, /prompt\?\.duplicateJob \|\| prompt\?\.duplicatePath/, 'destination-only duplicate prompts should render the same duplicate action UI as URL duplicates');
 
 for (const label of ['Choose Action', 'Overwrite', 'Rename', 'Download Anyway']) {
@@ -40,6 +40,7 @@ assert.match(promptSource, /title=\{duplicateLabel\}/, 'duplicate prompt filenam
 assert.match(ipcSource, /"enqueue_download"[\s\S]*handoff_transfer_kind\([\s\S]*if source\.entry_point == "browser_download" && transfer_kind == TransferKind::Http[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/, 'HTTP auto enqueue handoffs should still reroute detected duplicates through the prompt flow');
 assert.match(ipcSource, /"prompt_download"[\s\S]*handoff_transfer_kind\([\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent prompt handoffs should bypass the download prompt and enqueue directly');
 assert.match(ipcSource, /"enqueue_download"[\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent enqueue handoffs should bypass duplicate prompt routing');
+assert.match(ipcSource, /prompt\.browser_fallback == BrowserFallback::Unavailable[\s\S]*PromptDecision::Cancel[\s\S]*PromptDecision::SwapToBrowser/, 'unsafe browser fallback prompts should dismiss instead of replaying when the prompt receiver closes');
 
 for (const [name, source] of progressSources) {
   assert.doesNotMatch(source, />\s*Swap\s*</, `${name} UI should not render a Swap button`);

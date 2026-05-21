@@ -18,6 +18,7 @@ const defaultRoot = path.resolve(path.dirname(__filename), '..');
 export async function publishUpdaterAlphaBridge(repoRoot = defaultRoot) {
   const packageJson = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
   const paths = updaterReleasePaths(repoRoot, packageJson.version, releaseChannels.alphaBridge);
+  const uploadPaths = updaterAlphaBridgeUploadPaths(paths);
 
   try {
     await assertGitHubCliAvailable((args, options) => runGh(args, { ...options, cwd: repoRoot }));
@@ -28,18 +29,22 @@ export async function publishUpdaterAlphaBridge(repoRoot = defaultRoot) {
     throw error;
   }
 
-  await access(paths.metadataPath);
+  await Promise.all(uploadPaths.map((uploadPath) => access(uploadPath)));
   await ensureUpdaterRelease(releaseChannels.alphaBridge, repoRoot);
 
   await runGh([
     'release',
     'upload',
     releaseChannels.alphaBridge.metadataReleaseTag,
-    paths.metadataPath,
+    ...uploadPaths,
     '--clobber',
   ], { cwd: repoRoot });
 
   console.log(`Uploaded ${releaseChannels.alphaBridge.metadataFilename} to ${releaseChannels.alphaBridge.metadataReleaseTag}.`);
+}
+
+export function updaterAlphaBridgeUploadPaths(paths) {
+  return [paths.metadataPath];
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

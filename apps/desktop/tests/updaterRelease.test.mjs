@@ -14,7 +14,11 @@ const {
   requireSigningEnvironment,
   releaseChannels,
   updaterAssetUrl,
+  updaterReleasePaths,
   writeReleaseUpdaterMetadata,
+  windowsInstallerName,
+  windowsReleaseTargetList,
+  windowsReleaseTargets,
 } = updaterRelease;
 
 assert.equal(releaseChannels.beta.metadataReleaseTag, 'updater-beta');
@@ -23,6 +27,21 @@ assert.equal(releaseChannels.beta.metadataFilename, 'latest-beta.json');
 assert.equal(releaseChannels.alphaBridge.metadataReleaseTag, 'updater-alpha');
 assert.equal(releaseChannels.alphaBridge.assetReleaseTag, 'updater-beta');
 assert.equal(releaseChannels.alphaBridge.metadataFilename, 'latest-alpha.json');
+
+assert.deepEqual(
+  windowsReleaseTargetList.map((target) => target.name),
+  ['x64', 'arm64'],
+  'release tooling should build x64 and ARM64 Windows targets by default',
+);
+assert.equal(windowsReleaseTargets.x64.rustTarget, 'x86_64-pc-windows-msvc');
+assert.equal(windowsReleaseTargets.x64.updaterPlatform, 'windows-x86_64');
+assert.equal(windowsReleaseTargets.arm64.rustTarget, 'aarch64-pc-windows-msvc');
+assert.equal(windowsReleaseTargets.arm64.updaterPlatform, 'windows-aarch64');
+assert.equal(
+  windowsInstallerName('0.5.12-beta', windowsReleaseTargets.arm64),
+  'Simple Download Manager_0.5.12-beta_arm64-setup.exe',
+  'ARM64 installer names should use the arm64 artifact suffix',
+);
 
 const installerName = 'Simple Download Manager_0.5.12-beta_x64-setup.exe';
 assert.equal(
@@ -42,26 +61,45 @@ const latest = createUpdaterMetadata({
   version: '0.5.12-beta',
   notes: 'Beta update',
   pubDate: '2026-04-27T00:00:00.000Z',
-  url: updaterAssetUrl(
-    'JustNak/SimpleDownloadManager',
-    releaseChannels.beta.assetReleaseTag,
-    githubReleaseAssetName(installerName),
-  ),
-  signature: 'signed-content',
+  platformAssets: [
+    {
+      target: windowsReleaseTargets.x64,
+      url: updaterAssetUrl(
+        'JustNak/SimpleDownloadManager',
+        releaseChannels.beta.assetReleaseTag,
+        githubReleaseAssetName(installerName),
+      ),
+      signature: 'signed-content-x64',
+    },
+    {
+      target: windowsReleaseTargets.arm64,
+      url: updaterAssetUrl(
+        'JustNak/SimpleDownloadManager',
+        releaseChannels.beta.assetReleaseTag,
+        githubReleaseAssetName('Simple Download Manager_0.5.12-beta_arm64-setup.exe'),
+      ),
+      signature: 'signed-content-arm64',
+    },
+  ],
 });
 
 assert.equal(latest.version, '0.5.12-beta');
 assert.equal(latest.notes, 'Beta update');
 assert.equal(latest.pub_date, '2026-04-27T00:00:00.000Z');
-assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64']);
-assert.equal(latest.platforms['windows-x86_64'].signature, 'signed-content');
+assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64', 'windows-aarch64']);
+assert.equal(latest.platforms['windows-x86_64'].signature, 'signed-content-x64');
+assert.equal(latest.platforms['windows-aarch64'].signature, 'signed-content-arm64');
 assert.match(latest.platforms['windows-x86_64'].url, /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_x64-setup\.exe$/);
+assert.match(latest.platforms['windows-aarch64'].url, /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_arm64-setup\.exe$/);
 
 const alphaBridge = await writeReleaseUpdaterMetadata({
   root: 'virtual-root',
   channel: releaseChannels.alphaBridge,
   version: '0.5.12-beta',
-  signature: 'signed-content',
+  signatures: new Map([
+    ['x64', 'signed-content-x64'],
+    ['arm64', 'signed-content-arm64'],
+  ]),
   writeFile: async () => undefined,
   readFile: async () => '{"version":"0.5.12-beta"}',
   pubDate: '2026-04-27T00:00:00.000Z',
@@ -73,7 +111,21 @@ assert.match(
   /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_x64-setup\.exe$/,
   'alpha bridge should point alpha clients at the beta installer asset',
 );
+assert.match(
+  alphaBridge.metadata.platforms['windows-aarch64'].url,
+  /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.5\.12-beta_arm64-setup\.exe$/,
+  'alpha bridge should point ARM64 alpha clients at the beta ARM64 installer asset',
+);
 assert.equal(alphaBridge.metadata.notes, 'Beta migration update');
+
+const releasePaths = updaterReleasePaths('virtual-root', '0.5.12-beta');
+assert.deepEqual(
+  releasePaths.installers.map((installer) => installer.target.name),
+  ['x64', 'arm64'],
+  'release paths should include both Windows installers by default',
+);
+assert.match(releasePaths.installers[0].installerPath, /_x64-setup\.exe$/);
+assert.match(releasePaths.installers[1].installerPath, /_arm64-setup\.exe$/);
 
 assert.throws(
   () => requireSigningEnvironment({}),

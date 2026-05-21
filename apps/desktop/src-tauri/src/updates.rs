@@ -251,6 +251,7 @@ mod tests {
                 BulkArchiveStatus::Pending,
             )],
             settings: Settings::default(),
+            startup_recovery: None,
         };
 
         let error = ensure_no_bulk_update_blocker(&snapshot).unwrap_err();

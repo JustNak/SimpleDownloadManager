@@ -74,6 +74,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
+            commands::preview_local_recovery,
+            commands::import_local_recovery,
             commands::get_progress_job_snapshot,
             commands::get_batch_progress_snapshot,
             commands::get_settings_snapshot,

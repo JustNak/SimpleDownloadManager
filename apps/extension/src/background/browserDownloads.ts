@@ -1,6 +1,7 @@
 import {
   isErrorResponse,
   isUrlHostExcludedByPatterns,
+  type BrowserFallback,
   type ExtensionIntegrationSettings,
   type HandoffAuth,
   type HostToExtensionResponse,
@@ -81,12 +82,14 @@ export type FirefoxWebRequestDownloadCandidate = {
   filename?: string;
   totalBytes?: number;
   incognito: boolean;
+  browserFallback?: BrowserFallback;
 };
 export type BrowserDownloadHandoffMetadata = {
   suggestedFilename?: string;
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
+  browserFallback?: BrowserFallback;
 };
 
 type BrowserDownloadBypassUrlEntry = {
@@ -323,7 +326,7 @@ export function classifyBrowserDownloadHandoffResolution(
 }
 
 export function createBrowserDownloadHandoffMetadata(
-  item: { filename?: string; totalBytes?: number },
+  item: { filename?: string; totalBytes?: number; browserFallback?: BrowserFallback },
   handoffAuth?: HandoffAuth,
 ): BrowserDownloadHandoffMetadata {
   const suggestedFilename = basenameOnly(item.filename);
@@ -335,6 +338,7 @@ export function createBrowserDownloadHandoffMetadata(
     ...(suggestedFilename ? { suggestedFilename } : {}),
     ...(totalBytes ? { totalBytes } : {}),
     ...(handoffAuth ? { handoffAuth } : {}),
+    ...(item.browserFallback === 'unavailable' ? { browserFallback: item.browserFallback } : {}),
   };
 }
 

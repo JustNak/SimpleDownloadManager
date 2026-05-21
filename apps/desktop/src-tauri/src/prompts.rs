@@ -156,6 +156,7 @@ mod tests {
             url: format!("https://example.com/{id}.zip"),
             filename: format!("{id}.zip"),
             source: None,
+            browser_fallback: crate::storage::BrowserFallback::Replay,
             total_bytes: None,
             default_directory: "C:/Downloads".into(),
             target_path: format!("C:/Downloads/{id}.zip"),

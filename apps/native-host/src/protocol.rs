@@ -56,6 +56,19 @@ pub enum TransferKind {
     Torrent,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserFallback {
+    Replay,
+    Unavailable,
+}
+
+impl Default for BrowserFallback {
+    fn default() -> Self {
+        Self::Replay
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EnqueueDownloadPayload {
     pub url: String,
@@ -68,6 +81,8 @@ pub struct EnqueueDownloadPayload {
     pub handoff_auth: Option<HandoffAuth>,
     #[serde(rename = "transferKind")]
     pub transfer_kind: Option<TransferKind>,
+    #[serde(rename = "browserFallback", default)]
+    pub browser_fallback: BrowserFallback,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -82,6 +97,8 @@ pub struct PromptDownloadPayload {
     pub handoff_auth: Option<HandoffAuth>,
     #[serde(rename = "transferKind")]
     pub transfer_kind: Option<TransferKind>,
+    #[serde(rename = "browserFallback", default)]
+    pub browser_fallback: BrowserFallback,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -595,7 +612,8 @@ mod tests {
                 },
                 "suggestedFilename": "guide.pdf",
                 "totalBytes": 4096,
-                "transferKind": "torrent"
+                "transferKind": "torrent",
+                "browserFallback": "unavailable"
             }),
         );
 
@@ -604,6 +622,7 @@ mod tests {
         assert_eq!(payload.suggested_filename.as_deref(), Some("guide.pdf"));
         assert_eq!(payload.total_bytes, Some(4096));
         assert_eq!(payload.transfer_kind, Some(TransferKind::Torrent));
+        assert_eq!(payload.browser_fallback, BrowserFallback::Unavailable);
     }
 
     #[test]

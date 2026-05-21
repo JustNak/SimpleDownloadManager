@@ -1897,21 +1897,17 @@ fn reject_hoster_html_response(
     task: &crate::state::DownloadTask,
     response: &reqwest::Response,
 ) -> Result<(), DownloadError> {
-    if task.resolved_from_url.is_none() {
-        return Ok(());
-    }
-    let content_type = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if content_type.contains("text/html") || content_type.contains("application/xhtml") {
-        return Err(download_error(
-            FailureCategory::Http,
-            "Hoster direct link returned HTML instead of file content.".into(),
-            true,
-        ));
+    let browser_handoff = task
+        .source
+        .as_ref()
+        .is_some_and(|source| source.entry_point == "browser_download");
+    if let Some(error) = unusable_download_response_error_for_parts(
+        response.url().as_str(),
+        response.headers(),
+        browser_handoff,
+        task.resolved_from_url.is_some(),
+    ) {
+        return Err(error);
     }
 
     Ok(())
@@ -2048,6 +2044,136 @@ pub(super) async fn retry_bulk_archive_creation<A: DownloadUi>(
     create_bulk_archive_from_ready(app, state, archive, None).await
 }
 
+struct BulkFinalizeProgressChannel {
+    sender: mpsc::UnboundedSender<BulkFinalizeProgressUpdate>,
+}
+
+impl BulkFinalizeProgressListener for BulkFinalizeProgressChannel {
+    fn report(&self, update: BulkFinalizeProgressUpdate) {
+        let _ = self.sender.send(update);
+    }
+}
+
+struct BulkFinalizeProgressRuntime {
+    reporter: BulkFinalizeProgressReporter,
+    status: Arc<StdMutex<BulkArchiveStatus>>,
+    handle: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl BulkFinalizeProgressRuntime {
+    fn set_status(&self, status: BulkArchiveStatus) {
+        *self
+            .status
+            .lock()
+            .expect("bulk finalize progress status lock poisoned") = status;
+    }
+
+    async fn stop(self) {
+        drop(self.reporter);
+        let _ = self.handle.await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_bulk_finalize_progress_runtime<A: DownloadUi>(
+    app: A,
+    state: SharedState,
+    archive_id: String,
+    initial_status: BulkArchiveStatus,
+    requires_extraction: bool,
+    output_path: String,
+    warning: Option<String>,
+    finalize_mode: BulkFinalizeMode,
+    initial_total_bytes: u64,
+) -> BulkFinalizeProgressRuntime {
+    let (sender, mut receiver) = mpsc::unbounded_channel::<BulkFinalizeProgressUpdate>();
+    let listener = Arc::new(BulkFinalizeProgressChannel { sender });
+    let reporter = BulkFinalizeProgressReporter::new(initial_total_bytes, listener);
+    let status = Arc::new(StdMutex::new(initial_status));
+    let status_for_task = status.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        let mut latest = None;
+        let mut last_emit = Instant::now() - Duration::from_millis(500);
+        while let Some(update) = receiver.recv().await {
+            latest = Some(update);
+            let should_emit = last_emit.elapsed() >= Duration::from_millis(250)
+                || (update.total_bytes > 0 && update.processed_bytes >= update.total_bytes);
+            if !should_emit {
+                continue;
+            }
+            if let Some(update) = latest.take() {
+                emit_bulk_finalize_progress_update(
+                    &app,
+                    &state,
+                    &archive_id,
+                    &status_for_task,
+                    requires_extraction,
+                    &output_path,
+                    warning.clone(),
+                    finalize_mode,
+                    update,
+                )
+                .await;
+                last_emit = Instant::now();
+            }
+        }
+        if let Some(update) = latest {
+            emit_bulk_finalize_progress_update(
+                &app,
+                &state,
+                &archive_id,
+                &status_for_task,
+                requires_extraction,
+                &output_path,
+                warning,
+                finalize_mode,
+                update,
+            )
+            .await;
+        }
+    });
+
+    BulkFinalizeProgressRuntime {
+        reporter,
+        status,
+        handle,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn emit_bulk_finalize_progress_update<A: DownloadUi>(
+    app: &A,
+    state: &SharedState,
+    archive_id: &str,
+    status: &Arc<StdMutex<BulkArchiveStatus>>,
+    requires_extraction: bool,
+    output_path: &str,
+    warning: Option<String>,
+    finalize_mode: BulkFinalizeMode,
+    update: BulkFinalizeProgressUpdate,
+) {
+    let archive_status = *status
+        .lock()
+        .expect("bulk finalize progress status lock poisoned");
+    match state
+        .mark_bulk_archive_status(
+            archive_id,
+            archive_status,
+            Some(requires_extraction),
+            Some(output_path.to_string()),
+            None,
+            warning,
+            Some(finalize_mode),
+            Some(update.total_bytes),
+            Some(update.processed_bytes),
+        )
+        .await
+    {
+        Ok(snapshot) => emit_snapshot(app, &snapshot),
+        Err(error) => eprintln!("failed to persist bulk finalization progress: {error}"),
+    }
+}
+
 async fn create_bulk_archive_from_ready<A: DownloadUi>(
     app: &A,
     state: &SharedState,
@@ -2125,9 +2251,29 @@ async fn create_bulk_archive_from_ready<A: DownloadUi>(
         .await?;
     emit_snapshot(app, &snapshot);
 
-    let prepared = match prepare_bulk_archive_sources(archive, seven_zip_path).await {
+    let progress_runtime = spawn_bulk_finalize_progress_runtime(
+        app.clone(),
+        state.clone(),
+        archive_id.clone(),
+        initial_status,
+        requires_extraction,
+        archive_output_path.clone(),
+        plan.warning.clone(),
+        plan.finalize_mode,
+        plan.total_completed_bytes,
+    );
+    let _finalization_io_permit = acquire_bulk_finalization_io_permit().await;
+
+    let prepared = match prepare_bulk_archive_sources_with_progress(
+        archive,
+        seven_zip_path,
+        progress_runtime.reporter.clone(),
+    )
+    .await
+    {
         Ok(prepared) => prepared,
         Err(error) => {
+            progress_runtime.stop().await;
             mark_bulk_archive_create_failed(
                 app,
                 state,
@@ -2143,6 +2289,8 @@ async fn create_bulk_archive_from_ready<A: DownloadUi>(
     };
 
     if requires_extraction {
+        progress_runtime.set_status(BulkArchiveStatus::Combining);
+        let update = progress_runtime.reporter.current();
         let snapshot = state
             .mark_bulk_archive_status(
                 &archive_id,
@@ -2152,15 +2300,19 @@ async fn create_bulk_archive_from_ready<A: DownloadUi>(
                 None,
                 plan.warning.clone(),
                 Some(plan.finalize_mode),
-                Some(plan.total_completed_bytes),
-                Some(0),
+                Some(update.total_bytes),
+                Some(update.processed_bytes),
             )
             .await?;
         emit_snapshot(app, &snapshot);
     }
 
-    match finish_prepared_bulk_archive(prepared).await {
+    match finish_prepared_bulk_archive_with_progress(prepared, progress_runtime.reporter.clone())
+        .await
+    {
         Ok(outcome) => {
+            let final_progress = progress_runtime.reporter.current();
+            progress_runtime.stop().await;
             let cleanup_warning = cleanup_warning_message(&outcome.cleanup_warnings);
             if let Some(warning) = &cleanup_warning {
                 let _ = state
@@ -2181,8 +2333,8 @@ async fn create_bulk_archive_from_ready<A: DownloadUi>(
                     None,
                     cleanup_warning,
                     Some(plan.finalize_mode),
-                    Some(plan.total_completed_bytes),
-                    Some(plan.total_completed_bytes),
+                    Some(final_progress.total_bytes),
+                    Some(final_progress.total_bytes),
                 )
                 .await?;
             emit_snapshot(app, &snapshot);
@@ -2190,6 +2342,7 @@ async fn create_bulk_archive_from_ready<A: DownloadUi>(
             Ok(())
         }
         Err(error) => {
+            progress_runtime.stop().await;
             mark_bulk_archive_create_failed(
                 app,
                 state,

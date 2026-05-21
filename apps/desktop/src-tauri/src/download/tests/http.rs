@@ -173,6 +173,66 @@ fn preflight_metadata_uses_head_headers() {
 }
 
 #[test]
+fn browser_handoff_html_response_without_attachment_is_unusable() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+
+    let error = unusable_download_response_error_for_parts(
+        "https://cdn.example.com/download",
+        &headers,
+        true,
+        false,
+    )
+    .expect("browser handoff HTML should not be treated as file content");
+
+    assert_eq!(error.category, FailureCategory::Http);
+    assert!(!error.retryable);
+    assert!(error.message.contains("HTML"));
+}
+
+#[test]
+fn browser_handoff_explicit_html_attachment_is_usable() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"report.html\""),
+    );
+
+    assert!(unusable_download_response_error_for_parts(
+        "https://cdn.example.com/download",
+        &headers,
+        true,
+        false,
+    )
+    .is_none());
+}
+
+#[test]
+fn gofile_direct_json_response_without_attachment_is_unusable() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+    let error = unusable_download_response_error_for_parts(
+        "https://file-ap-sgp-3.gofile.io/download/web/token",
+        &headers,
+        false,
+        false,
+    )
+    .expect("Gofile JSON API responses should not be saved as file content");
+
+    assert_eq!(error.category, FailureCategory::Http);
+    assert!(!error.retryable);
+    assert!(error.message.contains("Gofile"));
+}
+
+#[test]
 fn content_disposition_filename_avoids_windows_reserved_device_names() {
     assert_eq!(
         parse_content_disposition_filename("attachment; filename=\"CON\"").as_deref(),
@@ -653,8 +713,100 @@ async fn protected_handoff_access_probe_accepts_captured_browser_auth() {
     assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
 }
 
+#[tokio::test]
+async fn protected_handoff_access_probe_rejects_html_landing_pages() {
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "Content-Length: 38\r\n",
+        "\r\n",
+        "<html><body>login required</body></html>"
+    );
+    let (url, request_handle) = spawn_one_response_server(response).await;
+
+    let error = probe_browser_handoff_access(&url, None)
+        .await
+        .expect_err("HTML landing pages should not be accepted as browser download bytes");
+    let request = request_handle.await.unwrap();
+
+    assert_eq!(error.code, PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE);
+    assert_eq!(error.status, Some(200));
+    assert!(error.message.contains("HTML"));
+    assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
+}
+
+#[tokio::test]
+async fn protected_handoff_access_probe_allows_explicit_html_attachments() {
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "Content-Disposition: attachment; filename=\"report.html\"\r\n",
+        "Content-Length: 31\r\n",
+        "\r\n",
+        "<html><body>report</body></html>"
+    );
+    let (url, request_handle) = spawn_one_response_server(response).await;
+
+    let result = probe_browser_handoff_access(&url, None).await;
+    let request = request_handle.await.unwrap();
+
+    assert!(result.is_ok());
+    assert!(request.to_ascii_lowercase().contains("range: bytes=0-0"));
+}
+
+#[tokio::test]
+async fn authenticated_handoff_redirects_to_cross_origin_without_forwarding_auth() {
+    let (url, request_handle) =
+        spawn_authenticated_cross_origin_redirect_server(b"redirected bytes").await;
+    let client = download_client().unwrap();
+    let auth = HandoffAuth {
+        headers: vec![HandoffAuthHeader {
+            name: "Cookie".into(),
+            value: "session=abc".into(),
+        }],
+    };
+
+    let response = send_request(&client, &url, 0, Some(&auth), None)
+        .await
+        .expect("signed cross-origin redirects should be followed without browser credentials");
+    let requests = request_handle.await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("cookie: session=abc"));
+    assert!(
+        !requests[1].to_ascii_lowercase().contains("cookie:"),
+        "browser credentials must not be forwarded to a redirected CDN origin",
+    );
+}
+
+#[tokio::test]
+async fn protected_handoff_access_probe_allows_cross_origin_signed_redirects() {
+    let (url, request_handle) = spawn_authenticated_cross_origin_redirect_server(b"").await;
+    let auth = HandoffAuth {
+        headers: vec![HandoffAuthHeader {
+            name: "Cookie".into(),
+            value: "session=abc".into(),
+        }],
+    };
+
+    let result = probe_browser_handoff_access(&url, Some(&auth)).await;
+    let requests = request_handle.await.unwrap();
+
+    assert!(result.is_ok());
+    assert!(requests[0]
+        .to_ascii_lowercase()
+        .contains("cookie: session=abc"));
+    assert!(
+        !requests[1].to_ascii_lowercase().contains("cookie:"),
+        "access probes should drop browser credentials after a cross-origin redirect",
+    );
+}
+
 #[test]
-fn authenticated_redirect_policy_rejects_cross_origin_redirects() {
+fn authenticated_redirect_policy_identifies_same_origin_redirects() {
     assert!(redirect_keeps_origin(
         "https://chatgpt.com/backend-api/estuary/content?id=file_123",
         "https://chatgpt.com/backend-api/estuary/content?id=file_456",
@@ -663,6 +815,47 @@ fn authenticated_redirect_policy_rejects_cross_origin_redirects() {
         "https://chatgpt.com/backend-api/estuary/content?id=file_123",
         "https://cdn.example.com/file.pdf",
     ));
+}
+
+async fn spawn_authenticated_cross_origin_redirect_server(
+    body: &'static [u8],
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirect_address = redirect_listener.local_addr().unwrap();
+    let target_address = target_listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut redirect_socket, _) = redirect_listener.accept().await.unwrap();
+        let mut redirect_buffer = vec![0_u8; 4096];
+        let redirect_read = redirect_socket.read(&mut redirect_buffer).await.unwrap();
+        let redirect_request =
+            String::from_utf8_lossy(&redirect_buffer[..redirect_read]).to_string();
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/cdn.bin\r\nContent-Length: 0\r\n\r\n"
+        );
+        redirect_socket
+            .write_all(redirect_response.as_bytes())
+            .await
+            .unwrap();
+
+        let (mut target_socket, _) = target_listener.accept().await.unwrap();
+        let mut target_buffer = vec![0_u8; 4096];
+        let target_read = target_socket.read(&mut target_buffer).await.unwrap();
+        let target_request = String::from_utf8_lossy(&target_buffer[..target_read]).to_string();
+        let target_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body),
+        );
+        target_socket
+            .write_all(target_response.as_bytes())
+            .await
+            .unwrap();
+
+        vec![redirect_request, target_request]
+    });
+
+    (format!("http://{redirect_address}/download.bin"), handle)
 }
 
 #[test]

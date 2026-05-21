@@ -71,6 +71,7 @@
     getAppSnapshot,
     APP_VERSION,
     getInstalledVersion,
+    importLocalRecovery,
     installUpdate,
     openBatchProgressWindow,
     openBulkArchive,
@@ -80,6 +81,7 @@
     pauseAllJobs,
     pauseJob,
     pauseJobs,
+    previewLocalRecovery,
     revealBulkArchive,
     revealJobInFolder,
     renameJob,
@@ -101,7 +103,7 @@
     swapFailedDownloadToBrowser,
     testExtensionHandoff,
   } from './backend';
-  import type { AddJobsResult, DesktopSnapshot } from './backend';
+  import type { AddJobsResult, DesktopSnapshot, LocalRecoveryPreview, StartupRecoverySummary } from './backend';
   import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
   import {
@@ -156,6 +158,13 @@
   let pendingQueueActionIds = $state<Set<string>>(new Set());
   let isAddModalOpen = $state(false);
   let diagnostics = $state<DiagnosticsSnapshot | null>(null);
+  let startupRecovery = $state<StartupRecoverySummary | null>(null);
+  let isLocalRecoveryOpen = $state(false);
+  let isLoadingLocalRecovery = $state(false);
+  let isImportingLocalRecovery = $state(false);
+  let localRecoveryPreview = $state<LocalRecoveryPreview | null>(null);
+  let localRecoverySelectedIds = $state<Set<string>>(new Set());
+  let localRecoveryError = $state<string | null>(null);
   let settingsDraft = $state<Settings | null>(null);
   let settingsDirty = $state(false);
   let pendingSettingsView = $state<ViewState | null>(null);
@@ -175,6 +184,8 @@
   let startupUpdateCheckStarted = false;
   let deferredStartupUpdateCheck = false;
   let pendingVisibleSnapshot: DesktopSnapshot | null = null;
+  let startupRecoveryToastKey: string | null = null;
+  let dismissedStartupRecoveryKey: string | null = null;
   let lastDiagnosticsRefreshAt = 0;
   let settingsPageLoad: Promise<void> | null = null;
   let addDownloadModalLoad: Promise<void> | null = null;
@@ -198,6 +209,7 @@
   const canPauseAny = $derived(jobs.some((job) => [JobState.Queued, JobState.Starting, JobState.Downloading, JobState.Seeding].includes(job.state)));
   const canResumeAny = $derived(jobs.some((job) => [JobState.Paused, JobState.Failed, JobState.Canceled].includes(job.state)));
   const canRetryFailed = $derived(canRetryFailedDownloads(jobs));
+  const selectedLocalRecoveryCount = $derived(localRecoverySelectedIds.size);
   const isBulkStatusView = $derived(isBulkView(view));
   const isTorrentStatusView = $derived(isTorrentView(view));
   const hasActiveTorrentJobs = $derived(jobs.some(
@@ -560,6 +572,7 @@
     connectionState = snapshot.connectionState;
     jobs = snapshot.jobs;
     settings = snapshot.settings;
+    applyStartupRecovery(snapshot.startupRecovery ?? null);
   }
 
   function applyDownloadBatch(batch: DownloadUpdateBatch) {
@@ -580,7 +593,7 @@
 
   function applyDownloadUpdateBatchWhenVisible(batch: DownloadUpdateBatch): boolean {
     if (document.visibilityState !== 'visible') {
-      const baseSnapshot = pendingVisibleSnapshot ?? { connectionState, jobs, settings };
+      const baseSnapshot = pendingVisibleSnapshot ?? { connectionState, jobs, settings, startupRecovery: startupRecovery ?? undefined };
       pendingVisibleSnapshot = {
         ...baseSnapshot,
         jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, batch),
@@ -640,6 +653,38 @@
 
   function removeToast(id: string) {
     toasts = toasts.filter((toast) => toast.id !== id);
+  }
+
+  function startupRecoveryKey(recovery: StartupRecoverySummary): string {
+    return `${recovery.status}:${recovery.sourcePath ?? ''}:${recovery.quarantinedPath ?? ''}:${recovery.message}`;
+  }
+
+  function applyStartupRecovery(recovery: StartupRecoverySummary | null) {
+    if (!recovery || recovery.status === 'none') {
+      startupRecovery = null;
+      return;
+    }
+
+    const key = startupRecoveryKey(recovery);
+    if (key === dismissedStartupRecoveryKey) return;
+
+    startupRecovery = recovery;
+    if (startupRecoveryToastKey === key) return;
+
+    startupRecoveryToastKey = key;
+    addToast({
+      type: 'warning',
+      title: recovery.status === 'recovered' ? 'Download Data Restored' : 'Download Data Needs Review',
+      message: recovery.message,
+      autoClose: false,
+    });
+  }
+
+  function dismissStartupRecovery() {
+    if (startupRecovery) {
+      dismissedStartupRecoveryKey = startupRecoveryKey(startupRecovery);
+    }
+    startupRecovery = null;
   }
 
   async function refreshDiagnostics(options: DiagnosticsRefreshOptions = {}) {
@@ -854,6 +899,66 @@
       addToast({ type: 'info', title: 'Swapped to Browser', message: 'The download URL was opened in your browser.' });
     } catch (error) {
       addToast({ type: 'error', title: 'Swap Failed', message: getErrorMessage(error) });
+    }
+  }
+
+  async function openLocalRecoveryReview() {
+    isLocalRecoveryOpen = true;
+    isLoadingLocalRecovery = true;
+    localRecoveryError = null;
+    localRecoveryPreview = null;
+    localRecoverySelectedIds = new Set();
+
+    try {
+      const preview = await previewLocalRecovery();
+      localRecoveryPreview = preview;
+      localRecoverySelectedIds = new Set(preview.candidates.map((candidate) => candidate.id));
+    } catch (error) {
+      localRecoveryError = getErrorMessage(error, 'Failed to scan local download files.');
+    } finally {
+      isLoadingLocalRecovery = false;
+    }
+  }
+
+  function toggleLocalRecoveryCandidate(id: string) {
+    const next = new Set(localRecoverySelectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    localRecoverySelectedIds = next;
+  }
+
+  function toggleAllLocalRecoveryCandidates() {
+    const candidates = localRecoveryPreview?.candidates ?? [];
+    localRecoverySelectedIds = localRecoverySelectedIds.size === candidates.length
+      ? new Set()
+      : new Set(candidates.map((candidate) => candidate.id));
+  }
+
+  async function handleImportLocalRecovery() {
+    if (localRecoverySelectedIds.size === 0) return;
+    isImportingLocalRecovery = true;
+    localRecoveryError = null;
+    const importCount = localRecoverySelectedIds.size;
+
+    try {
+      const snapshot = await importLocalRecovery([...localRecoverySelectedIds]);
+      applyDesktopSnapshot(snapshot);
+      dismissStartupRecovery();
+      isLocalRecoveryOpen = false;
+      localRecoveryPreview = null;
+      localRecoverySelectedIds = new Set();
+      addToast({
+        type: 'success',
+        title: 'Local Files Recovered',
+        message: `${importCount} local ${importCount === 1 ? 'file is' : 'files are'} now visible in the queue.`,
+      });
+    } catch (error) {
+      localRecoveryError = getErrorMessage(error, 'Failed to import selected local files.');
+    } finally {
+      isImportingLocalRecovery = false;
     }
   }
 
@@ -1483,6 +1588,38 @@
           {/if}
         </div>
       {:else}
+        {#if startupRecovery}
+          <div class="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-5 py-3 text-sm text-foreground">
+            <div class="flex items-start gap-3">
+              <Wrench size={18} class="mt-0.5 shrink-0 text-amber-400" />
+              <div class="min-w-0 flex-1">
+                <div class="font-semibold text-foreground">
+                  {startupRecovery.status === 'recovered' ? 'Download data restored' : 'Download data needs review'}
+                </div>
+                <div class="mt-0.5 leading-5 text-muted-foreground">{startupRecovery.message}</div>
+              </div>
+              <div class="flex shrink-0 items-center gap-2">
+                {#if startupRecovery.status !== 'recovered'}
+                  <button
+                    type="button"
+                    onclick={() => void openLocalRecoveryReview()}
+                    class="h-8 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground transition hover:bg-primary/90"
+                  >
+                    Review local files
+                  </button>
+                {/if}
+                <button
+                  type="button"
+                  onclick={dismissStartupRecovery}
+                  class="h-8 rounded-md border border-border bg-background px-3 text-xs font-semibold text-foreground transition hover:bg-muted"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        {/if}
+
         <QueueView
           jobs={displayedJobs}
           {view}
@@ -1546,6 +1683,20 @@
       updateState,
       () => isUpdatePromptOpen = false,
       () => void handleInstallUpdate(),
+    )}
+  {/if}
+
+  {#if isLocalRecoveryOpen}
+    {@render LocalRecoveryDialog(
+      localRecoveryPreview,
+      localRecoverySelectedIds,
+      isLoadingLocalRecovery,
+      isImportingLocalRecovery,
+      localRecoveryError,
+      toggleLocalRecoveryCandidate,
+      toggleAllLocalRecoveryCandidates,
+      () => isLocalRecoveryOpen = false,
+      () => void handleImportLocalRecovery(),
     )}
   {/if}
 </div>
@@ -1732,6 +1883,81 @@
         <button type="button" onclick={onDiscard} disabled={isSaving} class="h-10 rounded-md border border-input bg-background px-4 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">Discard Changes</button>
         <button type="button" onclick={onSave} disabled={isSaving} class="h-10 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
           {isSaving ? 'Saving...' : 'Save Changes'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/snippet}
+
+{#snippet LocalRecoveryDialog(
+  preview: LocalRecoveryPreview | null,
+  selectedIds: Set<string>,
+  isLoading: boolean,
+  isImporting: boolean,
+  errorMessage: string | null,
+  onToggleCandidate: (id: string) => void,
+  onToggleAll: () => void,
+  onClose: () => void,
+  onImport: () => void,
+)}
+  <div class="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="local-recovery-title"
+      class="flex max-h-[82vh] w-full max-w-3xl flex-col rounded-md border border-border bg-card shadow-2xl"
+    >
+      <div class="border-b border-border bg-header px-5 py-4">
+        <h2 id="local-recovery-title" class="text-base font-semibold text-foreground">Review local files</h2>
+        <p class="mt-1 text-sm leading-5 text-muted-foreground">
+          {preview ? `${preview.candidates.length} files found in ${preview.root}` : 'Scanning the download folder...'}
+        </p>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {#if errorMessage}
+          <div class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{errorMessage}</div>
+        {:else if isLoading}
+          <div class="py-8 text-center text-sm text-muted-foreground">Scanning...</div>
+        {:else if preview && preview.candidates.length > 0}
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <button type="button" onclick={onToggleAll} class="h-8 rounded-md border border-input bg-background px-3 text-xs font-semibold text-foreground transition hover:bg-muted">
+              {selectedIds.size === preview.candidates.length ? 'Clear selection' : 'Select all'}
+            </button>
+            <div class="text-xs text-muted-foreground">{selectedIds.size} selected</div>
+          </div>
+          <div class="overflow-hidden rounded-md border border-border">
+            {#each preview.candidates as candidate (candidate.id)}
+              <label class="flex min-h-12 cursor-pointer items-center gap-3 border-b border-border px-3 py-2 last:border-b-0 hover:bg-muted/60">
+                <input
+                  type="checkbox"
+                  checked={selectedIds.has(candidate.id)}
+                  onchange={() => onToggleCandidate(candidate.id)}
+                  class="h-4 w-4 accent-primary"
+                />
+                <FileText size={16} class="shrink-0 text-primary" />
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-sm font-medium text-foreground">{candidate.filename}</span>
+                  <span class="block truncate text-xs text-muted-foreground">{candidate.path}</span>
+                </span>
+                <span class="shrink-0 text-xs text-muted-foreground">{formatBytes(candidate.sizeBytes)}</span>
+              </label>
+            {/each}
+          </div>
+        {:else}
+          <div class="py-8 text-center text-sm text-muted-foreground">No recoverable local files were found.</div>
+        {/if}
+      </div>
+
+      <div class="flex justify-end gap-2 border-t border-border px-5 py-4">
+        <button type="button" onclick={onClose} disabled={isImporting} class="h-10 rounded-md border border-input bg-background px-4 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">Cancel</button>
+        <button
+          type="button"
+          onclick={onImport}
+          disabled={isImporting || selectedLocalRecoveryCount === 0}
+          class="h-10 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isImporting ? 'Importing...' : 'Import selected'}
         </button>
       </div>
     </div>

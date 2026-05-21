@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   activeBulkFinalizingStepId,
   bulkFailedRetrySelection,
+  bulkFinalizationProgress,
   bulkFinalizingSteps,
   bulkCancelConfirmPlan,
   bulkReviewCanStart,
@@ -432,6 +433,45 @@ assert.equal(
   activeBulkFinalizingStepId('compressing'),
   'compressing',
   'compressing archive status should activate the compressing finalizing step',
+);
+
+assert.deepEqual(
+  bulkFinalizationProgress([
+    job({
+      id: 'job_1',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle',
+        outputKind: 'folder',
+        archiveStatus: 'combining',
+        requiresExtraction: false,
+        finalizeTotalBytes: 1_000,
+        finalizeProcessedBytes: 250,
+      },
+    }),
+    job({
+      id: 'job_2',
+      state: 'completed',
+      bulkArchive: {
+        id: 'bulk_1',
+        name: 'bundle',
+        outputKind: 'folder',
+        archiveStatus: 'combining',
+        requiresExtraction: false,
+        finalizeTotalBytes: 1_000,
+        finalizeProcessedBytes: 250,
+      },
+    }),
+  ]),
+  {
+    progress: 25,
+    processedBytes: 250,
+    totalBytes: 1_000,
+    knownTotal: true,
+    active: true,
+  },
+  'bulk popup finalization progress should use archive finalize bytes instead of member download bytes',
 );
 
 const singleQueued: AddJobResult = { jobId: 'job_1', filename: 'file.zip', status: 'queued' };

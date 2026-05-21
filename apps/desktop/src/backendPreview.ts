@@ -2,7 +2,7 @@ import { createStoredProgressBatchContext as createSharedStoredProgressBatchCont
 import { createDefaultSettings, DEFAULT_DOWNLOAD_DIRECTORY } from './defaultSettings';
 import { canSwapFailedDownloadToBrowser } from './queueCommands';
 import { ConnectionState, JobState, type DiagnosticsSnapshot, type DownloadJob, type DownloadPrompt, type Settings, type TorrentSessionCacheClearResult, type TransferKind } from './types';
-import type { AddJobResult, AddJobsResult, BatchProgressSnapshot, DesktopSnapshot, ExternalUseResult, ProgressJobSnapshot, SettingsSnapshot } from './backend';
+import type { AddJobResult, AddJobsResult, BatchProgressSnapshot, DesktopSnapshot, ExternalUseResult, LocalRecoveryPreview, ProgressJobSnapshot, SettingsSnapshot } from './backend';
 
 type MockStateListener = (snapshot: DesktopSnapshot) => void;
 
@@ -202,6 +202,20 @@ let mockState: DesktopSnapshot = {
 };
 
 export function getMockAppSnapshot(): DesktopSnapshot {
+  return cloneSnapshot(mockState);
+}
+
+export function previewMockLocalRecovery(root?: string): LocalRecoveryPreview {
+  return {
+    root: root?.trim() || mockState.settings.downloadDirectory,
+    candidates: [],
+    skippedCount: 0,
+  };
+}
+
+export function importMockLocalRecovery(_candidateIds: string[]): DesktopSnapshot {
+  mockState = { ...mockState, startupRecovery: undefined };
+  emitMockState();
   return cloneSnapshot(mockState);
 }
 

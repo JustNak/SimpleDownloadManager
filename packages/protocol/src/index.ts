@@ -46,6 +46,7 @@ export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' |
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type AppearanceTheme = 'light' | 'dark' | 'oled_dark' | 'system';
 export type TransferKind = 'http' | 'torrent';
+export type BrowserFallback = 'replay' | 'unavailable';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -94,6 +95,7 @@ export interface EnqueueDownloadPayload {
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
+  browserFallback?: BrowserFallback;
 }
 
 export interface PromptDownloadPayload {
@@ -103,6 +105,7 @@ export interface PromptDownloadPayload {
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
+  browserFallback?: BrowserFallback;
 }
 
 export interface DownloadRequestMetadata {
@@ -110,6 +113,7 @@ export interface DownloadRequestMetadata {
   totalBytes?: number;
   handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
+  browserFallback?: BrowserFallback;
 }
 
 export interface OpenAppPayload {
@@ -443,6 +447,10 @@ function normalizeTransferKind(transferKind: TransferKind | undefined): Transfer
   return transferKind === 'http' || transferKind === 'torrent' ? transferKind : undefined;
 }
 
+function normalizeBrowserFallback(browserFallback: BrowserFallback | undefined): BrowserFallback | undefined {
+  return browserFallback === 'unavailable' ? browserFallback : undefined;
+}
+
 export function createPingRequest(requestId = createRequestId()): RequestEnvelope<'ping', EmptyPayload> {
   return {
     protocolVersion: PROTOCOL_VERSION,
@@ -489,6 +497,7 @@ export function createEnqueueDownloadRequest(
   const suggestedFilename = trimMetadata(normalizedMetadata.suggestedFilename);
   const sanitizedAuth = sanitizeHandoffAuth(normalizedMetadata.handoffAuth);
   const transferKind = normalizeTransferKind(normalizedMetadata.transferKind);
+  const browserFallback = normalizeBrowserFallback(normalizedMetadata.browserFallback);
   return {
     ok: true,
     value: {
@@ -502,6 +511,7 @@ export function createEnqueueDownloadRequest(
         totalBytes,
         ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
         ...(transferKind ? { transferKind } : {}),
+        ...(browserFallback ? { browserFallback } : {}),
       },
     },
   };
@@ -522,6 +532,7 @@ export function createPromptDownloadRequest(
 
   const sanitizedAuth = sanitizeHandoffAuth(metadata.handoffAuth);
   const transferKind = normalizeTransferKind(metadata.transferKind);
+  const browserFallback = normalizeBrowserFallback(metadata.browserFallback);
   return {
     ok: true,
     value: {
@@ -535,6 +546,7 @@ export function createPromptDownloadRequest(
         totalBytes,
         ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
         ...(transferKind ? { transferKind } : {}),
+        ...(browserFallback ? { browserFallback } : {}),
       },
     },
   };
