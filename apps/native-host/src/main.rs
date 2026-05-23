@@ -6,8 +6,11 @@ mod protocol;
 
 use forwarder::{AppForwarder, ForwarderError};
 use protocol::{
-    app_enqueue_request, app_prompt_download_request, app_save_extension_settings_request,
-    app_show_window_request, app_status_request, parse_enqueue_payload, parse_open_app_payload,
+    app_browser_blob_begin_request, app_browser_blob_cancel_request,
+    app_browser_blob_chunk_request, app_browser_blob_finish_request, app_enqueue_request,
+    app_prompt_download_request, app_save_extension_settings_request, app_show_window_request,
+    app_status_request, parse_browser_blob_begin_payload, parse_browser_blob_chunk_payload,
+    parse_browser_blob_stream_payload, parse_enqueue_payload, parse_open_app_payload,
     parse_prompt_download_payload, validate_protocol, AppResponseEnvelope, HostResponseEnvelope,
     NativeRequestEnvelope,
 };
@@ -21,15 +24,29 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut stdin = io::stdin();
-    let raw_request = framing::read_message(&mut stdin).map_err(|error| error.to_string())?;
-    let request: NativeRequestEnvelope = serde_json::from_slice(&raw_request)
-        .map_err(|error| format!("invalid request payload: {error}"))?;
-
-    let response = handle_request(request);
-    let response_bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
-
     let mut stdout = io::stdout();
-    framing::write_message(&mut stdout, &response_bytes).map_err(|error| error.to_string())
+
+    loop {
+        let raw_request = match framing::read_message(&mut stdin) {
+            Ok(raw_request) => raw_request,
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error.to_string()),
+        };
+        let response = match serde_json::from_slice::<NativeRequestEnvelope>(&raw_request) {
+            Ok(request) => handle_request(request),
+            Err(error) => HostResponseEnvelope::rejected(
+                "invalid_request".into(),
+                "invalid_payload",
+                "INVALID_PAYLOAD",
+                format!("Invalid request payload: {error}"),
+            ),
+        };
+        let response_bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+
+        framing::write_message(&mut stdout, &response_bytes).map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
@@ -67,6 +84,46 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
         },
         "prompt_download" => match parse_prompt_download_payload(&request) {
             Ok(payload) => match forwarder.send(&app_prompt_download_request(
+                request.request_id.clone(),
+                payload,
+            )) {
+                Ok(response) => map_app_response(response),
+                Err(error) => map_forwarder_error(request.request_id, error),
+            },
+            Err(response) => *response,
+        },
+        "begin_browser_blob_download" => match parse_browser_blob_begin_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_browser_blob_begin_request(
+                request.request_id.clone(),
+                payload,
+            )) {
+                Ok(response) => map_app_response(response),
+                Err(error) => map_forwarder_error(request.request_id, error),
+            },
+            Err(response) => *response,
+        },
+        "append_browser_blob_download_chunk" => match parse_browser_blob_chunk_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_browser_blob_chunk_request(
+                request.request_id.clone(),
+                payload,
+            )) {
+                Ok(response) => map_app_response(response),
+                Err(error) => map_forwarder_error(request.request_id, error),
+            },
+            Err(response) => *response,
+        },
+        "finish_browser_blob_download" => match parse_browser_blob_stream_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_browser_blob_finish_request(
+                request.request_id.clone(),
+                payload,
+            )) {
+                Ok(response) => map_app_response(response),
+                Err(error) => map_forwarder_error(request.request_id, error),
+            },
+            Err(response) => *response,
+        },
+        "cancel_browser_blob_download" => match parse_browser_blob_stream_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_browser_blob_cancel_request(
                 request.request_id.clone(),
                 payload,
             )) {
@@ -124,7 +181,13 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
     if response.ok {
         if !matches!(
             response.message_type.as_str(),
-            "queued" | "duplicate_existing_job" | "prompt_canceled" | "prompt_dismissed"
+            "queued"
+                | "duplicate_existing_job"
+                | "prompt_canceled"
+                | "prompt_dismissed"
+                | "blob_stream_accepted"
+                | "blob_stream_finished"
+                | "blob_stream_canceled"
         ) {
             return HostResponseEnvelope::rejected(
                 response.request_id,

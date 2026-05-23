@@ -325,12 +325,10 @@ pub(super) fn handoff_auth_for_request_origin<'a>(
     request_url: &str,
     handoff_auth: Option<&'a HandoffAuth>,
 ) -> Option<&'a HandoffAuth> {
-    if handoff_auth.is_none() {
-        return None;
-    }
+    let auth = handoff_auth?;
 
     if request_url == original_url || redirect_keeps_origin(original_url, request_url) {
-        handoff_auth
+        Some(auth)
     } else {
         None
     }
@@ -491,19 +489,14 @@ pub(super) fn unusable_download_response_error_for_parts(
     resolved_hoster: bool,
 ) -> Option<DownloadError> {
     let content_type = normalized_content_type(headers);
-    let is_html = content_type
-        .as_deref()
-        .is_some_and(is_html_content_type);
-    let is_json = content_type
-        .as_deref()
-        .is_some_and(is_json_content_type);
+    let is_html = content_type.as_deref().is_some_and(is_html_content_type);
+    let is_json = content_type.as_deref().is_some_and(is_json_content_type);
     let attachment_filename = attachment_filename_from_headers(headers);
     let explicit_html_attachment = attachment_filename
         .as_deref()
         .is_some_and(filename_has_html_extension);
 
-    if is_gofile_direct_http_url(raw_url) && (is_html || is_json) && attachment_filename.is_none()
-    {
+    if is_gofile_direct_http_url(raw_url) && (is_html || is_json) && attachment_filename.is_none() {
         return Some(download_error(
             FailureCategory::Http,
             "Gofile direct link returned a hoster response instead of file content. Reopen the source page or capture a fresh download link."

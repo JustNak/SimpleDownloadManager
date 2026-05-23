@@ -15,6 +15,7 @@ use crate::windows::{
     focus_job_in_main_window_async, focus_main_window_async, show_download_prompt_window,
     show_progress_window_for_transfer_kind, DOWNLOAD_PROMPT_WINDOW,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -38,6 +39,8 @@ const MAX_METADATA_LENGTH: usize = 512;
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
 const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
 const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
+const MAX_BLOB_STREAM_ID_LENGTH: usize = 128;
+const MAX_BLOB_CHUNK_BASE64_LENGTH: usize = 512 * 1024;
 const SIDE_EFFECT_REQUEST_LIMIT: usize = 30;
 const SIDE_EFFECT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
 static SIDE_EFFECT_REQUEST_TIMES: OnceLock<Mutex<VecDeque<Instant>>> = OnceLock::new();
@@ -120,6 +123,31 @@ struct PromptDownloadPayload {
     transfer_kind: Option<TransferKind>,
     #[serde(default)]
     browser_fallback: BrowserFallback,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserBlobDownloadBeginPayload {
+    stream_id: String,
+    source: EnqueueSource,
+    suggested_filename: Option<String>,
+    total_bytes: Option<u64>,
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserBlobDownloadChunkPayload {
+    stream_id: String,
+    offset: u64,
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserBlobDownloadStreamPayload {
+    stream_id: String,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,6 +266,19 @@ impl HostResponse {
             message_type: "prompt_dismissed".into(),
             payload: Some(json!({
                 "status": "dismissed",
+            })),
+            code: None,
+            message: None,
+        }
+    }
+
+    fn blob_stream_status(request_id: String, message_type: &str, status: &str) -> Self {
+        Self {
+            ok: true,
+            request_id,
+            message_type: message_type.into(),
+            payload: Some(json!({
+                "status": status,
             })),
             code: None,
             message: None,
@@ -588,6 +629,124 @@ async fn handle_request(
             )
             .await
         }
+        "begin_browser_blob_download" => {
+            let payload =
+                match serde_json::from_value::<BrowserBlobDownloadBeginPayload>(request.payload) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return HostResponse::error(
+                            request.request_id,
+                            "invalid_payload",
+                            "INVALID_PAYLOAD",
+                            format!("Could not parse browser blob begin payload: {error}"),
+                        )
+                    }
+                };
+            let source: DownloadSource = payload.source.into();
+            match state
+                .begin_browser_blob_download(
+                    payload.stream_id,
+                    source,
+                    payload.suggested_filename,
+                    payload.total_bytes,
+                    payload.mime_type,
+                )
+                .await
+            {
+                Ok(result) => {
+                    let host_snapshot = state.register_host_contact().await;
+                    emit_snapshot(&app, &result.snapshot);
+                    emit_snapshot(&app, &host_snapshot);
+                    HostResponse::enqueue_result(request.request_id, result)
+                }
+                Err(error) => map_backend_error(request.request_id, error),
+            }
+        }
+        "append_browser_blob_download_chunk" => {
+            let payload =
+                match serde_json::from_value::<BrowserBlobDownloadChunkPayload>(request.payload) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return HostResponse::error(
+                            request.request_id,
+                            "invalid_payload",
+                            "INVALID_PAYLOAD",
+                            format!("Could not parse browser blob chunk payload: {error}"),
+                        )
+                    }
+                };
+            let chunk = match decode_browser_blob_chunk(&payload.data) {
+                Ok(chunk) => chunk,
+                Err(error) => return map_backend_error(request.request_id, error),
+            };
+            match state
+                .append_browser_blob_download_chunk(&payload.stream_id, payload.offset, &chunk)
+                .await
+            {
+                Ok(snapshot) => {
+                    emit_snapshot(&app, &snapshot);
+                    HostResponse::blob_stream_status(
+                        request.request_id,
+                        "blob_stream_accepted",
+                        "accepted",
+                    )
+                }
+                Err(error) => map_backend_error(request.request_id, error),
+            }
+        }
+        "finish_browser_blob_download" => {
+            let payload =
+                match serde_json::from_value::<BrowserBlobDownloadStreamPayload>(request.payload) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return HostResponse::error(
+                            request.request_id,
+                            "invalid_payload",
+                            "INVALID_PAYLOAD",
+                            format!("Could not parse browser blob finish payload: {error}"),
+                        )
+                    }
+                };
+            match state.finish_browser_blob_download(&payload.stream_id).await {
+                Ok(snapshot) => {
+                    emit_snapshot(&app, &snapshot);
+                    HostResponse::blob_stream_status(
+                        request.request_id,
+                        "blob_stream_finished",
+                        "finished",
+                    )
+                }
+                Err(error) => map_backend_error(request.request_id, error),
+            }
+        }
+        "cancel_browser_blob_download" => {
+            let payload =
+                match serde_json::from_value::<BrowserBlobDownloadStreamPayload>(request.payload) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        return HostResponse::error(
+                            request.request_id,
+                            "invalid_payload",
+                            "INVALID_PAYLOAD",
+                            format!("Could not parse browser blob cancel payload: {error}"),
+                        )
+                    }
+                };
+            match state
+                .cancel_browser_blob_download(&payload.stream_id, payload.reason)
+                .await
+            {
+                Ok(snapshot) => {
+                    emit_snapshot(&app, &snapshot);
+                    HostResponse::blob_stream_status(
+                        request.request_id,
+                        "blob_stream_canceled",
+                        "canceled",
+                    )
+                }
+                Err(error) => map_backend_error(request.request_id, error),
+            }
+        }
         "enqueue_download" => {
             let payload = match serde_json::from_value::<EnqueuePayload>(request.payload) {
                 Ok(payload) => payload,
@@ -734,6 +893,11 @@ fn validate_host_request(request: &HostRequest) -> ValidationResult {
         "save_extension_settings" => validate_extension_settings_payload(request),
         "enqueue_download" => validate_enqueue_request_payload(request),
         "prompt_download" => validate_prompt_download_request_payload(request),
+        "begin_browser_blob_download" => validate_browser_blob_begin_payload(request),
+        "append_browser_blob_download_chunk" => validate_browser_blob_chunk_payload(request),
+        "finish_browser_blob_download" | "cancel_browser_blob_download" => {
+            validate_browser_blob_stream_payload(request)
+        }
         _ => unreachable!("supported request type checked above"),
     }
 }
@@ -800,6 +964,42 @@ fn validate_prompt_download_request_payload(request: &HostRequest) -> Validation
     )
 }
 
+fn validate_browser_blob_begin_payload(request: &HostRequest) -> ValidationResult {
+    let payload = parse_payload::<BrowserBlobDownloadBeginPayload>(request, "browser blob begin")?;
+    validate_browser_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    validate_request_source(&request.request_id, &payload.source)?;
+    if payload.source.entry_point != "browser_download" {
+        return Err(validation_error(
+            &request.request_id,
+            "INVALID_PAYLOAD",
+            "Browser blob downloads are only supported for browser downloads.",
+        ));
+    }
+    validate_metadata_field(
+        &request.request_id,
+        "suggestedFilename",
+        payload.suggested_filename.as_deref(),
+    )?;
+    validate_metadata_field(
+        &request.request_id,
+        "mimeType",
+        payload.mime_type.as_deref(),
+    )
+}
+
+fn validate_browser_blob_chunk_payload(request: &HostRequest) -> ValidationResult {
+    let payload = parse_payload::<BrowserBlobDownloadChunkPayload>(request, "browser blob chunk")?;
+    validate_browser_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    validate_browser_blob_chunk_data(&request.request_id, &payload.data)
+}
+
+fn validate_browser_blob_stream_payload(request: &HostRequest) -> ValidationResult {
+    let payload =
+        parse_payload::<BrowserBlobDownloadStreamPayload>(request, "browser blob stream")?;
+    validate_browser_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    validate_metadata_field(&request.request_id, "reason", payload.reason.as_deref())
+}
+
 fn parse_payload<T>(request: &HostRequest, label: &str) -> ValidationParseResult<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -842,6 +1042,46 @@ fn validate_handoff_url(request_id: &str, raw_url: &str) -> ValidationResult {
             "Only http, https, and magnet URLs are supported.",
         )),
     }
+}
+
+fn validate_browser_blob_stream_id(request_id: &str, stream_id: &str) -> ValidationResult {
+    if stream_id.is_empty()
+        || stream_id.len() > MAX_BLOB_STREAM_ID_LENGTH
+        || !stream_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+    {
+        return Err(validation_error(
+            request_id,
+            "INVALID_PAYLOAD",
+            "Browser blob stream id is not supported.",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_browser_blob_chunk_data(request_id: &str, data: &str) -> ValidationResult {
+    if data.is_empty() || data.len() > MAX_BLOB_CHUNK_BASE64_LENGTH {
+        return Err(validation_error(
+            request_id,
+            "INVALID_PAYLOAD",
+            "Browser blob chunk size is not supported.",
+        ));
+    }
+
+    if !data
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '='))
+    {
+        return Err(validation_error(
+            request_id,
+            "INVALID_PAYLOAD",
+            "Browser blob chunk is not valid base64.",
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_request_source(request_id: &str, source: &EnqueueSource) -> ValidationResult {
@@ -982,6 +1222,10 @@ fn is_supported_request_type(message_type: &str) -> bool {
             | "save_extension_settings"
             | "enqueue_download"
             | "prompt_download"
+            | "begin_browser_blob_download"
+            | "append_browser_blob_download_chunk"
+            | "finish_browser_blob_download"
+            | "cancel_browser_blob_download"
     )
 }
 
@@ -1036,6 +1280,10 @@ fn is_side_effect_request_type(message_type: &str) -> bool {
             | "save_extension_settings"
             | "enqueue_download"
             | "prompt_download"
+            | "begin_browser_blob_download"
+            | "append_browser_blob_download_chunk"
+            | "finish_browser_blob_download"
+            | "cancel_browser_blob_download"
     )
 }
 
@@ -1488,6 +1736,22 @@ fn handoff_auth_header_summary(handoff_auth: Option<&HandoffAuth>) -> (usize, St
     } else {
         (auth.headers.len(), names.join(","))
     }
+}
+
+fn decode_browser_blob_chunk(data: &str) -> Result<Vec<u8>, BackendError> {
+    if data.is_empty() || data.len() > MAX_BLOB_CHUNK_BASE64_LENGTH {
+        return Err(BackendError {
+            code: "INVALID_PAYLOAD",
+            message: "Browser blob chunk size is not supported.".into(),
+        });
+    }
+
+    BASE64_STANDARD
+        .decode(data.as_bytes())
+        .map_err(|_| BackendError {
+            code: "INVALID_PAYLOAD",
+            message: "Browser blob chunk is not valid base64.".into(),
+        })
 }
 
 fn prompt_enqueue_details(

@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 futures-util = "0.3.31"
+base64 = "0.22.1"
 aws-lc-rs = { version = "1.16.3", features = ["prebuilt-nasm"] }
 librqbit = { version = "8.1.1", default-features = false, features = ["rust-tls"] }
 reqwest = { version = "0.12.15", features = ["stream", "rustls-tls", "native-tls"] }

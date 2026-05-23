@@ -1,4 +1,4 @@
-import { isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
+import { HOST_NAME, isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
 import {
   browserDownloadUrl,
@@ -359,6 +359,7 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
 });
 
 registerHandoffAuthHeaderCapture();
+registerBrowserBlobDownloadBridge();
 void ensureAppearanceSyncAlarm();
 
 async function ensureAppearanceSyncAlarm(): Promise<void> {
@@ -394,15 +395,6 @@ async function handOffBrowserDownload(
     incognito: item.incognito,
   };
   const authResolution = resolveBrowserHandoffAuth(handoffDetails, settings);
-  if (authResolution.status === 'protected_auth_required') {
-    return {
-      ok: false,
-      requestId: 'protected_downloads_disabled',
-      type: 'rejected',
-      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
-      message: 'This site requires your browser session. Enable Protected Downloads or let the browser handle this download.',
-    };
-  }
 
   const metadata = createBrowserDownloadHandoffMetadata(item, authResolution.handoffAuth);
   const transferKind = browserDownloadTransferKind(item);
@@ -672,6 +664,75 @@ function registerHandoffAuthHeaderCapture(): void {
   } catch {
     headerEvent.addListener(listener, filter, ['requestHeaders']);
   }
+}
+
+function registerBrowserBlobDownloadBridge(): void {
+  browser.runtime.onConnect.addListener((contentPort) => {
+    if (contentPort.name !== 'browser_blob_download') {
+      return;
+    }
+
+    let nativePort: browser.runtime.Port | null = null;
+    try {
+      nativePort = browser.runtime.connectNative(HOST_NAME);
+    } catch (error) {
+      postBlobStreamError(
+        contentPort,
+        'native_messaging_error',
+        error instanceof Error ? error.message : 'Could not connect to the native messaging host.',
+      );
+      contentPort.disconnect();
+      return;
+    }
+
+    contentPort.onMessage.addListener((message) => {
+      try {
+        nativePort?.postMessage(message);
+      } catch (error) {
+        postBlobStreamError(
+          contentPort,
+          requestIdFromPortMessage(message),
+          error instanceof Error ? error.message : 'Could not forward blob download data to the native host.',
+        );
+      }
+    });
+
+    nativePort.onMessage.addListener((message: object) => {
+      contentPort.postMessage(message as HostToExtensionResponse);
+    });
+
+    nativePort.onDisconnect.addListener(() => {
+      contentPort.disconnect();
+    });
+
+    contentPort.onDisconnect.addListener(() => {
+      nativePort?.disconnect();
+      nativePort = null;
+    });
+  });
+}
+
+function postBlobStreamError(
+  port: browser.runtime.Port,
+  requestId: string,
+  message: string,
+): void {
+  port.postMessage({
+    ok: false,
+    requestId,
+    type: 'rejected',
+    code: 'HOST_NOT_AVAILABLE',
+    message: toUserFacingMessage('HOST_NOT_AVAILABLE', message),
+  } satisfies HostToExtensionResponse);
+}
+
+function requestIdFromPortMessage(message: unknown): string {
+  return typeof message === 'object'
+    && message !== null
+    && 'requestId' in message
+    && typeof (message as { requestId?: unknown }).requestId === 'string'
+    ? (message as { requestId: string }).requestId
+    : 'native_messaging_error';
 }
 
 async function handleFirefoxWebRequestHeadersReceived(

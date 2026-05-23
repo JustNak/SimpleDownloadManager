@@ -40,6 +40,12 @@ const allowlistSettings: ExtensionIntegrationSettings = {
   authenticatedHandoffHosts: ['chatgpt.com', '*.example.com'],
 };
 
+const defaultAllowlistSettings: ExtensionIntegrationSettings = {
+  ...settings,
+  protectedDownloadAuthScope: 'allowlist',
+  authenticatedHandoffHosts: ['gofile.io'],
+};
+
 const disabledSettings: ExtensionIntegrationSettings = {
   ...settings,
   authenticatedHandoffEnabled: false,
@@ -81,6 +87,16 @@ assert.equal(
   ),
   undefined,
   'allowlist mode should not forward browser session headers for unlisted hosts',
+);
+
+assert.deepEqual(
+  buildHandoffAuthForUrl(
+    'https://file-ap-sgp-3.gofile.io/download/web/file.rar',
+    [{ name: 'Cookie', value: 'accountToken=secret' }],
+    defaultAllowlistSettings,
+  ),
+  { headers: [{ name: 'Cookie', value: 'accountToken=secret' }] },
+  'built-in GoFile protected-download allowlist should forward bounded session headers by default',
 );
 
 assert.deepEqual(
@@ -190,7 +206,7 @@ assert.equal(
 captureHandoffAuthHeaders(
   {
     requestId: 'chrome-protected-unavailable',
-    url: 'https://file-ap-sgp-3.gofile.io/download/web/file.rar',
+    url: 'https://download-cdn.other.test/file.rar',
     method: 'GET',
     incognito: false,
     requestHeaders: [{ name: 'Cookie', value: 'accountToken=secret' }],
@@ -202,14 +218,14 @@ assert.deepEqual(
   resolveBrowserHandoffAuth(
     {
       requestId: 'chrome-protected-unavailable',
-      url: 'https://file-ap-sgp-3.gofile.io/download/web/file.rar',
+      url: 'https://download-cdn.other.test/file.rar',
       incognito: false,
     },
     allowlistSettings,
     1_350,
   ),
-  { status: 'protected_auth_required' },
-  'Chrome browser handoffs with session headers but no allowed captured auth should restore to the browser',
+  { status: 'ready' },
+  'Chrome browser handoffs with unallowlisted session headers should still reach the desktop access probe',
 );
 
 captureHandoffAuthHeaders(

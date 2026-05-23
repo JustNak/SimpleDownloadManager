@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
 
+mod blob_stream;
 mod diagnostics;
 mod enqueue;
 mod jobs;
@@ -665,7 +666,17 @@ pub struct SharedState {
     storage_path: Arc<PathBuf>,
     diagnostic_event_store: Arc<DiagnosticEventStore>,
     handoff_auth: Arc<RwLock<HashMap<String, HandoffAuth>>>,
+    browser_blob_streams: Arc<RwLock<HashMap<String, BrowserBlobStream>>>,
     scheduler_wake: Arc<StdMutex<SchedulerWakeState>>,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserBlobStream {
+    job_id: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    target_path: PathBuf,
+    temp_path: PathBuf,
 }
 
 #[derive(Debug, Default)]

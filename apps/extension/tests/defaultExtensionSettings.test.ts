@@ -6,26 +6,33 @@ import {
   normalizeExtensionSettings,
 } from '../src/shared/defaultExtensionSettings.ts';
 
-assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, ['web.telegram.org']);
-assert.deepEqual(defaultExtensionSettings.excludedHosts, ['web.telegram.org']);
-assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, false);
-assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'off');
-assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, []);
-assert.deepEqual(createDefaultExtensionSettings().excludedHosts, ['web.telegram.org']);
-assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'off');
+assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, []);
+assert.deepEqual(defaultExtensionSettings.excludedHosts, []);
+assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, true);
+assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'allowlist');
+assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, ['gofile.io']);
+assert.deepEqual(createDefaultExtensionSettings().excludedHosts, []);
+assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'allowlist');
+assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, ['gofile.io']);
 
 assert.deepEqual(
   normalizeExtensionSettings(undefined).excludedHosts,
-  ['web.telegram.org'],
-  'fresh settings should include Telegram Web in excluded hosts',
+  [],
+  'fresh settings should not exclude Telegram Web because blob downloads are bridged by the extension',
+);
+
+assert.deepEqual(
+  normalizeExtensionSettings({ excludedHosts: ['web.telegram.org'] }).excludedHosts,
+  [],
+  'old default-only Telegram exclusions should migrate away so Telegram blob downloads can be captured',
 );
 
 assert.deepEqual(
   normalizeExtensionSettings({
     excludedHosts: ['https://web.telegram.org/', 'WEB.TELEGRAM.ORG', 'https://example.com/path', 'https://*.Example.com/downloads'],
   }).excludedHosts,
-  ['web.telegram.org', 'example.com', '*.example.com'],
-  'excluded hosts should normalize URLs, wildcard host patterns, and deduplicate hosts',
+  ['example.com', '*.example.com'],
+  'excluded hosts should migrate the old Telegram default while preserving custom exclusions',
 );
 
 assert.deepEqual(

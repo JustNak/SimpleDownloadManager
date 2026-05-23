@@ -120,6 +120,15 @@ impl SharedState {
         self.cancel_jobs(&[id.to_string()]).await
     }
 
+    async fn clear_browser_blob_streams_for_jobs(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+
+        let mut streams = self.browser_blob_streams.write().await;
+        streams.retain(|_, stream| !ids.iter().any(|id| id == &stream.job_id));
+    }
+
     pub async fn cancel_jobs_for_delete(
         &self,
         ids: &[String],
@@ -130,6 +139,7 @@ impl SharedState {
                 jobs: Vec::new(),
             });
         }
+        self.clear_browser_blob_streams_for_jobs(ids).await;
 
         let (snapshot, persisted, cleanup_jobs, diagnostic_events) = {
             let mut state = self.inner.write().await;
@@ -213,6 +223,7 @@ impl SharedState {
         if ids.is_empty() {
             return Ok(self.snapshot().await);
         }
+        self.clear_browser_blob_streams_for_jobs(ids).await;
 
         let temp_paths_to_remove =
             {

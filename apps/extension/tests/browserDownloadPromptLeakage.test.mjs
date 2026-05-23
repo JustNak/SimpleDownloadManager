@@ -67,8 +67,13 @@ assert.match(
   /const authResolution = resolveBrowserHandoffAuth\(handoffDetails, settings\);/,
   'Chrome-style browser download handoffs should resolve captured auth before queuing',
 );
-assert.match(
+assert.doesNotMatch(
   handoffSource,
   /authResolution\.status === 'protected_auth_required'[\s\S]*?PROTECTED_DOWNLOAD_AUTH_REQUIRED/,
-  'Chrome-style browser download handoffs should reject protected downloads when auth cannot be attached',
+  'Chrome-style browser download handoffs should let the desktop access probe decide when auth cannot be attached',
+);
+assert.match(
+  handoffSource,
+  /createBrowserDownloadHandoffMetadata\(item, authResolution\.handoffAuth\)/,
+  'Chrome-style browser download handoffs should attach captured auth only when available',
 );

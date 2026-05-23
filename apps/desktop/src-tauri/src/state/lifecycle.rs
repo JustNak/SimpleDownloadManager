@@ -126,6 +126,7 @@ impl SharedState {
             storage_path: Arc::new(storage_path),
             diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
+            browser_blob_streams: Arc::new(RwLock::new(HashMap::new())),
             scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
         };
 
@@ -165,6 +166,7 @@ impl SharedState {
             storage_path: Arc::new(storage_path),
             diagnostic_event_store,
             handoff_auth: Arc::new(RwLock::new(HashMap::new())),
+            browser_blob_streams: Arc::new(RwLock::new(HashMap::new())),
             scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
         }
     }

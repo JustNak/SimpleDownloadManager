@@ -32,7 +32,7 @@ export type FailureCategory =
   | 'internal';
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
-export type TransferKind = 'http' | 'torrent';
+export type TransferKind = 'http' | 'torrent' | 'browser_blob';
 export type IntegrityAlgorithm = 'sha256';
 export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';

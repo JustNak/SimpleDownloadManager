@@ -8,7 +8,8 @@ export const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH = 64;
 export const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH = 16 * 1024;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
-export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
+export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = [] as const;
+export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = ['gofile.io'] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
 export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
@@ -16,6 +17,10 @@ export type ExtensionRequestType =
   | 'ping'
   | 'enqueue_download'
   | 'prompt_download'
+  | 'begin_browser_blob_download'
+  | 'append_browser_blob_download_chunk'
+  | 'finish_browser_blob_download'
+  | 'cancel_browser_blob_download'
   | 'open_app'
   | 'get_status'
   | 'save_extension_settings';
@@ -31,6 +36,10 @@ export type AppRequestType =
   | 'get_status'
   | 'enqueue_download'
   | 'prompt_download'
+  | 'begin_browser_blob_download'
+  | 'append_browser_blob_download_chunk'
+  | 'finish_browser_blob_download'
+  | 'cancel_browser_blob_download'
   | 'show_window'
   | 'save_extension_settings';
 export type AppResponseType =
@@ -38,6 +47,9 @@ export type AppResponseType =
   | 'duplicate_existing_job'
   | 'prompt_canceled'
   | 'prompt_dismissed'
+  | 'blob_stream_accepted'
+  | 'blob_stream_finished'
+  | 'blob_stream_canceled'
   | 'invalid_url'
   | 'blocked_by_policy'
   | 'ready';
@@ -116,6 +128,25 @@ export interface DownloadRequestMetadata {
   browserFallback?: BrowserFallback;
 }
 
+export interface BrowserBlobDownloadBeginPayload {
+  streamId: string;
+  source: RequestSource;
+  suggestedFilename?: string;
+  totalBytes?: number;
+  mimeType?: string;
+}
+
+export interface BrowserBlobDownloadChunkPayload {
+  streamId: string;
+  offset: number;
+  data: string;
+}
+
+export interface BrowserBlobDownloadStreamPayload {
+  streamId: string;
+  reason?: string;
+}
+
 export interface OpenAppPayload {
   reason: 'user_request' | 'reconnect';
 }
@@ -147,7 +178,7 @@ export interface ErrorResponse<TType extends HostResponseType = HostResponseType
 }
 
 export interface AcceptedPayload {
-  status: 'queued' | 'duplicate_existing_job' | 'canceled' | 'dismissed';
+  status: 'queued' | 'duplicate_existing_job' | 'canceled' | 'dismissed' | 'accepted' | 'finished';
   jobId?: string;
   filename?: string;
   appState: 'running' | 'launched';
@@ -243,7 +274,10 @@ export function isProtectedDownloadAuthAllowedForUrl(
   if (!settings.authenticatedHandoffEnabled) return false;
   if (settings.protectedDownloadAuthScope === 'legacy_global') return true;
   if (settings.protectedDownloadAuthScope !== 'allowlist') return false;
-  return isUrlHostExcludedByPatterns(url, settings.authenticatedHandoffHosts);
+  return isUrlHostExcludedByPatterns(url, [
+    ...DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS,
+    ...settings.authenticatedHandoffHosts,
+  ]);
 }
 
 function wildcardHostPatternRegex(pattern: string): RegExp {
@@ -293,6 +327,10 @@ export type ExtensionToHostRequest =
   | RequestEnvelope<'ping', EmptyPayload>
   | RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | RequestEnvelope<'prompt_download', PromptDownloadPayload>
+  | RequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload>
+  | RequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload>
+  | RequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload>
+  | RequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload>
   | RequestEnvelope<'open_app', OpenAppPayload>
   | RequestEnvelope<'get_status', EmptyPayload>
   | RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
@@ -307,6 +345,10 @@ export type AppRequest =
   | AppRequestEnvelope<'get_status', EmptyPayload>
   | AppRequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | AppRequestEnvelope<'prompt_download', PromptDownloadPayload>
+  | AppRequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload>
+  | AppRequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload>
+  | AppRequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload>
+  | AppRequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload>
   | AppRequestEnvelope<'show_window', OpenAppPayload>
   | AppRequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
@@ -550,6 +592,76 @@ export function createPromptDownloadRequest(
       },
     },
   };
+}
+
+export function createBrowserBlobBeginRequest(
+  payload: BrowserBlobDownloadBeginPayload,
+  requestId = createRequestId(),
+): RequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'begin_browser_blob_download',
+    payload: {
+      streamId: trimMetadata(payload.streamId) ?? '',
+      source: sanitizeSource(payload.source),
+      suggestedFilename: trimMetadata(payload.suggestedFilename),
+      totalBytes: normalizeTotalBytes(payload.totalBytes),
+      mimeType: trimMetadata(payload.mimeType),
+    },
+  };
+}
+
+export function createBrowserBlobChunkRequest(
+  streamId: string,
+  offset: number,
+  data: string,
+  requestId = createRequestId(),
+): RequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'append_browser_blob_download_chunk',
+    payload: {
+      streamId: trimMetadata(streamId) ?? '',
+      offset: normalizeNonNegativeInteger(offset),
+      data,
+    },
+  };
+}
+
+export function createBrowserBlobFinishRequest(
+  streamId: string,
+  requestId = createRequestId(),
+): RequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'finish_browser_blob_download',
+    payload: { streamId: trimMetadata(streamId) ?? '' },
+  };
+}
+
+export function createBrowserBlobCancelRequest(
+  streamId: string,
+  reason?: string,
+  requestId = createRequestId(),
+): RequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload> {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    requestId,
+    type: 'cancel_browser_blob_download',
+    payload: {
+      streamId: trimMetadata(streamId) ?? '',
+      reason: trimMetadata(reason),
+    },
+  };
+}
+
+function normalizeNonNegativeInteger(value: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
 }
 
 export function createSaveExtensionSettingsRequest(

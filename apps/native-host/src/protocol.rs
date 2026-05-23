@@ -9,6 +9,8 @@ const MAX_METADATA_LENGTH: usize = 512;
 const MAX_HANDOFF_AUTH_HEADERS: usize = 16;
 const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH: usize = 64;
 const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH: usize = 16 * 1024;
+const MAX_BLOB_STREAM_ID_LENGTH: usize = 128;
+const MAX_BLOB_CHUNK_BASE64_LENGTH: usize = 512 * 1024;
 
 type HostResult<T> = Result<T, Box<HostResponseEnvelope>>;
 
@@ -56,17 +58,12 @@ pub enum TransferKind {
     Torrent,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BrowserFallback {
+    #[default]
     Replay,
     Unavailable,
-}
-
-impl Default for BrowserFallback {
-    fn default() -> Self {
-        Self::Replay
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -99,6 +96,34 @@ pub struct PromptDownloadPayload {
     pub transfer_kind: Option<TransferKind>,
     #[serde(rename = "browserFallback", default)]
     pub browser_fallback: BrowserFallback,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BrowserBlobDownloadBeginPayload {
+    #[serde(rename = "streamId")]
+    pub stream_id: String,
+    pub source: RequestSource,
+    #[serde(rename = "suggestedFilename")]
+    pub suggested_filename: Option<String>,
+    #[serde(rename = "totalBytes")]
+    pub total_bytes: Option<u64>,
+    #[serde(rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BrowserBlobDownloadChunkPayload {
+    #[serde(rename = "streamId")]
+    pub stream_id: String,
+    pub offset: u64,
+    pub data: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BrowserBlobDownloadStreamPayload {
+    #[serde(rename = "streamId")]
+    pub stream_id: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -289,6 +314,94 @@ pub fn parse_prompt_download_payload(
     Ok(payload)
 }
 
+pub fn parse_browser_blob_begin_payload(
+    request: &NativeRequestEnvelope,
+) -> HostResult<BrowserBlobDownloadBeginPayload> {
+    let payload =
+        serde_json::from_value::<BrowserBlobDownloadBeginPayload>(request.payload.clone())
+            .map_err(|error| {
+                Box::new(HostResponseEnvelope::rejected(
+                    request.request_id.clone(),
+                    "invalid_payload",
+                    "INVALID_PAYLOAD",
+                    format!("Payload could not be parsed: {error}"),
+                ))
+            })?;
+
+    validate_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    validate_request_source(&request.request_id, &payload.source)?;
+    if payload.source.entry_point != "browser_download" {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Browser blob downloads are only supported for browser downloads.",
+        ));
+    }
+    validate_metadata_field(
+        &request.request_id,
+        "suggestedFilename",
+        payload.suggested_filename.as_deref(),
+    )?;
+    validate_metadata_field(
+        &request.request_id,
+        "mimeType",
+        payload.mime_type.as_deref(),
+    )?;
+    Ok(payload)
+}
+
+pub fn parse_browser_blob_chunk_payload(
+    request: &NativeRequestEnvelope,
+) -> HostResult<BrowserBlobDownloadChunkPayload> {
+    let payload =
+        serde_json::from_value::<BrowserBlobDownloadChunkPayload>(request.payload.clone())
+            .map_err(|error| {
+                Box::new(HostResponseEnvelope::rejected(
+                    request.request_id.clone(),
+                    "invalid_payload",
+                    "INVALID_PAYLOAD",
+                    format!("Payload could not be parsed: {error}"),
+                ))
+            })?;
+
+    validate_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    if payload.data.is_empty() || payload.data.len() > MAX_BLOB_CHUNK_BASE64_LENGTH {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Browser blob chunk size is not supported.",
+        ));
+    }
+    if !payload
+        .data
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '/' | '='))
+    {
+        return Err(invalid_payload(
+            &request.request_id,
+            "Browser blob chunk is not valid base64.",
+        ));
+    }
+    Ok(payload)
+}
+
+pub fn parse_browser_blob_stream_payload(
+    request: &NativeRequestEnvelope,
+) -> HostResult<BrowserBlobDownloadStreamPayload> {
+    let payload =
+        serde_json::from_value::<BrowserBlobDownloadStreamPayload>(request.payload.clone())
+            .map_err(|error| {
+                Box::new(HostResponseEnvelope::rejected(
+                    request.request_id.clone(),
+                    "invalid_payload",
+                    "INVALID_PAYLOAD",
+                    format!("Payload could not be parsed: {error}"),
+                ))
+            })?;
+
+    validate_blob_stream_id(&request.request_id, &payload.stream_id)?;
+    validate_metadata_field(&request.request_id, "reason", payload.reason.as_deref())?;
+    Ok(payload)
+}
+
 pub fn parse_open_app_payload(request: &NativeRequestEnvelope) -> HostResult<OpenAppPayload> {
     let payload =
         serde_json::from_value::<OpenAppPayload>(request.payload.clone()).map_err(|error| {
@@ -444,6 +557,22 @@ fn validate_metadata_field(
     Ok(())
 }
 
+fn validate_blob_stream_id(request_id: &str, stream_id: &str) -> HostResult<()> {
+    if stream_id.is_empty()
+        || stream_id.len() > MAX_BLOB_STREAM_ID_LENGTH
+        || !stream_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+    {
+        return Err(invalid_payload(
+            request_id,
+            "Browser blob stream id is not supported.",
+        ));
+    }
+
+    Ok(())
+}
+
 fn invalid_payload(request_id: &str, message: &str) -> Box<HostResponseEnvelope> {
     Box::new(HostResponseEnvelope::rejected(
         request_id.to_string(),
@@ -469,6 +598,10 @@ fn is_supported_request_type(message_type: &str) -> bool {
             | "open_app"
             | "enqueue_download"
             | "prompt_download"
+            | "begin_browser_blob_download"
+            | "append_browser_blob_download_chunk"
+            | "finish_browser_blob_download"
+            | "cancel_browser_blob_download"
             | "save_extension_settings"
     )
 }
@@ -514,6 +647,54 @@ pub fn app_prompt_download_request(
         protocol_version: PROTOCOL_VERSION,
         request_id,
         message_type: "prompt_download".into(),
+        payload,
+    }
+}
+
+pub fn app_browser_blob_begin_request(
+    request_id: String,
+    payload: BrowserBlobDownloadBeginPayload,
+) -> AppRequestEnvelope<BrowserBlobDownloadBeginPayload> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "begin_browser_blob_download".into(),
+        payload,
+    }
+}
+
+pub fn app_browser_blob_chunk_request(
+    request_id: String,
+    payload: BrowserBlobDownloadChunkPayload,
+) -> AppRequestEnvelope<BrowserBlobDownloadChunkPayload> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "append_browser_blob_download_chunk".into(),
+        payload,
+    }
+}
+
+pub fn app_browser_blob_finish_request(
+    request_id: String,
+    payload: BrowserBlobDownloadStreamPayload,
+) -> AppRequestEnvelope<BrowserBlobDownloadStreamPayload> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "finish_browser_blob_download".into(),
+        payload,
+    }
+}
+
+pub fn app_browser_blob_cancel_request(
+    request_id: String,
+    payload: BrowserBlobDownloadStreamPayload,
+) -> AppRequestEnvelope<BrowserBlobDownloadStreamPayload> {
+    AppRequestEnvelope {
+        protocol_version: PROTOCOL_VERSION,
+        request_id,
+        message_type: "cancel_browser_blob_download".into(),
         payload,
     }
 }
@@ -734,6 +915,49 @@ mod tests {
 
         let error =
             parse_enqueue_payload(&request).expect_err("non-browser auth should be rejected");
+
+        assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
+    }
+
+    #[test]
+    fn parse_browser_blob_begin_payload_accepts_browser_download_sources() {
+        let request = request(
+            "begin_browser_blob_download",
+            json!({
+                "streamId": "blob:stream-1",
+                "source": {
+                    "entryPoint": "browser_download",
+                    "browser": "chrome",
+                    "extensionVersion": "0.3.52",
+                    "pageUrl": "https://web.telegram.org/k/"
+                },
+                "suggestedFilename": "clip.webm",
+                "totalBytes": 4096,
+                "mimeType": "video/webm"
+            }),
+        );
+
+        let payload =
+            parse_browser_blob_begin_payload(&request).expect("blob begin should be accepted");
+
+        assert_eq!(payload.stream_id, "blob:stream-1");
+        assert_eq!(payload.suggested_filename.as_deref(), Some("clip.webm"));
+        assert_eq!(payload.total_bytes, Some(4096));
+    }
+
+    #[test]
+    fn parse_browser_blob_chunk_payload_rejects_oversized_chunks() {
+        let request = request(
+            "append_browser_blob_download_chunk",
+            json!({
+                "streamId": "blob:stream-1",
+                "offset": 0,
+                "data": "A".repeat(MAX_BLOB_CHUNK_BASE64_LENGTH + 1)
+            }),
+        );
+
+        let error = parse_browser_blob_chunk_payload(&request)
+            .expect_err("oversized blob chunk should reject");
 
         assert_eq!(error.code.as_deref(), Some("INVALID_PAYLOAD"));
     }

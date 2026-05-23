@@ -30,8 +30,7 @@ type CapturedAuth = {
 type CapturedBrowserSessionMarker = Omit<CapturedAuth, 'auth'>;
 
 export type BrowserHandoffAuthResolution =
-  | { status: 'ready'; handoffAuth?: HandoffAuth }
-  | { status: 'protected_auth_required' };
+  { status: 'ready'; handoffAuth?: HandoffAuth };
 
 const CAPTURE_TTL_MS = 30_000;
 const MAX_CAPTURED_AUTH_ENTRIES = 64;
@@ -158,12 +157,7 @@ export function resolveBrowserHandoffAuth(
   settings: ExtensionIntegrationSettings,
   now = Date.now(),
 ): BrowserHandoffAuthResolution {
-  const hadBrowserSessionHeaders = hasCapturedBrowserSessionHeaders(details, now);
   const handoffAuth = takeCapturedHandoffAuth(details, settings, now);
-  if (hadBrowserSessionHeaders && !handoffAuth) {
-    return { status: 'protected_auth_required' };
-  }
-
   return handoffAuth ? { status: 'ready', handoffAuth } : { status: 'ready' };
 }
 

@@ -117,13 +117,15 @@ fn startup_restores_zero_filled_state_from_last_good_snapshot() {
     let data_dir = test_runtime_dir("startup-zero-filled-last-good");
     let state_path = data_dir.join("state.json");
     std::fs::write(&state_path, vec![0; 256]).unwrap();
-    let mut persisted = PersistedState::default();
-    persisted.jobs = vec![download_job(
-        "job_recovered",
-        JobState::Completed,
-        ResumeSupport::Supported,
-        100,
-    )];
+    let persisted = PersistedState {
+        jobs: vec![download_job(
+            "job_recovered",
+            JobState::Completed,
+            ResumeSupport::Supported,
+            100,
+        )],
+        ..Default::default()
+    };
     std::fs::write(
         data_dir.join("state.last-good.json"),
         serde_json::to_string_pretty(&persisted).unwrap(),

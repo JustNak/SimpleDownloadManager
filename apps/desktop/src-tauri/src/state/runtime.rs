@@ -326,6 +326,22 @@ pub(super) fn normalize_job(mut job: DownloadJob, settings: &Settings) -> Downlo
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
 
+    if job.transfer_kind == TransferKind::BrowserBlob
+        && !matches!(
+            job.state,
+            JobState::Completed | JobState::Failed | JobState::Canceled
+        )
+    {
+        job.state = JobState::Failed;
+        job.speed = 0;
+        job.eta = 0;
+        job.active_segments = None;
+        job.planned_segments = None;
+        job.error = Some("The browser blob stream was interrupted before it finished.".into());
+        job.failure_category = Some(FailureCategory::Network);
+        job.resume_support = ResumeSupport::Unsupported;
+    }
+
     if matches!(
         job.state,
         JobState::Starting | JobState::Downloading | JobState::Seeding

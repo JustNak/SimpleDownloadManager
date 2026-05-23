@@ -74,6 +74,8 @@ async fn authenticated_handoff_auth_is_memory_only_and_claimed_with_task() {
     let mut settings = state.settings().await;
     settings.download_directory = download_dir.display().to_string();
     settings.extension_integration.authenticated_handoff_enabled = true;
+    settings.extension_integration.protected_download_auth_scope =
+        ProtectedDownloadAuthScope::LegacyGlobal;
     state.save_settings(settings).await.unwrap();
 
     let auth = HandoffAuth {

@@ -1,12 +1,15 @@
 import {
   DEFAULT_EXTENSION_EXCLUDED_HOSTS,
   DEFAULT_EXTENSION_LISTEN_PORT,
+  DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS,
   normalizeExcludedHostPattern,
   type ExtensionIntegrationSettings,
   type ProtectedDownloadAuthScope,
 } from '@myapp/protocol';
 
 export const DEFAULT_EXCLUDED_HOSTS = DEFAULT_EXTENSION_EXCLUDED_HOSTS;
+export const DEFAULT_AUTHENTICATED_HANDOFF_HOSTS = DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS;
+const LEGACY_DEFAULT_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
 export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   enabled: true,
@@ -17,9 +20,9 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
-  authenticatedHandoffEnabled: false,
-  protectedDownloadAuthScope: 'off',
-  authenticatedHandoffHosts: [],
+  authenticatedHandoffEnabled: true,
+  protectedDownloadAuthScope: 'allowlist',
+  authenticatedHandoffHosts: [...DEFAULT_AUTHENTICATED_HANDOFF_HOSTS],
 };
 
 export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
@@ -42,24 +45,38 @@ export function normalizeExtensionSettings(
     authenticatedHandoffEnabled: protectedDownloadAuthScope !== 'off',
     protectedDownloadAuthScope,
     listenPort: normalizeListenPort(settings?.listenPort),
-    excludedHosts: Array.from(
-      new Set(
-        (settings?.excludedHosts ?? defaults.excludedHosts)
-          .map((host) => normalizeHost(host))
-          .filter(Boolean),
-      ),
-    ),
-    authenticatedHandoffHosts: Array.from(
-      new Set(
-        (settings?.authenticatedHandoffHosts ?? defaults.authenticatedHandoffHosts)
-          .map((host) => normalizeHost(host))
-          .filter(Boolean),
-      ),
+    excludedHosts: normalizeExcludedHosts(settings?.excludedHosts ?? defaults.excludedHosts),
+    authenticatedHandoffHosts: normalizeAuthenticatedHandoffHosts(
+      settings?.authenticatedHandoffHosts ?? defaults.authenticatedHandoffHosts,
     ),
     ignoredFileExtensions: normalizeFileExtensions(
       settings?.ignoredFileExtensions ?? defaults.ignoredFileExtensions,
     ),
   };
+}
+
+function normalizeExcludedHosts(hosts: string[]): string[] {
+  const normalized = Array.from(
+    new Set(
+      hosts
+        .map((host) => normalizeHost(host))
+        .filter(Boolean),
+    ),
+  );
+
+  return normalized.filter((host) =>
+    !LEGACY_DEFAULT_EXCLUDED_HOSTS.includes(host as (typeof LEGACY_DEFAULT_EXCLUDED_HOSTS)[number])
+  );
+}
+
+function normalizeAuthenticatedHandoffHosts(hosts: string[]): string[] {
+  return Array.from(
+    new Set(
+      hosts
+        .map((host) => normalizeHost(host))
+        .filter(Boolean),
+    ),
+  );
 }
 
 function normalizeProtectedDownloadAuthScope(
@@ -81,7 +98,11 @@ function normalizeProtectedDownloadAuthScope(
     return 'legacy_global';
   }
 
-  return settings?.authenticatedHandoffEnabled ? 'legacy_global' : 'off';
+  if (settings?.authenticatedHandoffEnabled) {
+    return 'legacy_global';
+  }
+
+  return defaultExtensionSettings.protectedDownloadAuthScope;
 }
 
 function normalizeListenPort(value: unknown): number {

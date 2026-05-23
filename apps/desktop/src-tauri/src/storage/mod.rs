@@ -68,6 +68,7 @@ pub enum TransferKind {
     #[default]
     Http,
     Torrent,
+    BrowserBlob,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,8 +431,8 @@ pub enum DownloadPerformanceMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedDownloadAuthScope {
-    #[default]
     Off,
+    #[default]
     Allowlist,
     LegacyGlobal,
 }
@@ -626,15 +627,31 @@ pub struct ExtensionIntegrationSettings {
     pub excluded_hosts: Vec<String>,
     #[serde(default)]
     pub ignored_file_extensions: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_authenticated_handoff_enabled")]
     pub authenticated_handoff_enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_protected_download_auth_scope")]
     pub protected_download_auth_scope: ProtectedDownloadAuthScope,
-    #[serde(default)]
+    #[serde(default = "default_authenticated_handoff_hosts")]
     pub authenticated_handoff_hosts: Vec<String>,
 }
 
-const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
+const DEFAULT_EXCLUDED_HOSTS: &[&str] = &[];
+const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &["gofile.io"];
+
+fn default_authenticated_handoff_enabled() -> bool {
+    true
+}
+
+fn default_protected_download_auth_scope() -> ProtectedDownloadAuthScope {
+    ProtectedDownloadAuthScope::Allowlist
+}
+
+fn default_authenticated_handoff_hosts() -> Vec<String> {
+    DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect()
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -963,9 +980,9 @@ impl Default for ExtensionIntegrationSettings {
                 .map(|host| (*host).to_string())
                 .collect(),
             ignored_file_extensions: Vec::new(),
-            authenticated_handoff_enabled: false,
-            protected_download_auth_scope: ProtectedDownloadAuthScope::Off,
-            authenticated_handoff_hosts: Vec::new(),
+            authenticated_handoff_enabled: default_authenticated_handoff_enabled(),
+            protected_download_auth_scope: default_protected_download_auth_scope(),
+            authenticated_handoff_hosts: default_authenticated_handoff_hosts(),
         }
     }
 }
@@ -2214,15 +2231,16 @@ mod tests {
         assert!(settings.extension_integration.context_menu_enabled);
         assert!(settings.extension_integration.show_progress_after_handoff);
         assert!(settings.extension_integration.show_badge_status);
-        assert!(!settings.extension_integration.authenticated_handoff_enabled);
+        assert!(settings.extension_integration.authenticated_handoff_enabled);
         assert_eq!(
             settings.extension_integration.protected_download_auth_scope,
-            ProtectedDownloadAuthScope::Off
+            ProtectedDownloadAuthScope::Allowlist
         );
         assert_eq!(settings.extension_integration.listen_port, 1420);
+        assert!(settings.extension_integration.excluded_hosts.is_empty());
         assert_eq!(
-            settings.extension_integration.excluded_hosts,
-            vec!["web.telegram.org".to_string()]
+            settings.extension_integration.authenticated_handoff_hosts,
+            vec!["gofile.io".to_string()]
         );
         assert!(settings
             .extension_integration
@@ -2261,7 +2279,7 @@ mod tests {
         );
         assert!(state.settings.extension_integration.show_badge_status);
         assert!(
-            !state
+            state
                 .settings
                 .extension_integration
                 .authenticated_handoff_enabled
@@ -2271,12 +2289,20 @@ mod tests {
                 .settings
                 .extension_integration
                 .protected_download_auth_scope,
-            ProtectedDownloadAuthScope::Off
+            ProtectedDownloadAuthScope::Allowlist
         );
         assert_eq!(state.settings.extension_integration.listen_port, 1420);
+        assert!(state
+            .settings
+            .extension_integration
+            .excluded_hosts
+            .is_empty());
         assert_eq!(
-            state.settings.extension_integration.excluded_hosts,
-            vec!["web.telegram.org".to_string()]
+            state
+                .settings
+                .extension_integration
+                .authenticated_handoff_hosts,
+            vec!["gofile.io".to_string()]
         );
         assert!(state
             .settings

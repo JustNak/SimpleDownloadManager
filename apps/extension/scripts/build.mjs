@@ -48,7 +48,16 @@ const targets = [
       options_ui: {
         page: 'options.html',
         open_in_tab: true
-      }
+      },
+      content_scripts: [{
+        matches: ['<all_urls>'],
+        js: ['blobDownloadInterceptor.js'],
+        run_at: 'document_start'
+      }],
+      web_accessible_resources: [{
+        resources: ['blobDownloadPageHook.js'],
+        matches: ['<all_urls>']
+      }]
     }
   },
   {
@@ -73,6 +82,12 @@ const targets = [
         page: 'options.html',
         open_in_tab: true
       },
+      content_scripts: [{
+        matches: ['<all_urls>'],
+        js: ['blobDownloadInterceptor.js'],
+        run_at: 'document_start'
+      }],
+      web_accessible_resources: ['blobDownloadPageHook.js'],
       browser_specific_settings: {
         gecko: {
           id: releaseConfig.firefoxExtensionId,
@@ -94,6 +109,8 @@ async function buildTarget(target) {
   await build({
     entryPoints: {
       background: path.join(appRoot, 'src', 'background', 'index.ts'),
+      blobDownloadInterceptor: path.join(appRoot, 'src', 'content', 'blobDownloadInterceptor.ts'),
+      blobDownloadPageHook: path.join(appRoot, 'src', 'content', 'blobDownloadPageHook.ts'),
       popup: path.join(appRoot, 'src', 'popup', 'index.ts'),
       options: path.join(appRoot, 'src', 'options', 'index.ts')
     },

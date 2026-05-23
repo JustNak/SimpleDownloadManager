@@ -4684,6 +4684,7 @@ name = "simple-download-manager-desktop-backend"
 version = "0.8.3-beta"
 dependencies = [
  "aws-lc-rs",
+ "base64 0.22.1",
  "dirs",
  "futures-util",
  "librqbit",

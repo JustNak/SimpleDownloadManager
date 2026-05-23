@@ -56,6 +56,9 @@ assert.match(backendSource, /app:\/\/progress-job-snapshot/, 'backend should def
 assert.match(backendSource, /app:\/\/batch-progress-snapshot/, 'backend should define a lightweight batch progress event');
 assert.match(backendSource, /app:\/\/settings-snapshot/, 'backend should define a lightweight settings event');
 assert.match(backendSource, /export async function markPopupReady\(\): Promise<void>[\s\S]*invokeCommand\('mark_popup_ready'\)/, 'backend should expose a narrow popup-ready command without a state snapshot');
+assert.doesNotMatch(backendSource, /import\s+\{\s*invoke\s*\}\s+from\s+['"]@tauri-apps\/api\/core['"]/, 'backend should route Tauri commands through the resilient IPC wrapper instead of importing invoke directly');
+assert.match(backendSource, /import\s+\{\s*invokeTauriCommand\s*\}\s+from\s+['"]\.\/tauriInvoke['"]/, 'backend should import the resilient Tauri invoke wrapper');
+assert.match(backendSource, /return invokeTauriCommand<T>\(command,\s*args\)/, 'backend invokeCommand should delegate command dispatch to the resilient wrapper');
 assert.match(popupReadySource, /import \{ tick \} from 'svelte'/, 'popup readiness helper should wait for Svelte DOM flush');
 assert.match(popupReadySource, /import \{ markPopupReady \} from '\.\/backend'/, 'popup readiness helper should own the native ready command call');
 assert.match(popupReadySource, /await tick\(\)[\s\S]*requestAnimationFrame[\s\S]*await markPopupReady\(\)[\s\S]*classList\.add\('popup-ready'\)/, 'popup readiness helper should reveal after a DOM flush and a browser paint');

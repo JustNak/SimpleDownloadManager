@@ -210,6 +210,7 @@ pub async fn show_progress_window_for_transfer_kind(
     match transfer_kind {
         TransferKind::Torrent => show_torrent_progress_window(app, job_id).await,
         TransferKind::Http => show_progress_window(app, job_id).await,
+        TransferKind::BrowserBlob => Ok(()),
     }
 }
 
