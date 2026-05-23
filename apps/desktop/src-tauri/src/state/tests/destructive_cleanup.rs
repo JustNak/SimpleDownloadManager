@@ -78,6 +78,67 @@ async fn restart_job_removes_partial_file_and_segment_metadata() {
     let _ = std::fs::remove_dir_all(download_dir);
 }
 
+#[tokio::test]
+async fn destructive_cancel_delete_removes_segment_sidecars() {
+    let download_dir = test_runtime_dir("cancel-delete-removes-segment-sidecars");
+    let target_path = download_dir.join("segmented.zip");
+    let temp_path = download_dir.join("segmented.zip.part");
+    let sidecars = write_partial_sidecars(&temp_path);
+
+    let mut job = download_job(
+        "job_segment_cancel",
+        JobState::Failed,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.target_path = target_path.display().to_string();
+    job.temp_path = temp_path.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    let ids = vec!["job_segment_cancel".to_string()];
+
+    let prepared = state
+        .cancel_jobs_for_delete(&ids)
+        .await
+        .expect("cancel should prepare destructive cleanup");
+    let snapshot = state
+        .run_destructive_cleanup(prepared.jobs)
+        .await
+        .expect("destructive cleanup should finish");
+
+    assert!(snapshot.jobs.is_empty());
+    assert_partial_artifacts_removed(&temp_path, &sidecars);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_job_from_disk_removes_segment_sidecars() {
+    let download_dir = test_runtime_dir("delete-job-removes-segment-sidecars");
+    let target_path = download_dir.join("segmented.zip");
+    let temp_path = download_dir.join("segmented.zip.part");
+    let sidecars = write_partial_sidecars(&temp_path);
+
+    let mut job = download_job(
+        "job_segment_direct",
+        JobState::Failed,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.target_path = target_path.display().to_string();
+    job.temp_path = temp_path.display().to_string();
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let snapshot = state
+        .delete_job("job_segment_direct", true)
+        .await
+        .expect("delete from disk should remove partial artifacts");
+
+    assert!(snapshot.jobs.is_empty());
+    assert_partial_artifacts_removed(&temp_path, &sidecars);
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
 #[test]
 fn restart_reset_clears_torrent_runtime_metadata_without_changing_paths() {
     let mut job = DownloadJob {
@@ -1875,4 +1936,32 @@ async fn delete_paused_seeding_torrent_waits_for_worker_release_and_clears_resee
     assert!(!temp_path.exists());
 
     let _ = std::fs::remove_dir_all(download_dir);
+}
+
+fn write_partial_sidecars(temp_path: &Path) -> Vec<PathBuf> {
+    let sidecars = vec![
+        temp_path.to_path_buf(),
+        PathBuf::from(format!("{}.meta", temp_path.display())),
+        PathBuf::from(format!("{}.meta.tmp", temp_path.display())),
+        PathBuf::from(format!("{}.meta.bak", temp_path.display())),
+        PathBuf::from(format!("{}.meta.42.tmp", temp_path.display())),
+        PathBuf::from(format!("{}.seg0", temp_path.display())),
+    ];
+
+    for path in &sidecars {
+        std::fs::write(path, b"partial").unwrap();
+    }
+
+    sidecars
+}
+
+fn assert_partial_artifacts_removed(temp_path: &Path, sidecars: &[PathBuf]) {
+    assert!(!temp_path.exists(), "partial file should be removed");
+    for path in sidecars {
+        assert!(
+            !path.exists(),
+            "partial sidecar should be removed: {}",
+            path.display()
+        );
+    }
 }

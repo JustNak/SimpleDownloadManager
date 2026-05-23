@@ -159,6 +159,7 @@ impl SharedState {
                         id: job.id.clone(),
                         filename: job.filename.clone(),
                         paths,
+                        partial_artifact_roots: destructive_partial_artifact_roots_for_job(job),
                         wait_for_worker_release: active,
                     };
                     let clear_hoster_health = is_protected_bulk_hoster_job(job);
@@ -715,7 +716,7 @@ impl SharedState {
 
         if delete_from_disk {
             self.wait_for_disk_delete_release(id).await?;
-            let (target_path, temp_path, bulk_archive_output_path) = {
+            let (target_path, temp_path, partial_artifact_roots, bulk_archive_output_path) = {
                 let state = self.inner.read().await;
                 let job =
                     state
@@ -739,6 +740,7 @@ impl SharedState {
                 (
                     PathBuf::from(&job.target_path),
                     PathBuf::from(&job.temp_path),
+                    destructive_partial_artifact_roots_for_job(job),
                     job.bulk_archive.as_ref().and_then(|archive| {
                         if archive.archive_status == BulkArchiveStatus::Completed {
                             archive.output_path.as_ref().map(PathBuf::from)
@@ -749,6 +751,9 @@ impl SharedState {
                 )
             };
 
+            for partial_artifact_root in partial_artifact_roots {
+                remove_partial_artifacts(&partial_artifact_root).map_err(internal_error)?;
+            }
             remove_path_if_exists(&target_path).map_err(internal_error)?;
             if temp_path != target_path {
                 remove_path_if_exists(&temp_path).map_err(internal_error)?;
@@ -806,6 +811,7 @@ impl SharedState {
                         id: job.id.clone(),
                         filename: job.filename.clone(),
                         paths,
+                        partial_artifact_roots: destructive_partial_artifact_roots_for_job(job),
                         wait_for_worker_release: active,
                     }
                 };
@@ -890,7 +896,10 @@ impl SharedState {
 
         let cleanup_job = job.clone();
         let cleanup_result = tokio::task::spawn_blocking(move || {
-            remove_destructive_cleanup_paths(&cleanup_job.paths)
+            remove_destructive_cleanup_paths(
+                &cleanup_job.paths,
+                &cleanup_job.partial_artifact_roots,
+            )
         })
         .await
         .map_err(|error| (job.clone(), format!("Could not run disk cleanup: {error}")))?;
@@ -1366,6 +1375,14 @@ fn destructive_cleanup_paths_for_job(
     paths
 }
 
+fn destructive_partial_artifact_roots_for_job(job: &DownloadJob) -> Vec<PathBuf> {
+    if job.transfer_kind != TransferKind::Http || job.temp_path.trim().is_empty() {
+        return Vec::new();
+    }
+
+    vec![PathBuf::from(&job.temp_path)]
+}
+
 fn push_unique_cleanup_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if path.as_os_str().is_empty() {
         return;
@@ -1411,7 +1428,14 @@ fn remove_partial_artifacts(temp_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn remove_destructive_cleanup_paths(paths: &[PathBuf]) -> Result<(), String> {
+fn remove_destructive_cleanup_paths(
+    paths: &[PathBuf],
+    partial_artifact_roots: &[PathBuf],
+) -> Result<(), String> {
+    for partial_artifact_root in partial_artifact_roots {
+        remove_partial_artifacts(partial_artifact_root)?;
+    }
+
     for path in paths {
         remove_path_if_exists(path)?;
     }

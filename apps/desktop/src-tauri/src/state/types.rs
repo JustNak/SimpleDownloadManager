@@ -84,6 +84,7 @@ pub struct DestructiveCleanupJob {
     pub id: String,
     pub filename: String,
     pub paths: Vec<PathBuf>,
+    pub partial_artifact_roots: Vec<PathBuf>,
     pub wait_for_worker_release: bool,
 }
 
