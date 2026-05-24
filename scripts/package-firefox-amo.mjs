@@ -79,9 +79,19 @@ export function createFirefoxAmoListingMetadata() {
     ],
     version: {
       license: 'all-rights-reserved',
+      release_notes: {
+        'en-US': createFirefoxAmoReleaseNotes(),
+      },
       approval_notes: createFirefoxAmoReviewerNotes(),
     },
   };
+}
+
+export function createFirefoxAmoReleaseNotes() {
+  return [
+    'Improved Firefox download capture for server, Canvas/Instructure, blob/data, and <a download> flows.',
+    'Captured downloads now return to Firefox only when the user clicks Swap.',
+  ].join('\n');
 }
 
 export function createFirefoxAmoReadme(paths) {
@@ -155,39 +165,15 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-Simple Download Manager is a companion extension for a local native desktop app. No remote code is used. The extension does not use remote configuration, analytics, advertising, or tracking.
+This is a public AMO listing for a companion extension to the local native desktop app. It uses Native messaging only. No remote code, analytics, tracking, ads, or remote config.
 
-This is intended for public AMO listing. The source package includes apps/extension/FIREFOX_GUIDELINES.md with the Firefox-specific AMO review, manifest, permission, and packaging notes.
+Permissions support download handoff: downloads manages captured items, webRequest/webRequestBlocking intercept qualifying Firefox download responses and exact protected-download headers, and <all_urls> covers arbitrary user download sites with local filtering.
 
-## Core Functionality
+Data disclosures include browsingActivity, websiteActivity, and websiteContent because download URL/page metadata, response headers, filename hints, and Protected Downloads headers for the exact browser download are sent to the local app only. Users can disable capture and configure wildcard excluded host patterns.
 
-- Detects user-initiated HTTP(S) browser downloads.
-- Sends eligible download URLs, suggested filename hints, content length when available, incognito flag, and user download actions to the local native desktop app through Firefox Native messaging.
-- Cancels the original browser download only after the desktop app accepts or queues it. If the user cancels the desktop prompt or the native host is unavailable, the extension restarts the browser download as fallback.
-- Provides a context menu and popup/options UI for manually sending URLs to the desktop app.
+Strict handoff: captured downloads are canceled/discarded unless the user clicks Swap in the desktop prompt. Protected headers are memory-only, bounded, exact-request, and sent only to the local app.
 
-## Permission Rationale
-
-- Native messaging: required to communicate with the local native desktop app.
-- downloads: required to observe, cancel, remove, erase, and restart browser downloads during managed handoff/fallback.
-- webRequest and webRequestBlocking: required in Firefox to intercept qualifying attachment/download responses before Firefox opens its default Save As dialog and to capture request headers for exact protected-download handoff.
-- <all_urls>: required because download links can originate from arbitrary HTTP(S) sites; filtering happens in extension code by scheme, excluded host list, wildcard excluded host patterns, ignored extension list, protected-download handoff state, and user settings.
-- storage: required to store extension settings such as enabled state, handoff mode, excluded hosts, protected-download toggle state, ignored extensions, and badge preference.
-- contextMenus: required for the "Download with Simple Download Manager" link menu action.
-
-## Data Collection Disclosure
-
-The manifest declares required data_collection_permissions for browsingActivity, websiteActivity, and websiteContent because download URLs, page/referrer metadata when available, filename hints, response headers, content length, download actions, and opt-in protected-download request headers are transmitted outside Firefox to the local native desktop app. This transmission is required for the extension to perform download handoff.
-
-The data is sent to the local native desktop app only. The extension does not transmit this data to a remote server.
-
-## User Controls
-
-- Users can disable browser download interception.
-- Users can switch handoff mode between prompt and automatic queueing.
-- Users can add excluded hosts, wildcard excluded host patterns, and ignored file extensions.
-- Protected Downloads can be disabled by the user; when enabled, it sends bounded request headers only for the exact browser download being handed to the local native app.
-- web.telegram.org is excluded by default.
+Source package includes apps/extension/FIREFOX_GUIDELINES.md.
 `;
 }
 
