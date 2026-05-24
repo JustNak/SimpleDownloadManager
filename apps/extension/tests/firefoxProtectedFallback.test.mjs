@@ -13,8 +13,6 @@ assert.notEqual(handlerEnd, -1, 'Firefox webRequest handler should be sliceable'
 
 const handlerSource = backgroundSource.slice(handlerStart, handlerEnd);
 const markerCheckIndex = handlerSource.indexOf('hasCapturedBrowserSessionHeaders');
-const authCheckIndex = handlerSource.indexOf('hasCapturedHandoffAuth');
-const preserveIndex = handlerSource.indexOf('return {};', markerCheckIndex);
 const cancelIndex = handlerSource.indexOf('return { cancel: true };');
 
 assert.notEqual(
@@ -22,17 +20,18 @@ assert.notEqual(
   -1,
   'Firefox protected downloads should check memory-only browser session markers before canceling',
 );
-assert.notEqual(
-  authCheckIndex,
-  -1,
-  'Firefox protected downloads should require exact captured auth before canceling',
-);
-assert.ok(
-  preserveIndex > markerCheckIndex && preserveIndex < cancelIndex,
-  'Firefox should preserve the original browser request when protected auth cannot be replayed',
+assert.doesNotMatch(
+  handlerSource.slice(markerCheckIndex, cancelIndex),
+  /return \{\};/,
+  'Firefox protected downloads should not leak the original browser request after they are classified as downloads',
 );
 assert.match(
   handlerSource,
-  /const browserFallback:[\s\S]*\?[\s\r\n]*'unavailable'[\s\S]*:[\s\r\n]*'replay'/,
+  /const browserFallback:[\s\S]*\?[\s\r\n]*'unavailable'[\s\S]*:[\s\r\n]*candidate\.browserFallback \?\? 'replay'/,
   'Firefox protected handoffs should mark browser replay fallback as unavailable',
+);
+assert.match(
+  handlerSource,
+  /void handleFirefoxWebRequestDownload\(\{ \.\.\.candidate, browserFallback \}, settings\);[\s\S]*return \{ cancel: true \};/,
+  'Firefox protected handoffs should cancel the browser request and let the strict handoff policy handle failures',
 );

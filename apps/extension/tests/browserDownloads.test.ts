@@ -20,7 +20,6 @@ import {
   shouldDiscardBrowserDownloadAfterHandoff,
   shouldHandleBrowserDownload,
   shouldRestoreBrowserDownloadAfterPromptSwap,
-  shouldRestoreBrowserDownloadAfterFailedProtectedHandoff,
 } from '../src/background/browserDownloads.ts';
 
 const calls: string[] = [];
@@ -222,18 +221,7 @@ async function main() {
       message: 'app did not respond',
     }),
     false,
-    'failed extension handoffs should be passed back to the browser',
-  );
-  assert.equal(
-    shouldRestoreBrowserDownloadAfterFailedProtectedHandoff({
-      ok: false,
-      requestId: 'request_protected',
-      type: 'rejected',
-      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
-      message: 'This site requires your browser session.',
-    }),
-    true,
-    'protected-download auth failures should leave the browser fallback path active',
+    'failed extension handoffs should be handled by the strict error classifier',
   );
   assert.deepEqual(
     classifyBrowserDownloadHandoffResolution({
@@ -244,7 +232,7 @@ async function main() {
       message: 'app did not respond',
     }),
     {
-      action: 'record_error_and_restore',
+      action: 'record_error',
       response: {
         ok: false,
         requestId: 'request_app_unreachable',
@@ -253,7 +241,27 @@ async function main() {
         message: 'app did not respond',
       },
     },
-    'failed handoffs should record the error and restore the browser download after detachment',
+    'failed handoffs should record the error and keep the browser download blocked after capture',
+  );
+  assert.deepEqual(
+    classifyBrowserDownloadHandoffResolution({
+      ok: false,
+      requestId: 'request_protected',
+      type: 'rejected',
+      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
+      message: 'This site requires your browser session.',
+    }),
+    {
+      action: 'record_error',
+      response: {
+        ok: false,
+        requestId: 'request_protected',
+        type: 'rejected',
+        code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
+        message: 'This site requires your browser session.',
+      },
+    },
+    'protected-download auth failures should be recorded and blocked instead of restored',
   );
   assert.deepEqual(
     classifyBrowserDownloadHandoffResolution({
@@ -283,6 +291,19 @@ async function main() {
       `${status} handoffs should leave the detached browser download discarded`,
     );
   }
+  assert.deepEqual(
+    classifyBrowserDownloadHandoffResolution({
+      ok: true,
+      requestId: 'request_finished',
+      type: 'accepted',
+      payload: {
+        appState: 'running',
+        status: 'finished',
+      },
+    }),
+    { action: 'discard' },
+    'non-swap accepted handoff statuses should keep the browser download blocked',
+  );
   assert.deepEqual(
     createBrowserDownloadHandoffMetadata(
       {

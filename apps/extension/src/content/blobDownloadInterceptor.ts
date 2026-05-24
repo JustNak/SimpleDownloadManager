@@ -12,12 +12,16 @@ import {
   createBrowserBlobChunkRequest,
   createBrowserBlobFinishRequest,
   createBrowserBlobStreamId,
-  shouldHandleBlobDownload,
-  type BrowserBlobDownloadCandidate,
+  pageManagedDownloadKind,
+  shouldHandlePageManagedDownload,
+  type PageManagedDownloadCandidate,
+  type PageManagedDownloadKind,
 } from '../background/blobDownloads';
 import { getExtensionSettings } from '../background/state';
 
-type BlobDownloadPageMessage = BrowserBlobDownloadCandidate & {
+type PageManagedDownloadMessage = PageManagedDownloadCandidate & {
+  blobUrl?: string;
+  downloadUrl?: string;
   pageUrl?: string;
   referrer?: string;
 };
@@ -47,24 +51,39 @@ window.addEventListener(BLOB_DOWNLOAD_INTERCEPT_EVENT, (event) => {
   void handleBlobDownload(candidate);
 });
 
-async function handleBlobDownload(candidate: BlobDownloadPageMessage): Promise<void> {
+async function handleBlobDownload(candidate: PageManagedDownloadMessage): Promise<void> {
   const settings = await getExtensionSettings();
   const enrichedCandidate = {
     ...candidate,
     pageUrl: candidate.pageUrl || location.href,
   };
 
-  if (!shouldHandleBlobDownload(enrichedCandidate, settings)) {
-    replayBlobDownload(candidate);
+  if (!shouldHandlePageManagedDownload(enrichedCandidate, settings)) {
+    replayPageDownload(candidate);
+    return;
+  }
+
+  if (candidate.kind === 'url') {
+    const response = await browser.runtime.sendMessage({
+      type: 'page_download_intent',
+      url: candidate.url,
+      filename: candidate.filename,
+      pageUrl: enrichedCandidate.pageUrl,
+      pageTitle: document.title || undefined,
+      referrer: candidate.referrer || document.referrer || undefined,
+      incognito: extensionIsIncognito(),
+    });
+    if (shouldReplayPageDownload(response)) {
+      replayPageDownload(candidate);
+    }
     return;
   }
 
   let blob: Blob;
   try {
-    const response = await fetch(candidate.blobUrl);
+    const response = await fetch(candidate.url);
     blob = await response.blob();
   } catch {
-    replayBlobDownload(candidate);
     return;
   }
 
@@ -90,7 +109,6 @@ async function handleBlobDownload(candidate: BlobDownloadPageMessage): Promise<v
       mimeType: blob.type || candidate.mimeType,
     }));
     if (!beginResponse.ok) {
-      replayBlobDownload(candidate);
       return;
     }
     beganStream = true;
@@ -113,8 +131,6 @@ async function handleBlobDownload(candidate: BlobDownloadPageMessage): Promise<v
         streamId,
         error instanceof Error ? error.message : 'Browser blob stream failed.',
       )).catch(() => undefined);
-    } else {
-      replayBlobDownload(candidate);
     }
   } finally {
     port.disconnect();
@@ -197,10 +213,15 @@ function* splitChunk(bytes: Uint8Array): Generator<Uint8Array> {
   }
 }
 
-function replayBlobDownload(candidate: BlobDownloadPageMessage): void {
+function replayPageDownload(candidate: PageManagedDownloadMessage): void {
   const anchor = document.createElement('a');
-  anchor.href = candidate.blobUrl;
-  anchor.download = blobDownloadFilename(candidate.filename, candidate.mimeType);
+  anchor.href = candidate.url;
+  const filename = candidate.kind === 'stream'
+    ? blobDownloadFilename(candidate.filename, candidate.mimeType)
+    : candidate.filename;
+  if (filename) {
+    anchor.download = filename;
+  }
   anchor.setAttribute(BLOB_DOWNLOAD_BYPASS_ATTRIBUTE, 'true');
   anchor.style.display = 'none';
   document.documentElement.append(anchor);
@@ -216,22 +237,52 @@ function injectPageHook(): void {
   (document.documentElement || document.head).append(script);
 }
 
-function blobCandidateFromPageMessage(value: unknown): BlobDownloadPageMessage | null {
+function shouldReplayPageDownload(response: unknown): boolean {
+  return isAcceptedResponse(response) && response.payload.status === 'canceled';
+}
+
+function isAcceptedResponse(
+  response: unknown,
+): response is Extract<HostToExtensionResponse, { type: 'accepted' }> {
+  return typeof response === 'object'
+    && response !== null
+    && (response as Partial<HostToExtensionResponse>).ok === true
+    && (response as Partial<HostToExtensionResponse>).type === 'accepted';
+}
+
+function blobCandidateFromPageMessage(value: unknown): PageManagedDownloadMessage | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
 
-  const message = value as Partial<BlobDownloadPageMessage> & { source?: unknown };
+  const message = value as Partial<PageManagedDownloadMessage> & { source?: unknown };
   if (message.source !== BLOB_DOWNLOAD_PAGE_MESSAGE_SOURCE) {
     return null;
   }
 
-  if (typeof message.blobUrl !== 'string') {
+  const url = typeof message.url === 'string'
+    ? message.url
+    : typeof message.blobUrl === 'string'
+      ? message.blobUrl
+      : typeof message.downloadUrl === 'string'
+        ? message.downloadUrl
+        : undefined;
+  if (!url) {
+    return null;
+  }
+
+  const kind = message.kind === 'stream' || message.kind === 'url'
+    ? message.kind
+    : pageManagedDownloadKind(url, Boolean(message.filename));
+  if (!kind) {
     return null;
   }
 
   return {
-    blobUrl: message.blobUrl,
+    kind: kind as PageManagedDownloadKind,
+    url,
+    blobUrl: kind === 'stream' ? url : undefined,
+    downloadUrl: kind === 'url' ? url : undefined,
     pageUrl: typeof message.pageUrl === 'string' ? message.pageUrl : location.href,
     filename: typeof message.filename === 'string' ? message.filename : undefined,
     mimeType: typeof message.mimeType === 'string' ? message.mimeType : undefined,

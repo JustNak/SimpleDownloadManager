@@ -5,7 +5,9 @@ import {
   createBrowserBlobBeginRequest,
   createBrowserBlobChunkRequest,
   isBlobDownloadHref,
+  pageManagedDownloadKind,
   shouldHandleBlobDownload,
+  shouldHandlePageManagedDownload,
 } from '../src/background/blobDownloads.ts';
 
 const defaultSettings: ExtensionIntegrationSettings = {
@@ -24,6 +26,10 @@ const defaultSettings: ExtensionIntegrationSettings = {
 
 assert.equal(isBlobDownloadHref('blob:https://web.telegram.org/8f2a'), true);
 assert.equal(isBlobDownloadHref('https://web.telegram.org/file.zip'), false);
+assert.equal(pageManagedDownloadKind('blob:https://web.telegram.org/8f2a', false), 'stream');
+assert.equal(pageManagedDownloadKind('data:application/pdf;base64,AA==', false), 'stream');
+assert.equal(pageManagedDownloadKind('https://canvas.instructure.com/files/569/download?download_frd=1', false), null);
+assert.equal(pageManagedDownloadKind('https://canvas.instructure.com/files/569/download?download_frd=1', true), 'url');
 
 assert.equal(
   shouldHandleBlobDownload(
@@ -50,6 +56,34 @@ assert.equal(
   ),
   false,
   'ignored file extensions should bypass blob capture',
+);
+
+assert.equal(
+  shouldHandlePageManagedDownload(
+    {
+      url: 'https://canvas.instructure.com/files/569/download?download_frd=1&verifier=abc',
+      kind: 'url',
+      pageUrl: 'https://canvas.instructure.com/courses/1/files',
+      filename: 'lecture.pdf',
+    },
+    defaultSettings,
+  ),
+  true,
+  'explicit page download anchors should be captured before the browser starts its own download',
+);
+
+assert.equal(
+  shouldHandlePageManagedDownload(
+    {
+      url: 'https://canvas.instructure.com/files/569/download?download_frd=1&verifier=abc',
+      kind: 'url',
+      pageUrl: 'https://canvas.instructure.com/courses/1/files',
+      filename: 'lecture.pdf',
+    },
+    { ...defaultSettings, excludedHosts: ['canvas.instructure.com'] },
+  ),
+  false,
+  'page-managed URL downloads should still respect excluded host settings before capture',
 );
 
 assert.equal(blobDownloadFilename('C:\\Users\\Me\\Downloads\\clip.webm', 'video/mp4'), 'clip.webm');

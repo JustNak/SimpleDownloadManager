@@ -15,6 +15,16 @@ export type PopupRequest =
   | { type: 'popup_enqueue'; url: string }
   | { type: 'extension_settings_update'; settings: ExtensionIntegrationSettings };
 
+export type PageDownloadIntentRequest = {
+  type: 'page_download_intent';
+  url: string;
+  filename?: string;
+  pageUrl?: string;
+  pageTitle?: string;
+  referrer?: string;
+  incognito?: boolean;
+};
+
 export interface PopupStateResponse {
   connection: 'checking' | 'connected' | 'host_missing' | 'app_missing' | 'app_unreachable' | 'error';
   isSubmitting: boolean;

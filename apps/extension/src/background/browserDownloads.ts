@@ -106,10 +106,10 @@ export type BrowserDownloadBypassState = {
 export type BrowserDownloadHandoffResolution =
   | { action: 'discard' }
   | { action: 'restore' }
-  | { action: 'record_error_and_restore'; response: Extract<HostToExtensionResponse, { ok: false }> };
+  | { action: 'record_error'; response: Extract<HostToExtensionResponse, { ok: false }> };
 
 const DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS = 60_000;
-const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame']);
+const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other']);
 const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
   'application/octet-stream',
   'application/zip',
@@ -134,6 +134,36 @@ const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
   'application/x-msi',
   'application/x-msdos-program',
   'application/x-redhat-package-manager',
+]);
+const STRONG_DOWNLOAD_EXTENSIONS = new Set([
+  '7z',
+  'apk',
+  'bz2',
+  'cab',
+  'csv',
+  'deb',
+  'dmg',
+  'doc',
+  'docx',
+  'exe',
+  'gz',
+  'iso',
+  'jar',
+  'msi',
+  'pdf',
+  'ppt',
+  'pptx',
+  'rar',
+  'rpm',
+  'tar',
+  'tgz',
+  'torrent',
+  'txz',
+  'xls',
+  'xlsx',
+  'xz',
+  'zip',
+  'zst',
 ]);
 
 export function createBrowserDownloadBypassState(ttlMs = DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS): BrowserDownloadBypassState {
@@ -224,10 +254,6 @@ export function firefoxWebRequestDownloadCandidate(
   details: FirefoxWebRequestDownloadDetails,
   settings: ExtensionIntegrationSettings,
 ): FirefoxWebRequestDownloadCandidate | null {
-  if (details.method && details.method.toUpperCase() !== 'GET') {
-    return null;
-  }
-
   if (details.type && !FIREFOX_DOWNLOAD_RESOURCE_TYPES.has(details.type)) {
     return null;
   }
@@ -246,8 +272,11 @@ export function firefoxWebRequestDownloadCandidate(
   const filename = filenameFromContentDisposition(contentDisposition) ?? basenameFromUrl(url);
   const isAttachment = /\battachment\b/i.test(contentDisposition ?? '');
   const hasDownloadMimeType = Boolean(contentType && FIREFOX_DOWNLOAD_MIME_TYPES.has(contentType));
+  const hasStrongDownloadFilename = !isInlineContentType(contentType)
+    && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
+  const hasExplicitDownloadUrl = isExplicitDownloadUrl(url);
 
-  if (!isAttachment && !hasDownloadMimeType) {
+  if (!isAttachment && !hasDownloadMimeType && !hasStrongDownloadFilename && !hasExplicitDownloadUrl) {
     return null;
   }
 
@@ -261,6 +290,7 @@ export function firefoxWebRequestDownloadCandidate(
     filename,
     totalBytes: positiveIntegerHeader(details.responseHeaders, 'content-length'),
     incognito: details.incognito ?? false,
+    ...(isReplayableRequestMethod(details.method) ? {} : { browserFallback: 'unavailable' as const }),
   };
 }
 
@@ -307,22 +337,18 @@ export function shouldRestoreBrowserDownloadAfterPromptSwap(response: HostToExte
     && response.payload.status === 'canceled';
 }
 
-export function shouldRestoreBrowserDownloadAfterFailedProtectedHandoff(response: HostToExtensionResponse): boolean {
-  return isErrorResponse(response) && response.code === 'PROTECTED_DOWNLOAD_AUTH_REQUIRED';
-}
-
 export function classifyBrowserDownloadHandoffResolution(
   response: HostToExtensionResponse,
 ): BrowserDownloadHandoffResolution {
   if (isErrorResponse(response)) {
-    return { action: 'record_error_and_restore', response };
+    return { action: 'record_error', response };
   }
 
-  if (shouldDiscardBrowserDownloadAfterHandoff(response)) {
-    return { action: 'discard' };
+  if (shouldRestoreBrowserDownloadAfterPromptSwap(response)) {
+    return { action: 'restore' };
   }
 
-  return { action: 'restore' };
+  return { action: 'discard' };
 }
 
 export function createBrowserDownloadHandoffMetadata(
@@ -519,12 +545,41 @@ function normalizeContentType(value: string | undefined): string | undefined {
   return value?.split(';', 1)[0]?.trim().toLowerCase() || undefined;
 }
 
+function isInlineContentType(contentType: string | undefined): boolean {
+  return contentType === 'text/html' || contentType === 'application/json';
+}
+
 function isRedirectResponse(details: FirefoxWebRequestDownloadDetails): boolean {
   if (details.statusCode !== undefined) {
     return details.statusCode >= 300 && details.statusCode < 400;
   }
 
   return /^HTTP\/\S+\s+3\d\d\b/i.test(details.statusLine ?? '');
+}
+
+function isReplayableRequestMethod(method: string | undefined): boolean {
+  return !method || method.toUpperCase() === 'GET';
+}
+
+function isExplicitDownloadUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase();
+    return parsed.searchParams.get('download_frd') === '1'
+      || (/\/files\/\d+\/download\/?$/.test(pathname) && parsed.searchParams.has('verifier'));
+  } catch {
+    return false;
+  }
+}
+
+function hasStrongDownloadExtension(filename: string | undefined): boolean {
+  const basename = basenameOnly(filename)?.toLowerCase();
+  if (!basename) {
+    return false;
+  }
+
+  const extension = basename.split('.').pop();
+  return Boolean(extension && extension !== basename && STRONG_DOWNLOAD_EXTENSIONS.has(extension));
 }
 
 function positiveIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {

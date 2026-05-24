@@ -28,13 +28,12 @@ import {
 import {
   captureHandoffAuthHeaders,
   hasCapturedBrowserSessionHeaders,
-  hasCapturedHandoffAuth,
   resolveBrowserHandoffAuth,
   type HandoffAuthRequestDetails,
 } from './handoffAuth';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
-import type { PopupRequest, PopupStateResponse } from '../shared/messages';
+import type { PageDownloadIntentRequest, PopupRequest, PopupStateResponse } from '../shared/messages';
 import { normalizeAccentColor } from '../shared/appearance';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
@@ -142,23 +141,23 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
     const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
-      await restoreBrowserDownloadFallback(item);
+      await blockBrowserDownloadAfterCapture(item);
       return;
     }
 
     rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
-      await restoreBrowserDownloadFallback(item);
+      await blockBrowserDownloadAfterCapture(item);
       return;
     }
 
     const response = await handOffBrowserDownload(url, item, settings);
 
     const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error_and_restore') {
+    if (handoffResolution.action === 'record_error') {
       await recordHostError(handoffResolution.response);
-      await restoreBrowserDownloadFallback(item);
+      await blockBrowserDownloadAfterCapture(item);
       return;
     }
 
@@ -179,7 +178,7 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
       'error',
     );
     await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item);
+    await blockBrowserDownloadAfterCapture(item);
   } finally {
     activeBrowserDownloadIds.delete(item.id);
   }
@@ -217,7 +216,6 @@ async function handleBrowserDownloadDeterminingFilename(
     const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
-      await restoreBrowserDownloadFallback(item);
       return;
     }
 
@@ -225,16 +223,14 @@ async function handleBrowserDownloadDeterminingFilename(
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload(item, settings)) {
       await updateBrowserBadge(pingState);
-      await restoreBrowserDownloadFallback(item);
       return;
     }
 
     const response = await handOffBrowserDownload(url, item, settings);
 
     const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error_and_restore') {
+    if (handoffResolution.action === 'record_error') {
       await recordHostError(handoffResolution.response);
-      await restoreBrowserDownloadFallback(item);
       return;
     }
 
@@ -250,7 +246,6 @@ async function handleBrowserDownloadDeterminingFilename(
       'error',
     );
     await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item);
   } finally {
     activeBrowserDownloadIds.delete(item.id);
   }
@@ -294,8 +289,10 @@ if (filenameInterceptionApi) {
   registerFirefoxWebRequestInterception();
 }
 
-browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
+browser.runtime.onMessage.addListener(async (message: PopupRequest | PageDownloadIntentRequest) => {
   switch (message.type) {
+    case 'page_download_intent':
+      return handlePageDownloadIntent(message);
     case 'popup_ping':
       return refreshConnectionState();
     case 'popup_get_state':
@@ -388,6 +385,9 @@ async function handOffBrowserDownload(
     entryPoint: 'browser_download' as const,
     extensionVersion: browser.runtime.getManifest().version,
     incognito: item.incognito,
+    pageUrl: item.pageUrl,
+    pageTitle: item.pageTitle,
+    referrer: item.referrer,
   };
   const handoffDetails = {
     requestId: 'requestId' in item ? item.requestId : undefined,
@@ -408,6 +408,80 @@ async function handOffBrowserDownload(
   }
 
   return promptDownload(url, source, metadata);
+}
+
+async function handlePageDownloadIntent(message: PageDownloadIntentRequest): Promise<HostToExtensionResponse> {
+  const initialSettings = await getCachedExtensionSettings();
+  if (!shouldHandleBrowserDownload({ url: message.url, filename: message.filename }, initialSettings)) {
+    return {
+      ok: false,
+      requestId: 'page_download_bypass',
+      type: 'rejected',
+      code: 'INVALID_URL',
+      message: 'This page download is not configured for browser handoff.',
+    };
+  }
+
+  let settings = initialSettings;
+  try {
+    const pingResponse = await pingNativeHostCoalesced();
+    if (isErrorResponse(pingResponse)) {
+      await recordHostError(pingResponse);
+      return pingResponse;
+    }
+
+    const pingState = rememberStateSettings(await setLastResult('connected', pingResponse));
+    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
+    if (!shouldHandleBrowserDownload({ url: message.url, filename: message.filename }, settings)) {
+      await updateBrowserBadge(pingState);
+      return {
+        ok: false,
+        requestId: 'page_download_blocked_after_capture',
+        type: 'rejected',
+        code: 'DOWNLOAD_FAILED',
+        message: 'The page download was already captured before handoff settings changed.',
+      };
+    }
+
+    const response = await handOffBrowserDownload(
+      message.url,
+      {
+        filename: message.filename,
+        incognito: message.incognito,
+        pageUrl: message.pageUrl,
+        pageTitle: message.pageTitle,
+        referrer: message.referrer,
+      },
+      settings,
+    );
+    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
+    if (handoffResolution.action === 'record_error') {
+      await recordHostError(handoffResolution.response);
+      return response;
+    }
+
+    const state = rememberStateSettings(await setLastResult('connected', response));
+    await updateBrowserBadge(state);
+    if (handoffResolution.action === 'restore') {
+      markBrowserDownloadBypassUrl(browserDownloadFallbackBypass, message.url);
+    }
+
+    return response;
+  } catch (error) {
+    const state = await setHostError(
+      'HOST_NOT_AVAILABLE',
+      error instanceof Error ? error.message : 'Could not hand the page download to the desktop app.',
+      'error',
+    );
+    await updateBrowserBadge(state);
+    return {
+      ok: false,
+      requestId: 'page_download_error',
+      type: 'rejected',
+      code: 'HOST_NOT_AVAILABLE',
+      message: error instanceof Error ? error.message : 'Could not hand the page download to the desktop app.',
+    };
+  }
 }
 
 async function recordHostError(response: Extract<HostToExtensionResponse, { ok: false }>): Promise<void> {
@@ -445,6 +519,21 @@ async function restoreBrowserDownloadFallback(
   }
 }
 
+async function blockBrowserDownloadAfterCapture(item: browser.downloads.DownloadItem): Promise<void> {
+  try {
+    await discardBrowserDownload(browser.downloads, item.id);
+  } catch (error) {
+    const state = await setHostError(
+      'DOWNLOAD_FAILED',
+      error instanceof Error
+        ? `Could not discard the captured browser download: ${error.message}`
+        : 'Could not discard the captured browser download.',
+      'error',
+    );
+    await updateBrowserBadge(state);
+  }
+}
+
 async function handleFirefoxWebRequestDownload(
   candidate: FirefoxWebRequestDownloadCandidate,
   initialSettings: ExtensionIntegrationSettings,
@@ -455,29 +544,20 @@ async function handleFirefoxWebRequestDownload(
     const pingResponse = await pingNativeHostCoalesced();
     if (isErrorResponse(pingResponse)) {
       await recordHostError(pingResponse);
-      if (canReplayBrowserFallback(candidate)) {
-        await restoreFirefoxWebRequestFallback(candidate);
-      }
       return;
     }
 
     rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
     if (!shouldHandleBrowserDownload({ url: candidate.url, filename: candidate.filename }, settings)) {
-      if (canReplayBrowserFallback(candidate)) {
-        await restoreFirefoxWebRequestFallback(candidate);
-      }
       return;
     }
 
     const response = await handOffBrowserDownload(candidate.url, candidate, settings);
 
     const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error_and_restore') {
+    if (handoffResolution.action === 'record_error') {
       await recordHostError(handoffResolution.response);
-      if (canReplayBrowserFallback(candidate)) {
-        await restoreFirefoxWebRequestFallback(candidate);
-      }
       return;
     }
 
@@ -493,9 +573,6 @@ async function handleFirefoxWebRequestDownload(
       'error',
     );
     await updateBrowserBadge(state);
-    if (canReplayBrowserFallback(candidate)) {
-      await restoreFirefoxWebRequestFallback(candidate);
-    }
   }
 }
 
@@ -636,7 +713,7 @@ function registerFirefoxWebRequestInterception(): void {
     handleFirefoxWebRequestHeadersReceived,
     {
       urls: ['http://*/*', 'https://*/*'],
-      types: ['main_frame', 'sub_frame'],
+      types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'],
     },
     ['blocking', 'responseHeaders'],
   );
@@ -754,13 +831,9 @@ async function handleFirefoxWebRequestHeadersReceived(
       url: candidate.url,
       incognito: candidate.incognito,
     };
-    if (hasCapturedBrowserSessionHeaders(protectedDetails) && !hasCapturedHandoffAuth(protectedDetails)) {
-      return {};
-    }
-
     const browserFallback: BrowserFallback = hasCapturedBrowserSessionHeaders(protectedDetails)
       ? 'unavailable'
-      : 'replay';
+      : candidate.browserFallback ?? 'replay';
 
     void handleFirefoxWebRequestDownload({ ...candidate, browserFallback }, settings);
     return { cancel: true };
@@ -845,6 +918,9 @@ type BrowserDownloadHandoffItem = {
   totalBytes?: number;
   incognito?: boolean;
   browserFallback?: BrowserFallback;
+  pageUrl?: string;
+  pageTitle?: string;
+  referrer?: string;
 };
 
 type FirefoxWebRequestApi = {

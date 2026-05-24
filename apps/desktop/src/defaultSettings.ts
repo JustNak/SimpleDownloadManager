@@ -4,7 +4,7 @@ import type { ExtensionIntegrationSettings, Settings } from './types.ts';
 export const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = [] as const;
-export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = ['gofile.io'] as const;
+export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = ['gofile.io', '*.instructure.com'] as const;
 
 export function defaultBulkDownloadDirectory(downloadDirectory: string): string {
   const trimmed = downloadDirectory.trim();

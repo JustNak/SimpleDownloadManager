@@ -49,18 +49,33 @@ assert.doesNotMatch(
 
 assert.match(
   handlerSource,
-  /if \(isErrorResponse\(pingResponse\)\) \{[\s\S]*?await recordHostError\(pingResponse\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
-  'native-host ping failures after detachment should restore the browser download',
+  /if \(isErrorResponse\(pingResponse\)\) \{[\s\S]*?await recordHostError\(pingResponse\);[\s\S]*?return;/,
+  'native-host ping failures after detachment should record an error and keep the browser download blocked',
+);
+assert.doesNotMatch(
+  handlerSource,
+  /if \(isErrorResponse\(pingResponse\)\) \{(?:(?!return;)[\s\S])*restoreBrowserDownloadFallback\(item\)/,
+  'native-host ping failures must not restore the browser download automatically',
 );
 assert.match(
   handlerSource,
-  /if \(!shouldHandleBrowserDownload\(item, settings\)\) \{[\s\S]*?await updateBrowserBadge\(pingState\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
-  'settings synced from the desktop app after detachment should restore when capture becomes disabled',
+  /if \(!shouldHandleBrowserDownload\(item, settings\)\) \{[\s\S]*?await updateBrowserBadge\(pingState\);[\s\S]*?return;/,
+  'settings synced from the desktop app after detachment should not leak the captured browser download',
+);
+assert.doesNotMatch(
+  handlerSource,
+  /if \(!shouldHandleBrowserDownload\(item, settings\)\) \{(?:(?!return;)[\s\S])*restoreBrowserDownloadFallback\(item\)/,
+  'post-capture settings changes must not restore the browser download automatically',
 );
 assert.match(
   handlerSource,
-  /if \(handoffResolution\.action === 'record_error_and_restore'\) \{[\s\S]*?await recordHostError\(handoffResolution\.response\);[\s\S]*?await restoreBrowserDownloadFallback\(item\);[\s\S]*?return;/,
-  'native handoff errors after detachment should record the error and restore the browser download',
+  /if \(handoffResolution\.action === 'record_error'\) \{[\s\S]*?await recordHostError\(handoffResolution\.response\);[\s\S]*?return;/,
+  'native handoff errors after detachment should record the error and keep the browser download blocked',
+);
+assert.doesNotMatch(
+  handlerSource,
+  /handoffResolution\.action === 'record_error'(?:(?!return;)[\s\S])*restoreBrowserDownloadFallback\(item\)/,
+  'native handoff errors must not restore the browser download automatically',
 );
 assert.match(
   handoffSource,

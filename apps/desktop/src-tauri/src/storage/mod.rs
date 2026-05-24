@@ -636,7 +636,7 @@ pub struct ExtensionIntegrationSettings {
 }
 
 const DEFAULT_EXCLUDED_HOSTS: &[&str] = &[];
-const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &["gofile.io"];
+const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &["gofile.io", "*.instructure.com"];
 
 fn default_authenticated_handoff_enabled() -> bool {
     true
@@ -2240,7 +2240,7 @@ mod tests {
         assert!(settings.extension_integration.excluded_hosts.is_empty());
         assert_eq!(
             settings.extension_integration.authenticated_handoff_hosts,
-            vec!["gofile.io".to_string()]
+            vec!["gofile.io".to_string(), "*.instructure.com".to_string()]
         );
         assert!(settings
             .extension_integration
@@ -2302,7 +2302,7 @@ mod tests {
                 .settings
                 .extension_integration
                 .authenticated_handoff_hosts,
-            vec!["gofile.io".to_string()]
+            vec!["gofile.io".to_string(), "*.instructure.com".to_string()]
         );
         assert!(state
             .settings

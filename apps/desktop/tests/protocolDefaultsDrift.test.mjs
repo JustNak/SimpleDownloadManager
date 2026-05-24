@@ -13,11 +13,11 @@ const storageSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri
 
 assert.match(protocolSource, /export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;/, 'protocol should own the extension listen-port default');
 assert.match(protocolSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \[\] as const;/, 'protocol should own the extension excluded-host default');
-assert.match(protocolSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io'\] as const;/, 'protocol should own the built-in protected-download host default');
+assert.match(protocolSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io', '\*\.instructure\.com'\] as const;/, 'protocol should own the built-in protected-download host default');
 
 assert.match(desktopDefaultsSource, /export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;/, 'desktop preview defaults should stay aligned with the protocol listen-port default');
 assert.match(desktopDefaultsSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \[\] as const;/, 'desktop preview defaults should stay aligned with Rust and extension excluded-host defaults');
-assert.match(desktopDefaultsSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io'\] as const;/, 'desktop preview defaults should stay aligned with protected-download host defaults');
+assert.match(desktopDefaultsSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io', '\*\.instructure\.com'\] as const;/, 'desktop preview defaults should stay aligned with protected-download host defaults');
 assert.match(desktopDefaultsSource, /excludedHosts: \[\.\.\.DEFAULT_EXTENSION_EXCLUDED_HOSTS\]/, 'desktop preview settings should use the centralized desktop excluded-host default');
 assert.match(desktopDefaultsSource, /authenticatedHandoffEnabled: true/, 'desktop preview defaults should enable Protected Downloads');
 assert.match(desktopDefaultsSource, /protectedDownloadAuthScope: 'allowlist'/, 'desktop preview defaults should use allowlist Protected Downloads');
@@ -28,5 +28,5 @@ assert.match(extensionDefaultsSource, /DEFAULT_EXTENSION_EXCLUDED_HOSTS/, 'exten
 assert.match(extensionDefaultsSource, /DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS/, 'extension defaults should import protected-download host defaults from protocol');
 
 assert.match(storageSource, /const DEFAULT_EXCLUDED_HOSTS: &\[&str\] = &\[\];/, 'Rust settings defaults should include the same excluded host as TypeScript defaults');
-assert.match(storageSource, /const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &\[&str\] = &\["gofile\.io"\];/, 'Rust settings defaults should include the built-in protected-download hosts');
+assert.match(storageSource, /const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &\[&str\] = &\["gofile\.io", "\*\.instructure\.com"\];/, 'Rust settings defaults should include the built-in protected-download hosts');
 assert.match(storageSource, /pub fn default_extension_listen_port\(\) -> u32 \{\s*1420\s*\}/, 'Rust settings defaults should use the same listen port as protocol');

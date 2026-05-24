@@ -10,10 +10,10 @@ assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, []);
 assert.deepEqual(defaultExtensionSettings.excludedHosts, []);
 assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, true);
 assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'allowlist');
-assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, ['gofile.io']);
+assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, ['gofile.io', '*.instructure.com']);
 assert.deepEqual(createDefaultExtensionSettings().excludedHosts, []);
 assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'allowlist');
-assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, ['gofile.io']);
+assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, ['gofile.io', '*.instructure.com']);
 
 assert.deepEqual(
   normalizeExtensionSettings(undefined).excludedHosts,

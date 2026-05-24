@@ -14,6 +14,14 @@ export type BrowserBlobDownloadCandidate = {
   filename?: string;
   mimeType?: string;
 };
+export type PageManagedDownloadKind = 'stream' | 'url';
+export type PageManagedDownloadCandidate = {
+  url: string;
+  kind: PageManagedDownloadKind;
+  pageUrl?: string;
+  filename?: string;
+  mimeType?: string;
+};
 
 export const BROWSER_BLOB_DOWNLOAD_PORT = 'browser_blob_download';
 export const BLOB_DOWNLOAD_INTERCEPT_EVENT = 'simple-download-manager:blob-download';
@@ -68,6 +76,32 @@ export function isBlobDownloadHref(href: string | undefined): href is string {
   }
 }
 
+export function isPageManagedStreamDownloadHref(href: string | undefined): href is string {
+  if (!href) return false;
+  const normalizedHref = href.trim().toLowerCase();
+  try {
+    const protocol = new URL(href).protocol;
+    return protocol === 'blob:' || protocol === 'data:';
+  } catch {
+    return normalizedHref.startsWith('blob:') || normalizedHref.startsWith('data:');
+  }
+}
+
+export function pageManagedDownloadKind(
+  href: string | undefined,
+  hasDownloadAttribute: boolean,
+): PageManagedDownloadKind | null {
+  if (isPageManagedStreamDownloadHref(href)) {
+    return 'stream';
+  }
+
+  if (!hasDownloadAttribute || !isHttpUrl(href)) {
+    return null;
+  }
+
+  return 'url';
+}
+
 export function shouldHandleBlobDownload(
   candidate: BrowserBlobDownloadCandidate,
   settings: ExtensionIntegrationSettings,
@@ -76,7 +110,7 @@ export function shouldHandleBlobDownload(
     return false;
   }
 
-  if (!isBlobDownloadHref(candidate.blobUrl)) {
+  if (!isPageManagedStreamDownloadHref(candidate.blobUrl)) {
     return false;
   }
 
@@ -89,6 +123,25 @@ export function shouldHandleBlobDownload(
     candidate.filename ?? blobDownloadFilename(candidate.filename, candidate.mimeType),
     settings.ignoredFileExtensions,
   );
+}
+
+export function shouldHandlePageManagedDownload(
+  candidate: PageManagedDownloadCandidate,
+  settings: ExtensionIntegrationSettings,
+): boolean {
+  if (candidate.kind === 'stream') {
+    return shouldHandleBlobDownload(
+      {
+        blobUrl: candidate.url,
+        pageUrl: candidate.pageUrl,
+        filename: candidate.filename,
+        mimeType: candidate.mimeType,
+      },
+      settings,
+    );
+  }
+
+  return shouldHandleUrlDownload(candidate, settings);
 }
 
 export function blobDownloadFilename(filename?: string, mimeType?: string): string {
@@ -148,6 +201,55 @@ function pageUrlFromBlobUrl(blobUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isHttpUrl(url: string | undefined): url is string {
+  if (!url) return false;
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function shouldHandleUrlDownload(
+  candidate: Pick<PageManagedDownloadCandidate, 'url' | 'filename'>,
+  settings: ExtensionIntegrationSettings,
+): boolean {
+  if (!settings.enabled || settings.downloadHandoffMode === 'off' || !isHttpUrl(candidate.url)) {
+    return false;
+  }
+
+  if (isUrlHostExcludedByPatterns(candidate.url, settings.excludedHosts)) {
+    return false;
+  }
+
+  if (isBrowserExtensionPackage(candidate.url, candidate.filename)) {
+    return false;
+  }
+
+  return !isFileExtensionIgnored(
+    candidate.filename ?? basenameFromUrl(candidate.url) ?? '',
+    settings.ignoredFileExtensions,
+  );
+}
+
+function basenameFromUrl(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return basenameOnly(decodeURIComponent(parsed.pathname));
+  } catch {
+    return undefined;
+  }
+}
+
+function isBrowserExtensionPackage(url: string, filename: string | undefined): boolean {
+  const candidates = [basenameOnly(filename), basenameFromUrl(url)]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map((candidate) => candidate.toLowerCase());
+
+  return candidates.some((candidate) => candidate.endsWith('.xpi'));
 }
 
 function extensionForMimeType(mimeType: string | undefined): string | undefined {

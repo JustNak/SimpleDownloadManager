@@ -92,10 +92,16 @@ assert.equal(
   'Firefox should not intercept redirect responses even when they look like attachments',
 );
 
-assert.equal(
+assert.deepEqual(
   firefoxWebRequestDownloadCandidate(details({ method: 'POST' }), defaultSettings),
-  null,
-  'non-replayable POST downloads should stay with Firefox',
+  {
+    url: 'https://downloads.example.com/movie.zip',
+    filename: 'movie.zip',
+    totalBytes: 1024,
+    incognito: false,
+    browserFallback: 'unavailable',
+  },
+  'non-replayable POST downloads should be captured without browser replay fallback',
 );
 
 assert.equal(
@@ -210,4 +216,91 @@ assert.deepEqual(
     incognito: false,
   },
   'Firefox attachment responses should be intercepted even when the MIME type is unknown',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://canvas.instructure.com/files/569/download?download_frd=1&verifier=c6Hd',
+      type: 'xmlhttprequest',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="lecture.pdf"' },
+        { name: 'Content-Length', value: '4096' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://canvas.instructure.com/files/569/download?download_frd=1&verifier=c6Hd',
+    filename: 'lecture.pdf',
+    totalBytes: 4096,
+    incognito: false,
+  },
+  'Firefox should intercept Canvas/Instructure attachment downloads delivered through XHR requests',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://canvas.school.edu/files/569/download?download_frd=1&verifier=c6Hd',
+      type: 'other',
+      responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://canvas.school.edu/files/569/download?download_frd=1&verifier=c6Hd',
+    filename: 'download',
+    totalBytes: undefined,
+    incognito: false,
+  },
+  'Firefox should classify explicit Canvas download URLs even on custom Canvas domains',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/course/report-final.docx?token=abc',
+      type: 'object',
+      responseHeaders: [],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://downloads.example.com/course/report-final.docx?token=abc',
+    filename: 'report-final.docx',
+    totalBytes: undefined,
+    incognito: false,
+  },
+  'Firefox should classify strong filename-extension download URLs beyond frame navigation',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://canvas.instructure.com/api/v1/courses/1/files',
+      type: 'xmlhttprequest',
+      responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not classify normal Canvas API JSON requests as downloads',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://cdn.example.com/signed',
+      statusCode: 302,
+      type: 'other',
+      responseHeaders: [
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Location', value: 'https://cdn.example.com/file.zip?Signature=abc&Expires=123' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should wait for the final signed redirect response before classifying a download',
 );
