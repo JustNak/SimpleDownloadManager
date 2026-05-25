@@ -315,16 +315,20 @@ export function classifyBrowserDownloadIntent(
   const hasStrongDownloadFilename = !isInlineContentType(contentType)
     && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
 
+  if (isExplicitDownloadUrl(url)) {
+    return { action: 'capture', reason: 'explicit_download_url' };
+  }
+
+  if (isHighConfidenceAppTrafficProbe(item, url, filename, contentType)) {
+    return { action: 'ignore', reason: 'app_traffic_probe' };
+  }
+
   if (hasAttachmentDisposition) {
     return { action: 'capture', reason: 'attachment_disposition' };
   }
 
   if (hasStrongDownloadFilename) {
     return { action: 'capture', reason: 'strong_filename' };
-  }
-
-  if (isExplicitDownloadUrl(url)) {
-    return { action: 'capture', reason: 'explicit_download_url' };
   }
 
   if (isLikelyAppTrafficPayload(item, url, filename, contentType)) {
@@ -677,6 +681,32 @@ function isLikelyAppTrafficPayload(
   }
 
   return isLikelyApplicationTrafficUrl(url) || isTinyGenericPayload(item, url, filename);
+}
+
+function isHighConfidenceAppTrafficProbe(
+  item: BrowserDownloadPolicyItem,
+  url: string,
+  filename: string | undefined,
+  contentType: string | undefined,
+): boolean {
+  const payloadFilename = filename ?? basenameFromUrl(url);
+  if (!isGenericAppPayloadFilename(payloadFilename)) {
+    return false;
+  }
+
+  if (isLikelyApplicationTrafficUrl(url)) {
+    return true;
+  }
+
+  const byteLength = browserDownloadByteLength(item);
+  return byteLength !== undefined
+    && byteLength <= 1024
+    && (
+      !contentType
+      || isStructuredApiMimeType(contentType)
+      || AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES.has(contentType)
+      || contentType.startsWith('text/')
+    );
 }
 
 function isStructuredApiMimeType(contentType: string): boolean {

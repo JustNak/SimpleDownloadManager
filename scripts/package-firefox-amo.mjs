@@ -89,9 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Protected Downloads now forwards browser session headers for eligible Firefox downloads without a strict site allowlist.',
-    '- Added Firefox cookie fallback for session-protected downloads when request headers omit Cookie.',
-    '- Removed the Protected Download Sites allowlist; use Excluded Sites to keep downloads in Firefox.',
+    '- Tightened Firefox auto-capture to ignore site session/API probes such as YouTube Music verify_session.',
+    '- Kept Protected Downloads session-header forwarding for eligible real downloads.',
+    '- Preserved Canvas/Instructure and attachment download capture while reducing false prompts.',
   ].join('\n');
 }
 
@@ -166,9 +166,9 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Protected Downloads now uses browser-session forwarding for eligible Firefox browser downloads when enabled; Excluded Sites remains the per-site opt-out.
-- The Firefox cookies permission is used only as a fallback when webRequest does not expose Cookie for the same download URL; cookie values are sent only to the local native desktop app and are not stored.
-- Session headers remain memory-only, sanitized, capped, and short-lived; the previous Protected Download Sites allowlist UI was removed.
+- Firefox auto-capture now separates download intent from Protected Downloads auth forwarding. Generic app/session traffic such as YouTube Music verify_session, youtubei payloads, json.txt, player, version, and zero-byte probes is ignored before prompting.
+- Real downloads still capture when Firefox exposes strong evidence: Content-Disposition attachment, strong file extensions, or known explicit download URLs such as Canvas/Instructure file downloads.
+- Protected Downloads behavior is unchanged after capture: sanitized, memory-only browser session headers may be forwarded only to the local native desktop app for eligible HTTP(S) browser downloads.
 `;
 }
 

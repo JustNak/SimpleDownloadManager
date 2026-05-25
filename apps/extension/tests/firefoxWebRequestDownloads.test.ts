@@ -333,6 +333,38 @@ assert.equal(
 assert.equal(
   firefoxWebRequestDownloadCandidate(
     details({
+      url: 'https://music.youtube.com/verify_session',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="json.txt"' },
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Content-Length', value: '0' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should ignore zero-byte YouTube Music session attachments with generic JSON filenames',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://music.youtube.com/verify_session',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="json.txt"' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should ignore YouTube Music session attachments even when size and MIME metadata are missing',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
       url: 'https://canvas.instructure.com/api/v1/courses/1/files',
       type: 'xmlhttprequest',
       responseHeaders: [{ name: 'Content-Type', value: 'application/x-protobuf' }],

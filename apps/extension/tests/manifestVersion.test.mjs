@@ -33,7 +33,7 @@ const buildScript = await readFile(
 assert.equal(firefoxManifest.manifest_version, 2);
 assert.equal(
   extensionPackage.version,
-  '1.0.8',
+  '1.0.9',
   'extension package version should remain on its own release version even when the desktop app is bumped',
 );
 assert.equal(firefoxManifest.version_name, extensionPackage.version);

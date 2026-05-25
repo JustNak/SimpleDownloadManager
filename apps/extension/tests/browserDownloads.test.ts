@@ -177,6 +177,17 @@ async function main() {
       {
         url: 'https://music.youtube.com/verify_session',
         filename: 'C:\\Users\\Me\\Downloads\\json.txt',
+      },
+      defaultSettings,
+    ),
+    false,
+    'YouTube Music session verification browser downloads without size or MIME metadata should not open a prompt',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://music.youtube.com/verify_session',
+        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
         mime: 'application/json',
         totalBytes: 0,
         fileSize: 0,

@@ -79,10 +79,10 @@ assert.equal('support_url' in listingMetadata, false, 'metadata should only use 
 assert.equal(listingMetadata.requires_payment, false);
 assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
-assert.match(listingMetadata.version.release_notes['en-US'], /browser session headers/);
-assert.match(listingMetadata.version.release_notes['en-US'], /cookie fallback/);
-assert.match(listingMetadata.version.approval_notes, /Excluded Sites/);
-assert.match(listingMetadata.version.approval_notes, /not stored/);
+assert.match(listingMetadata.version.release_notes['en-US'], /site session\/API probes/);
+assert.match(listingMetadata.version.release_notes['en-US'], /Protected Downloads session-header forwarding/);
+assert.match(listingMetadata.version.approval_notes, /download intent/);
+assert.match(listingMetadata.version.approval_notes, /local native desktop app/);
 
 const privacyPolicy = createFirefoxAmoPrivacyPolicy();
 assert.match(privacyPolicy, /Simple Download Manager Firefox Extension Privacy Policy/);
@@ -90,16 +90,15 @@ assert.match(privacyPolicy, /local native desktop app/);
 assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
-assert.match(reviewerNotes, /browser-session forwarding/);
-assert.match(reviewerNotes, /Excluded Sites/);
+assert.match(reviewerNotes, /download intent/);
+assert.match(reviewerNotes, /YouTube Music verify_session/);
 assert.match(reviewerNotes, /local native desktop app/);
-assert.match(reviewerNotes, /cookies permission/);
 assert.match(reviewerNotes, /Protected Downloads/);
 
 const releaseNotes = createFirefoxAmoReleaseNotes();
-assert.match(releaseNotes, /^- Protected Downloads now forwards browser session headers/m);
-assert.match(releaseNotes, /^- Added Firefox cookie fallback/m);
-assert.match(releaseNotes, /^- Removed the Protected Download Sites allowlist/m);
+assert.match(releaseNotes, /^- Tightened Firefox auto-capture/m);
+assert.match(releaseNotes, /^- Kept Protected Downloads session-header forwarding/m);
+assert.match(releaseNotes, /^- Preserved Canvas\/Instructure/m);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);
