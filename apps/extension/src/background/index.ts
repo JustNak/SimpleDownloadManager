@@ -730,7 +730,9 @@ function registerHandoffAuthHeaderCapture(): void {
 
   const listener = (details: HandoffAuthRequestDetails): void => {
     captureHandoffAuthHeaders(details, cachedExtensionSettings ?? defaultExtensionSettings);
-    void getCachedExtensionSettings();
+    void getCachedExtensionSettings().then((settings) => {
+      captureHandoffAuthHeaders(details, settings);
+    });
   };
   const filter = {
     urls: ['http://*/*', 'https://*/*'],

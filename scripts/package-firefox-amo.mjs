@@ -89,9 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Fixed false download prompts from Telegram Web version checks and YouTube Music API responses.',
-    '- Improved Canvas/Instructure/canvadocs protected-download capture for Firefox object/frame requests.',
-    '- Blob/data capture now requires an explicit page download action while real attachments still capture normally.',
+    '- Reduced false prompts from YouTube Music session/API traffic and Telegram Web version checks.',
+    '- Kept capture limited to clear download intent: attachments, strong file names, explicit page/blob downloads, and Canvas/Instructure downloads.',
+    '- Improved Firefox protected-download handoff for startup and canvadocs object/frame requests.',
   ].join('\n');
 }
 
@@ -166,9 +166,9 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Added false-positive guards for Telegram Web /k/version and YouTube /youtubei/ browser-created or Firefox webRequest downloads.
-- Expanded Protected Downloads header capture to Firefox object requests and built-in Instructure/canvadocs hosts.
-- Kept blob/data capture behind explicit download anchors while preserving attachment, filename, MIME, and Canvas download classification.
+- Replaced broad MIME-driven capture with intent-first classification: Content-Disposition attachments, strong file names/URLs, explicit page/blob downloads, and Canvas/Instructure download URLs.
+- Ignored weak app/API traffic such as JSON/protobuf, octet-stream-only responses, tiny generic files like json.txt/version/player, redirects, Firefox .xpi packages, and other-extension downloads.
+- Updated Firefox protected-download handling to cancel only classified downloads while preserving startup, object/frame, and canvadocs auth handoff.
 `;
 }
 

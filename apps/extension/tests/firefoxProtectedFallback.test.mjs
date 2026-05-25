@@ -45,3 +45,8 @@ assert.match(
   /types: \['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'\]/,
   'protected-download header capture should include object requests used by embedded Canvas/canvadocs PDFs',
 );
+assert.match(
+  captureSource,
+  /captureHandoffAuthHeaders\(details, cachedExtensionSettings \?\? defaultExtensionSettings\);[\s\S]*getCachedExtensionSettings\(\)\.then\(\(settings\) => \{[\s\S]*captureHandoffAuthHeaders\(details, settings\);/,
+  'startup protected-download header capture should re-run with loaded user settings before Firefox cancels classified downloads',
+);

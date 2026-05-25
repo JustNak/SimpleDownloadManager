@@ -81,8 +81,8 @@ assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
 assert.match(listingMetadata.version.release_notes['en-US'], /YouTube Music/);
 assert.match(listingMetadata.version.release_notes['en-US'], /Telegram Web/);
-assert.match(listingMetadata.version.approval_notes, /Telegram Web \/k\/version/);
-assert.match(listingMetadata.version.approval_notes, /Instructure\/canvadocs/);
+assert.match(listingMetadata.version.approval_notes, /intent-first classification/);
+assert.match(listingMetadata.version.approval_notes, /canvadocs auth handoff/);
 
 const privacyPolicy = createFirefoxAmoPrivacyPolicy();
 assert.match(privacyPolicy, /Simple Download Manager Firefox Extension Privacy Policy/);
@@ -90,16 +90,15 @@ assert.match(privacyPolicy, /local native desktop app/);
 assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
-assert.match(reviewerNotes, /Telegram Web \/k\/version/);
-assert.match(reviewerNotes, /YouTube \/youtubei\//);
-assert.match(reviewerNotes, /Firefox object requests/);
-assert.match(reviewerNotes, /blob\/data capture/);
-assert.match(reviewerNotes, /Canvas download classification/);
+assert.match(reviewerNotes, /intent-first classification/);
+assert.match(reviewerNotes, /json\.txt\/version\/player/);
+assert.match(reviewerNotes, /other-extension downloads/);
+assert.match(reviewerNotes, /startup, object\/frame, and canvadocs auth handoff/);
 
 const releaseNotes = createFirefoxAmoReleaseNotes();
-assert.match(releaseNotes, /^- Fixed false download prompts/m);
-assert.match(releaseNotes, /^- Improved Canvas\/Instructure\/canvadocs/m);
-assert.match(releaseNotes, /^- Blob\/data capture/m);
+assert.match(releaseNotes, /^- Reduced false prompts/m);
+assert.match(releaseNotes, /^- Kept capture limited to clear download intent/m);
+assert.match(releaseNotes, /^- Improved Firefox protected-download handoff/m);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);
