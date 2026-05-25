@@ -16,7 +16,24 @@ export type HandoffAuthRequestDetails = {
   url: string;
   method?: string;
   incognito?: boolean;
+  cookieStoreId?: string;
   requestHeaders?: HandoffAuthRequestHeader[];
+};
+
+export type HandoffAuthCookie = {
+  name: string;
+  value: string;
+};
+
+export type HandoffAuthCookieLookup = (details: {
+  url: string;
+  storeId?: string;
+}) => Promise<HandoffAuthCookie[]>;
+
+export type BrowserHandoffAuthFallbackOptions = {
+  now?: number;
+  cookieLookup?: HandoffAuthCookieLookup;
+  userAgent?: string;
 };
 
 type CapturedAuth = {
@@ -158,6 +175,51 @@ export function resolveBrowserHandoffAuth(
   now = Date.now(),
 ): BrowserHandoffAuthResolution {
   const handoffAuth = takeCapturedHandoffAuth(details, settings, now);
+  return handoffAuth ? { status: 'ready', handoffAuth } : { status: 'ready' };
+}
+
+export async function resolveBrowserHandoffAuthWithCookieFallback(
+  details: Pick<HandoffAuthRequestDetails, 'requestId' | 'url' | 'incognito' | 'cookieStoreId'>,
+  settings: ExtensionIntegrationSettings,
+  options: BrowserHandoffAuthFallbackOptions = {},
+): Promise<BrowserHandoffAuthResolution> {
+  const now = options.now ?? Date.now();
+  const capturedAuth = takeCapturedHandoffAuth(details, settings, now);
+  if (!isProtectedDownloadAuthAllowedForUrl(details.url, settings)) {
+    return capturedAuth ? { status: 'ready', handoffAuth: capturedAuth } : { status: 'ready' };
+  }
+
+  const headers = [...(capturedAuth?.headers ?? [])];
+  const hasCapturedCookie = hasHeader(headers, 'cookie');
+  const cookieLookup = options.cookieLookup;
+  const shouldTryCookieFallback = !hasCapturedCookie && cookieLookup;
+  let cookieLookupFailed = false;
+
+  if (shouldTryCookieFallback) {
+    try {
+      const cookieHeader = buildCookieHeader(
+        await cookieLookup({
+          url: details.url,
+          ...(details.cookieStoreId ? { storeId: details.cookieStoreId } : {}),
+        }),
+      );
+      if (cookieHeader) {
+        headers.push({ name: 'Cookie', value: cookieHeader });
+      }
+    } catch {
+      cookieLookupFailed = true;
+    }
+  }
+
+  if (headers.length > 0 && options.userAgent && !hasHeader(headers, 'user-agent')) {
+    headers.push({ name: 'User-Agent', value: options.userAgent });
+  }
+
+  if (!headers.length || (!capturedAuth && cookieLookupFailed)) {
+    return { status: 'ready' };
+  }
+
+  const handoffAuth = buildHandoffAuthForUrl(details.url, headers, settings);
   return handoffAuth ? { status: 'ready', handoffAuth } : { status: 'ready' };
 }
 
@@ -328,6 +390,18 @@ function hasBrowserSessionHeader(headers: HandoffAuthRequestHeader[] | undefined
     const normalized = header.name.trim().toLowerCase();
     return normalized === 'cookie' || normalized === 'authorization';
   });
+}
+
+function hasHeader(headers: HandoffAuthRequestHeader[] | undefined, name: string): boolean {
+  const normalizedName = name.trim().toLowerCase();
+  return (headers ?? []).some((header) => header.name.trim().toLowerCase() === normalizedName);
+}
+
+function buildCookieHeader(cookies: HandoffAuthCookie[]): string | undefined {
+  const pairs = cookies
+    .filter((cookie) => cookie.name)
+    .map((cookie) => `${cookie.name}=${cookie.value}`);
+  return pairs.length > 0 ? pairs.join('; ') : undefined;
 }
 
 function normalizeUrlKey(url: string): string {

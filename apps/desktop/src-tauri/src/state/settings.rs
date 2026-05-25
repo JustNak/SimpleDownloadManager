@@ -19,8 +19,7 @@ pub(super) fn normalize_extension_settings(settings: &mut ExtensionIntegrationSe
         settings.listen_port = default_extension_listen_port();
     }
 
-    settings.excluded_hosts =
-        migrate_legacy_default_excluded_hosts(normalize_host_patterns(&settings.excluded_hosts));
+    settings.excluded_hosts = normalize_host_patterns(&settings.excluded_hosts);
     settings.authenticated_handoff_hosts =
         normalize_host_patterns(&settings.authenticated_handoff_hosts);
     settings.protected_download_auth_scope = normalize_protected_download_auth_scope(settings);
@@ -54,16 +53,11 @@ fn normalize_protected_download_auth_scope(
     }
 
     match settings.protected_download_auth_scope {
-        ProtectedDownloadAuthScope::Off => ProtectedDownloadAuthScope::LegacyGlobal,
-        scope => scope,
+        ProtectedDownloadAuthScope::Off => ProtectedDownloadAuthScope::Off,
+        ProtectedDownloadAuthScope::Allowlist | ProtectedDownloadAuthScope::LegacyGlobal => {
+            ProtectedDownloadAuthScope::LegacyGlobal
+        }
     }
-}
-
-fn migrate_legacy_default_excluded_hosts(hosts: Vec<String>) -> Vec<String> {
-    hosts
-        .into_iter()
-        .filter(|host| host != "web.telegram.org")
-        .collect()
 }
 
 pub(super) fn normalize_host_patterns(hosts: &[String]) -> Vec<String> {

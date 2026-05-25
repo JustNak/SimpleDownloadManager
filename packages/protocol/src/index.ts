@@ -8,8 +8,8 @@ export const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH = 64;
 export const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH = 16 * 1024;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
-export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = [] as const;
-export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = ['gofile.io', '*.instructure.com'] as const;
+export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
+export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = [] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
 export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
@@ -269,15 +269,12 @@ export function isProtectedDownloadAuthAllowedForUrl(
   settings: Pick<
     ExtensionIntegrationSettings,
     'authenticatedHandoffEnabled' | 'protectedDownloadAuthScope' | 'authenticatedHandoffHosts'
-  >,
+  > & Partial<Pick<ExtensionIntegrationSettings, 'excludedHosts'>>,
 ): boolean {
   if (!settings.authenticatedHandoffEnabled) return false;
-  if (settings.protectedDownloadAuthScope === 'legacy_global') return true;
-  if (settings.protectedDownloadAuthScope !== 'allowlist') return false;
-  return isUrlHostExcludedByPatterns(url, [
-    ...DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS,
-    ...settings.authenticatedHandoffHosts,
-  ]);
+  if (settings.protectedDownloadAuthScope === 'off') return false;
+  if (isUrlHostExcludedByPatterns(url, settings.excludedHosts ?? [])) return false;
+  return true;
 }
 
 function wildcardHostPatternRegex(pattern: string): RegExp {

@@ -3,6 +3,11 @@ import { createDefaultExtensionIntegrationSettings } from '../src/defaultSetting
 
 assert.deepEqual(
   createDefaultExtensionIntegrationSettings().authenticatedHandoffHosts,
-  ['gofile.io', '*.instructure.com'],
-  'desktop default extension settings should enable protected handoff coverage for Instructure-hosted Canvas files',
+  [],
+  'desktop default extension settings should not depend on a protected-download host allowlist',
+);
+assert.equal(
+  createDefaultExtensionIntegrationSettings().protectedDownloadAuthScope,
+  'legacy_global',
+  'desktop default extension settings should use global Protected Downloads when enabled',
 );

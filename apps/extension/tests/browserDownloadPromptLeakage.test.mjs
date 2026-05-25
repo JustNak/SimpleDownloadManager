@@ -79,8 +79,8 @@ assert.doesNotMatch(
 );
 assert.match(
   handoffSource,
-  /const authResolution = resolveBrowserHandoffAuth\(handoffDetails, settings\);/,
-  'Chrome-style browser download handoffs should resolve captured auth before queuing',
+  /const authResolution = await resolveBrowserHandoffAuthWithCookieFallback\(handoffDetails, settings, \{[\s\S]*?cookieLookup: getCookieLookup\(\),[\s\S]*?userAgent: browserUserAgent\(\),[\s\S]*?\}\);/,
+  'browser download handoffs should resolve captured auth and Firefox cookie fallback before queuing',
 );
 assert.doesNotMatch(
   handoffSource,

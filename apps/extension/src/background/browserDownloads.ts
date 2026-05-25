@@ -84,6 +84,7 @@ export type FirefoxWebRequestDownloadDetails = {
   statusLine?: string;
   responseHeaders?: FirefoxWebRequestHeader[];
   incognito?: boolean;
+  cookieStoreId?: string;
 };
 export type FirefoxWebRequestDownloadCandidate = {
   requestId?: string;
@@ -91,6 +92,7 @@ export type FirefoxWebRequestDownloadCandidate = {
   filename?: string;
   totalBytes?: number;
   incognito: boolean;
+  cookieStoreId?: string;
   browserFallback?: BrowserFallback;
 };
 export type BrowserDownloadHandoffMetadata = {
@@ -384,6 +386,7 @@ export function firefoxWebRequestDownloadCandidate(
     filename,
     totalBytes,
     incognito: details.incognito ?? false,
+    ...(details.cookieStoreId ? { cookieStoreId: details.cookieStoreId } : {}),
     ...(isReplayableRequestMethod(details.method) ? {} : { browserFallback: 'unavailable' as const }),
   };
 }

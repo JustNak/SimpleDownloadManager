@@ -8,7 +8,7 @@ const backgroundSource = await readFile(path.join(repoRoot, 'apps/extension/src/
 const handlerStart = backgroundSource.indexOf('async function handleFirefoxWebRequestHeadersReceived');
 const handlerEnd = backgroundSource.indexOf('function markFirefoxWebRequestBypass', handlerStart);
 const captureStart = backgroundSource.indexOf('function registerHandoffAuthHeaderCapture');
-const captureEnd = backgroundSource.indexOf('function registerBrowserBlobDownloadBridge', captureStart);
+const captureEnd = backgroundSource.indexOf('async function handleFirefoxWebRequestHeadersReceived', captureStart);
 
 assert.notEqual(handlerStart, -1, 'Firefox webRequest headers handler should exist');
 assert.notEqual(handlerEnd, -1, 'Firefox webRequest handler should be sliceable');

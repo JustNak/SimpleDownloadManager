@@ -49,6 +49,18 @@ assert.deepEqual(
   'Firefox attachment responses should be intercepted before the browser Save As dialog',
 );
 
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(details({ cookieStoreId: 'firefox-container-1' }), defaultSettings),
+  {
+    url: 'https://downloads.example.com/movie.zip',
+    filename: 'movie.zip',
+    totalBytes: 1024,
+    incognito: false,
+    cookieStoreId: 'firefox-container-1',
+  },
+  'Firefox webRequest candidates should preserve cookieStoreId for container-aware cookie fallback',
+);
+
 assert.equal(
   firefoxWebRequestDownloadCandidate(
     details({

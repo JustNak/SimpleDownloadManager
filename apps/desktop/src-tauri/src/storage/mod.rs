@@ -432,8 +432,8 @@ pub enum DownloadPerformanceMode {
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedDownloadAuthScope {
     Off,
-    #[default]
     Allowlist,
+    #[default]
     LegacyGlobal,
 }
 
@@ -635,15 +635,15 @@ pub struct ExtensionIntegrationSettings {
     pub authenticated_handoff_hosts: Vec<String>,
 }
 
-const DEFAULT_EXCLUDED_HOSTS: &[&str] = &[];
-const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &["gofile.io", "*.instructure.com"];
+const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
+const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &[];
 
 fn default_authenticated_handoff_enabled() -> bool {
     true
 }
 
 fn default_protected_download_auth_scope() -> ProtectedDownloadAuthScope {
-    ProtectedDownloadAuthScope::Allowlist
+    ProtectedDownloadAuthScope::LegacyGlobal
 }
 
 fn default_authenticated_handoff_hosts() -> Vec<String> {
@@ -2234,14 +2234,17 @@ mod tests {
         assert!(settings.extension_integration.authenticated_handoff_enabled);
         assert_eq!(
             settings.extension_integration.protected_download_auth_scope,
-            ProtectedDownloadAuthScope::Allowlist
+            ProtectedDownloadAuthScope::LegacyGlobal
         );
         assert_eq!(settings.extension_integration.listen_port, 1420);
-        assert!(settings.extension_integration.excluded_hosts.is_empty());
         assert_eq!(
-            settings.extension_integration.authenticated_handoff_hosts,
-            vec!["gofile.io".to_string(), "*.instructure.com".to_string()]
+            settings.extension_integration.excluded_hosts,
+            vec!["web.telegram.org".to_string()]
         );
+        assert!(settings
+            .extension_integration
+            .authenticated_handoff_hosts
+            .is_empty());
         assert!(settings
             .extension_integration
             .ignored_file_extensions
@@ -2289,21 +2292,18 @@ mod tests {
                 .settings
                 .extension_integration
                 .protected_download_auth_scope,
-            ProtectedDownloadAuthScope::Allowlist
+            ProtectedDownloadAuthScope::LegacyGlobal
         );
         assert_eq!(state.settings.extension_integration.listen_port, 1420);
+        assert_eq!(
+            state.settings.extension_integration.excluded_hosts,
+            vec!["web.telegram.org".to_string()]
+        );
         assert!(state
             .settings
             .extension_integration
-            .excluded_hosts
+            .authenticated_handoff_hosts
             .is_empty());
-        assert_eq!(
-            state
-                .settings
-                .extension_integration
-                .authenticated_handoff_hosts,
-            vec!["gofile.io".to_string(), "*.instructure.com".to_string()]
-        );
         assert!(state
             .settings
             .extension_integration

@@ -33,7 +33,7 @@ const buildScript = await readFile(
 assert.equal(firefoxManifest.manifest_version, 2);
 assert.equal(
   extensionPackage.version,
-  '1.0.6',
+  '1.0.7',
   'extension package version should remain on its own release version even when the desktop app is bumped',
 );
 assert.equal(firefoxManifest.version_name, extensionPackage.version);
@@ -65,7 +65,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   firefoxManifest.permissions,
-  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
+  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', 'cookies', '<all_urls>'],
 );
 assert.deepEqual(
   chromiumManifest.permissions,
@@ -77,9 +77,15 @@ assert.deepEqual(
   ['<all_urls>'],
   'Chromium webRequest header observation requires host permissions for download origins',
 );
+assert.equal('content_scripts' in firefoxManifest, false, 'Firefox build should not inject page-managed download content scripts');
+assert.equal('content_scripts' in chromiumManifest, false, 'Chromium build should not inject page-managed download content scripts');
+assert.equal('web_accessible_resources' in firefoxManifest, false, 'Firefox build should not expose page-managed download hooks');
+assert.equal('web_accessible_resources' in chromiumManifest, false, 'Chromium build should not expose page-managed download hooks');
 
 assert.match(
   buildScript,
   /rm\(outdir,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/,
   'extension build should clear each target output directory before writing release ZIP contents',
 );
+assert.doesNotMatch(buildScript, /blobDownloadInterceptor/, 'extension build should not bundle the removed page-managed download interceptor');
+assert.doesNotMatch(buildScript, /blobDownloadPageHook/, 'extension build should not bundle the removed page hook');

@@ -12,21 +12,21 @@ const extensionDefaultsSource = await readFile(path.join(repoRoot, 'apps/extensi
 const storageSource = await readFile(path.join(repoRoot, 'apps/desktop/src-tauri/src/storage/mod.rs'), 'utf8');
 
 assert.match(protocolSource, /export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;/, 'protocol should own the extension listen-port default');
-assert.match(protocolSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \[\] as const;/, 'protocol should own the extension excluded-host default');
-assert.match(protocolSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io', '\*\.instructure\.com'\] as const;/, 'protocol should own the built-in protected-download host default');
+assert.match(protocolSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \['web\.telegram\.org'\] as const;/, 'protocol should own the extension excluded-host default');
+assert.match(protocolSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \[\] as const;/, 'protocol should own the now-empty protected-download host default');
 
 assert.match(desktopDefaultsSource, /export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;/, 'desktop preview defaults should stay aligned with the protocol listen-port default');
-assert.match(desktopDefaultsSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \[\] as const;/, 'desktop preview defaults should stay aligned with Rust and extension excluded-host defaults');
-assert.match(desktopDefaultsSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \['gofile\.io', '\*\.instructure\.com'\] as const;/, 'desktop preview defaults should stay aligned with protected-download host defaults');
+assert.match(desktopDefaultsSource, /export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = \['web\.telegram\.org'\] as const;/, 'desktop preview defaults should stay aligned with Rust and extension excluded-host defaults');
+assert.match(desktopDefaultsSource, /export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = \[\] as const;/, 'desktop preview defaults should stay aligned with protected-download host defaults');
 assert.match(desktopDefaultsSource, /excludedHosts: \[\.\.\.DEFAULT_EXTENSION_EXCLUDED_HOSTS\]/, 'desktop preview settings should use the centralized desktop excluded-host default');
 assert.match(desktopDefaultsSource, /authenticatedHandoffEnabled: true/, 'desktop preview defaults should enable Protected Downloads');
-assert.match(desktopDefaultsSource, /protectedDownloadAuthScope: 'allowlist'/, 'desktop preview defaults should use allowlist Protected Downloads');
+assert.match(desktopDefaultsSource, /protectedDownloadAuthScope: 'legacy_global'/, 'desktop preview defaults should use global Protected Downloads');
 assert.match(desktopDefaultsSource, /authenticatedHandoffHosts: \[\.\.\.DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS\]/, 'desktop preview defaults should include built-in protected-download hosts');
 
 assert.match(extensionDefaultsSource, /DEFAULT_EXTENSION_LISTEN_PORT/, 'extension defaults should import the listen-port default from protocol');
 assert.match(extensionDefaultsSource, /DEFAULT_EXTENSION_EXCLUDED_HOSTS/, 'extension defaults should import excluded-host defaults from protocol');
 assert.match(extensionDefaultsSource, /DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS/, 'extension defaults should import protected-download host defaults from protocol');
 
-assert.match(storageSource, /const DEFAULT_EXCLUDED_HOSTS: &\[&str\] = &\[\];/, 'Rust settings defaults should include the same excluded host as TypeScript defaults');
-assert.match(storageSource, /const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &\[&str\] = &\["gofile\.io", "\*\.instructure\.com"\];/, 'Rust settings defaults should include the built-in protected-download hosts');
+assert.match(storageSource, /const DEFAULT_EXCLUDED_HOSTS: &\[&str\] = &\["web\.telegram\.org"\];/, 'Rust settings defaults should include the same excluded host as TypeScript defaults');
+assert.match(storageSource, /const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &\[&str\] = &\[\];/, 'Rust settings defaults should keep the protected-download host list empty');
 assert.match(storageSource, /pub fn default_extension_listen_port\(\) -> u32 \{\s*1420\s*\}/, 'Rust settings defaults should use the same listen port as protocol');

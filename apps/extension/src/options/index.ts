@@ -23,9 +23,6 @@ const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-ho
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
 const authHandoffToggle = document.querySelector<HTMLInputElement>('#auth-handoff-toggle');
-const protectedHostInput = document.querySelector<HTMLInputElement>('#protected-host-input');
-const addProtectedHostButton = document.querySelector<HTMLButtonElement>('#add-protected-host-button');
-const protectedHosts = document.querySelector<HTMLDivElement>('#protected-hosts');
 const saveState = document.querySelector<HTMLDivElement>('#save-state');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh-button');
 
@@ -53,14 +50,9 @@ function renderState(state: PopupStateResponse) {
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
   if (authHandoffToggle) authHandoffToggle.checked = settings.authenticatedHandoffEnabled;
-  const protectedDownloadsEnabled = isProtectedDownloadsEnabled(settings);
   renderIgnoredExtensions(settings.ignoredFileExtensions ?? []);
   renderExcludedHosts(settings.excludedHosts ?? []);
-  renderProtectedHosts(
-    settings.authenticatedHandoffHosts ?? [],
-    isSaving || !settings.enabled || !protectedDownloadsEnabled,
-  );
-  setControlsDisabled(isSaving, settings.enabled, protectedDownloadsEnabled);
+  setControlsDisabled(isSaving, settings.enabled);
 
   if (saveState && !isSaving) {
     saveState.textContent = state.lastError
@@ -135,31 +127,6 @@ function renderExcludedHosts(hosts: string[]) {
   }
 }
 
-function renderProtectedHosts(hosts: string[], disabled: boolean) {
-  if (!protectedHosts) return;
-  protectedHosts.textContent = '';
-
-  if (hosts.length === 0) {
-    protectedHosts.append(emptyState('No protected download sites.'));
-    return;
-  }
-
-  for (const host of hosts) {
-    protectedHosts.append(
-      removableChip(host, `Remove ${host}`, () => {
-        const nextHosts = currentState?.extensionSettings?.authenticatedHandoffHosts.filter(
-          (candidate) => candidate !== host,
-        ) ?? [];
-        void updateSettings({
-          authenticatedHandoffEnabled: true,
-          protectedDownloadAuthScope: 'allowlist',
-          authenticatedHandoffHosts: nextHosts,
-        });
-      }, disabled),
-    );
-  }
-}
-
 function removableChip(
   label: string,
   removeLabel: string,
@@ -189,7 +156,7 @@ function emptyState(text: string): HTMLDivElement {
   return empty;
 }
 
-function setControlsDisabled(saving: boolean, extensionEnabled: boolean, protectedDownloadsEnabled: boolean) {
+function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
   if (enabledToggle) enabledToggle.disabled = saving;
   if (refreshButton) refreshButton.disabled = saving;
 
@@ -205,17 +172,9 @@ function setControlsDisabled(saving: boolean, extensionEnabled: boolean, protect
     addHostButton,
     authHandoffToggle,
   ];
-  const protectedDownloadControls = [
-    protectedHostInput,
-    addProtectedHostButton,
-  ];
 
   for (const control of extensionControls) {
     if (control) control.disabled = saving || !extensionEnabled;
-  }
-
-  for (const control of protectedDownloadControls) {
-    if (control) control.disabled = saving || !extensionEnabled || !protectedDownloadsEnabled;
   }
 }
 
@@ -230,7 +189,7 @@ async function updateSettings(update: Partial<ExtensionIntegrationSettings>) {
   if (!settings) return;
 
   isSaving = true;
-  setControlsDisabled(true, settings.enabled, isProtectedDownloadsEnabled(settings));
+  setControlsDisabled(true, settings.enabled);
   if (saveState) saveState.textContent = 'Saving settings...';
 
   try {
@@ -278,7 +237,7 @@ badgeToggle?.addEventListener('change', () => {
 authHandoffToggle?.addEventListener('change', () => {
   void updateSettings({
     authenticatedHandoffEnabled: authHandoffToggle.checked,
-    protectedDownloadAuthScope: authHandoffToggle.checked ? 'allowlist' : 'off',
+    protectedDownloadAuthScope: authHandoffToggle.checked ? 'legacy_global' : 'off',
   });
 });
 
@@ -301,17 +260,6 @@ excludedHostInput?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
     addExcludedHost();
-  }
-});
-
-addProtectedHostButton?.addEventListener('click', () => {
-  addProtectedHost();
-});
-
-protectedHostInput?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    addProtectedHost();
   }
 });
 
@@ -349,24 +297,6 @@ function addExcludedHost() {
   void updateSettings({ excludedHosts: [...hosts, host] });
 }
 
-function addProtectedHost() {
-  const host = normalizeHost(protectedHostInput?.value ?? '');
-  if (!host) return;
-
-  const hosts = currentState?.extensionSettings?.authenticatedHandoffHosts ?? [];
-  if (hosts.includes(host)) {
-    if (protectedHostInput) protectedHostInput.value = '';
-    return;
-  }
-
-  if (protectedHostInput) protectedHostInput.value = '';
-  void updateSettings({
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'allowlist',
-    authenticatedHandoffHosts: [...hosts, host],
-  });
-}
-
 function parseFileExtensions(value: string): string[] {
   return Array.from(
     new Set(
@@ -396,17 +326,10 @@ function normalizeListenPort(value: string): number {
   return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_EXTENSION_LISTEN_PORT;
 }
 
-function isProtectedDownloadsEnabled(settings: ExtensionIntegrationSettings): boolean {
-  return settings.authenticatedHandoffEnabled && settings.protectedDownloadAuthScope !== 'off';
-}
-
 async function refreshState() {
   isSaving = true;
   const extensionEnabled = currentState?.extensionSettings?.enabled ?? true;
-  const protectedDownloadsEnabled = currentState?.extensionSettings
-    ? isProtectedDownloadsEnabled(currentState.extensionSettings)
-    : false;
-  setControlsDisabled(true, extensionEnabled, protectedDownloadsEnabled);
+  setControlsDisabled(true, extensionEnabled);
   if (saveState) saveState.textContent = 'Refreshing status...';
 
   try {

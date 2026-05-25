@@ -100,27 +100,13 @@
             <div class="setting-row switch-row">
               <div>
                 <div class="label">Protected Downloads</div>
-                <div class="description">Forward memory-only browser session headers for configured sites when the desktop app needs them.</div>
+                <div class="description">Forward memory-only browser session headers for browser downloads when the desktop app needs them.</div>
               </div>
               <label class="switch" for="auth-handoff-toggle" aria-label="Protected Downloads">
                 <input id="auth-handoff-toggle" type="checkbox" />
                 <span class="track"></span>
                 <span class="thumb"></span>
               </label>
-            </div>
-
-            <div class="setting-row">
-              <div>
-                <div class="label">Protected Download Sites</div>
-                <div class="description">Only these hostnames and wildcard host patterns can receive browser session headers.</div>
-              </div>
-              <div>
-                <div class="input-action">
-                  <input id="protected-host-input" type="text" placeholder="chatgpt.com or *.example.com" />
-                  <button id="add-protected-host-button" type="button" class="button primary">Add</button>
-                </div>
-                <div id="protected-hosts" class="chips"></div>
-              </div>
             </div>
           </section>
 

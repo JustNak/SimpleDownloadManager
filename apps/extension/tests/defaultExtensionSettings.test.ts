@@ -1,38 +1,40 @@
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_AUTHENTICATED_HANDOFF_HOSTS,
   DEFAULT_EXCLUDED_HOSTS,
   createDefaultExtensionSettings,
   defaultExtensionSettings,
   normalizeExtensionSettings,
 } from '../src/shared/defaultExtensionSettings.ts';
 
-assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, []);
-assert.deepEqual(defaultExtensionSettings.excludedHosts, []);
+assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, ['web.telegram.org']);
+assert.deepEqual(DEFAULT_AUTHENTICATED_HANDOFF_HOSTS, []);
+assert.deepEqual(defaultExtensionSettings.excludedHosts, ['web.telegram.org']);
 assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, true);
-assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'allowlist');
-assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, ['gofile.io', '*.instructure.com']);
-assert.deepEqual(createDefaultExtensionSettings().excludedHosts, []);
-assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'allowlist');
-assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, ['gofile.io', '*.instructure.com']);
+assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'legacy_global');
+assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, []);
+assert.deepEqual(createDefaultExtensionSettings().excludedHosts, ['web.telegram.org']);
+assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'legacy_global');
+assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, []);
 
 assert.deepEqual(
   normalizeExtensionSettings(undefined).excludedHosts,
-  [],
-  'fresh settings should not exclude Telegram Web because blob downloads are bridged by the extension',
+  ['web.telegram.org'],
+  'fresh settings should exclude Telegram Web by default because Telegram download handling is intentionally ignored',
 );
 
 assert.deepEqual(
   normalizeExtensionSettings({ excludedHosts: ['web.telegram.org'] }).excludedHosts,
-  [],
-  'old default-only Telegram exclusions should migrate away so Telegram blob downloads can be captured',
+  ['web.telegram.org'],
+  'Telegram Web exclusions should be preserved during normalization',
 );
 
 assert.deepEqual(
   normalizeExtensionSettings({
     excludedHosts: ['https://web.telegram.org/', 'WEB.TELEGRAM.ORG', 'https://example.com/path', 'https://*.Example.com/downloads'],
   }).excludedHosts,
-  ['example.com', '*.example.com'],
-  'excluded hosts should migrate the old Telegram default while preserving custom exclusions',
+  ['web.telegram.org', 'example.com', '*.example.com'],
+  'excluded hosts should preserve Telegram while normalizing custom exclusions',
 );
 
 assert.deepEqual(
@@ -72,6 +74,16 @@ assert.deepEqual(
   }).authenticatedHandoffHosts,
   ['chatgpt.com', '*.example.com'],
   'allowlisted protected-download hosts should normalize URL input, wildcard patterns, and duplicates',
+);
+
+assert.equal(
+  normalizeExtensionSettings({
+    authenticatedHandoffEnabled: true,
+    protectedDownloadAuthScope: 'allowlist',
+    authenticatedHandoffHosts: ['chatgpt.com'],
+  }).protectedDownloadAuthScope,
+  'legacy_global',
+  'legacy allowlist settings should migrate to global browser-session forwarding',
 );
 
 assert.deepEqual(

@@ -9,7 +9,6 @@ import {
 
 export const DEFAULT_EXCLUDED_HOSTS = DEFAULT_EXTENSION_EXCLUDED_HOSTS;
 export const DEFAULT_AUTHENTICATED_HANDOFF_HOSTS = DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS;
-const LEGACY_DEFAULT_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
 
 export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   enabled: true,
@@ -21,7 +20,7 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
   authenticatedHandoffEnabled: true,
-  protectedDownloadAuthScope: 'allowlist',
+  protectedDownloadAuthScope: 'legacy_global',
   authenticatedHandoffHosts: [...DEFAULT_AUTHENTICATED_HANDOFF_HOSTS],
 };
 
@@ -56,16 +55,12 @@ export function normalizeExtensionSettings(
 }
 
 function normalizeExcludedHosts(hosts: string[]): string[] {
-  const normalized = Array.from(
+  return Array.from(
     new Set(
       hosts
         .map((host) => normalizeHost(host))
         .filter(Boolean),
     ),
-  );
-
-  return normalized.filter((host) =>
-    !LEGACY_DEFAULT_EXCLUDED_HOSTS.includes(host as (typeof LEGACY_DEFAULT_EXCLUDED_HOSTS)[number])
   );
 }
 
@@ -90,11 +85,10 @@ function normalizeProtectedDownloadAuthScope(
     return 'off';
   }
 
-  if (settings?.protectedDownloadAuthScope === 'allowlist') {
-    return 'allowlist';
-  }
-
-  if (settings?.protectedDownloadAuthScope === 'legacy_global') {
+  if (
+    settings?.protectedDownloadAuthScope === 'allowlist'
+    || settings?.protectedDownloadAuthScope === 'legacy_global'
+  ) {
     return 'legacy_global';
   }
 

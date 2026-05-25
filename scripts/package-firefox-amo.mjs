@@ -89,9 +89,10 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Reduced false prompts from YouTube Music session/API traffic and Telegram Web version checks.',
-    '- Kept capture limited to clear download intent: attachments, strong file names, explicit page/blob downloads, and Canvas/Instructure downloads.',
-    '- Improved Firefox protected-download handoff for startup and canvadocs object/frame requests.',
+    '- Restored Telegram Web as a default excluded site to avoid Telegram-specific false prompts.',
+    '- Removed page-managed download interception so scripted page traffic stays in the browser.',
+    '- Kept normal browser download, Firefox attachment, protected-download, and Canvas/Instructure capture paths.',
+    '- Updated Protected Downloads to use browser-session forwarding for replayable Firefox downloads instead of a strict site allowlist.',
   ].join('\n');
 }
 
@@ -166,9 +167,10 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Replaced broad MIME-driven capture with intent-first classification: Content-Disposition attachments, strong file names/URLs, explicit page/blob downloads, and Canvas/Instructure download URLs.
-- Ignored weak app/API traffic such as JSON/protobuf, octet-stream-only responses, tiny generic files like json.txt/version/player, redirects, Firefox .xpi packages, and other-extension downloads.
-- Updated Firefox protected-download handling to cancel only classified downloads while preserving startup, object/frame, and canvadocs auth handoff.
+- Restored the 1.0.1-style capture surface: no page-managed content script, no injected page hook, and no blob/data bridge.
+- Restored web.telegram.org as a default excluded host so Telegram Web downloads are ignored by automatic capture.
+- Normal browser downloads, context menu, popup enqueue, Firefox attachment/webRequest capture, protected downloads, and Canvas/Instructure downloads remain supported.
+- The Firefox cookies permission is used only for Protected Downloads when webRequest does not expose a Cookie header; cookie values are sent to the local native desktop app for the same download URL and are not stored.
 `;
 }
 

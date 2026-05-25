@@ -1,4 +1,4 @@
-import { HOST_NAME, isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
+import { isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
 import {
   browserDownloadUrl,
@@ -29,12 +29,13 @@ import {
 import {
   captureHandoffAuthHeaders,
   hasCapturedBrowserSessionHeaders,
-  resolveBrowserHandoffAuth,
+  resolveBrowserHandoffAuthWithCookieFallback,
+  type HandoffAuthCookie,
   type HandoffAuthRequestDetails,
 } from './handoffAuth';
 import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
-import type { PageDownloadIntentRequest, PopupRequest, PopupStateResponse } from '../shared/messages';
+import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { normalizeAccentColor } from '../shared/appearance';
 import { defaultExtensionSettings } from '../shared/defaultExtensionSettings';
 
@@ -291,10 +292,8 @@ if (filenameInterceptionApi) {
   registerFirefoxWebRequestInterception();
 }
 
-browser.runtime.onMessage.addListener(async (message: PopupRequest | PageDownloadIntentRequest) => {
+browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   switch (message.type) {
-    case 'page_download_intent':
-      return handlePageDownloadIntent(message);
     case 'popup_ping':
       return refreshConnectionState();
     case 'popup_get_state':
@@ -358,7 +357,6 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest | PageDownloa
 });
 
 registerHandoffAuthHeaderCapture();
-registerBrowserBlobDownloadBridge();
 void ensureAppearanceSyncAlarm();
 
 async function ensureAppearanceSyncAlarm(): Promise<void> {
@@ -395,8 +393,12 @@ async function handOffBrowserDownload(
     requestId: 'requestId' in item ? item.requestId : undefined,
     url,
     incognito: item.incognito,
+    cookieStoreId: item.cookieStoreId,
   };
-  const authResolution = resolveBrowserHandoffAuth(handoffDetails, settings);
+  const authResolution = await resolveBrowserHandoffAuthWithCookieFallback(handoffDetails, settings, {
+    cookieLookup: getCookieLookup(),
+    userAgent: browserUserAgent(),
+  });
 
   const metadata = createBrowserDownloadHandoffMetadata(item, authResolution.handoffAuth);
   const transferKind = browserDownloadTransferKind(item);
@@ -410,80 +412,6 @@ async function handOffBrowserDownload(
   }
 
   return promptDownload(url, source, metadata);
-}
-
-async function handlePageDownloadIntent(message: PageDownloadIntentRequest): Promise<HostToExtensionResponse> {
-  const initialSettings = await getCachedExtensionSettings();
-  if (!shouldAllowBrowserDownloadBySettings({ url: message.url, filename: message.filename }, initialSettings)) {
-    return {
-      ok: false,
-      requestId: 'page_download_bypass',
-      type: 'rejected',
-      code: 'INVALID_URL',
-      message: 'This page download is not configured for browser handoff.',
-    };
-  }
-
-  let settings = initialSettings;
-  try {
-    const pingResponse = await pingNativeHostCoalesced();
-    if (isErrorResponse(pingResponse)) {
-      await recordHostError(pingResponse);
-      return pingResponse;
-    }
-
-    const pingState = rememberStateSettings(await setLastResult('connected', pingResponse));
-    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldAllowBrowserDownloadBySettings({ url: message.url, filename: message.filename }, settings)) {
-      await updateBrowserBadge(pingState);
-      return {
-        ok: false,
-        requestId: 'page_download_blocked_after_capture',
-        type: 'rejected',
-        code: 'DOWNLOAD_FAILED',
-        message: 'The page download was already captured before handoff settings changed.',
-      };
-    }
-
-    const response = await handOffBrowserDownload(
-      message.url,
-      {
-        filename: message.filename,
-        incognito: message.incognito,
-        pageUrl: message.pageUrl,
-        pageTitle: message.pageTitle,
-        referrer: message.referrer,
-      },
-      settings,
-    );
-    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error') {
-      await recordHostError(handoffResolution.response);
-      return response;
-    }
-
-    const state = rememberStateSettings(await setLastResult('connected', response));
-    await updateBrowserBadge(state);
-    if (handoffResolution.action === 'restore') {
-      markBrowserDownloadBypassUrl(browserDownloadFallbackBypass, message.url);
-    }
-
-    return response;
-  } catch (error) {
-    const state = await setHostError(
-      'HOST_NOT_AVAILABLE',
-      error instanceof Error ? error.message : 'Could not hand the page download to the desktop app.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-    return {
-      ok: false,
-      requestId: 'page_download_error',
-      type: 'rejected',
-      code: 'HOST_NOT_AVAILABLE',
-      message: error instanceof Error ? error.message : 'Could not hand the page download to the desktop app.',
-    };
-  }
 }
 
 async function recordHostError(response: Extract<HostToExtensionResponse, { ok: false }>): Promise<void> {
@@ -746,75 +674,6 @@ function registerHandoffAuthHeaderCapture(): void {
   }
 }
 
-function registerBrowserBlobDownloadBridge(): void {
-  browser.runtime.onConnect.addListener((contentPort) => {
-    if (contentPort.name !== 'browser_blob_download') {
-      return;
-    }
-
-    let nativePort: browser.runtime.Port | null = null;
-    try {
-      nativePort = browser.runtime.connectNative(HOST_NAME);
-    } catch (error) {
-      postBlobStreamError(
-        contentPort,
-        'native_messaging_error',
-        error instanceof Error ? error.message : 'Could not connect to the native messaging host.',
-      );
-      contentPort.disconnect();
-      return;
-    }
-
-    contentPort.onMessage.addListener((message) => {
-      try {
-        nativePort?.postMessage(message);
-      } catch (error) {
-        postBlobStreamError(
-          contentPort,
-          requestIdFromPortMessage(message),
-          error instanceof Error ? error.message : 'Could not forward blob download data to the native host.',
-        );
-      }
-    });
-
-    nativePort.onMessage.addListener((message: object) => {
-      contentPort.postMessage(message as HostToExtensionResponse);
-    });
-
-    nativePort.onDisconnect.addListener(() => {
-      contentPort.disconnect();
-    });
-
-    contentPort.onDisconnect.addListener(() => {
-      nativePort?.disconnect();
-      nativePort = null;
-    });
-  });
-}
-
-function postBlobStreamError(
-  port: browser.runtime.Port,
-  requestId: string,
-  message: string,
-): void {
-  port.postMessage({
-    ok: false,
-    requestId,
-    type: 'rejected',
-    code: 'HOST_NOT_AVAILABLE',
-    message: toUserFacingMessage('HOST_NOT_AVAILABLE', message),
-  } satisfies HostToExtensionResponse);
-}
-
-function requestIdFromPortMessage(message: unknown): string {
-  return typeof message === 'object'
-    && message !== null
-    && 'requestId' in message
-    && typeof (message as { requestId?: unknown }).requestId === 'string'
-    ? (message as { requestId: string }).requestId
-    : 'native_messaging_error';
-}
-
 async function handleFirefoxWebRequestHeadersReceived(
   details: FirefoxWebRequestDownloadDetails,
 ): Promise<{ cancel?: boolean }> {
@@ -920,11 +779,29 @@ type BrowserDownloadHandoffItem = {
   filename?: string;
   totalBytes?: number;
   incognito?: boolean;
+  cookieStoreId?: string;
   browserFallback?: BrowserFallback;
   pageUrl?: string;
   pageTitle?: string;
   referrer?: string;
 };
+
+function getCookieLookup() {
+  const runtimeBrowser = browser as typeof browser & {
+    cookies?: {
+      getAll(details: { url: string; storeId?: string }): Promise<HandoffAuthCookie[]>;
+    };
+  };
+
+  return runtimeBrowser.cookies?.getAll
+    ? (details: { url: string; storeId?: string }) => runtimeBrowser.cookies?.getAll(details) ?? Promise.resolve([])
+    : undefined;
+}
+
+function browserUserAgent(): string | undefined {
+  const userAgent = globalThis.navigator?.userAgent;
+  return userAgent && userAgent.trim() ? userAgent : undefined;
+}
 
 type FirefoxWebRequestApi = {
   onHeadersReceived: {

@@ -4,64 +4,64 @@ import { readFileSync } from 'node:fs';
 const optionsHtml = readFileSync(new URL('../src/options/index.html', import.meta.url), 'utf8');
 const optionsSource = readFileSync(new URL('../src/options/index.ts', import.meta.url), 'utf8');
 
-assert.match(
+assert.doesNotMatch(
   optionsHtml,
   /Protected Download Sites/,
-  'options page should expose a protected-download host allowlist section',
+  'options page should not expose a protected-download host allowlist section',
 );
-assert.match(
+assert.doesNotMatch(
   optionsHtml,
   /id="protected-host-input"/,
-  'protected-download allowlist should include a host input',
+  'protected-download settings should not include a host input',
 );
-assert.match(
+assert.doesNotMatch(
   optionsHtml,
   /id="add-protected-host-button"/,
-  'protected-download allowlist should include an add button',
+  'protected-download settings should not include an add button',
 );
-assert.match(
+assert.doesNotMatch(
   optionsHtml,
   /id="protected-hosts"/,
-  'protected-download allowlist should render configured hosts',
+  'protected-download settings should not render configured host chips',
 );
 
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /const protectedHostInput = document\.querySelector<HTMLInputElement>\('#protected-host-input'\);/,
-  'options script should wire the protected-download host input',
+  'options script should not wire a protected-download host input',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /const addProtectedHostButton = document\.querySelector<HTMLButtonElement>\('#add-protected-host-button'\);/,
-  'options script should wire the protected-download add button',
+  'options script should not wire a protected-download add button',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /const protectedHosts = document\.querySelector<HTMLDivElement>\('#protected-hosts'\);/,
-  'options script should wire the protected-download chip container',
+  'options script should not wire a protected-download chip container',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /renderProtectedHosts\([\s\S]*settings\.authenticatedHandoffHosts \?\? \[\],[\s\S]*isSaving \|\| !settings\.enabled \|\| !protectedDownloadsEnabled,[\s\S]*\);/,
-  'rendering settings should show the configured protected-download hosts',
+  'rendering settings should not show configured protected-download hosts',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /function addProtectedHost\(\)/,
-  'options script should provide an add handler for protected-download hosts',
+  'options script should not provide an add handler for protected-download hosts',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /authenticatedHandoffHosts: \[\.\.\.hosts, host\]/,
-  'adding a protected-download host should persist authenticatedHandoffHosts',
+  'options script should not persist protected-download host edits',
 );
 assert.match(
   optionsSource,
-  /protectedDownloadAuthScope: 'allowlist'/,
-  'protected-download host edits should keep the extension in allowlist mode',
+  /protectedDownloadAuthScope: authHandoffToggle\.checked \? 'legacy_global' : 'off'/,
+  'Protected Downloads toggle should save global browser-session forwarding when enabled',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
   /protectedHostInput[\s\S]*addProtectedHostButton[\s\S]*saving \|\| !extensionEnabled \|\| !protectedDownloadsEnabled/,
-  'protected-download host controls should be disabled unless the extension and Protected Downloads are enabled',
+  'options script should not manage removed protected-download host controls',
 );

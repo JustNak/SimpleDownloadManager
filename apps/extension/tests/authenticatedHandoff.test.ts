@@ -11,6 +11,7 @@ import {
   hasCapturedBrowserSessionHeaders,
   hasCapturedHandoffAuth,
   resolveBrowserHandoffAuth,
+  resolveBrowserHandoffAuthWithCookieFallback,
   takeCapturedHandoffAuth,
 } from '../src/background/handoffAuth.ts';
 
@@ -76,17 +77,17 @@ assert.deepEqual(
     allowlistSettings,
   ),
   { headers: [{ name: 'Cookie', value: 'oai-did=1' }] },
-  'protected downloads should forward browser session headers for allowlisted hosts',
+  'legacy allowlist settings should forward browser session headers for configured hosts',
 );
 
-assert.equal(
+assert.deepEqual(
   buildHandoffAuthForUrl(
     'https://download-cdn.other.test/file.pdf',
     [{ name: 'Cookie', value: 'session=abc' }],
     allowlistSettings,
   ),
-  undefined,
-  'allowlist mode should not forward browser session headers for unlisted hosts',
+  { headers: [{ name: 'Cookie', value: 'session=abc' }] },
+  'legacy allowlist settings should now forward browser session headers for any protected browser download host',
 );
 
 assert.deepEqual(
@@ -96,7 +97,7 @@ assert.deepEqual(
     defaultAllowlistSettings,
   ),
   { headers: [{ name: 'Cookie', value: 'accountToken=secret' }] },
-  'built-in GoFile protected-download allowlist should forward bounded session headers by default',
+  'protected downloads should forward bounded session headers without requiring a built-in host allowlist',
 );
 
 assert.deepEqual(
@@ -114,7 +115,25 @@ assert.deepEqual(
       { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
     ],
   },
-  'built-in Instructure protected-download allowlist should cover canvadocs PDF hosts',
+  'protected downloads should cover canvadocs PDF hosts without requiring a built-in host allowlist',
+);
+
+assert.deepEqual(
+  buildHandoffAuthForUrl(
+    'https://cdn.inst-fs-sin-prod.inscloudgate.net/f5a017c8-f85a-4dca/file.pptx',
+    [
+      { name: 'Cookie', value: 'canvas_session=abc' },
+      { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+    ],
+    defaultAllowlistSettings,
+  ),
+  {
+    headers: [
+      { name: 'Cookie', value: 'canvas_session=abc' },
+      { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+    ],
+  },
+  'protected downloads should cover Canvas inscloudgate CDN hosts without requiring a built-in host allowlist',
 );
 
 assert.deepEqual(
@@ -125,6 +144,16 @@ assert.deepEqual(
   ),
   { headers: [{ name: 'Cookie', value: 'session=abc' }] },
   'legacy global protected-download scope should preserve existing authenticated handoff behavior',
+);
+
+assert.equal(
+  buildHandoffAuthForUrl(
+    'https://download-cdn.other.test/file.pdf',
+    [{ name: 'Cookie', value: 'session=abc' }],
+    { ...settings, excludedHosts: ['download-cdn.other.test'] },
+  ),
+  undefined,
+  'excluded sites should suppress protected-download browser session headers',
 );
 
 assert.equal(
@@ -199,7 +228,7 @@ assert.equal(
 
 captureHandoffAuthHeaders(
   {
-    requestId: 'request-1',
+    requestId: 'broad-cdn-capture',
     url: 'https://download-cdn.other.test/file.zip',
     method: 'GET',
     incognito: false,
@@ -211,19 +240,32 @@ captureHandoffAuthHeaders(
 assert.equal(
   hasCapturedHandoffAuth(
     {
-      requestId: 'request-1',
+      requestId: 'broad-cdn-capture',
       url: 'https://download-cdn.other.test/file.zip',
       incognito: false,
     },
     1_200,
   ),
-  false,
-  'capture should ignore browser session headers for hosts outside the allowlist',
+  true,
+  'capture should retain browser session headers for any host when Protected Downloads is enabled',
+);
+assert.deepEqual(
+  takeCapturedHandoffAuth(
+    {
+      requestId: 'broad-cdn-capture',
+      url: 'https://download-cdn.other.test/file.zip',
+      incognito: false,
+    },
+    allowlistSettings,
+    1_225,
+  ),
+  { headers: [{ name: 'Cookie', value: 'session=abc' }] },
+  'broad protected-download captures should be consumable for arbitrary CDN hosts',
 );
 
 captureHandoffAuthHeaders(
   {
-    requestId: 'chrome-protected-unavailable',
+    requestId: 'chrome-protected-cdn',
     url: 'https://download-cdn.other.test/file.rar',
     method: 'GET',
     incognito: false,
@@ -235,15 +277,15 @@ captureHandoffAuthHeaders(
 assert.deepEqual(
   resolveBrowserHandoffAuth(
     {
-      requestId: 'chrome-protected-unavailable',
+      requestId: 'chrome-protected-cdn',
       url: 'https://download-cdn.other.test/file.rar',
       incognito: false,
     },
     allowlistSettings,
     1_350,
   ),
-  { status: 'ready' },
-  'Chrome browser handoffs with unallowlisted session headers should still reach the desktop access probe',
+  { status: 'ready', handoffAuth: { headers: [{ name: 'Cookie', value: 'accountToken=secret' }] } },
+  'Chrome browser handoffs should attach captured session headers for arbitrary CDN hosts',
 );
 
 captureHandoffAuthHeaders(
@@ -500,6 +542,132 @@ assert.deepEqual(
   { headers: [{ name: 'Cookie', value: 'session=69' }] },
   'newer captured auth entries should remain available after global eviction',
 );
+
+let cookieLookupCalls = 0;
+const cookieFallback = await resolveBrowserHandoffAuthWithCookieFallback(
+  {
+    requestId: 'firefox-cookie-fallback',
+    url: 'https://cdn.example.net/file.zip',
+    incognito: false,
+    cookieStoreId: 'firefox-container-1',
+  },
+  settings,
+  {
+    now: 50_000,
+    userAgent: 'Mozilla/5.0 Test',
+    async cookieLookup(details) {
+      cookieLookupCalls += 1;
+      assert.deepEqual(
+        details,
+        { url: 'https://cdn.example.net/file.zip', storeId: 'firefox-container-1' },
+        'cookie fallback should query the matching URL and Firefox cookie store',
+      );
+      return [
+        { name: 'sid', value: 'abc' },
+        { name: 'pref', value: '1' },
+      ];
+    },
+  },
+);
+assert.equal(cookieLookupCalls, 1);
+assert.deepEqual(
+  cookieFallback,
+  {
+    status: 'ready',
+    handoffAuth: {
+      headers: [
+        { name: 'Cookie', value: 'sid=abc; pref=1' },
+        { name: 'User-Agent', value: 'Mozilla/5.0 Test' },
+      ],
+    },
+  },
+  'Firefox cookie fallback should synthesize Cookie and User-Agent headers when webRequest omits Cookie',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'firefox-captured-cookie-preferred',
+    url: 'https://cdn.example.net/preferred.zip',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [{ name: 'Cookie', value: 'captured=1' }],
+  },
+  settings,
+  51_000,
+);
+let capturedCookieLookupCalled = false;
+assert.deepEqual(
+  await resolveBrowserHandoffAuthWithCookieFallback(
+    {
+      requestId: 'firefox-captured-cookie-preferred',
+      url: 'https://cdn.example.net/preferred.zip',
+      incognito: false,
+    },
+    settings,
+    {
+      now: 51_100,
+      userAgent: 'Mozilla/5.0 Test',
+      async cookieLookup() {
+        capturedCookieLookupCalled = true;
+        return [{ name: 'sid', value: 'fallback' }];
+      },
+    },
+  ),
+  {
+    status: 'ready',
+    handoffAuth: {
+      headers: [
+        { name: 'Cookie', value: 'captured=1' },
+        { name: 'User-Agent', value: 'Mozilla/5.0 Test' },
+      ],
+    },
+  },
+  'captured webRequest Cookie headers should be preferred over cookies API fallback',
+);
+assert.equal(capturedCookieLookupCalled, false);
+
+assert.deepEqual(
+  await resolveBrowserHandoffAuthWithCookieFallback(
+    {
+      requestId: 'firefox-cookie-rejected',
+      url: 'https://cdn.example.net/rejected.zip',
+      incognito: false,
+    },
+    settings,
+    {
+      now: 52_000,
+      userAgent: 'Mozilla/5.0 Test',
+      async cookieLookup() {
+        throw new Error('cookies unavailable');
+      },
+    },
+  ),
+  { status: 'ready' },
+  'cookie fallback should fail closed when the cookies API lookup rejects',
+);
+
+let excludedCookieLookupCalled = false;
+assert.deepEqual(
+  await resolveBrowserHandoffAuthWithCookieFallback(
+    {
+      requestId: 'firefox-cookie-excluded',
+      url: 'https://excluded.example.net/file.zip',
+      incognito: false,
+    },
+    { ...settings, excludedHosts: ['excluded.example.net'] },
+    {
+      now: 53_000,
+      userAgent: 'Mozilla/5.0 Test',
+      async cookieLookup() {
+        excludedCookieLookupCalled = true;
+        return [{ name: 'sid', value: 'abc' }];
+      },
+    },
+  ),
+  { status: 'ready' },
+  'excluded sites should suppress Firefox cookie fallback auth',
+);
+assert.equal(excludedCookieLookupCalled, false);
 
 const request = createEnqueueDownloadRequest(
   'https://chatgpt.com/backend-api/estuary/content?id=file_123',

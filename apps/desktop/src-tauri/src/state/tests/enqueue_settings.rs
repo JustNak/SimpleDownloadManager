@@ -53,8 +53,8 @@ fn save_settings_sync_persists_startup_preferences() {
 fn normalize_extension_settings_migrates_legacy_protected_downloads() {
     let mut settings = ExtensionIntegrationSettings {
         authenticated_handoff_enabled: true,
-        protected_download_auth_scope: ProtectedDownloadAuthScope::Off,
-        authenticated_handoff_hosts: vec![],
+        protected_download_auth_scope: ProtectedDownloadAuthScope::Allowlist,
+        authenticated_handoff_hosts: vec!["chatgpt.com".into()],
         ..ExtensionIntegrationSettings::default()
     };
 
@@ -64,6 +64,28 @@ fn normalize_extension_settings_migrates_legacy_protected_downloads() {
     assert_eq!(
         settings.protected_download_auth_scope,
         ProtectedDownloadAuthScope::LegacyGlobal
+    );
+    assert_eq!(
+        settings.authenticated_handoff_hosts,
+        vec!["chatgpt.com".to_string()]
+    );
+}
+
+#[test]
+fn normalize_extension_settings_respects_explicit_protected_downloads_off() {
+    let mut settings = ExtensionIntegrationSettings {
+        authenticated_handoff_enabled: true,
+        protected_download_auth_scope: ProtectedDownloadAuthScope::Off,
+        authenticated_handoff_hosts: vec!["chatgpt.com".into()],
+        ..ExtensionIntegrationSettings::default()
+    };
+
+    normalize_extension_settings(&mut settings);
+
+    assert!(!settings.authenticated_handoff_enabled);
+    assert_eq!(
+        settings.protected_download_auth_scope,
+        ProtectedDownloadAuthScope::Off
     );
 }
 
@@ -119,8 +141,8 @@ async fn authenticated_handoff_auth_is_memory_only_and_claimed_with_task() {
 }
 
 #[tokio::test]
-async fn authenticated_handoff_auth_requires_allowed_host() {
-    let download_dir = test_runtime_dir("auth-handoff-allowlist");
+async fn authenticated_handoff_auth_allows_any_host_until_excluded() {
+    let download_dir = test_runtime_dir("auth-handoff-broad");
     let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
     let mut settings = state.settings().await;
     settings.download_directory = download_dir.display().to_string();
@@ -137,7 +159,7 @@ async fn authenticated_handoff_auth_requires_allowed_host() {
         }],
     };
 
-    let error = state
+    state
         .enqueue_download_with_options(
             "https://example.com/file.zip".into(),
             EnqueueOptions {
@@ -155,9 +177,7 @@ async fn authenticated_handoff_auth_requires_allowed_host() {
             },
         )
         .await
-        .expect_err("unlisted hosts should not receive browser session headers");
-
-    assert_eq!(error.code, "PERMISSION_DENIED");
+        .expect("legacy allowlist settings should migrate to broad browser-session forwarding");
 
     state
         .enqueue_download_with_options(
@@ -177,10 +197,82 @@ async fn authenticated_handoff_auth_requires_allowed_host() {
             },
         )
         .await
-        .expect("allowlisted host should receive browser session headers");
+        .expect("configured legacy hosts should still receive browser session headers");
 
     let raw_state = std::fs::read_to_string(download_dir.join("state.json")).unwrap();
     assert!(!raw_state.contains("session=abc"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn authenticated_handoff_auth_rejects_excluded_hosts_and_disabled_scope() {
+    let download_dir = test_runtime_dir("auth-handoff-excluded");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![]);
+    let mut settings = state.settings().await;
+    settings.download_directory = download_dir.display().to_string();
+    settings.extension_integration.authenticated_handoff_enabled = true;
+    settings.extension_integration.protected_download_auth_scope =
+        ProtectedDownloadAuthScope::LegacyGlobal;
+    settings.extension_integration.excluded_hosts = vec!["example.com".into()];
+    state.save_settings(settings).await.unwrap();
+
+    let auth = HandoffAuth {
+        headers: vec![HandoffAuthHeader {
+            name: "Cookie".into(),
+            value: "session=abc".into(),
+        }],
+    };
+
+    let error = state
+        .enqueue_download_with_options(
+            "https://files.example.com/file.zip".into(),
+            EnqueueOptions {
+                source: Some(DownloadSource {
+                    entry_point: "browser_download".into(),
+                    browser: "chrome".into(),
+                    extension_version: "0.3.41".into(),
+                    page_url: None,
+                    page_title: None,
+                    referrer: None,
+                    incognito: Some(false),
+                }),
+                handoff_auth: Some(auth.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("excluded hosts should not receive browser session headers");
+
+    assert_eq!(error.code, "PERMISSION_DENIED");
+
+    let mut settings = state.settings().await;
+    settings.extension_integration.excluded_hosts = vec![];
+    settings.extension_integration.authenticated_handoff_enabled = false;
+    settings.extension_integration.protected_download_auth_scope = ProtectedDownloadAuthScope::Off;
+    state.save_settings(settings).await.unwrap();
+
+    let error = state
+        .enqueue_download_with_options(
+            "https://files.example.net/file.zip".into(),
+            EnqueueOptions {
+                source: Some(DownloadSource {
+                    entry_point: "browser_download".into(),
+                    browser: "chrome".into(),
+                    extension_version: "0.3.41".into(),
+                    page_url: None,
+                    page_title: None,
+                    referrer: None,
+                    incognito: Some(false),
+                }),
+                handoff_auth: Some(auth),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("disabled Protected Downloads should not receive browser session headers");
+
+    assert_eq!(error.code, "PERMISSION_DENIED");
 
     let _ = std::fs::remove_dir_all(download_dir);
 }

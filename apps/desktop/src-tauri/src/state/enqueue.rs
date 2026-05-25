@@ -752,11 +752,13 @@ pub(super) fn protected_download_auth_allowed_for_url(
         return false;
     }
 
+    if url_host_matches_patterns(url, &settings.excluded_hosts) {
+        return false;
+    }
+
     match settings.protected_download_auth_scope {
         ProtectedDownloadAuthScope::LegacyGlobal => true,
-        ProtectedDownloadAuthScope::Allowlist => {
-            url_host_matches_patterns(url, &settings.authenticated_handoff_hosts)
-        }
+        ProtectedDownloadAuthScope::Allowlist => true,
         ProtectedDownloadAuthScope::Off => false,
     }
 }
