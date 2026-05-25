@@ -135,6 +135,9 @@ const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
   'application/x-msdos-program',
   'application/x-redhat-package-manager',
 ]);
+const AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES = new Set([
+  'application/octet-stream',
+]);
 const STRONG_DOWNLOAD_EXTENSIONS = new Set([
   '7z',
   'apk',
@@ -275,8 +278,16 @@ export function firefoxWebRequestDownloadCandidate(
   const hasStrongDownloadFilename = !isInlineContentType(contentType)
     && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
   const hasExplicitDownloadUrl = isExplicitDownloadUrl(url);
+  const hasOnlyAmbiguousApiBinarySignal = Boolean(contentType && AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES.has(contentType))
+    && isLikelyApiSubresourceResponse(details, url)
+    && !isAttachment
+    && !hasStrongDownloadFilename
+    && !hasExplicitDownloadUrl;
 
-  if (!isAttachment && !hasDownloadMimeType && !hasStrongDownloadFilename && !hasExplicitDownloadUrl) {
+  if (
+    hasOnlyAmbiguousApiBinarySignal
+    || (!isAttachment && !hasDownloadMimeType && !hasStrongDownloadFilename && !hasExplicitDownloadUrl)
+  ) {
     return null;
   }
 
@@ -559,6 +570,26 @@ function isRedirectResponse(details: FirefoxWebRequestDownloadDetails): boolean 
 
 function isReplayableRequestMethod(method: string | undefined): boolean {
   return !method || method.toUpperCase() === 'GET';
+}
+
+function isLikelyApiSubresourceResponse(details: FirefoxWebRequestDownloadDetails, url: string): boolean {
+  if (details.type !== 'xmlhttprequest' && details.type !== 'other') {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase();
+    return pathname.includes('/youtubei/')
+      || pathname.includes('/api/')
+      || pathname.includes('/ajax/')
+      || pathname.includes('/graphql')
+      || pathname.includes('/rpc/')
+      || pathname.endsWith('.json')
+      || parsed.searchParams.has('prettyPrint');
+  } catch {
+    return false;
+  }
 }
 
 function isExplicitDownloadUrl(url: string): boolean {

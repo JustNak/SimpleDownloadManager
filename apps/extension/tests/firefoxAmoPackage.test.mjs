@@ -13,6 +13,7 @@ const {
   createFirefoxAmoReadme,
   createFirefoxAmoListingMetadata,
   createFirefoxAmoPrivacyPolicy,
+  createFirefoxAmoReleaseNotes,
   createFirefoxAmoReviewerNotes,
   createFirefoxAmoSourceReadme,
   copyFirefoxExtensionFiles,
@@ -78,7 +79,8 @@ assert.equal('support_url' in listingMetadata, false, 'metadata should only use 
 assert.equal(listingMetadata.requires_payment, false);
 assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
-assert.match(listingMetadata.version.approval_notes, /Native messaging/);
+assert.match(listingMetadata.version.release_notes['en-US'], /YouTube Music/);
+assert.match(listingMetadata.version.approval_notes, /YouTube Music JSON/);
 
 const privacyPolicy = createFirefoxAmoPrivacyPolicy();
 assert.match(privacyPolicy, /Simple Download Manager Firefox Extension Privacy Policy/);
@@ -86,19 +88,15 @@ assert.match(privacyPolicy, /local native desktop app/);
 assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
-assert.match(reviewerNotes, /Native messaging/);
-assert.match(reviewerNotes, /webRequestBlocking/);
-assert.match(reviewerNotes, /<all_urls>/);
-assert.match(reviewerNotes, /browsingActivity/);
-assert.match(reviewerNotes, /websiteActivity/);
-assert.match(reviewerNotes, /websiteContent/);
-assert.match(reviewerNotes, /No remote code/);
-assert.match(reviewerNotes, /local native desktop app/);
-assert.match(reviewerNotes, /wildcard excluded host patterns/);
-assert.match(reviewerNotes, /Protected Downloads/);
-assert.match(reviewerNotes, /exact browser download/);
-assert.match(reviewerNotes, /FIREFOX_GUIDELINES\.md/);
-assert.match(reviewerNotes, /public AMO listing/);
+assert.match(reviewerNotes, /YouTube Music JSON/);
+assert.match(reviewerNotes, /blob\/data page interception/);
+assert.match(reviewerNotes, /Content-Disposition/);
+assert.match(reviewerNotes, /Canvas\/Instructure/);
+
+const releaseNotes = createFirefoxAmoReleaseNotes();
+assert.match(releaseNotes, /^- Reduced false positives/m);
+assert.match(releaseNotes, /^- Blob\/data URL capture/m);
+assert.match(releaseNotes, /^- Real attachment downloads/m);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);

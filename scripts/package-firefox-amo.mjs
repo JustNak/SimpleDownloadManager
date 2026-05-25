@@ -89,8 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    'Improved Firefox download capture for server, Canvas/Instructure, blob/data, and <a download> flows.',
-    'Captured downloads now return to Firefox only when the user clicks Swap.',
+    '- Reduced false positives for YouTube Music and other API JSON responses that use generic binary MIME types.',
+    '- Blob/data URL capture now requires an explicit page download action.',
+    '- Real attachment downloads still capture through filename, MIME, Content-Disposition, and Canvas/Instructure signals.',
   ].join('\n');
 }
 
@@ -165,15 +166,9 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-This is a public AMO listing for a companion extension to the local native desktop app. It uses Native messaging only. No remote code, analytics, tracking, ads, or remote config.
-
-Permissions support download handoff: downloads manages captured items, webRequest/webRequestBlocking intercept qualifying Firefox download responses and exact protected-download headers, and <all_urls> covers arbitrary user download sites with local filtering.
-
-Data disclosures include browsingActivity, websiteActivity, and websiteContent because download URL/page metadata, response headers, filename hints, and Protected Downloads headers for the exact browser download are sent to the local app only. Users can disable capture and configure wildcard excluded host patterns.
-
-Strict handoff: captured downloads are canceled/discarded unless the user clicks Swap in the desktop prompt. Protected headers are memory-only, bounded, exact-request, and sent only to the local app.
-
-Source package includes apps/extension/FIREFOX_GUIDELINES.md.
+- Tightened Firefox response classification so generic binary API responses, including YouTube Music JSON, are not treated as downloads without a strong download signal.
+- Changed blob/data page interception to require an explicit download anchor before handoff.
+- Preserved capture for real downloads with Content-Disposition, known download MIME types, strong filename extensions, and Canvas/Instructure download URLs.
 `;
 }
 

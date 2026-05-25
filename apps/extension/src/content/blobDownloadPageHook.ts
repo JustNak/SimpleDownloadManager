@@ -21,12 +21,12 @@
 
   function downloadKind(anchor: HTMLAnchorElement): PageManagedDownloadKind | null {
     const href = anchor.href;
-    if (isStreamHref(href)) {
-      return 'stream';
-    }
-
     if (!anchor.hasAttribute('download')) {
       return null;
+    }
+
+    if (isStreamHref(href)) {
+      return 'stream';
     }
 
     try {

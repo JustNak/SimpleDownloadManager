@@ -291,6 +291,43 @@ assert.equal(
 assert.equal(
   firefoxWebRequestDownloadCandidate(
     details({
+      url: 'https://music.youtube.com/youtubei/v1/player?prettyPrint=false',
+      method: 'POST',
+      type: 'xmlhttprequest',
+      responseHeaders: [{ name: 'Content-Type', value: 'application/octet-stream' }],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not classify YouTube Music API JSON payloads as downloads even when they use a generic binary MIME type',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://app.example.com/api/files/123',
+      method: 'POST',
+      type: 'xmlhttprequest',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="export.zip"' },
+        { name: 'Content-Type', value: 'application/octet-stream' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://app.example.com/api/files/123',
+    filename: 'export.zip',
+    totalBytes: undefined,
+    incognito: false,
+    browserFallback: 'unavailable',
+  },
+  'Firefox should still capture API downloads when the response explicitly declares an attachment filename',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
       url: 'https://cdn.example.com/signed',
       statusCode: 302,
       type: 'other',

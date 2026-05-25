@@ -91,11 +91,15 @@ export function pageManagedDownloadKind(
   href: string | undefined,
   hasDownloadAttribute: boolean,
 ): PageManagedDownloadKind | null {
+  if (!hasDownloadAttribute) {
+    return null;
+  }
+
   if (isPageManagedStreamDownloadHref(href)) {
     return 'stream';
   }
 
-  if (!hasDownloadAttribute || !isHttpUrl(href)) {
+  if (!isHttpUrl(href)) {
     return null;
   }
 

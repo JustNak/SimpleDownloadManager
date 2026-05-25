@@ -26,8 +26,8 @@ assert.match(
 
 assert.match(
   pageHookSource,
-  /data:/,
-  'page hook should treat data URL downloads as page-managed download intents',
+  /if \(!anchor\.hasAttribute\('download'\)\) \{[\s\S]*?return null;[\s\S]*?if \(isStreamHref\(href\)\)/,
+  'page hook should only treat blob/data URLs as page-managed downloads when the page explicitly uses a download anchor',
 );
 
 assert.match(

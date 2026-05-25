@@ -26,8 +26,10 @@ const defaultSettings: ExtensionIntegrationSettings = {
 
 assert.equal(isBlobDownloadHref('blob:https://web.telegram.org/8f2a'), true);
 assert.equal(isBlobDownloadHref('https://web.telegram.org/file.zip'), false);
-assert.equal(pageManagedDownloadKind('blob:https://web.telegram.org/8f2a', false), 'stream');
-assert.equal(pageManagedDownloadKind('data:application/pdf;base64,AA==', false), 'stream');
+assert.equal(pageManagedDownloadKind('blob:https://web.telegram.org/8f2a', false), null);
+assert.equal(pageManagedDownloadKind('data:application/json,%7B%7D', false), null);
+assert.equal(pageManagedDownloadKind('blob:https://web.telegram.org/8f2a', true), 'stream');
+assert.equal(pageManagedDownloadKind('data:application/pdf;base64,AA==', true), 'stream');
 assert.equal(pageManagedDownloadKind('https://canvas.instructure.com/files/569/download?download_frd=1', false), null);
 assert.equal(pageManagedDownloadKind('https://canvas.instructure.com/files/569/download?download_frd=1', true), 'url');
 
