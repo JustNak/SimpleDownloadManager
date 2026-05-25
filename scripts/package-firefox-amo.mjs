@@ -89,9 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Reduced false positives for YouTube Music and other API JSON responses that use generic binary MIME types.',
-    '- Blob/data URL capture now requires an explicit page download action.',
-    '- Real attachment downloads still capture through filename, MIME, Content-Disposition, and Canvas/Instructure signals.',
+    '- Fixed false download prompts from Telegram Web version checks and YouTube Music API responses.',
+    '- Improved Canvas/Instructure/canvadocs protected-download capture for Firefox object/frame requests.',
+    '- Blob/data capture now requires an explicit page download action while real attachments still capture normally.',
   ].join('\n');
 }
 
@@ -166,9 +166,9 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Tightened Firefox response classification so generic binary API responses, including YouTube Music JSON, are not treated as downloads without a strong download signal.
-- Changed blob/data page interception to require an explicit download anchor before handoff.
-- Preserved capture for real downloads with Content-Disposition, known download MIME types, strong filename extensions, and Canvas/Instructure download URLs.
+- Added false-positive guards for Telegram Web /k/version and YouTube /youtubei/ browser-created or Firefox webRequest downloads.
+- Expanded Protected Downloads header capture to Firefox object requests and built-in Instructure/canvadocs hosts.
+- Kept blob/data capture behind explicit download anchors while preserving attachment, filename, MIME, and Canvas download classification.
 `;
 }
 

@@ -302,6 +302,51 @@ assert.equal(
   'Firefox should not classify YouTube Music API JSON payloads as downloads even when they use a generic binary MIME type',
 );
 
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://music.youtube.com/verify_session',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Content-Length', value: '0' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not classify YouTube Music session verification payloads as downloads',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://canvas.instructure.com/api/v1/courses/1/files',
+      type: 'xmlhttprequest',
+      responseHeaders: [{ name: 'Content-Type', value: 'application/x-protobuf' }],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not classify Canvas API protobuf requests as downloads',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://web.telegram.org/k/version',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Content-Length', value: '9' },
+      ],
+    }),
+    defaultSettings,
+  ),
+  null,
+  'Firefox should not classify Telegram Web version probes as user downloads',
+);
+
 assert.deepEqual(
   firefoxWebRequestDownloadCandidate(
     details({

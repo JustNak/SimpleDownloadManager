@@ -80,7 +80,9 @@ assert.equal(listingMetadata.requires_payment, false);
 assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
 assert.match(listingMetadata.version.release_notes['en-US'], /YouTube Music/);
-assert.match(listingMetadata.version.approval_notes, /YouTube Music JSON/);
+assert.match(listingMetadata.version.release_notes['en-US'], /Telegram Web/);
+assert.match(listingMetadata.version.approval_notes, /Telegram Web \/k\/version/);
+assert.match(listingMetadata.version.approval_notes, /Instructure\/canvadocs/);
 
 const privacyPolicy = createFirefoxAmoPrivacyPolicy();
 assert.match(privacyPolicy, /Simple Download Manager Firefox Extension Privacy Policy/);
@@ -88,15 +90,16 @@ assert.match(privacyPolicy, /local native desktop app/);
 assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
-assert.match(reviewerNotes, /YouTube Music JSON/);
-assert.match(reviewerNotes, /blob\/data page interception/);
-assert.match(reviewerNotes, /Content-Disposition/);
-assert.match(reviewerNotes, /Canvas\/Instructure/);
+assert.match(reviewerNotes, /Telegram Web \/k\/version/);
+assert.match(reviewerNotes, /YouTube \/youtubei\//);
+assert.match(reviewerNotes, /Firefox object requests/);
+assert.match(reviewerNotes, /blob\/data capture/);
+assert.match(reviewerNotes, /Canvas download classification/);
 
 const releaseNotes = createFirefoxAmoReleaseNotes();
-assert.match(releaseNotes, /^- Reduced false positives/m);
-assert.match(releaseNotes, /^- Blob\/data URL capture/m);
-assert.match(releaseNotes, /^- Real attachment downloads/m);
+assert.match(releaseNotes, /^- Fixed false download prompts/m);
+assert.match(releaseNotes, /^- Improved Canvas\/Instructure\/canvadocs/m);
+assert.match(releaseNotes, /^- Blob\/data capture/m);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);

@@ -133,6 +133,85 @@ async function main() {
     false,
     'Firefox .xpi packages should stay with the browser because AMO downloads can require browser session context',
   );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://web.telegram.org/k/version',
+        filename: 'C:\\Users\\Me\\Downloads\\version',
+        mime: 'application/octet-stream',
+        totalBytes: 9,
+      },
+      defaultSettings,
+    ),
+    false,
+    'Telegram Web app version probes should not open a download prompt',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://music.youtube.com/youtubei/v1/player?prettyPrint=false',
+        filename: 'player',
+        mime: 'application/octet-stream',
+      },
+      defaultSettings,
+    ),
+    false,
+    'YouTube Music API payloads should not open a download prompt',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://music.youtube.com/verify_session',
+        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
+        mime: 'application/octet-stream',
+        totalBytes: 0,
+        fileSize: 0,
+      },
+      defaultSettings,
+    ),
+    false,
+    'YouTube Music session verification payloads should not open a download prompt',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://music.youtube.com/verify_session',
+        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
+        mime: 'application/json',
+        totalBytes: 0,
+        fileSize: 0,
+      },
+      defaultSettings,
+    ),
+    false,
+    'structured session verification payloads should not be captured as browser downloads',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://downloads.example.com/archive.zip',
+        filename: 'C:\\Users\\Me\\Downloads\\archive.zip',
+        byExtensionId: 'other-extension@example.test',
+        byExtensionName: 'Other Download Extension',
+      } as any,
+      defaultSettings,
+    ),
+    false,
+    'downloads initiated by another extension should stay out of Simple Download Manager',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://canvadocs-sin.instructure.com/v2/documents/fzhs8D-eL9dX',
+        filename: 'C:\\Users\\Me\\Downloads\\file.pdf',
+        mime: 'application/pdf',
+        totalBytes: 0,
+      },
+      defaultSettings,
+    ),
+    true,
+    'Canvadocs PDF browser downloads should remain eligible for protected handoff',
+  );
 
   await discardBrowserDownload(
     {

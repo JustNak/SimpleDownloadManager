@@ -61,6 +61,15 @@ export type BrowserDownloadPolicyItem = {
   url?: string;
   finalUrl?: string;
   filename?: string;
+  mime?: string;
+  totalBytes?: number;
+  fileSize?: number;
+  byExtensionId?: string;
+  byExtensionName?: string;
+};
+export type BrowserDownloadIntentDecision = {
+  action: 'capture' | 'ignore';
+  reason: string;
 };
 export type FirefoxWebRequestHeader = {
   name: string;
@@ -110,8 +119,39 @@ export type BrowserDownloadHandoffResolution =
 
 const DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS = 60_000;
 const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other']);
-const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
+const AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES = new Set([
   'application/octet-stream',
+]);
+const STRUCTURED_API_MIME_TYPES = new Set([
+  'application/json',
+  'text/json',
+  'application/x-protobuf',
+  'application/protobuf',
+]);
+const GENERIC_APP_PAYLOAD_BASENAMES = new Set([
+  'config',
+  'data',
+  'download',
+  'file',
+  'json',
+  'manifest',
+  'metadata',
+  'ping',
+  'player',
+  'response',
+  'session',
+  'verify',
+  'verify_session',
+  'version',
+]);
+const GENERIC_APP_PAYLOAD_TEXT_FILENAMES = new Set([
+  'data.txt',
+  'download.txt',
+  'file.txt',
+  'json.txt',
+  'response.txt',
+]);
+const DOWNLOAD_MIME_TYPES = new Set([
   'application/zip',
   'application/x-zip-compressed',
   'application/vnd.rar',
@@ -134,9 +174,6 @@ const FIREFOX_DOWNLOAD_MIME_TYPES = new Set([
   'application/x-msi',
   'application/x-msdos-program',
   'application/x-redhat-package-manager',
-]);
-const AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES = new Set([
-  'application/octet-stream',
 ]);
 const STRONG_DOWNLOAD_EXTENSIONS = new Set([
   '7z',
@@ -240,12 +277,63 @@ export function shouldHandleBrowserDownload(
     return false;
   }
 
+  return shouldAllowBrowserDownloadBySettings(item, settings)
+    && classifyBrowserDownloadIntent({ ...item, url }).action === 'capture';
+}
+
+export function shouldAllowBrowserDownloadBySettings(
+  item: BrowserDownloadPolicyItem,
+  settings: ExtensionIntegrationSettings,
+): boolean {
+  const url = browserDownloadUrl(item);
+  if (!url) {
+    return false;
+  }
+
   const isTorrentBrowserDownload = isTorrentUrl(url) || isTorrentFilename(item.filename);
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
     && !isHostExcluded(url, settings.excludedHosts)
     && !isBrowserExtensionPackage(url, item.filename)
     && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, item.filename, settings.ignoredFileExtensions));
+}
+
+export function classifyBrowserDownloadIntent(
+  item: BrowserDownloadPolicyItem & { url: string; contentDisposition?: string },
+): BrowserDownloadIntentDecision {
+  if (isDownloadCreatedByExtension(item)) {
+    return { action: 'ignore', reason: 'extension_initiated' };
+  }
+
+  const url = item.url;
+  const contentDisposition = item.contentDisposition;
+  const contentType = normalizeContentType(item.mime);
+  const filename = item.filename ?? filenameFromContentDisposition(contentDisposition) ?? basenameFromUrl(url);
+  const hasAttachmentDisposition = /\battachment\b/i.test(contentDisposition ?? '');
+  const hasStrongDownloadFilename = !isInlineContentType(contentType)
+    && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
+
+  if (hasAttachmentDisposition) {
+    return { action: 'capture', reason: 'attachment_disposition' };
+  }
+
+  if (hasStrongDownloadFilename) {
+    return { action: 'capture', reason: 'strong_filename' };
+  }
+
+  if (isExplicitDownloadUrl(url)) {
+    return { action: 'capture', reason: 'explicit_download_url' };
+  }
+
+  if (isLikelyAppTrafficPayload(item, url, filename, contentType)) {
+    return { action: 'ignore', reason: 'app_traffic_payload' };
+  }
+
+  if (contentType && DOWNLOAD_MIME_TYPES.has(contentType)) {
+    return { action: 'ignore', reason: 'download_mime_without_intent' };
+  }
+
+  return { action: 'ignore', reason: 'no_download_intent' };
 }
 
 export function browserDownloadTransferKind(item: BrowserDownloadPolicyItem): TransferKind | undefined {
@@ -273,25 +361,20 @@ export function firefoxWebRequestDownloadCandidate(
   const contentDisposition = headerValue(details.responseHeaders, 'content-disposition');
   const contentType = normalizeContentType(headerValue(details.responseHeaders, 'content-type'));
   const filename = filenameFromContentDisposition(contentDisposition) ?? basenameFromUrl(url);
-  const isAttachment = /\battachment\b/i.test(contentDisposition ?? '');
-  const hasDownloadMimeType = Boolean(contentType && FIREFOX_DOWNLOAD_MIME_TYPES.has(contentType));
-  const hasStrongDownloadFilename = !isInlineContentType(contentType)
-    && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
-  const hasExplicitDownloadUrl = isExplicitDownloadUrl(url);
-  const hasOnlyAmbiguousApiBinarySignal = Boolean(contentType && AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES.has(contentType))
-    && isLikelyApiSubresourceResponse(details, url)
-    && !isAttachment
-    && !hasStrongDownloadFilename
-    && !hasExplicitDownloadUrl;
+  const responseTotalBytes = nonNegativeIntegerHeader(details.responseHeaders, 'content-length');
+  const totalBytes = positiveFiniteNumber(responseTotalBytes);
 
-  if (
-    hasOnlyAmbiguousApiBinarySignal
-    || (!isAttachment && !hasDownloadMimeType && !hasStrongDownloadFilename && !hasExplicitDownloadUrl)
-  ) {
+  if (!shouldAllowBrowserDownloadBySettings({ url, filename }, settings)) {
     return null;
   }
 
-  if (!shouldHandleBrowserDownload({ url, filename }, settings)) {
+  if (classifyBrowserDownloadIntent({
+    url,
+    filename,
+    mime: contentType,
+    totalBytes: responseTotalBytes,
+    contentDisposition,
+  }).action !== 'capture') {
     return null;
   }
 
@@ -299,7 +382,7 @@ export function firefoxWebRequestDownloadCandidate(
     ...(details.requestId ? { requestId: details.requestId } : {}),
     url,
     filename,
-    totalBytes: positiveIntegerHeader(details.responseHeaders, 'content-length'),
+    totalBytes,
     incognito: details.incognito ?? false,
     ...(isReplayableRequestMethod(details.method) ? {} : { browserFallback: 'unavailable' as const }),
   };
@@ -572,21 +655,68 @@ function isReplayableRequestMethod(method: string | undefined): boolean {
   return !method || method.toUpperCase() === 'GET';
 }
 
-function isLikelyApiSubresourceResponse(details: FirefoxWebRequestDownloadDetails, url: string): boolean {
-  if (details.type !== 'xmlhttprequest' && details.type !== 'other') {
+function isDownloadCreatedByExtension(item: BrowserDownloadPolicyItem): boolean {
+  return Boolean(item.byExtensionId || item.byExtensionName);
+}
+
+function isLikelyAppTrafficPayload(
+  item: BrowserDownloadPolicyItem,
+  url: string,
+  filename: string | undefined,
+  contentType: string | undefined,
+): boolean {
+  if (contentType && isStructuredApiMimeType(contentType)) {
+    return true;
+  }
+
+  if (contentType && AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES.has(contentType)) {
+    return true;
+  }
+
+  return isLikelyApplicationTrafficUrl(url) || isTinyGenericPayload(item, url, filename);
+}
+
+function isStructuredApiMimeType(contentType: string): boolean {
+  return STRUCTURED_API_MIME_TYPES.has(contentType) || contentType.endsWith('+json');
+}
+
+function isTinyGenericPayload(
+  item: BrowserDownloadPolicyItem,
+  url: string,
+  filename: string | undefined,
+): boolean {
+  const byteLength = browserDownloadByteLength(item);
+  return byteLength !== undefined
+    && byteLength <= 1024
+    && isGenericAppPayloadFilename(filename ?? basenameFromUrl(url));
+}
+
+function isGenericAppPayloadFilename(filename: string | undefined): boolean {
+  const basename = basenameOnly(filename)?.toLowerCase();
+  if (!basename || hasStrongDownloadExtension(basename)) {
     return false;
   }
 
+  if (GENERIC_APP_PAYLOAD_TEXT_FILENAMES.has(basename)) {
+    return true;
+  }
+
+  const stem = basename.replace(/\.[^.]+$/, '');
+  return GENERIC_APP_PAYLOAD_BASENAMES.has(stem);
+}
+
+function isLikelyApplicationTrafficUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     const pathname = parsed.pathname.toLowerCase();
-    return pathname.includes('/youtubei/')
-      || pathname.includes('/api/')
+    const basename = basenameOnly(pathname) ?? '';
+    return pathname.includes('/api/')
       || pathname.includes('/ajax/')
       || pathname.includes('/graphql')
       || pathname.includes('/rpc/')
       || pathname.endsWith('.json')
-      || parsed.searchParams.has('prettyPrint');
+      || parsed.searchParams.has('prettyPrint')
+      || /(?:^|[-_])(config|heartbeat|manifest|metadata|ping|player|session|verify|version)(?:[-_]|$)/.test(basename);
   } catch {
     return false;
   }
@@ -613,14 +743,26 @@ function hasStrongDownloadExtension(filename: string | undefined): boolean {
   return Boolean(extension && extension !== basename && STRONG_DOWNLOAD_EXTENSIONS.has(extension));
 }
 
-function positiveIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {
+function nonNegativeIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {
   const value = headerValue(headers, name);
   if (!value) {
     return undefined;
   }
 
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function browserDownloadByteLength(item: BrowserDownloadPolicyItem): number | undefined {
+  return nonNegativeFiniteNumber(item.totalBytes) ?? nonNegativeFiniteNumber(item.fileSize);
+}
+
+function nonNegativeFiniteNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
+function positiveFiniteNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
 }
 
 function filenameFromContentDisposition(value: string | undefined): string | undefined {

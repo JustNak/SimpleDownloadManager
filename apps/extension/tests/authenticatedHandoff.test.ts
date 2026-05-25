@@ -101,6 +101,24 @@ assert.deepEqual(
 
 assert.deepEqual(
   buildHandoffAuthForUrl(
+    'https://canvadocs-sin.instructure.com/v2/documents/fzhs8D-eL9dX',
+    [
+      { name: 'Cookie', value: 'canvas_session=abc' },
+      { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+    ],
+    defaultAllowlistSettings,
+  ),
+  {
+    headers: [
+      { name: 'Cookie', value: 'canvas_session=abc' },
+      { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+    ],
+  },
+  'built-in Instructure protected-download allowlist should cover canvadocs PDF hosts',
+);
+
+assert.deepEqual(
+  buildHandoffAuthForUrl(
     'https://download-cdn.other.test/file.pdf',
     [{ name: 'Cookie', value: 'session=abc' }],
     settings,
@@ -251,6 +269,42 @@ assert.deepEqual(
   ),
   { status: 'ready', handoffAuth: { headers: [{ name: 'Cookie', value: 'session=abc' }] } },
   'Chrome browser handoffs should keep allowed memory-only auth when it was captured',
+);
+
+captureHandoffAuthHeaders(
+  {
+    requestId: 'firefox-canvadocs-object',
+    url: 'https://canvadocs-sin.instructure.com/v2/documents/fzhs8D-eL9dX',
+    method: 'GET',
+    incognito: false,
+    requestHeaders: [
+      { name: 'Cookie', value: 'canvas_session=abc' },
+      { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+    ],
+  },
+  defaultAllowlistSettings,
+  1_475,
+);
+assert.deepEqual(
+  resolveBrowserHandoffAuth(
+    {
+      requestId: 'firefox-canvadocs-object',
+      url: 'https://canvadocs-sin.instructure.com/v2/documents/fzhs8D-eL9dX',
+      incognito: false,
+    },
+    defaultAllowlistSettings,
+    1_490,
+  ),
+  {
+    status: 'ready',
+    handoffAuth: {
+      headers: [
+        { name: 'Cookie', value: 'canvas_session=abc' },
+        { name: 'Referer', value: 'https://canvas.instructure.com/courses/1/files/2' },
+      ],
+    },
+  },
+  'Firefox canvadocs handoffs should attach captured same-request browser session headers',
 );
 
 assert.deepEqual(

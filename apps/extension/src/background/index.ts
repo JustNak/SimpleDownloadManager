@@ -15,6 +15,7 @@ import {
   restoreBrowserDownloadAfterPromptFallback,
   revokeBrowserDownloadBypassUrl,
   selectFilenameInterceptionApi,
+  shouldAllowBrowserDownloadBySettings,
   shouldBypassBrowserDownload,
   shouldBypassBrowserDownloadUrl,
   shouldHandleBrowserDownload,
@@ -35,6 +36,7 @@ import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openA
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PageDownloadIntentRequest, PopupRequest, PopupStateResponse } from '../shared/messages';
 import { normalizeAccentColor } from '../shared/appearance';
+import { defaultExtensionSettings } from '../shared/defaultExtensionSettings';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const APPEARANCE_SYNC_ALARM_NAME = 'appearance-sync';
@@ -412,7 +414,7 @@ async function handOffBrowserDownload(
 
 async function handlePageDownloadIntent(message: PageDownloadIntentRequest): Promise<HostToExtensionResponse> {
   const initialSettings = await getCachedExtensionSettings();
-  if (!shouldHandleBrowserDownload({ url: message.url, filename: message.filename }, initialSettings)) {
+  if (!shouldAllowBrowserDownloadBySettings({ url: message.url, filename: message.filename }, initialSettings)) {
     return {
       ok: false,
       requestId: 'page_download_bypass',
@@ -432,7 +434,7 @@ async function handlePageDownloadIntent(message: PageDownloadIntentRequest): Pro
 
     const pingState = rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldHandleBrowserDownload({ url: message.url, filename: message.filename }, settings)) {
+    if (!shouldAllowBrowserDownloadBySettings({ url: message.url, filename: message.filename }, settings)) {
       await updateBrowserBadge(pingState);
       return {
         ok: false,
@@ -549,7 +551,7 @@ async function handleFirefoxWebRequestDownload(
 
     rememberStateSettings(await setLastResult('connected', pingResponse));
     settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldHandleBrowserDownload({ url: candidate.url, filename: candidate.filename }, settings)) {
+    if (!shouldAllowBrowserDownloadBySettings({ url: candidate.url, filename: candidate.filename }, settings)) {
       return;
     }
 
@@ -727,13 +729,12 @@ function registerHandoffAuthHeaderCapture(): void {
   }
 
   const listener = (details: HandoffAuthRequestDetails): void => {
-    void getCachedExtensionSettings().then((settings) => {
-      captureHandoffAuthHeaders(details, settings);
-    });
+    captureHandoffAuthHeaders(details, cachedExtensionSettings ?? defaultExtensionSettings);
+    void getCachedExtensionSettings();
   };
   const filter = {
     urls: ['http://*/*', 'https://*/*'],
-    types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'other'],
+    types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'],
   };
 
   try {
