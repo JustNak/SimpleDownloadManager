@@ -89,10 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Restored Telegram Web as a default excluded site to avoid Telegram-specific false prompts.',
-    '- Removed page-managed download interception so scripted page traffic stays in the browser.',
-    '- Kept normal browser download, Firefox attachment, protected-download, and Canvas/Instructure capture paths.',
-    '- Updated Protected Downloads to use browser-session forwarding for replayable Firefox downloads instead of a strict site allowlist.',
+    '- Protected Downloads now forwards browser session headers for eligible Firefox downloads without a strict site allowlist.',
+    '- Added Firefox cookie fallback for session-protected downloads when request headers omit Cookie.',
+    '- Removed the Protected Download Sites allowlist; use Excluded Sites to keep downloads in Firefox.',
   ].join('\n');
 }
 
@@ -148,7 +147,7 @@ When the extension is enabled and a download is eligible for handoff, it may sen
 - Page URL, page title, referrer, entry point, extension version, and incognito flag when available.
 - User actions such as context-menu handoff, popup handoff, browser-download prompt, accepted handoff, canceled prompt, or fallback.
 - Extension settings such as capture mode, excluded sites, ignored file extensions, Protected Downloads settings, badge preference, and progress-window preference.
-- If Protected Downloads is enabled for a configured site, bounded browser request headers for the exact download being handed off, such as Cookie or Authorization headers after extension-side filtering.
+- If Protected Downloads is enabled, bounded browser request headers for the exact download being handed off, such as Cookie or Authorization headers after extension-side filtering.
 
 ## Local-Only Use
 
@@ -160,17 +159,16 @@ The extension stores its settings in Firefox extension storage. Protected-downlo
 
 ## User Controls
 
-Users can disable browser download interception, choose prompt or automatic handoff, exclude sites, ignore file extensions, disable Protected Downloads, and remove protected-download sites from the extension options page.
+Users can disable browser download interception, choose prompt or automatic handoff, exclude sites, ignore file extensions, and disable Protected Downloads from the extension options page.
 `;
 }
 
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Restored the 1.0.1-style capture surface: no page-managed content script, no injected page hook, and no blob/data bridge.
-- Restored web.telegram.org as a default excluded host so Telegram Web downloads are ignored by automatic capture.
-- Normal browser downloads, context menu, popup enqueue, Firefox attachment/webRequest capture, protected downloads, and Canvas/Instructure downloads remain supported.
-- The Firefox cookies permission is used only for Protected Downloads when webRequest does not expose a Cookie header; cookie values are sent to the local native desktop app for the same download URL and are not stored.
+- Protected Downloads now uses browser-session forwarding for eligible Firefox browser downloads when enabled; Excluded Sites remains the per-site opt-out.
+- The Firefox cookies permission is used only as a fallback when webRequest does not expose Cookie for the same download URL; cookie values are sent only to the local native desktop app and are not stored.
+- Session headers remain memory-only, sanitized, capped, and short-lived; the previous Protected Download Sites allowlist UI was removed.
 `;
 }
 
