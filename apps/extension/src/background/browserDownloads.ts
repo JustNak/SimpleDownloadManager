@@ -280,7 +280,7 @@ export function shouldHandleBrowserDownload(
   }
 
   return shouldAllowBrowserDownloadBySettings(item, settings)
-    && classifyBrowserDownloadIntent({ ...item, url }).action === 'capture';
+    && classifyBrowserDownloadIntent({ ...item, url }, settings.capturedFileExtensions).action === 'capture';
 }
 
 export function shouldAllowBrowserDownloadBySettings(
@@ -302,6 +302,7 @@ export function shouldAllowBrowserDownloadBySettings(
 
 export function classifyBrowserDownloadIntent(
   item: BrowserDownloadPolicyItem & { url: string; contentDisposition?: string },
+  capturedFileExtensions: string[] = [],
 ): BrowserDownloadIntentDecision {
   if (isDownloadCreatedByExtension(item)) {
     return { action: 'ignore', reason: 'extension_initiated' };
@@ -311,9 +312,13 @@ export function classifyBrowserDownloadIntent(
   const contentDisposition = item.contentDisposition;
   const contentType = normalizeContentType(item.mime);
   const filename = item.filename ?? filenameFromContentDisposition(contentDisposition) ?? basenameFromUrl(url);
+  const capturedExtensionSet = normalizedCapturedFileExtensions(capturedFileExtensions);
   const hasAttachmentDisposition = /\battachment\b/i.test(contentDisposition ?? '');
   const hasStrongDownloadFilename = !isInlineContentType(contentType)
-    && (hasStrongDownloadExtension(filename) || hasStrongDownloadExtension(basenameFromUrl(url)));
+    && (
+      hasStrongDownloadExtension(filename, capturedExtensionSet)
+      || hasStrongDownloadExtension(basenameFromUrl(url), capturedExtensionSet)
+    );
 
   if (isExplicitDownloadUrl(url)) {
     return { action: 'capture', reason: 'explicit_download_url' };
@@ -380,7 +385,7 @@ export function firefoxWebRequestDownloadCandidate(
     mime: contentType,
     totalBytes: responseTotalBytes,
     contentDisposition,
-  }).action !== 'capture') {
+  }, settings.capturedFileExtensions).action !== 'capture') {
     return null;
   }
 
@@ -766,14 +771,22 @@ function isExplicitDownloadUrl(url: string): boolean {
   }
 }
 
-function hasStrongDownloadExtension(filename: string | undefined): boolean {
+function hasStrongDownloadExtension(filename: string | undefined, capturedFileExtensions: Set<string> = new Set()): boolean {
   const basename = basenameOnly(filename)?.toLowerCase();
   if (!basename) {
     return false;
   }
 
   const extension = basename.split('.').pop();
-  return Boolean(extension && extension !== basename && STRONG_DOWNLOAD_EXTENSIONS.has(extension));
+  return Boolean(
+    extension
+    && extension !== basename
+    && (STRONG_DOWNLOAD_EXTENSIONS.has(extension) || capturedFileExtensions.has(extension)),
+  );
+}
+
+function normalizedCapturedFileExtensions(values: string[]): Set<string> {
+  return new Set(values.map(normalizeFileExtension).filter(Boolean));
 }
 
 function nonNegativeIntegerHeader(headers: FirefoxWebRequestHeader[] | undefined, name: string): number | undefined {
@@ -866,7 +879,8 @@ function isFileExtensionIgnored(url: string, filename: string | undefined, ignor
 }
 
 function normalizeFileExtension(value: string): string {
-  return value.trim().replace(/^\.+/, '').toLowerCase();
+  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
+  return extension === '7zip' ? '7z' : extension;
 }
 
 function basenameFromUrl(url: string): string | undefined {

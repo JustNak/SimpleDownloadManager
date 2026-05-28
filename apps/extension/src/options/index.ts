@@ -19,6 +19,9 @@ const badgeToggle = document.querySelector<HTMLInputElement>('#badge-toggle');
 const ignoredExtensionInput = document.querySelector<HTMLInputElement>('#ignored-extension-input');
 const addExtensionButton = document.querySelector<HTMLButtonElement>('#add-extension-button');
 const ignoredExtensions = document.querySelector<HTMLDivElement>('#ignored-extensions');
+const capturedExtensionInput = document.querySelector<HTMLInputElement>('#captured-extension-input');
+const addCapturedExtensionButton = document.querySelector<HTMLButtonElement>('#add-captured-extension-button');
+const capturedExtensions = document.querySelector<HTMLDivElement>('#captured-extensions');
 const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-host-input');
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
@@ -51,6 +54,7 @@ function renderState(state: PopupStateResponse) {
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
   if (authHandoffToggle) authHandoffToggle.checked = settings.authenticatedHandoffEnabled;
   renderIgnoredExtensions(settings.ignoredFileExtensions ?? []);
+  renderCapturedExtensions(settings.capturedFileExtensions ?? []);
   renderExcludedHosts(settings.excludedHosts ?? []);
   setControlsDisabled(isSaving, settings.enabled);
 
@@ -103,6 +107,27 @@ function renderIgnoredExtensions(extensions: string[]) {
           (candidate) => candidate !== extension,
         ) ?? [];
         void updateSettings({ ignoredFileExtensions: nextExtensions });
+      }),
+    );
+  }
+}
+
+function renderCapturedExtensions(extensions: string[]) {
+  if (!capturedExtensions) return;
+  capturedExtensions.textContent = '';
+
+  if (extensions.length === 0) {
+    capturedExtensions.append(emptyState('No custom captured file extensions.'));
+    return;
+  }
+
+  for (const extension of extensions) {
+    capturedExtensions.append(
+      removableChip(`.${extension}`, `Remove .${extension}`, () => {
+        const nextExtensions = currentState?.extensionSettings?.capturedFileExtensions.filter(
+          (candidate) => candidate !== extension,
+        ) ?? [];
+        void updateSettings({ capturedFileExtensions: nextExtensions });
       }),
     );
   }
@@ -168,6 +193,8 @@ function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
     badgeToggle,
     ignoredExtensionInput,
     addExtensionButton,
+    capturedExtensionInput,
+    addCapturedExtensionButton,
     excludedHostInput,
     addHostButton,
     authHandoffToggle,
@@ -252,6 +279,17 @@ ignoredExtensionInput?.addEventListener('keydown', (event) => {
   }
 });
 
+addCapturedExtensionButton?.addEventListener('click', () => {
+  addCapturedExtensions();
+});
+
+capturedExtensionInput?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    addCapturedExtensions();
+  }
+});
+
 addHostButton?.addEventListener('click', () => {
   addExcludedHost();
 });
@@ -283,6 +321,22 @@ function addIgnoredExtensions() {
   void updateSettings({ ignoredFileExtensions: nextExtensions });
 }
 
+function addCapturedExtensions() {
+  const extensionsToAdd = parseFileExtensions(capturedExtensionInput?.value ?? '');
+  if (extensionsToAdd.length === 0) return;
+
+  const extensions = currentState?.extensionSettings?.capturedFileExtensions ?? [];
+  const nextExtensions = [...extensions];
+  for (const extension of extensionsToAdd) {
+    if (!nextExtensions.includes(extension)) {
+      nextExtensions.push(extension);
+    }
+  }
+
+  if (capturedExtensionInput) capturedExtensionInput.value = '';
+  void updateSettings({ capturedFileExtensions: nextExtensions });
+}
+
 function addExcludedHost() {
   const host = normalizeHost(excludedHostInput?.value ?? '');
   if (!host) return;
@@ -309,12 +363,16 @@ function parseFileExtensions(value: string): string[] {
 }
 
 function normalizeFileExtension(value: string): string {
-  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
+  const extension = normalizeFileExtensionAlias(value.trim().replace(/^\.+/, '').toLowerCase());
   if (!extension || extension.includes('/') || extension.includes('\\') || /^\.+$/.test(extension)) {
     return '';
   }
 
   return extension;
+}
+
+function normalizeFileExtensionAlias(value: string): string {
+  return value === '7zip' ? '7z' : value;
 }
 
 function normalizeHost(value: string): string {

@@ -30,6 +30,7 @@ const settings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [],
   ignoredFileExtensions: [],
+  capturedFileExtensions: [],
   authenticatedHandoffEnabled: true,
   protectedDownloadAuthScope: 'legacy_global',
   authenticatedHandoffHosts: [],

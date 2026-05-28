@@ -85,6 +85,20 @@
 
             <div class="setting-row">
               <div>
+                <div class="label">Captured File Extensions</div>
+                <div class="description">Additional extensions that should be treated as browser downloads.</div>
+              </div>
+              <div>
+                <div class="input-action">
+                  <input id="captured-extension-input" type="text" placeholder="zip rar exe 7zip ppt pptx docx" />
+                  <button id="add-captured-extension-button" type="button" class="button primary">Add</button>
+                </div>
+                <div id="captured-extensions" class="chips"></div>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
                 <div class="label">Excluded Sites</div>
                 <div class="description">Downloads from these hostnames and wildcard host patterns stay in the browser.</div>
               </div>

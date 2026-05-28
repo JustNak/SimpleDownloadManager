@@ -14,6 +14,7 @@ const defaultSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [],
   ignoredFileExtensions: [],
+  capturedFileExtensions: [],
   authenticatedHandoffEnabled: false,
   protectedDownloadAuthScope: 'off',
   authenticatedHandoffHosts: [],
@@ -287,6 +288,24 @@ assert.deepEqual(
   'Firefox should classify strong filename-extension download URLs beyond frame navigation',
 );
 
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/export/report.pkgx?token=abc',
+      type: 'xmlhttprequest',
+      responseHeaders: [],
+    }),
+    { ...defaultSettings, capturedFileExtensions: ['pkgx'] },
+  ),
+  {
+    url: 'https://downloads.example.com/export/report.pkgx?token=abc',
+    filename: 'report.pkgx',
+    totalBytes: undefined,
+    incognito: false,
+  },
+  'Firefox should classify user configured filename-extension download URLs',
+);
+
 assert.equal(
   firefoxWebRequestDownloadCandidate(
     details({
@@ -345,6 +364,23 @@ assert.equal(
   ),
   null,
   'Firefox should ignore zero-byte YouTube Music session attachments with generic JSON filenames',
+);
+
+assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://music.youtube.com/verify_session',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="json.txt"' },
+        { name: 'Content-Type', value: 'application/octet-stream' },
+        { name: 'Content-Length', value: '0' },
+      ],
+    }),
+    { ...defaultSettings, capturedFileExtensions: ['txt'] },
+  ),
+  null,
+  'Firefox user captured extensions should not override high-confidence app traffic probes',
 );
 
 assert.equal(

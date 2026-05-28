@@ -53,6 +53,7 @@ const snapshot: DesktopSnapshot = {
       showBadgeStatus: true,
       excludedHosts: [],
       ignoredFileExtensions: [],
+      capturedFileExtensions: [],
       authenticatedHandoffEnabled: false,
       protectedDownloadAuthScope: 'off',
       authenticatedHandoffHosts: [],

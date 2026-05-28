@@ -26,23 +26,8 @@ pub(super) fn normalize_extension_settings(settings: &mut ExtensionIntegrationSe
     settings.authenticated_handoff_enabled =
         settings.protected_download_auth_scope != ProtectedDownloadAuthScope::Off;
 
-    let mut normalized_extensions = Vec::new();
-    let mut seen_extensions = HashSet::new();
-
-    for extension in &settings.ignored_file_extensions {
-        for candidate in
-            extension.split(|character: char| character == ',' || character.is_whitespace())
-        {
-            let candidate = normalize_file_extension(candidate);
-            if candidate.is_empty() || !seen_extensions.insert(candidate.clone()) {
-                continue;
-            }
-
-            normalized_extensions.push(candidate);
-        }
-    }
-
-    settings.ignored_file_extensions = normalized_extensions;
+    settings.ignored_file_extensions = normalize_file_extensions(&settings.ignored_file_extensions);
+    settings.captured_file_extensions = normalize_file_extensions(&settings.captured_file_extensions);
 }
 
 fn normalize_protected_download_auth_scope(
@@ -162,7 +147,10 @@ pub(super) fn normalize_accent_color(settings: &mut Settings) {
 }
 
 pub(super) fn normalize_file_extension(value: &str) -> String {
-    let extension = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    let extension = match value.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "7zip" => "7z".to_string(),
+        value => value.to_string(),
+    };
     if extension.is_empty()
         || extension.contains('/')
         || extension.contains('\\')
@@ -172,6 +160,26 @@ pub(super) fn normalize_file_extension(value: &str) -> String {
     }
 
     extension
+}
+
+fn normalize_file_extensions(values: &[String]) -> Vec<String> {
+    let mut normalized_extensions = Vec::new();
+    let mut seen_extensions = HashSet::new();
+
+    for extension in values {
+        for candidate in
+            extension.split(|character: char| character == ',' || character.is_whitespace())
+        {
+            let candidate = normalize_file_extension(candidate);
+            if candidate.is_empty() || !seen_extensions.insert(candidate.clone()) {
+                continue;
+            }
+
+            normalized_extensions.push(candidate);
+        }
+    }
+
+    normalized_extensions
 }
 
 pub(super) fn should_reset_download_directory(

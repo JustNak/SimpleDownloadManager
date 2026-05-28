@@ -23,6 +23,7 @@ export function createDefaultExtensionIntegrationSettings(): ExtensionIntegratio
     showBadgeStatus: true,
     excludedHosts: [...DEFAULT_EXTENSION_EXCLUDED_HOSTS],
     ignoredFileExtensions: [],
+    capturedFileExtensions: [],
     authenticatedHandoffEnabled: true,
     protectedDownloadAuthScope: 'legacy_global',
     authenticatedHandoffHosts: [...DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS],

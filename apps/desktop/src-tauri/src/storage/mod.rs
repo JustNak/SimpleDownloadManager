@@ -627,6 +627,8 @@ pub struct ExtensionIntegrationSettings {
     pub excluded_hosts: Vec<String>,
     #[serde(default)]
     pub ignored_file_extensions: Vec<String>,
+    #[serde(default)]
+    pub captured_file_extensions: Vec<String>,
     #[serde(default = "default_authenticated_handoff_enabled")]
     pub authenticated_handoff_enabled: bool,
     #[serde(default = "default_protected_download_auth_scope")]
@@ -980,6 +982,7 @@ impl Default for ExtensionIntegrationSettings {
                 .map(|host| (*host).to_string())
                 .collect(),
             ignored_file_extensions: Vec::new(),
+            captured_file_extensions: Vec::new(),
             authenticated_handoff_enabled: default_authenticated_handoff_enabled(),
             protected_download_auth_scope: default_protected_download_auth_scope(),
             authenticated_handoff_hosts: default_authenticated_handoff_hosts(),

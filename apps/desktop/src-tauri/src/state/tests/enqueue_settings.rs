@@ -1781,6 +1781,25 @@ fn normalize_extension_settings_cleans_ignored_file_extensions() {
 }
 
 #[test]
+fn normalize_extension_settings_cleans_captured_file_extensions() {
+    let mut settings = ExtensionIntegrationSettings {
+        captured_file_extensions: vec![
+            " zip rar exe 7zip ppt pptx docx ".into(),
+            ".ZIP".into(),
+            "invalid/path".into(),
+        ],
+        ..ExtensionIntegrationSettings::default()
+    };
+
+    normalize_extension_settings(&mut settings);
+
+    assert_eq!(
+        settings.captured_file_extensions,
+        vec!["zip", "rar", "exe", "7z", "ppt", "pptx", "docx"]
+    );
+}
+
+#[test]
 fn normalize_extension_settings_defaults_invalid_listen_port() {
     let mut settings = ExtensionIntegrationSettings {
         listen_port: 70_000,

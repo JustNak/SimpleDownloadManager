@@ -13,9 +13,11 @@ assert.deepEqual(defaultExtensionSettings.excludedHosts, ['web.telegram.org']);
 assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, true);
 assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'legacy_global');
 assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, []);
+assert.deepEqual(defaultExtensionSettings.capturedFileExtensions, []);
 assert.deepEqual(createDefaultExtensionSettings().excludedHosts, ['web.telegram.org']);
 assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'legacy_global');
 assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, []);
+assert.deepEqual(createDefaultExtensionSettings().capturedFileExtensions, []);
 
 assert.deepEqual(
   normalizeExtensionSettings(undefined).excludedHosts,
@@ -41,6 +43,14 @@ assert.deepEqual(
   normalizeExtensionSettings({ excludedHosts: [] }).excludedHosts,
   [],
   'existing saved settings with an explicit empty list should not be migrated',
+);
+
+assert.deepEqual(
+  normalizeExtensionSettings({
+    capturedFileExtensions: [' zip rar exe 7zip ppt pptx docx ', '.ZIP', 'invalid/path'],
+  }).capturedFileExtensions,
+  ['zip', 'rar', 'exe', '7z', 'ppt', 'pptx', 'docx'],
+  'captured file extensions should normalize whitespace input, aliases, dots, and duplicates',
 );
 
 assert.deepEqual(

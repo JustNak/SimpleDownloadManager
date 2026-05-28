@@ -34,6 +34,7 @@ async function main() {
     showBadgeStatus: true,
     excludedHosts: [],
     ignoredFileExtensions: [],
+    capturedFileExtensions: [],
     authenticatedHandoffEnabled: false,
     protectedDownloadAuthScope: 'off',
     authenticatedHandoffHosts: [],
@@ -98,6 +99,28 @@ async function main() {
     ),
     false,
     'ignored extensions should not capture normal HTTP downloads',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://downloads.example.com/packages/archive.pkgx?token=abc',
+        filename: 'C:\\Users\\Me\\Downloads\\archive.pkgx',
+      },
+      { ...defaultSettings, capturedFileExtensions: ['pkgx'] },
+    ),
+    true,
+    'user captured extensions should allow custom file types to be handed off',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://downloads.example.com/packages/archive.pkgx?token=abc',
+        filename: 'C:\\Users\\Me\\Downloads\\archive.pkgx',
+      },
+      { ...defaultSettings, capturedFileExtensions: ['pkgx'], ignoredFileExtensions: ['pkgx'] },
+    ),
+    false,
+    'ignored extensions should still win over user captured extensions',
   );
   assert.equal(
     shouldHandleBrowserDownload(
@@ -182,6 +205,20 @@ async function main() {
     ),
     false,
     'YouTube Music session verification browser downloads without size or MIME metadata should not open a prompt',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
+      {
+        url: 'https://music.youtube.com/verify_session',
+        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
+        mime: 'application/octet-stream',
+        totalBytes: 0,
+        fileSize: 0,
+      },
+      { ...defaultSettings, capturedFileExtensions: ['txt'] },
+    ),
+    false,
+    'user captured extensions should not override high-confidence app traffic probes',
   );
   assert.equal(
     shouldHandleBrowserDownload(

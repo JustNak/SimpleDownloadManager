@@ -38,6 +38,7 @@ function makeSettings(theme: Settings['theme']): Settings {
       showBadgeStatus: true,
       excludedHosts: [],
       ignoredFileExtensions: [],
+      capturedFileExtensions: [],
       authenticatedHandoffEnabled: false,
       protectedDownloadAuthScope: 'off',
       authenticatedHandoffHosts: [],

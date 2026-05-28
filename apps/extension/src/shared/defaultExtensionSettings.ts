@@ -19,6 +19,7 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
+  capturedFileExtensions: [],
   authenticatedHandoffEnabled: true,
   protectedDownloadAuthScope: 'legacy_global',
   authenticatedHandoffHosts: [...DEFAULT_AUTHENTICATED_HANDOFF_HOSTS],
@@ -29,6 +30,7 @@ export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
     ...defaultExtensionSettings,
     excludedHosts: [...defaultExtensionSettings.excludedHosts],
     ignoredFileExtensions: [...defaultExtensionSettings.ignoredFileExtensions],
+    capturedFileExtensions: [...defaultExtensionSettings.capturedFileExtensions],
     authenticatedHandoffHosts: [...defaultExtensionSettings.authenticatedHandoffHosts],
   };
 }
@@ -50,6 +52,9 @@ export function normalizeExtensionSettings(
     ),
     ignoredFileExtensions: normalizeFileExtensions(
       settings?.ignoredFileExtensions ?? defaults.ignoredFileExtensions,
+    ),
+    capturedFileExtensions: normalizeFileExtensions(
+      settings?.capturedFileExtensions ?? defaults.capturedFileExtensions,
     ),
   };
 }
@@ -129,10 +134,14 @@ function normalizeFileExtensions(values: string[]): string[] {
 }
 
 function normalizeFileExtension(value: string): string {
-  const extension = value.trim().replace(/^\.+/, '').toLowerCase();
+  const extension = normalizeFileExtensionAlias(value.trim().replace(/^\.+/, '').toLowerCase());
   if (!extension || extension.includes('/') || extension.includes('\\') || /^\.+$/.test(extension)) {
     return '';
   }
 
   return extension;
+}
+
+function normalizeFileExtensionAlias(value: string): string {
+  return value === '7zip' ? '7z' : value;
 }

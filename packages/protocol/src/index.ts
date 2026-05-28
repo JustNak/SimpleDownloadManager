@@ -210,6 +210,7 @@ export interface ExtensionIntegrationSettings {
   showBadgeStatus: boolean;
   excludedHosts: string[];
   ignoredFileExtensions: string[];
+  capturedFileExtensions: string[];
   authenticatedHandoffEnabled: boolean;
   protectedDownloadAuthScope: ProtectedDownloadAuthScope;
   authenticatedHandoffHosts: string[];
