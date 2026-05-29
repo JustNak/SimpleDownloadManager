@@ -9,14 +9,14 @@ This file documents the Firefox-specific review and packaging rules for the Simp
 - Alpha package versions must use a numeric `version` such as `0.3.45` and a human-readable `version_name` such as `0.3.45-alpha`.
 - The extension release version is sourced from `apps/extension/package.json` and may differ from the desktop/Tauri app version.
 - Keep `browser_specific_settings.gecko.strict_min_version` aligned with the AMO lint target used by the release scripts.
-- Declare `data_collection_permissions` when download URLs, referrer/page metadata, response headers, filename hints, content length, user download actions, or opt-in protected-download request headers are sent to the local native app.
+- Declare `data_collection_permissions` when download URLs, referrer/page metadata, response headers, filename hints, content length, user download actions, or completed local download paths are used for local handoff decisions.
 
 ## Permission Rationale
 
 - `nativeMessaging` is required to communicate with the installed native desktop host.
-- `downloads` is required to observe, cancel, remove, erase, and restart browser downloads during handoff and fallback.
-- `webRequest` and `webRequestBlocking` are required so Firefox can intercept attachment/download responses before the default Save As dialog opens and capture request headers for exact protected-download handoff.
-- `<all_urls>` is required because download links can originate from arbitrary HTTP(S) hosts. Runtime filtering still applies by scheme, excluded host patterns, ignored file extensions, and user settings.
+- `downloads` is required to observe browser downloads and adopt completed files into the desktop app queue.
+- `webRequest` and `webRequestBlocking` are required so Firefox can distinguish real attachment/download responses from page-internal traffic before completed-file adoption.
+- `<all_urls>` is required because download links can originate from arbitrary HTTP(S) hosts. Runtime filtering still applies by scheme, excluded host patterns, captured file extensions, and user settings.
 - `storage` is required for extension settings.
 - `contextMenus` is required for the link context menu action.
 
@@ -26,7 +26,7 @@ This file documents the Firefox-specific review and packaging rules for the Simp
 - No remote code is used. The submitted ZIP must contain only bundled extension JavaScript, static assets, and `manifest.json`.
 - The extension does not include analytics, advertising, tracking, or remote configuration.
 - Data is transmitted only to the local native desktop application through Firefox native messaging.
-- Reviewer notes should explain the native app dependency, download handoff flow, fallback behavior, wildcard excluded hosts, opt-in Protected Downloads, and why each permission is needed.
+- Reviewer notes should explain the native app dependency, completed-file adoption flow, wildcard excluded hosts, and why each permission is needed.
 - The AMO upload ZIP must contain extension files at the archive root, not inside a nested folder.
 - The source ZIP should include source files and build scripts, while excluding generated or heavy folders such as `node_modules`, `dist`, `release`, `.tmp`, and Rust `target`.
 - `AMO_LISTING_METADATA.json` is generated for `web-ext sign --channel=listed --amo-metadata=...`.

@@ -65,17 +65,17 @@ assert.deepEqual(
 );
 assert.deepEqual(
   firefoxManifest.permissions,
-  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', 'cookies', '<all_urls>'],
+  ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
 );
 assert.deepEqual(
   chromiumManifest.permissions,
   ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
-  'Chromium build should request webRequest for protected-download header capture',
+  'Chromium build should request webRequest for download response classification',
 );
 assert.deepEqual(
   chromiumManifest.host_permissions,
   ['<all_urls>'],
-  'Chromium webRequest header observation requires host permissions for download origins',
+  'Chromium webRequest observation requires host permissions for download origins',
 );
 assert.equal('content_scripts' in firefoxManifest, false, 'Firefox build should not inject page-managed download content scripts');
 assert.equal('content_scripts' in chromiumManifest, false, 'Chromium build should not inject page-managed download content scripts');

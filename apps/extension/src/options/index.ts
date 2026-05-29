@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CAPTURED_FILE_EXTENSIONS,
   DEFAULT_EXTENSION_LISTEN_PORT,
   normalizeExcludedHostPattern,
   type DownloadHandoffMode,
@@ -16,16 +17,13 @@ const listenPortInput = document.querySelector<HTMLInputElement>('#listen-port-i
 const contextMenuToggle = document.querySelector<HTMLInputElement>('#context-menu-toggle');
 const progressToggle = document.querySelector<HTMLInputElement>('#progress-toggle');
 const badgeToggle = document.querySelector<HTMLInputElement>('#badge-toggle');
-const ignoredExtensionInput = document.querySelector<HTMLInputElement>('#ignored-extension-input');
-const addExtensionButton = document.querySelector<HTMLButtonElement>('#add-extension-button');
-const ignoredExtensions = document.querySelector<HTMLDivElement>('#ignored-extensions');
 const capturedExtensionInput = document.querySelector<HTMLInputElement>('#captured-extension-input');
 const addCapturedExtensionButton = document.querySelector<HTMLButtonElement>('#add-captured-extension-button');
+const restoreCapturedExtensionsButton = document.querySelector<HTMLButtonElement>('#restore-captured-extensions-button');
 const capturedExtensions = document.querySelector<HTMLDivElement>('#captured-extensions');
 const excludedHostInput = document.querySelector<HTMLInputElement>('#excluded-host-input');
 const addHostButton = document.querySelector<HTMLButtonElement>('#add-host-button');
 const excludedHosts = document.querySelector<HTMLDivElement>('#excluded-hosts');
-const authHandoffToggle = document.querySelector<HTMLInputElement>('#auth-handoff-toggle');
 const saveState = document.querySelector<HTMLDivElement>('#save-state');
 const refreshButton = document.querySelector<HTMLButtonElement>('#refresh-button');
 
@@ -52,8 +50,6 @@ function renderState(state: PopupStateResponse) {
   if (contextMenuToggle) contextMenuToggle.checked = settings.contextMenuEnabled;
   if (progressToggle) progressToggle.checked = settings.showProgressAfterHandoff;
   if (badgeToggle) badgeToggle.checked = settings.showBadgeStatus;
-  if (authHandoffToggle) authHandoffToggle.checked = settings.authenticatedHandoffEnabled;
-  renderIgnoredExtensions(settings.ignoredFileExtensions ?? []);
   renderCapturedExtensions(settings.capturedFileExtensions ?? []);
   renderExcludedHosts(settings.excludedHosts ?? []);
   setControlsDisabled(isSaving, settings.enabled);
@@ -91,33 +87,12 @@ function updateConnectionStatus(connection: PopupStateResponse['connection']) {
   }
 }
 
-function renderIgnoredExtensions(extensions: string[]) {
-  if (!ignoredExtensions) return;
-  ignoredExtensions.textContent = '';
-
-  if (extensions.length === 0) {
-    ignoredExtensions.append(emptyState('No ignored file extensions.'));
-    return;
-  }
-
-  for (const extension of extensions) {
-    ignoredExtensions.append(
-      removableChip(`.${extension}`, `Remove .${extension}`, () => {
-        const nextExtensions = currentState?.extensionSettings?.ignoredFileExtensions.filter(
-          (candidate) => candidate !== extension,
-        ) ?? [];
-        void updateSettings({ ignoredFileExtensions: nextExtensions });
-      }),
-    );
-  }
-}
-
 function renderCapturedExtensions(extensions: string[]) {
   if (!capturedExtensions) return;
   capturedExtensions.textContent = '';
 
   if (extensions.length === 0) {
-    capturedExtensions.append(emptyState('No custom captured file extensions.'));
+    capturedExtensions.append(emptyState('No captured file extensions.'));
     return;
   }
 
@@ -191,13 +166,11 @@ function setControlsDisabled(saving: boolean, extensionEnabled: boolean) {
     contextMenuToggle,
     progressToggle,
     badgeToggle,
-    ignoredExtensionInput,
-    addExtensionButton,
     capturedExtensionInput,
     addCapturedExtensionButton,
+    restoreCapturedExtensionsButton,
     excludedHostInput,
     addHostButton,
-    authHandoffToggle,
   ];
 
   for (const control of extensionControls) {
@@ -261,24 +234,6 @@ badgeToggle?.addEventListener('change', () => {
   void updateSettings({ showBadgeStatus: badgeToggle.checked });
 });
 
-authHandoffToggle?.addEventListener('change', () => {
-  void updateSettings({
-    authenticatedHandoffEnabled: authHandoffToggle.checked,
-    protectedDownloadAuthScope: authHandoffToggle.checked ? 'legacy_global' : 'off',
-  });
-});
-
-addExtensionButton?.addEventListener('click', () => {
-  addIgnoredExtensions();
-});
-
-ignoredExtensionInput?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    addIgnoredExtensions();
-  }
-});
-
 addCapturedExtensionButton?.addEventListener('click', () => {
   addCapturedExtensions();
 });
@@ -288,6 +243,10 @@ capturedExtensionInput?.addEventListener('keydown', (event) => {
     event.preventDefault();
     addCapturedExtensions();
   }
+});
+
+restoreCapturedExtensionsButton?.addEventListener('click', () => {
+  void updateSettings({ capturedFileExtensions: [...DEFAULT_CAPTURED_FILE_EXTENSIONS] });
 });
 
 addHostButton?.addEventListener('click', () => {
@@ -304,22 +263,6 @@ excludedHostInput?.addEventListener('keydown', (event) => {
 refreshButton?.addEventListener('click', () => {
   void refreshState();
 });
-
-function addIgnoredExtensions() {
-  const extensionsToAdd = parseFileExtensions(ignoredExtensionInput?.value ?? '');
-  if (extensionsToAdd.length === 0) return;
-
-  const extensions = currentState?.extensionSettings?.ignoredFileExtensions ?? [];
-  const nextExtensions = [...extensions];
-  for (const extension of extensionsToAdd) {
-    if (!nextExtensions.includes(extension)) {
-      nextExtensions.push(extension);
-    }
-  }
-
-  if (ignoredExtensionInput) ignoredExtensionInput.value = '';
-  void updateSettings({ ignoredFileExtensions: nextExtensions });
-}
 
 function addCapturedExtensions() {
   const extensionsToAdd = parseFileExtensions(capturedExtensionInput?.value ?? '');

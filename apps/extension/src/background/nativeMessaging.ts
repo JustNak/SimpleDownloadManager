@@ -1,10 +1,12 @@
 import {
   HOST_NAME,
+  createAdoptBrowserDownloadRequest,
   createEnqueueDownloadRequest,
   createOpenAppRequest,
   createPingRequest,
   createPromptDownloadRequest,
   createSaveExtensionSettingsRequest,
+  type AdoptBrowserDownloadPayload,
   toUserFacingMessage,
   type BrowserKind,
   type DownloadRequestMetadata,
@@ -132,6 +134,26 @@ export async function promptDownload(
   metadata: DownloadRequestMetadata = {},
 ): Promise<HostToExtensionResponse> {
   const request = createPromptDownloadRequest(url, { ...source, browser: detectBrowser() }, metadata);
+  if (!request.ok) {
+    return {
+      ok: false,
+      requestId: 'validation_error',
+      type: 'rejected',
+      code: request.code,
+      message: request.message,
+    };
+  }
+
+  return sendNativeMessage(request.value);
+}
+
+export async function adoptBrowserDownload(
+  payload: Omit<AdoptBrowserDownloadPayload, 'source'> & { source: Omit<RequestSource, 'browser'> },
+): Promise<HostToExtensionResponse> {
+  const request = createAdoptBrowserDownloadRequest({
+    ...payload,
+    source: { ...payload.source, browser: detectBrowser() },
+  });
   if (!request.ok) {
     return {
       ok: false,

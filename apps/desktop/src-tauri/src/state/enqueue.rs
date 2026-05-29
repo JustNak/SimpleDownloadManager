@@ -349,9 +349,7 @@ impl SharedState {
         if !protected_download_auth_allowed_for_url(url, &settings) {
             return Err(BackendError {
                 code: "PERMISSION_DENIED",
-                message:
-                    "Protected Downloads browser session headers are not allowed for this site."
-                        .into(),
+                message: "Browser session handoff headers are not allowed for this site.".into(),
             });
         }
 
@@ -365,17 +363,9 @@ impl SharedState {
         source: Option<DownloadSource>,
         filename_hint: Option<String>,
         total_bytes: Option<u64>,
-        browser_fallback: BrowserFallback,
     ) -> Result<DownloadPrompt, BackendError> {
         let state = self.inner.read().await;
-        state.prepare_download_prompt(
-            id,
-            url,
-            source,
-            filename_hint,
-            total_bytes,
-            browser_fallback,
-        )
+        state.prepare_download_prompt(id, url, source, filename_hint, total_bytes)
     }
 }
 
@@ -616,7 +606,6 @@ impl RuntimeState {
         source: Option<DownloadSource>,
         filename_hint: Option<String>,
         total_bytes: Option<u64>,
-        browser_fallback: BrowserFallback,
     ) -> Result<DownloadPrompt, BackendError> {
         let url = normalize_download_url(url)?;
         let transfer_kind = transfer_kind_for_url(&url);
@@ -671,7 +660,6 @@ impl RuntimeState {
             url,
             filename,
             source,
-            browser_fallback,
             total_bytes: total_bytes.filter(|bytes| *bytes > 0),
             default_directory,
             target_path,

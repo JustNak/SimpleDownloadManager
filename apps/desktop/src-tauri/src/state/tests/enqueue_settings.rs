@@ -270,7 +270,7 @@ async fn authenticated_handoff_auth_rejects_excluded_hosts_and_disabled_scope() 
             },
         )
         .await
-        .expect_err("disabled Protected Downloads should not receive browser session headers");
+        .expect_err("disabled browser-session handling should not receive browser session headers");
 
     assert_eq!(error.code, "PERMISSION_DENIED");
 
@@ -650,7 +650,6 @@ fn prepare_download_prompt_marks_duplicate_job() {
             None,
             Some("archive.zip".into()),
             Some(4096),
-            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 
@@ -681,7 +680,6 @@ fn prepare_torrent_download_prompt_uses_torrent_directory_without_category_folde
             None,
             None,
             None,
-            BrowserFallback::Replay,
         )
         .expect("torrent prompt should use the torrent directory");
 
@@ -720,7 +718,6 @@ fn prepare_download_prompt_marks_duplicate_target_job_for_same_filename() {
             None,
             Some("guide.pdf".into()),
             None,
-            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 
@@ -761,7 +758,6 @@ fn prepare_download_prompt_marks_duplicate_existing_target_file() {
             None,
             Some("guide.pdf".into()),
             None,
-            BrowserFallback::Replay,
         )
         .expect("prompt should be prepared");
 

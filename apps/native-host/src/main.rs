@@ -6,11 +6,9 @@ mod protocol;
 
 use forwarder::{AppForwarder, ForwarderError};
 use protocol::{
-    app_browser_blob_begin_request, app_browser_blob_cancel_request,
-    app_browser_blob_chunk_request, app_browser_blob_finish_request, app_enqueue_request,
-    app_prompt_download_request, app_save_extension_settings_request, app_show_window_request,
-    app_status_request, parse_browser_blob_begin_payload, parse_browser_blob_chunk_payload,
-    parse_browser_blob_stream_payload, parse_enqueue_payload, parse_open_app_payload,
+    app_adopt_browser_download_request, app_enqueue_request, app_prompt_download_request,
+    app_save_extension_settings_request, app_show_window_request, app_status_request,
+    parse_adopt_browser_download_payload, parse_enqueue_payload, parse_open_app_payload,
     parse_prompt_download_payload, validate_protocol, AppResponseEnvelope, HostResponseEnvelope,
     NativeRequestEnvelope,
 };
@@ -92,38 +90,8 @@ fn handle_request(request: NativeRequestEnvelope) -> HostResponseEnvelope {
             },
             Err(response) => *response,
         },
-        "begin_browser_blob_download" => match parse_browser_blob_begin_payload(&request) {
-            Ok(payload) => match forwarder.send(&app_browser_blob_begin_request(
-                request.request_id.clone(),
-                payload,
-            )) {
-                Ok(response) => map_app_response(response),
-                Err(error) => map_forwarder_error(request.request_id, error),
-            },
-            Err(response) => *response,
-        },
-        "append_browser_blob_download_chunk" => match parse_browser_blob_chunk_payload(&request) {
-            Ok(payload) => match forwarder.send(&app_browser_blob_chunk_request(
-                request.request_id.clone(),
-                payload,
-            )) {
-                Ok(response) => map_app_response(response),
-                Err(error) => map_forwarder_error(request.request_id, error),
-            },
-            Err(response) => *response,
-        },
-        "finish_browser_blob_download" => match parse_browser_blob_stream_payload(&request) {
-            Ok(payload) => match forwarder.send(&app_browser_blob_finish_request(
-                request.request_id.clone(),
-                payload,
-            )) {
-                Ok(response) => map_app_response(response),
-                Err(error) => map_forwarder_error(request.request_id, error),
-            },
-            Err(response) => *response,
-        },
-        "cancel_browser_blob_download" => match parse_browser_blob_stream_payload(&request) {
-            Ok(payload) => match forwarder.send(&app_browser_blob_cancel_request(
+        "adopt_browser_download" => match parse_adopt_browser_download_payload(&request) {
+            Ok(payload) => match forwarder.send(&app_adopt_browser_download_request(
                 request.request_id.clone(),
                 payload,
             )) {
@@ -181,13 +149,7 @@ fn map_app_response(response: AppResponseEnvelope) -> HostResponseEnvelope {
     if response.ok {
         if !matches!(
             response.message_type.as_str(),
-            "queued"
-                | "duplicate_existing_job"
-                | "prompt_canceled"
-                | "prompt_dismissed"
-                | "blob_stream_accepted"
-                | "blob_stream_finished"
-                | "blob_stream_canceled"
+            "queued" | "duplicate_existing_job" | "prompt_dismissed"
         ) {
             return HostResponseEnvelope::rejected(
                 response.request_id,

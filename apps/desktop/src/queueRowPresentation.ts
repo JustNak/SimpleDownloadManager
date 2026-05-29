@@ -37,6 +37,10 @@ export function isBulkQueueView(view: string): boolean {
 type TorrentMetadataPendingJob = Pick<DownloadJob, 'state'> &
   Partial<Pick<DownloadJob, 'bulkArchive' | 'downloadedBytes' | 'filename' | 'progress' | 'removalState' | 'torrent' | 'transferKind' | 'totalBytes'>>;
 
+export function isBrowserAdoptedTransferKind(transferKind: string | undefined): boolean {
+  return transferKind === 'browser_adopted' || transferKind === 'browser_blob';
+}
+
 export function shouldShowNameProgress(job: TorrentMetadataPendingJob): boolean {
   if (isTorrentCheckingFiles(job) || isTorrentSeedingRestore(job)) return false;
   return job.state === 'downloading' && clampQueueProgress(job.progress ?? 0) > 0;
@@ -146,6 +150,9 @@ export function queueStatusPresentation(job: TorrentMetadataPendingJob): QueueSt
         tone: 'primary',
       };
     case 'completed':
+      if (isBrowserAdoptedTransferKind(job.transferKind)) {
+        return { label: 'Browser file', tone: 'success' };
+      }
       return { label: 'Done', tone: 'success' };
     case 'failed':
       return { label: 'Error', tone: 'destructive' };
@@ -250,6 +257,9 @@ export function formatQueueSizeTitle(
     & Partial<Pick<DownloadJob, 'transferKind' | 'resolvedFromUrl' | 'bulkArchive'>>,
   formatBytes: (bytes: number) => string,
 ): string {
+  if (isBrowserAdoptedTransferKind(job.transferKind)) {
+    return `Completed by browser; adopted into queue. ${formatQueueSize(job, formatBytes)}`;
+  }
   if (job.transferKind !== 'torrent') return formatQueueSize(job, formatBytes);
   return `${formatTorrentVerifiedSize(job, formatBytes)}; Downloaded ${formatTorrentFetchedSize(job, formatBytes)}`;
 }

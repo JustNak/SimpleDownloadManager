@@ -55,13 +55,44 @@ assert.doesNotMatch(
   /authenticatedHandoffHosts: \[\.\.\.hosts, host\]/,
   'options script should not persist protected-download host edits',
 );
-assert.match(
+assert.doesNotMatch(
   optionsSource,
-  /protectedDownloadAuthScope: authHandoffToggle\.checked \? 'legacy_global' : 'off'/,
-  'Protected Downloads toggle should save global browser-session forwarding when enabled',
+  /authHandoffToggle|protectedDownloadAuthScope: authHandoffToggle/,
+  'options script should not wire a browser-session toggle now that automatic capture is browser-owned',
+);
+assert.doesNotMatch(
+  optionsHtml,
+  /Browser Session Downloads|auth-handoff-toggle/,
+  'options page should not expose a browser-session toggle now that automatic capture is browser-owned',
+);
+assert.doesNotMatch(
+  optionsHtml,
+  /Forward memory-only browser session headers/,
+  'options page should not present header forwarding as protected-download support',
 );
 assert.doesNotMatch(
   optionsSource,
   /protectedHostInput[\s\S]*addProtectedHostButton[\s\S]*saving \|\| !extensionEnabled \|\| !protectedDownloadsEnabled/,
   'options script should not manage removed protected-download host controls',
+);
+
+assert.doesNotMatch(
+  optionsHtml,
+  /Ignored File Extensions|ignored-extension-input|ignored-extensions/,
+  'options page should not expose ignored file extensions now that captured extensions are the single gate',
+);
+assert.doesNotMatch(
+  optionsSource,
+  /ignoredExtensionInput|renderIgnoredExtensions|addIgnoredExtensions|ignoredFileExtensions:/,
+  'options script should not wire ignored file extension controls',
+);
+assert.match(
+  optionsHtml,
+  /id="restore-captured-extensions-button"[\s\S]*<svg viewBox="0 0 24 24"/,
+  'captured extension settings should provide an SVG restore-default button',
+);
+assert.match(
+  optionsSource,
+  /DEFAULT_CAPTURED_FILE_EXTENSIONS[\s\S]*capturedFileExtensions: \[\.\.\.DEFAULT_CAPTURED_FILE_EXTENSIONS\]/,
+  'restore-default button should reset captured extensions to the supported default list',
 );

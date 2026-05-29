@@ -16,8 +16,8 @@ MVP rules:
 - reject browser-internal URLs
 - do not accept save path from the extension
 - do not accept cookies, headers, or session replay material from manual URLs
-- for exact browser download handoff only, accept bounded protected-download request headers when enabled; keep them memory-only, redact values from diagnostics, and never persist them
-- clear captured protected-download headers when the feature is disabled, cap captured header entries in memory, and refuse ambiguous URL-only auth matches
+- automatic browser capture should prefer completed-file adoption over URL/header replay
+- accept completed browser download paths only from the local native messaging extension flow and validate them before recording completed jobs
 - cap metadata sizes
 - bound native messaging frames, app response lines, named pipe request lines, pipe read/write time, and side-effect request rate
 - sanitize filenames in the desktop app

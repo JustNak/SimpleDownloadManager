@@ -12,9 +12,9 @@ use crate::state::{
     SharedState, TorrentSessionCacheClearResult,
 };
 use crate::storage::{
-    BrowserFallback, BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot,
-    DownloadJob, DownloadPrompt, DownloadSource, HosterPreflightInfo, HosterPreflightStatus,
-    JobState, LocalRecoveryPreview, Settings, TransferKind,
+    BulkArchiveOutputKind, DesktopSnapshot, DiagnosticLevel, DiagnosticsSnapshot, DownloadJob,
+    DownloadPrompt, DownloadSource, HosterPreflightInfo, HosterPreflightStatus, JobState,
+    LocalRecoveryPreview, Settings, TransferKind,
 };
 use crate::windows::{
     close_download_prompt_window, focus_job_in_main_window_async, show_batch_progress_window,
@@ -989,21 +989,6 @@ pub async fn show_existing_download_prompt(
 }
 
 #[tauri::command]
-pub async fn swap_download_prompt(
-    app: AppHandle,
-    prompts: State<'_, PromptRegistry>,
-    id: String,
-) -> Result<(), String> {
-    complete_prompt_action(
-        &app,
-        prompts.inner().clone(),
-        &id,
-        PromptDecision::SwapToBrowser,
-    )
-    .await
-}
-
-#[tauri::command]
 pub async fn cancel_download_prompt(
     app: AppHandle,
     prompts: State<'_, PromptRegistry>,
@@ -1254,7 +1239,6 @@ pub async fn test_extension_handoff(
             }),
             Some("simple-download-manager-test.bin".into()),
             Some(1_048_576),
-            BrowserFallback::Replay,
         )
         .await
         .map_err(|error| error.message)?;
@@ -1269,10 +1253,9 @@ pub async fn test_extension_handoff(
     let worker_app = app.clone();
     let worker_state = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let decision = receiver.await.unwrap_or(PromptDecision::SwapToBrowser);
+        let decision = receiver.await.unwrap_or(PromptDecision::Cancel);
         match decision {
             PromptDecision::Cancel => {}
-            PromptDecision::SwapToBrowser => {}
             PromptDecision::ShowExisting => {
                 if let Some(job) = prompt.duplicate_job {
                     focus_job_in_main_window_async(&worker_app, &job.id).await;

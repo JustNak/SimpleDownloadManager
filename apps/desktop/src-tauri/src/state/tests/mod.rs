@@ -4,8 +4,8 @@ use crate::storage::{
     StartupRecoveryStatus, TorrentPeerConnectionWatchdogMode, TorrentRuntimeDiagnostics,
 };
 
-#[path = "blob_stream.rs"]
-mod blob_stream;
+#[path = "browser_adoption.rs"]
+mod browser_adoption;
 #[path = "destructive_cleanup.rs"]
 mod destructive_cleanup;
 #[path = "diagnostics.rs"]
@@ -692,7 +692,6 @@ fn shared_state_with_jobs(storage_path: PathBuf, jobs: Vec<DownloadJob>) -> Shar
         storage_path: Arc::new(storage_path),
         diagnostic_event_store,
         handoff_auth: Arc::new(RwLock::new(HashMap::new())),
-        browser_blob_streams: Arc::new(RwLock::new(HashMap::new())),
         scheduler_wake: Arc::new(StdMutex::new(SchedulerWakeState::default())),
     }
 }

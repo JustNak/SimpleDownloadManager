@@ -49,13 +49,13 @@ mod tests {
     fn framing_reads_multiple_messages_from_one_stream() {
         let mut stream = Vec::new();
         write_message(&mut stream, br#"{"type":"ping"}"#).unwrap();
-        write_message(&mut stream, br#"{"type":"finish_browser_blob_download"}"#).unwrap();
+        write_message(&mut stream, br#"{"type":"adopt_browser_download"}"#).unwrap();
         let mut reader = Cursor::new(stream);
 
         assert_eq!(read_message(&mut reader).unwrap(), br#"{"type":"ping"}"#);
         assert_eq!(
             read_message(&mut reader).unwrap(),
-            br#"{"type":"finish_browser_blob_download"}"#
+            br#"{"type":"adopt_browser_download"}"#
         );
         assert_eq!(
             read_message(&mut reader).unwrap_err().kind(),

@@ -71,27 +71,19 @@
 
             <div class="setting-row">
               <div>
-                <div class="label">Ignored File Extensions</div>
-                <div class="description">Automatic captures matching these extensions stay in the browser.</div>
-              </div>
-              <div>
-                <div class="input-action">
-                  <input id="ignored-extension-input" type="text" placeholder="exe zip txt pdf" />
-                  <button id="add-extension-button" type="button" class="button primary">Add</button>
-                </div>
-                <div id="ignored-extensions" class="chips"></div>
-              </div>
-            </div>
-
-            <div class="setting-row">
-              <div>
                 <div class="label">Captured File Extensions</div>
-                <div class="description">Additional extensions that should be treated as browser downloads.</div>
+                <div class="description">Filename extensions that should be treated as browser downloads.</div>
               </div>
               <div>
-                <div class="input-action">
+                <div class="input-action extension-input-action">
                   <input id="captured-extension-input" type="text" placeholder="zip rar exe 7zip ppt pptx docx" />
                   <button id="add-captured-extension-button" type="button" class="button primary">Add</button>
+                  <button id="restore-captured-extensions-button" type="button" class="icon-button" title="Restore default captured extensions" aria-label="Restore default captured extensions">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M3 12a9 9 0 1 0 3-6.7" />
+                      <path d="M3 4v6h6" />
+                    </svg>
+                  </button>
                 </div>
                 <div id="captured-extensions" class="chips"></div>
               </div>
@@ -111,17 +103,6 @@
               </div>
             </div>
 
-            <div class="setting-row switch-row">
-              <div>
-                <div class="label">Protected Downloads</div>
-                <div class="description">Forward memory-only browser session headers for browser downloads when the desktop app needs them.</div>
-              </div>
-              <label class="switch" for="auth-handoff-toggle" aria-label="Protected Downloads">
-                <input id="auth-handoff-toggle" type="checkbox" />
-                <span class="track"></span>
-                <span class="thumb"></span>
-              </label>
-            </div>
           </section>
 
           <section id="behavior" class="panel">

@@ -1,11 +1,7 @@
 import {
-  isErrorResponse,
   isUrlHostExcludedByPatterns,
-  type BrowserFallback,
+  DEFAULT_CAPTURED_FILE_EXTENSIONS,
   type ExtensionIntegrationSettings,
-  type HandoffAuth,
-  type HostToExtensionResponse,
-  type TransferKind,
 } from '@myapp/protocol';
 
 export type BrowserDownloadFilenameSuggestion = {
@@ -14,20 +10,6 @@ export type BrowserDownloadFilenameSuggestion = {
 };
 export type BrowserDownloadFilenameSuggest = (suggestion?: BrowserDownloadFilenameSuggestion) => void;
 export type BrowserDownloadState = 'in_progress' | 'interrupted' | 'complete' | string;
-export type BrowserDownloadSearchItem = {
-  id: number;
-  url?: string;
-  finalUrl?: string;
-  filename?: string;
-  state?: BrowserDownloadState;
-  exists?: boolean;
-};
-export type BrowserDownloadOptions = {
-  url: string;
-  filename?: string;
-  conflictAction?: 'uniquify' | 'overwrite' | 'prompt';
-  saveAs?: boolean;
-};
 export interface BrowserDownloadFilenameInterceptionApi<TItem = unknown> {
   onDeterminingFilename: {
     addListener(listener: (item: TItem, suggest: BrowserDownloadFilenameSuggest) => true): void;
@@ -39,24 +21,6 @@ export type AsyncFilenameInterceptionHandler<TItem> = (
   item: TItem,
   suggest: BrowserDownloadFilenameSuggest,
 ) => Promise<void> | void;
-
-export interface BrowserDownloadsCleanupApi {
-  cancel(downloadId: number): Promise<unknown>;
-  search(query: { id: number }): Promise<BrowserDownloadSearchItem[]>;
-  removeFile?(downloadId: number): Promise<unknown>;
-  erase(query: { id: number }): Promise<unknown>;
-}
-
-export interface BrowserDownloadsRestartApi {
-  download(options: BrowserDownloadOptions): Promise<number>;
-}
-
-export type BrowserDownloadReplayItem = {
-  id: number;
-  url?: string;
-  finalUrl?: string;
-  filename?: string;
-};
 export type BrowserDownloadPolicyItem = {
   url?: string;
   finalUrl?: string;
@@ -64,12 +28,60 @@ export type BrowserDownloadPolicyItem = {
   mime?: string;
   totalBytes?: number;
   fileSize?: number;
+  resourceType?: string;
   byExtensionId?: string;
   byExtensionName?: string;
 };
+export type BrowserDownloadIntentReason =
+  | 'extension_initiated'
+  | 'explicit_download_url'
+  | 'app_traffic_probe'
+  | 'attachment_disposition'
+  | 'strong_filename'
+  | 'app_traffic_payload'
+  | 'download_mime_without_intent'
+  | 'no_download_intent';
 export type BrowserDownloadIntentDecision = {
   action: 'capture' | 'ignore';
-  reason: string;
+  reason: BrowserDownloadIntentReason;
+};
+export type BrowserDownloadDelta = {
+  id: number;
+  state?: { current?: string };
+};
+export type BrowserDownloadAdoption = {
+  url: string;
+  suggestedFilename?: string;
+  totalBytes?: number;
+  incognito?: boolean;
+  pageUrl?: string;
+  pageTitle?: string;
+  referrer?: string;
+  reason: 'browser_download' | 'browser_session' | 'protected_auth_required';
+};
+export type CompletedBrowserDownloadItem = {
+  state?: string;
+  exists?: boolean;
+  filename?: string;
+  totalBytes?: number;
+  fileSize?: number;
+  mime?: string;
+};
+export type AdoptCompletedBrowserDownloadPayload<TSource> = {
+  url: string;
+  source: TSource;
+  localPath: string;
+  suggestedFilename?: string;
+  totalBytes?: number;
+  mimeType?: string;
+};
+export type CompletedBrowserDownloadAdoptionDependencies<TSource, TResponse> = {
+  searchDownloads: (query: { id: number }) => Promise<CompletedBrowserDownloadItem[]>;
+  browserDownloadSource: (item: BrowserDownloadAdoption & { filename: string }) => TSource;
+  adoptBrowserDownload: (payload: AdoptCompletedBrowserDownloadPayload<TSource>) => Promise<TResponse>;
+  isErrorResponse: (response: TResponse) => boolean;
+  onError: (response: TResponse) => Promise<void> | void;
+  onSuccess: (response: TResponse) => Promise<void> | void;
 };
 export type FirefoxWebRequestHeader = {
   name: string;
@@ -91,36 +103,24 @@ export type FirefoxWebRequestDownloadCandidate = {
   url: string;
   filename?: string;
   totalBytes?: number;
+  reason: BrowserDownloadIntentDecision['reason'];
   incognito: boolean;
   cookieStoreId?: string;
-  browserFallback?: BrowserFallback;
-};
-export type BrowserDownloadHandoffMetadata = {
-  suggestedFilename?: string;
-  totalBytes?: number;
-  handoffAuth?: HandoffAuth;
-  transferKind?: TransferKind;
-  browserFallback?: BrowserFallback;
 };
 
-type BrowserDownloadBypassUrlEntry = {
-  count: number;
-  expiresAt: number;
-};
-
-export type BrowserDownloadBypassState = {
-  downloadIds: Map<number, number>;
-  urls: Map<string, BrowserDownloadBypassUrlEntry>;
-  ttlMs: number;
-};
-
-export type BrowserDownloadHandoffResolution =
-  | { action: 'discard' }
-  | { action: 'restore' }
-  | { action: 'record_error'; response: Extract<HostToExtensionResponse, { ok: false }> };
-
-const DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS = 60_000;
 const FIREFOX_DOWNLOAD_RESOURCE_TYPES = new Set(['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other']);
+const PAGE_INTERNAL_RESOURCE_TYPES = new Set([
+  'csp_report',
+  'font',
+  'image',
+  'imageset',
+  'media',
+  'ping',
+  'script',
+  'stylesheet',
+  'websocket',
+  'xmlhttprequest',
+]);
 const AMBIGUOUS_BINARY_DOWNLOAD_MIME_TYPES = new Set([
   'application/octet-stream',
 ]);
@@ -177,90 +177,6 @@ const DOWNLOAD_MIME_TYPES = new Set([
   'application/x-msdos-program',
   'application/x-redhat-package-manager',
 ]);
-const STRONG_DOWNLOAD_EXTENSIONS = new Set([
-  '7z',
-  'apk',
-  'bz2',
-  'cab',
-  'csv',
-  'deb',
-  'dmg',
-  'doc',
-  'docx',
-  'exe',
-  'gz',
-  'iso',
-  'jar',
-  'msi',
-  'pdf',
-  'ppt',
-  'pptx',
-  'rar',
-  'rpm',
-  'tar',
-  'tgz',
-  'torrent',
-  'txz',
-  'xls',
-  'xlsx',
-  'xz',
-  'zip',
-  'zst',
-]);
-
-export function createBrowserDownloadBypassState(ttlMs = DEFAULT_BROWSER_DOWNLOAD_BYPASS_TTL_MS): BrowserDownloadBypassState {
-  return {
-    downloadIds: new Map<number, number>(),
-    urls: new Map<string, BrowserDownloadBypassUrlEntry>(),
-    ttlMs,
-  };
-}
-
-export function shouldBypassBrowserDownload(
-  item: BrowserDownloadReplayItem,
-  bypass: BrowserDownloadBypassState,
-  now = Date.now(),
-): boolean {
-  pruneExpiredBypassEntries(bypass, now);
-
-  if (consumeBypassId(bypass, item.id, now)) {
-    consumeBypassUrl(bypass, item.finalUrl, now);
-    consumeBypassUrl(bypass, item.url, now);
-    return true;
-  }
-
-  return consumeBypassUrl(bypass, item.finalUrl, now) || consumeBypassUrl(bypass, item.url, now);
-}
-
-export function markBrowserDownloadBypassUrl(
-  bypass: BrowserDownloadBypassState,
-  url: string,
-  now = Date.now(),
-): void {
-  addBypassUrl(bypass, url, now);
-}
-
-export function markBrowserDownloadBypassId(
-  bypass: BrowserDownloadBypassState,
-  downloadId: number,
-  now = Date.now(),
-): void {
-  pruneExpiredBypassEntries(bypass, now);
-  bypass.downloadIds.set(downloadId, now + bypass.ttlMs);
-}
-
-export function revokeBrowserDownloadBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
-  revokeBypassUrl(bypass, url);
-}
-
-export function shouldBypassBrowserDownloadUrl(
-  url: string | undefined,
-  bypass: BrowserDownloadBypassState,
-  now = Date.now(),
-): boolean {
-  pruneExpiredBypassEntries(bypass, now);
-  return consumeBypassUrl(bypass, url, now);
-}
 
 export function browserDownloadUrl(item: BrowserDownloadPolicyItem): string | undefined {
   if (isHttpUrl(item.finalUrl)) {
@@ -292,17 +208,15 @@ export function shouldAllowBrowserDownloadBySettings(
     return false;
   }
 
-  const isTorrentBrowserDownload = isTorrentUrl(url) || isTorrentFilename(item.filename);
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
     && !isHostExcluded(url, settings.excludedHosts)
-    && !isBrowserExtensionPackage(url, item.filename)
-    && (isTorrentBrowserDownload || !isFileExtensionIgnored(url, item.filename, settings.ignoredFileExtensions));
+    && !isBrowserExtensionPackage(url, item.filename);
 }
 
 export function classifyBrowserDownloadIntent(
   item: BrowserDownloadPolicyItem & { url: string; contentDisposition?: string },
-  capturedFileExtensions: string[] = [],
+  capturedFileExtensions: string[] = [...DEFAULT_CAPTURED_FILE_EXTENSIONS],
 ): BrowserDownloadIntentDecision {
   if (isDownloadCreatedByExtension(item)) {
     return { action: 'ignore', reason: 'extension_initiated' };
@@ -324,11 +238,15 @@ export function classifyBrowserDownloadIntent(
     return { action: 'capture', reason: 'explicit_download_url' };
   }
 
+  if (isPageInternalResourceType(item.resourceType)) {
+    return { action: 'ignore', reason: 'app_traffic_payload' };
+  }
+
   if (isHighConfidenceAppTrafficProbe(item, url, filename, contentType)) {
     return { action: 'ignore', reason: 'app_traffic_probe' };
   }
 
-  if (hasAttachmentDisposition) {
+  if (hasAttachmentDisposition && hasStrongDownloadFilename) {
     return { action: 'capture', reason: 'attachment_disposition' };
   }
 
@@ -345,11 +263,6 @@ export function classifyBrowserDownloadIntent(
   }
 
   return { action: 'ignore', reason: 'no_download_intent' };
-}
-
-export function browserDownloadTransferKind(item: BrowserDownloadPolicyItem): TransferKind | undefined {
-  const url = browserDownloadUrl(item) ?? item.finalUrl ?? item.url;
-  return isTorrentUrl(url) || isTorrentFilename(item.filename) ? 'torrent' : undefined;
 }
 
 export function firefoxWebRequestDownloadCandidate(
@@ -379,13 +292,15 @@ export function firefoxWebRequestDownloadCandidate(
     return null;
   }
 
-  if (classifyBrowserDownloadIntent({
+  const decision = classifyBrowserDownloadIntent({
     url,
     filename,
     mime: contentType,
     totalBytes: responseTotalBytes,
     contentDisposition,
-  }, settings.capturedFileExtensions).action !== 'capture') {
+    resourceType: details.type,
+  }, settings.capturedFileExtensions);
+  if (decision.action !== 'capture') {
     return null;
   }
 
@@ -394,9 +309,9 @@ export function firefoxWebRequestDownloadCandidate(
     url,
     filename,
     totalBytes,
+    reason: decision.reason,
     incognito: details.incognito ?? false,
     ...(details.cookieStoreId ? { cookieStoreId: details.cookieStoreId } : {}),
-    ...(isReplayableRequestMethod(details.method) ? {} : { browserFallback: 'unavailable' as const }),
   };
 }
 
@@ -427,132 +342,44 @@ export function selectFilenameInterceptionApi<TItem>(
   return null;
 }
 
-export function shouldDiscardBrowserDownloadAfterHandoff(response: HostToExtensionResponse): boolean {
-  return !isErrorResponse(response)
-    && response.type === 'accepted'
-    && (
-      response.payload.status === 'queued'
-      || response.payload.status === 'duplicate_existing_job'
-      || response.payload.status === 'dismissed'
-    );
-}
-
-export function shouldRestoreBrowserDownloadAfterPromptSwap(response: HostToExtensionResponse): boolean {
-  return !isErrorResponse(response)
-    && response.type === 'accepted'
-    && response.payload.status === 'canceled';
-}
-
-export function classifyBrowserDownloadHandoffResolution(
-  response: HostToExtensionResponse,
-): BrowserDownloadHandoffResolution {
-  if (isErrorResponse(response)) {
-    return { action: 'record_error', response };
+export async function completeBrowserDownloadAdoption<TSource, TResponse>(
+  delta: BrowserDownloadDelta,
+  adoptions: Map<number, BrowserDownloadAdoption>,
+  dependencies: CompletedBrowserDownloadAdoptionDependencies<TSource, TResponse>,
+): Promise<boolean> {
+  if (delta.state?.current !== 'complete') {
+    return false;
   }
 
-  if (shouldRestoreBrowserDownloadAfterPromptSwap(response)) {
-    return { action: 'restore' };
+  const adoption = adoptions.get(delta.id);
+  if (!adoption) {
+    return false;
   }
 
-  return { action: 'discard' };
-}
-
-export function createBrowserDownloadHandoffMetadata(
-  item: { filename?: string; totalBytes?: number; browserFallback?: BrowserFallback },
-  handoffAuth?: HandoffAuth,
-): BrowserDownloadHandoffMetadata {
-  const suggestedFilename = basenameOnly(item.filename);
-  const totalBytes = typeof item.totalBytes === 'number' && Number.isFinite(item.totalBytes) && item.totalBytes > 0
-    ? Math.floor(item.totalBytes)
-    : undefined;
-
-  return {
-    ...(suggestedFilename ? { suggestedFilename } : {}),
-    ...(totalBytes ? { totalBytes } : {}),
-    ...(handoffAuth ? { handoffAuth } : {}),
-    ...(item.browserFallback === 'unavailable' ? { browserFallback: item.browserFallback } : {}),
-  };
-}
-
-export async function discardBrowserDownload(
-  downloads: BrowserDownloadsCleanupApi,
-  downloadId: number,
-): Promise<void> {
-  await downloads.cancel(downloadId).catch(() => undefined);
-  await removeCompletedBrowserDownloadFile(downloads, downloadId);
-  await downloads.erase({ id: downloadId }).catch(() => undefined);
-}
-
-export async function cancelBrowserDownloadForDesktopPrompt(
-  downloads: Pick<BrowserDownloadsCleanupApi, 'cancel'>,
-  downloadId: number,
-): Promise<void> {
-  await downloads.cancel(downloadId).catch(() => undefined);
-}
-
-export async function detachBrowserDownloadForDesktopPrompt(
-  downloads: BrowserDownloadsCleanupApi,
-  downloadId: number,
-  releaseFilename: () => void,
-): Promise<void> {
-  await discardBrowserDownloadBeforeFilenameRelease(downloads, downloadId, releaseFilename);
-}
-
-export async function discardBrowserDownloadBeforeFilenameRelease(
-  downloads: BrowserDownloadsCleanupApi,
-  downloadId: number,
-  releaseFilename: () => void,
-): Promise<void> {
-  await downloads.cancel(downloadId).catch(() => undefined);
-
-  releaseFilename();
-
-  await downloads.cancel(downloadId).catch(() => undefined);
-  await removeCompletedBrowserDownloadFile(downloads, downloadId);
-  await downloads.erase({ id: downloadId }).catch(() => undefined);
-}
-
-export async function restoreBrowserDownloadAfterPromptFallback(
-  downloads: BrowserDownloadsCleanupApi & BrowserDownloadsRestartApi,
-  item: BrowserDownloadReplayItem,
-  bypass: BrowserDownloadBypassState,
-  releaseFilename?: () => void,
-): Promise<number> {
-  releaseFilename?.();
-  await discardBrowserDownload(downloads, item.id);
-  return restartBrowserDownload(downloads, item, bypass);
-}
-
-export async function restartBrowserDownload(
-  downloads: BrowserDownloadsRestartApi,
-  item: BrowserDownloadReplayItem,
-  bypass: BrowserDownloadBypassState,
-): Promise<number> {
-  const url = browserDownloadUrl(item);
-  if (!url) {
-    throw new Error('Could not return the download to the browser because the original URL is missing.');
+  const items = await dependencies.searchDownloads({ id: delta.id }).catch(() => []);
+  const item = items[0];
+  if (!item || item.state !== 'complete' || item.exists === false || !item.filename) {
+    adoptions.delete(delta.id);
+    return true;
   }
 
-  addBypassUrl(bypass, url);
+  const response = await dependencies.adoptBrowserDownload({
+    url: adoption.url,
+    source: dependencies.browserDownloadSource({ ...adoption, filename: item.filename }),
+    localPath: item.filename,
+    suggestedFilename: basenameOnly(item.filename) ?? adoption.suggestedFilename,
+    totalBytes: positiveFiniteNumber(item.totalBytes ?? item.fileSize ?? adoption.totalBytes),
+    mimeType: item.mime,
+  });
+  adoptions.delete(delta.id);
 
-  try {
-    const options: BrowserDownloadOptions = {
-      url,
-      conflictAction: 'uniquify',
-      saveAs: false,
-    };
-    const filename = basenameOnly(item.filename);
-    if (filename) {
-      options.filename = filename;
-    }
-
-    const downloadId = await downloads.download(options);
-    markBrowserDownloadBypassId(bypass, downloadId);
-    return downloadId;
-  } catch (error) {
-    revokeBypassUrl(bypass, url);
-    throw error;
+  if (dependencies.isErrorResponse(response)) {
+    await dependencies.onError(response);
+  } else {
+    await dependencies.onSuccess(response);
   }
+
+  return true;
 }
 
 function createSuggestOnce(suggest: BrowserDownloadFilenameSuggest): BrowserDownloadFilenameSuggest {
@@ -565,81 +392,6 @@ function createSuggestOnce(suggest: BrowserDownloadFilenameSuggest): BrowserDown
     called = true;
     suggest(suggestion);
   };
-}
-
-async function removeCompletedBrowserDownloadFile(
-  downloads: BrowserDownloadsCleanupApi,
-  downloadId: number,
-): Promise<void> {
-  const items = await downloads.search({ id: downloadId }).catch(() => []);
-  const item = items[0];
-  if (!item || item.state !== 'complete' || item.exists === false) {
-    return;
-  }
-
-  await downloads.removeFile?.(downloadId).catch(() => undefined);
-}
-
-function addBypassUrl(bypass: BrowserDownloadBypassState, url: string, now = Date.now()): void {
-  pruneExpiredBypassEntries(bypass, now);
-  const existing = bypass.urls.get(url);
-  bypass.urls.set(url, {
-    count: (existing?.count ?? 0) + 1,
-    expiresAt: now + bypass.ttlMs,
-  });
-}
-
-function revokeBypassUrl(bypass: BrowserDownloadBypassState, url: string): void {
-  const entry = bypass.urls.get(url);
-  if (!entry || entry.count <= 1) {
-    bypass.urls.delete(url);
-    return;
-  }
-
-  bypass.urls.set(url, { count: entry.count - 1, expiresAt: entry.expiresAt });
-}
-
-function consumeBypassUrl(bypass: BrowserDownloadBypassState, url: string | undefined, now = Date.now()): boolean {
-  if (!url) {
-    return false;
-  }
-
-  const entry = bypass.urls.get(url);
-  if (!entry) {
-    return false;
-  }
-
-  if (entry.expiresAt < now) {
-    bypass.urls.delete(url);
-    return false;
-  }
-
-  revokeBypassUrl(bypass, url);
-  return true;
-}
-
-function consumeBypassId(bypass: BrowserDownloadBypassState, downloadId: number, now: number): boolean {
-  const expiresAt = bypass.downloadIds.get(downloadId);
-  if (expiresAt === undefined) {
-    return false;
-  }
-
-  bypass.downloadIds.delete(downloadId);
-  return expiresAt >= now;
-}
-
-function pruneExpiredBypassEntries(bypass: BrowserDownloadBypassState, now: number): void {
-  for (const [downloadId, expiresAt] of bypass.downloadIds) {
-    if (expiresAt < now) {
-      bypass.downloadIds.delete(downloadId);
-    }
-  }
-
-  for (const [url, entry] of bypass.urls) {
-    if (entry.expiresAt < now) {
-      bypass.urls.delete(url);
-    }
-  }
 }
 
 function headerValue(headers: FirefoxWebRequestHeader[] | undefined, name: string): string | undefined {
@@ -661,10 +413,6 @@ function isRedirectResponse(details: FirefoxWebRequestDownloadDetails): boolean 
   }
 
   return /^HTTP\/\S+\s+3\d\d\b/i.test(details.statusLine ?? '');
-}
-
-function isReplayableRequestMethod(method: string | undefined): boolean {
-  return !method || method.toUpperCase() === 'GET';
 }
 
 function isDownloadCreatedByExtension(item: BrowserDownloadPolicyItem): boolean {
@@ -760,6 +508,10 @@ function isLikelyApplicationTrafficUrl(url: string): boolean {
   }
 }
 
+function isPageInternalResourceType(resourceType: string | undefined): boolean {
+  return Boolean(resourceType && PAGE_INTERNAL_RESOURCE_TYPES.has(resourceType.toLowerCase()));
+}
+
 function isExplicitDownloadUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -781,7 +533,7 @@ function hasStrongDownloadExtension(filename: string | undefined, capturedFileEx
   return Boolean(
     extension
     && extension !== basename
-    && (STRONG_DOWNLOAD_EXTENSIONS.has(extension) || capturedFileExtensions.has(extension)),
+    && capturedFileExtensions.has(extension),
   );
 }
 
@@ -865,19 +617,6 @@ function isHostExcluded(url: string, excludedHosts: string[]): boolean {
   return isUrlHostExcludedByPatterns(url, excludedHosts);
 }
 
-function isFileExtensionIgnored(url: string, filename: string | undefined, ignoredExtensions: string[] = []): boolean {
-  const extensions = ignoredExtensions.map(normalizeFileExtension).filter(Boolean);
-  if (extensions.length === 0) {
-    return false;
-  }
-
-  const candidates = [basenameOnly(filename), basenameFromUrl(url)]
-    .filter((candidate): candidate is string => Boolean(candidate))
-    .map((candidate) => candidate.toLowerCase());
-
-  return candidates.some((candidate) => extensions.some((extension) => candidate.endsWith(`.${extension}`)));
-}
-
 function normalizeFileExtension(value: string): string {
   const extension = value.trim().replace(/^\.+/, '').toLowerCase();
   return extension === '7zip' ? '7z' : extension;
@@ -891,23 +630,6 @@ function basenameFromUrl(url: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function isTorrentUrl(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol === 'magnet:') return true;
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.pathname.toLowerCase().endsWith('.torrent');
-  } catch {
-    return false;
-  }
-}
-
-function isTorrentFilename(filename: string | undefined): boolean {
-  if (!filename) return false;
-  return basenameOnly(filename)?.toLowerCase().endsWith('.torrent') ?? false;
 }
 
 function isBrowserExtensionPackage(url: string, filename: string | undefined): boolean {

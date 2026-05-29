@@ -98,6 +98,10 @@ assert.match(source, /#snippet SwitchFieldRow[\s\S]*title=\{description\}[\s\S]*
 assert.doesNotMatch(source, /<p class="mt-0\.5 text-xs leading-4 text-muted-foreground" title=\{tooltip\}>\{description\}<\/p>/, 'field descriptions should not render as wrapping helper text');
 assert.doesNotMatch(source, /<div class="mt-0\.5 text-xs leading-4 text-muted-foreground" title=\{description\}>\{description\}<\/div>/, 'switch descriptions should not render as wrapping helper text');
 assert.match(source, /isExcludedSitesDialogOpen/, 'excluded sites should use the Svelte dialog workflow');
+assert.match(source, /Captured File Extensions/, 'extension settings should expose captured file extension configuration');
+assert.match(source, /isCapturedExtensionsDialogOpen/, 'captured extensions should use the Svelte dialog workflow');
+assert.match(source, /DEFAULT_CAPTURED_FILE_EXTENSIONS/, 'captured extensions dialog should offer a restore-default action');
+assert.match(source, /removeCapturedExtensionFromSettings/, 'captured extensions dialog should allow removing captured extensions');
 assert.match(source, /onRefreshDiagnostics/, 'native host diagnostics should keep the refresh callback');
 assert.match(source, /onCheckForUpdates/, 'app updates section should keep the manual update callback');
 assert.match(source, /Recent Events \(latest 500\)[\s\S]*max-h-56 overflow-auto rounded-md border border-border\/55 bg-zinc-950 font-mono shadow-inner/, 'recent events should render as a compact latest-500 console-like box');

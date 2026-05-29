@@ -396,11 +396,6 @@ export async function showExistingDownloadPrompt(id: string): Promise<void> {
   await invokeCommand('show_existing_download_prompt', { id });
 }
 
-export async function swapDownloadPrompt(id: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invokeCommand('swap_download_prompt', { id });
-}
-
 export async function cancelDownloadPrompt(id: string): Promise<void> {
   if (!isTauriRuntime()) return;
   await invokeCommand('cancel_download_prompt', { id });

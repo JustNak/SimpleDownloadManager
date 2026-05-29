@@ -101,8 +101,13 @@ if (enqueueWithMetadata.ok) {
 }
 
 const backgroundSource = readFileSync(new URL('../src/background/index.ts', import.meta.url), 'utf8');
+assert.doesNotMatch(
+  backgroundSource,
+  /browserDownloadTransferKind\(item\)[\s\S]*promptDownload/,
+  'rebuilt automatic browser capture should not route .torrent browser downloads through the old ask-mode URL replay path',
+);
 assert.match(
   backgroundSource,
-  /const transferKind = browserDownloadTransferKind\(item\);[\s\S]*if \(transferKind === 'torrent'\) \{[\s\S]*return enqueueDownload\(url, source, \{ \.\.\.metadata, transferKind \}\);[\s\S]*settings\.downloadHandoffMode === 'auto'/,
-  'browser torrent downloads should always use enqueue handoff before ask-mode prompt routing is considered',
+  /trackBrowserDownloadForAdoption\(url, item, 'browser_download'\)/,
+  'automatic browser downloads, including .torrent files, should stay browser-owned until completed-file adoption',
 );

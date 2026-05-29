@@ -33,6 +33,13 @@
   import { defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
   import { settingsEqual, shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
   import {
+    addCapturedExtensions,
+    filterCapturedExtensions,
+    formatCapturedExtensionsSummary,
+    parseCapturedExtensionInput,
+    removeCapturedExtension,
+  } from './settingsCapturedExtensions';
+  import {
     addExcludedHosts,
     filterExcludedHosts,
     formatExcludedSitesSummary,
@@ -40,7 +47,7 @@
     parseExcludedHostInput,
     removeExcludedHost,
   } from './settingsExcludedSites';
-  import { defaultBulkDownloadDirectory } from './defaultSettings';
+  import { DEFAULT_CAPTURED_FILE_EXTENSIONS, defaultBulkDownloadDirectory } from './defaultSettings';
   import {
     diagnosticLevelConsoleClass,
     formatDiagnosticEventTime,
@@ -117,6 +124,9 @@
   let excludedBulkInput = $state('');
   let excludedSearchQuery = $state('');
   let isExcludedSitesDialogOpen = $state(false);
+  let capturedExtensionInput = $state('');
+  let capturedExtensionSearchQuery = $state('');
+  let isCapturedExtensionsDialogOpen = $state(false);
   let accentColorInput = $state(initialAccentColor());
   let customTrackersInput = $state(initialCustomTrackersInput());
   let isClearingTorrentSessionCache = $state(false);
@@ -124,6 +134,8 @@
   const isDirty = $derived(!settingsEqual(completeSettingsDraft(), settings));
   const excludedHosts = $derived(formData.extensionIntegration.excludedHosts);
   const filteredExcludedHosts = $derived(filterExcludedHosts(excludedHosts, excludedSearchQuery));
+  const capturedExtensions = $derived(formData.extensionIntegration.capturedFileExtensions);
+  const filteredCapturedExtensions = $derived(filterCapturedExtensions(capturedExtensions, capturedExtensionSearchQuery));
   const recentDiagnosticEvents = $derived(newestFirstDiagnosticEvents(diagnostics));
   const updateIsBusy = $derived(updateState.status === 'checking' || updateState.status === 'downloading' || updateState.status === 'installing');
   const updateVersion = $derived(updateVersionIndicator(updateState, installedVersion));
@@ -143,6 +155,9 @@
       excludedBulkInput = '';
       excludedSearchQuery = '';
       isExcludedSitesDialogOpen = false;
+      capturedExtensionInput = '';
+      capturedExtensionSearchQuery = '';
+      isCapturedExtensionsDialogOpen = false;
       accentColorInput = normalizeAccentColor(nextSettings.accentColor);
       customTrackersInput = formatCustomTrackersInput(nextSettings.torrent.customTrackers);
     });
@@ -282,6 +297,23 @@
 
   function removeExcludedSite(host: string) {
     updateExtensionIntegration({ excludedHosts: removeExcludedHost(excludedHosts, host) });
+  }
+
+  function addCapturedExtension() {
+    const candidates = parseCapturedExtensionInput(capturedExtensionInput);
+    if (candidates.length === 0) return;
+    const result = addCapturedExtensions(capturedExtensions, candidates);
+    updateExtensionIntegration({ capturedFileExtensions: result.extensions });
+    capturedExtensionInput = '';
+  }
+
+  function removeCapturedExtensionFromSettings(extension: string) {
+    updateExtensionIntegration({ capturedFileExtensions: removeCapturedExtension(capturedExtensions, extension) });
+  }
+
+  function restoreDefaultCapturedExtensions() {
+    updateExtensionIntegration({ capturedFileExtensions: [...DEFAULT_CAPTURED_FILE_EXTENSIONS] });
+    capturedExtensionSearchQuery = '';
   }
 
   function renderRegistrationIcon(status?: DiagnosticsSnapshot['hostRegistration']['status']): IconComponent {
@@ -463,7 +495,23 @@
     {@render SwitchFieldRow(Globe, 'Context menu', 'Show Send to Simple Download Manager in the browser.', contextMenuControl)}
     {@render SwitchFieldRow(Download, 'Progress after handoff', 'Open a progress window after accepting a browser download.', progressAfterHandoffControl)}
     {@render SwitchFieldRow(CheckCircle2, 'Badge status', 'Show extension status in the browser toolbar.', badgeStatusControl)}
-    {@render SwitchFieldRow(ShieldCheck, 'Protected Downloads', 'Forward memory-only browser session headers for eligible downloads.', authenticatedHandoffControl)}
+    <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
+      <div>
+        <div class="flex min-w-0 items-start gap-3">
+          <span class="mt-0.5 text-primary"><FileArchive size={18} /></span>
+          <div class="min-w-0">
+            <div class="text-sm font-semibold text-foreground">Captured File Extensions</div>
+            <div class="mt-0.5 text-xs text-muted-foreground">{formatCapturedExtensionsSummary(capturedExtensions)}</div>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-start">
+        <button type="button" onclick={() => isCapturedExtensionsDialogOpen = true} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted">
+          <FileArchive size={16} />
+          Manage
+        </button>
+      </div>
+    </div>
     <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
       <div>
         <div class="flex min-w-0 items-start gap-3">
@@ -612,6 +660,10 @@
 
 {#if isExcludedSitesDialogOpen}
   {@render ExcludedSitesDialog()}
+{/if}
+
+{#if isCapturedExtensionsDialogOpen}
+  {@render CapturedExtensionsDialog()}
 {/if}
 
 {#snippet directoryControl()}
@@ -874,10 +926,6 @@
   {@render ToggleSwitch('showBadgeStatus', formData.extensionIntegration.showBadgeStatus, (checked) => updateExtensionIntegration({ showBadgeStatus: checked }), !formData.extensionIntegration.enabled)}
 {/snippet}
 
-{#snippet authenticatedHandoffControl()}
-  {@render ToggleSwitch('authenticatedHandoffEnabled', formData.extensionIntegration.authenticatedHandoffEnabled, (checked) => updateExtensionIntegration({ authenticatedHandoffEnabled: checked, protectedDownloadAuthScope: checked ? 'allowlist' : 'off' }), !formData.extensionIntegration.enabled)}
-{/snippet}
-
 {#snippet CategorySettingsCard(title: string, icon: IconComponent, content: Snippet)}
   {@const Icon = icon}
   <div class="rounded-md border border-border/60 bg-card">
@@ -955,6 +1003,65 @@
   <div class="grid grid-cols-[110px_minmax(0,1fr)] gap-3 py-1 text-sm">
     <span class="text-muted-foreground">{label}</span>
     <span class={`break-all font-mono text-xs ${muted ? 'text-muted-foreground' : 'text-foreground'}`}>{value}</span>
+  </div>
+{/snippet}
+
+{#snippet CapturedExtensionsDialog()}
+  <div class="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 px-4">
+    <div role="dialog" aria-modal="true" aria-labelledby="captured-extensions-title" class="w-full max-w-2xl rounded-md border border-border bg-card shadow-2xl">
+      <header class="flex items-center justify-between border-b border-border bg-header px-5 py-3">
+        <div>
+          <h2 id="captured-extensions-title" class="text-base font-semibold text-foreground">Captured File Extensions</h2>
+          <p class="mt-0.5 text-xs text-muted-foreground">Choose which filename extensions the browser extension treats as downloads.</p>
+        </div>
+        <button type="button" onclick={() => isCapturedExtensionsDialogOpen = false} aria-label="Close captured file extensions" class="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground">
+          <X size={18} />
+        </button>
+      </header>
+
+      <div class="space-y-4 px-5 py-4">
+        <div class="grid gap-3 md:grid-cols-[1fr_auto_auto]">
+          <input bind:value={capturedExtensionInput} placeholder="zip rar exe 7zip ppt pptx docx" class="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+          <button type="button" onclick={addCapturedExtension} disabled={parseCapturedExtensionInput(capturedExtensionInput).length === 0 || !formData.extensionIntegration.enabled} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+            <Plus size={14} />
+            Add
+          </button>
+          <button type="button" onclick={restoreDefaultCapturedExtensions} disabled={!formData.extensionIntegration.enabled} class="flex h-9 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">
+            <RotateCw size={14} />
+            Defaults
+          </button>
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-sm font-semibold text-foreground" for="capturedExtensionsSearch">Current Extensions</label>
+          <div class="relative">
+            <Search size={15} class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input id="capturedExtensionsSearch" type="text" bind:value={capturedExtensionSearchQuery} placeholder="Search extensions" class="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
+          </div>
+          <div class="max-h-64 overflow-auto rounded-md border border-border bg-surface">
+            {#if filteredCapturedExtensions.length > 0}
+              {#each filteredCapturedExtensions as extension}
+                <div class="flex h-10 items-center justify-between gap-3 border-b border-border/35 px-3 last:border-b-0">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <FileArchive size={14} class="shrink-0 text-muted-foreground" />
+                    <span class="truncate text-sm font-medium text-foreground">.{extension}</span>
+                  </div>
+                  <button type="button" onclick={() => removeCapturedExtensionFromSettings(extension)} disabled={!formData.extensionIntegration.enabled} class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50" title={`Remove .${extension}`} aria-label={`Remove .${extension}`}>
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              {/each}
+            {:else}
+              <div class="px-3 py-6 text-center text-sm text-muted-foreground">No captured file extensions match.</div>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <footer class="flex justify-end border-t border-border px-5 py-3">
+        <button type="button" onclick={() => isCapturedExtensionsDialogOpen = false} class="h-9 rounded-md bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90">Done</button>
+      </footer>
+    </div>
   </div>
 {/snippet}
 

@@ -18,7 +18,6 @@ for (const expected of [
   'nativeMessaging',
   'webRequestBlocking',
   'data_collection_permissions',
-  'Protected Downloads',
   'No remote code',
   'npm run build:extension',
   'npm run lint:firefox',

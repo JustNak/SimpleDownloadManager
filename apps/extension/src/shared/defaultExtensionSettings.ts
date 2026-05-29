@@ -1,14 +1,12 @@
 import {
   DEFAULT_EXTENSION_EXCLUDED_HOSTS,
   DEFAULT_EXTENSION_LISTEN_PORT,
-  DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS,
+  DEFAULT_CAPTURED_FILE_EXTENSIONS,
   normalizeExcludedHostPattern,
   type ExtensionIntegrationSettings,
-  type ProtectedDownloadAuthScope,
 } from '@myapp/protocol';
 
 export const DEFAULT_EXCLUDED_HOSTS = DEFAULT_EXTENSION_EXCLUDED_HOSTS;
-export const DEFAULT_AUTHENTICATED_HANDOFF_HOSTS = DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS;
 
 export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   enabled: true,
@@ -19,10 +17,8 @@ export const defaultExtensionSettings: ExtensionIntegrationSettings = {
   showBadgeStatus: true,
   excludedHosts: [...DEFAULT_EXCLUDED_HOSTS],
   ignoredFileExtensions: [],
-  capturedFileExtensions: [],
-  authenticatedHandoffEnabled: true,
-  protectedDownloadAuthScope: 'legacy_global',
-  authenticatedHandoffHosts: [...DEFAULT_AUTHENTICATED_HANDOFF_HOSTS],
+  capturedFileExtensions: [...DEFAULT_CAPTURED_FILE_EXTENSIONS],
+  downloadCaptureDebugLogging: false,
 };
 
 export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
@@ -31,7 +27,6 @@ export function createDefaultExtensionSettings(): ExtensionIntegrationSettings {
     excludedHosts: [...defaultExtensionSettings.excludedHosts],
     ignoredFileExtensions: [...defaultExtensionSettings.ignoredFileExtensions],
     capturedFileExtensions: [...defaultExtensionSettings.capturedFileExtensions],
-    authenticatedHandoffHosts: [...defaultExtensionSettings.authenticatedHandoffHosts],
   };
 }
 
@@ -39,17 +34,11 @@ export function normalizeExtensionSettings(
   settings?: Partial<ExtensionIntegrationSettings>,
 ): ExtensionIntegrationSettings {
   const defaults = createDefaultExtensionSettings();
-  const protectedDownloadAuthScope = normalizeProtectedDownloadAuthScope(settings);
   return {
     ...defaults,
     ...settings,
-    authenticatedHandoffEnabled: protectedDownloadAuthScope !== 'off',
-    protectedDownloadAuthScope,
     listenPort: normalizeListenPort(settings?.listenPort),
     excludedHosts: normalizeExcludedHosts(settings?.excludedHosts ?? defaults.excludedHosts),
-    authenticatedHandoffHosts: normalizeAuthenticatedHandoffHosts(
-      settings?.authenticatedHandoffHosts ?? defaults.authenticatedHandoffHosts,
-    ),
     ignoredFileExtensions: normalizeFileExtensions(
       settings?.ignoredFileExtensions ?? defaults.ignoredFileExtensions,
     ),
@@ -67,41 +56,6 @@ function normalizeExcludedHosts(hosts: string[]): string[] {
         .filter(Boolean),
     ),
   );
-}
-
-function normalizeAuthenticatedHandoffHosts(hosts: string[]): string[] {
-  return Array.from(
-    new Set(
-      hosts
-        .map((host) => normalizeHost(host))
-        .filter(Boolean),
-    ),
-  );
-}
-
-function normalizeProtectedDownloadAuthScope(
-  settings?: Partial<ExtensionIntegrationSettings>,
-): ProtectedDownloadAuthScope {
-  if (settings?.authenticatedHandoffEnabled === false) {
-    return 'off';
-  }
-
-  if (settings?.protectedDownloadAuthScope === 'off') {
-    return 'off';
-  }
-
-  if (
-    settings?.protectedDownloadAuthScope === 'allowlist'
-    || settings?.protectedDownloadAuthScope === 'legacy_global'
-  ) {
-    return 'legacy_global';
-  }
-
-  if (settings?.authenticatedHandoffEnabled) {
-    return 'legacy_global';
-  }
-
-  return defaultExtensionSettings.protectedDownloadAuthScope;
 }
 
 function normalizeListenPort(value: unknown): number {

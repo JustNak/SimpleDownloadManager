@@ -182,7 +182,7 @@ const REQUEST_RETRY_DELAYS: [Duration; 3] = [
 ];
 pub const PROTECTED_DOWNLOAD_AUTH_REQUIRED_CODE: &str = "PROTECTED_DOWNLOAD_AUTH_REQUIRED";
 pub const PROTECTED_DOWNLOAD_AUTH_REQUIRED_MESSAGE: &str =
-    "This site requires your browser session. Enable Protected Downloads or let the browser handle this download.";
+    "This site requires your browser session. Let the browser handle this download.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrowserHandoffAccessProbe {

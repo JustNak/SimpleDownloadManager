@@ -275,7 +275,7 @@ impl SharedState {
             let mut admission_defer_diagnostics = Vec::new();
             for &job_index in admission_index.scheduler_job_order() {
                 let job = &state.jobs[job_index];
-                if job.transfer_kind == TransferKind::BrowserBlob {
+                if job.transfer_kind == TransferKind::BrowserAdopted {
                     continue;
                 }
                 if scheduled_normal_workers >= available_normal_slots

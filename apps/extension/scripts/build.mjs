@@ -60,7 +60,7 @@ const targets = [
       version_name: displayVersion,
       description: 'Send downloads to the Simple Download Manager desktop app.',
       icons: extensionIcons,
-      permissions: ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', 'cookies', '<all_urls>'],
+      permissions: ['alarms', 'contextMenus', 'downloads', 'nativeMessaging', 'storage', 'webRequest', 'webRequestBlocking', '<all_urls>'],
       background: {
         scripts: ['background.js']
       },

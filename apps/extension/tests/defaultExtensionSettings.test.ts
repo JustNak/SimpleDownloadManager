@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
+import { DEFAULT_CAPTURED_FILE_EXTENSIONS } from '@myapp/protocol';
 import {
-  DEFAULT_AUTHENTICATED_HANDOFF_HOSTS,
   DEFAULT_EXCLUDED_HOSTS,
   createDefaultExtensionSettings,
   defaultExtensionSettings,
@@ -8,16 +8,12 @@ import {
 } from '../src/shared/defaultExtensionSettings.ts';
 
 assert.deepEqual(DEFAULT_EXCLUDED_HOSTS, ['web.telegram.org']);
-assert.deepEqual(DEFAULT_AUTHENTICATED_HANDOFF_HOSTS, []);
 assert.deepEqual(defaultExtensionSettings.excludedHosts, ['web.telegram.org']);
-assert.equal(defaultExtensionSettings.authenticatedHandoffEnabled, true);
-assert.equal(defaultExtensionSettings.protectedDownloadAuthScope, 'legacy_global');
-assert.deepEqual(defaultExtensionSettings.authenticatedHandoffHosts, []);
-assert.deepEqual(defaultExtensionSettings.capturedFileExtensions, []);
+assert.deepEqual(defaultExtensionSettings.capturedFileExtensions, [...DEFAULT_CAPTURED_FILE_EXTENSIONS]);
+assert.equal(defaultExtensionSettings.downloadCaptureDebugLogging, false);
 assert.deepEqual(createDefaultExtensionSettings().excludedHosts, ['web.telegram.org']);
-assert.equal(createDefaultExtensionSettings().protectedDownloadAuthScope, 'legacy_global');
-assert.deepEqual(createDefaultExtensionSettings().authenticatedHandoffHosts, []);
-assert.deepEqual(createDefaultExtensionSettings().capturedFileExtensions, []);
+assert.deepEqual(createDefaultExtensionSettings().capturedFileExtensions, [...DEFAULT_CAPTURED_FILE_EXTENSIONS]);
+assert.equal(createDefaultExtensionSettings().downloadCaptureDebugLogging, false);
 
 assert.deepEqual(
   normalizeExtensionSettings(undefined).excludedHosts,
@@ -46,67 +42,21 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  normalizeExtensionSettings(undefined).capturedFileExtensions,
+  [...DEFAULT_CAPTURED_FILE_EXTENSIONS],
+  'fresh settings should list the default captured file extensions for user editing',
+);
+
+assert.deepEqual(
+  normalizeExtensionSettings({ capturedFileExtensions: [] }).capturedFileExtensions,
+  [],
+  'existing saved settings with an explicit empty captured extension list should not be migrated',
+);
+
+assert.deepEqual(
   normalizeExtensionSettings({
     capturedFileExtensions: [' zip rar exe 7zip ppt pptx docx ', '.ZIP', 'invalid/path'],
   }).capturedFileExtensions,
   ['zip', 'rar', 'exe', '7z', 'ppt', 'pptx', 'docx'],
   'captured file extensions should normalize whitespace input, aliases, dots, and duplicates',
-);
-
-assert.deepEqual(
-  normalizeExtensionSettings({
-    authenticatedHandoffEnabled: true,
-    authenticatedHandoffHosts: [' https://ChatGPT.com/backend-api ', 'CHATGPT.COM', 'https://*.Example.com/downloads'],
-  }).authenticatedHandoffHosts,
-  ['chatgpt.com', '*.example.com'],
-  'legacy authenticated handoff hosts should normalize URL input, wildcard patterns, and duplicates',
-);
-
-assert.deepEqual(
-  normalizeExtensionSettings({
-    authenticatedHandoffEnabled: true,
-    authenticatedHandoffHosts: [],
-  }),
-  {
-    ...defaultExtensionSettings,
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'legacy_global',
-    authenticatedHandoffHosts: [],
-  },
-  'existing users with the legacy enabled flag should retain global protected-download behavior explicitly',
-);
-
-assert.deepEqual(
-  normalizeExtensionSettings({
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'allowlist',
-    authenticatedHandoffHosts: [' https://ChatGPT.com/backend-api ', 'CHATGPT.COM', 'https://*.Example.com/downloads'],
-  }).authenticatedHandoffHosts,
-  ['chatgpt.com', '*.example.com'],
-  'allowlisted protected-download hosts should normalize URL input, wildcard patterns, and duplicates',
-);
-
-assert.equal(
-  normalizeExtensionSettings({
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'allowlist',
-    authenticatedHandoffHosts: ['chatgpt.com'],
-  }).protectedDownloadAuthScope,
-  'legacy_global',
-  'legacy allowlist settings should migrate to global browser-session forwarding',
-);
-
-assert.deepEqual(
-  normalizeExtensionSettings({
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'off',
-    authenticatedHandoffHosts: ['chatgpt.com'],
-  }),
-  {
-    ...defaultExtensionSettings,
-    authenticatedHandoffEnabled: false,
-    protectedDownloadAuthScope: 'off',
-    authenticatedHandoffHosts: ['chatgpt.com'],
-  },
-  'explicit off scope should clear the compatibility enabled flag while preserving the configured host list',
 );

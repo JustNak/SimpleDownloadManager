@@ -32,7 +32,7 @@ export type FailureCategory =
   | 'internal';
 
 export type ResumeSupport = 'unknown' | 'supported' | 'unsupported';
-export type TransferKind = 'http' | 'torrent' | 'browser_blob';
+export type TransferKind = 'http' | 'torrent' | 'browser_adopted' | 'browser_blob';
 export type IntegrityAlgorithm = 'sha256';
 export type IntegrityStatus = 'pending' | 'verified' | 'failed';
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
@@ -129,7 +129,6 @@ export interface DownloadPrompt {
   url: string;
   filename: string;
   source?: DownloadSource;
-  browserFallback?: 'replay' | 'unavailable';
   totalBytes?: number;
   defaultDirectory: string;
   targetPath: string;
@@ -149,9 +148,7 @@ export interface ExtensionIntegrationSettings {
   excludedHosts: string[];
   ignoredFileExtensions: string[];
   capturedFileExtensions: string[];
-  authenticatedHandoffEnabled: boolean;
-  protectedDownloadAuthScope: 'off' | 'allowlist' | 'legacy_global';
-  authenticatedHandoffHosts: string[];
+  downloadCaptureDebugLogging: boolean;
 }
 
 export interface TorrentSettings {

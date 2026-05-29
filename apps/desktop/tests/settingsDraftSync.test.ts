@@ -39,9 +39,7 @@ function makeSettings(theme: Settings['theme']): Settings {
       excludedHosts: [],
       ignoredFileExtensions: [],
       capturedFileExtensions: [],
-      authenticatedHandoffEnabled: false,
-      protectedDownloadAuthScope: 'off',
-      authenticatedHandoffHosts: [],
+      downloadCaptureDebugLogging: false,
     },
   };
 }

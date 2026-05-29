@@ -24,7 +24,7 @@ pub(super) fn transfer_dispatch_for_kind(kind: TransferKind) -> Option<TransferD
     match kind {
         TransferKind::Http => Some(TransferDispatch::Http),
         TransferKind::Torrent => Some(TransferDispatch::Torrent),
-        TransferKind::BrowserBlob => None,
+        TransferKind::BrowserAdopted => None,
     }
 }
 

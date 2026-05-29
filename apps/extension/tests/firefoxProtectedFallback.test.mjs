@@ -6,47 +6,39 @@ const repoRoot = path.resolve();
 const backgroundSource = await readFile(path.join(repoRoot, 'apps/extension/src/background/index.ts'), 'utf8');
 
 const handlerStart = backgroundSource.indexOf('async function handleFirefoxWebRequestHeadersReceived');
-const handlerEnd = backgroundSource.indexOf('function markFirefoxWebRequestBypass', handlerStart);
-const captureStart = backgroundSource.indexOf('function registerHandoffAuthHeaderCapture');
-const captureEnd = backgroundSource.indexOf('async function handleFirefoxWebRequestHeadersReceived', captureStart);
+const handlerEnd = backgroundSource.indexOf('async function handleBrowserDownloadChanged', handlerStart);
 
 assert.notEqual(handlerStart, -1, 'Firefox webRequest headers handler should exist');
 assert.notEqual(handlerEnd, -1, 'Firefox webRequest handler should be sliceable');
-assert.notEqual(captureStart, -1, 'protected-download header capture registration should exist');
-assert.notEqual(captureEnd, -1, 'protected-download header capture registration should be sliceable');
+assert.equal(
+  backgroundSource.indexOf('function registerHandoffAuthHeaderCapture'),
+  -1,
+  'rebuilt automatic capture should not collect browser auth headers for URL replay',
+);
 
 const handlerSource = backgroundSource.slice(handlerStart, handlerEnd);
-const captureSource = backgroundSource.slice(captureStart, captureEnd);
-const markerCheckIndex = handlerSource.indexOf('hasCapturedBrowserSessionHeaders');
+const passThroughIndex = handlerSource.indexOf('shouldKeepBrowserSessionDownloadInBrowser(candidate, settings)');
 const cancelIndex = handlerSource.indexOf('return { cancel: true };');
+const adoptIndex = handlerSource.indexOf('markBrowserDownloadUrlForAdoption(candidate)');
 
-assert.notEqual(
-  markerCheckIndex,
+assert.equal(cancelIndex, -1, 'Firefox webRequest interception should not cancel classified browser downloads');
+assert.equal(
+  passThroughIndex,
   -1,
-  'Firefox protected downloads should check memory-only browser session markers before canceling',
+  'Firefox should not bypass classified downloads merely because the browser sent cookies',
+);
+assert.notEqual(
+  adoptIndex,
+  -1,
+  'Firefox classified downloads should be marked for completed-file adoption',
+);
+assert.match(
+  handlerSource,
+  /markBrowserDownloadUrlForAdoption\(candidate\);[\s\S]*return \{\};/,
+  'Firefox classified downloads should let the original browser request finish before the app adopts the file',
 );
 assert.doesNotMatch(
-  handlerSource.slice(markerCheckIndex, cancelIndex),
-  /return \{\};/,
-  'Firefox protected downloads should not leak the original browser request after they are classified as downloads',
-);
-assert.match(
-  handlerSource,
-  /const browserFallback:[\s\S]*\?[\s\r\n]*'unavailable'[\s\S]*:[\s\r\n]*candidate\.browserFallback \?\? 'replay'/,
-  'Firefox protected handoffs should mark browser replay fallback as unavailable',
-);
-assert.match(
-  handlerSource,
-  /void handleFirefoxWebRequestDownload\(\{ \.\.\.candidate, browserFallback \}, settings\);[\s\S]*return \{ cancel: true \};/,
-  'Firefox protected handoffs should cancel the browser request and let the strict handoff policy handle failures',
-);
-assert.match(
-  captureSource,
-  /types: \['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'\]/,
-  'protected-download header capture should include object requests used by embedded Canvas/canvadocs PDFs',
-);
-assert.match(
-  captureSource,
-  /captureHandoffAuthHeaders\(details, cachedExtensionSettings \?\? defaultExtensionSettings\);[\s\S]*getCachedExtensionSettings\(\)\.then\(\(settings\) => \{[\s\S]*captureHandoffAuthHeaders\(details, settings\);/,
-  'startup protected-download header capture should re-run with loaded user settings before Firefox cancels classified downloads',
+  backgroundSource,
+  /captureHandoffAuthHeaders|shouldKeepBrowserSessionDownloadInBrowser|markFirefoxWebRequestBypass/,
+  'Firefox automatic capture should avoid the old protected-download replay fallback stack',
 );

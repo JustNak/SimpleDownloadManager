@@ -516,7 +516,7 @@ pub(super) fn unusable_download_response_error_for_parts(
     if browser_handoff && is_html && !explicit_html_attachment {
         return Some(download_error(
             FailureCategory::Http,
-            "Browser download handoff returned HTML instead of file content. Let the browser handle this download or enable Protected Downloads for this site."
+            "Browser download handoff returned HTML instead of file content. Let the browser handle this download."
                 .into(),
             false,
         ));

@@ -1,28 +1,12 @@
 import assert from 'node:assert/strict';
-import type { ExtensionIntegrationSettings } from '@myapp/protocol';
+import { DEFAULT_CAPTURED_FILE_EXTENSIONS, type ExtensionIntegrationSettings } from '@myapp/protocol';
 import {
   browserDownloadUrl,
-  browserDownloadTransferKind,
-  classifyBrowserDownloadHandoffResolution,
-  cancelBrowserDownloadForDesktopPrompt,
-  createBrowserDownloadHandoffMetadata,
-  createBrowserDownloadBypassState,
+  classifyBrowserDownloadIntent,
   createAsyncFilenameInterceptionListener,
-  detachBrowserDownloadForDesktopPrompt,
-  discardBrowserDownloadBeforeFilenameRelease,
-  discardBrowserDownload,
-  markBrowserDownloadBypassId,
-  markBrowserDownloadBypassUrl,
-  restartBrowserDownload,
-  restoreBrowserDownloadAfterPromptFallback,
   selectFilenameInterceptionApi,
-  shouldBypassBrowserDownload,
-  shouldDiscardBrowserDownloadAfterHandoff,
   shouldHandleBrowserDownload,
-  shouldRestoreBrowserDownloadAfterPromptSwap,
 } from '../src/background/browserDownloads.ts';
-
-const calls: string[] = [];
 
 async function main() {
   const defaultSettings: ExtensionIntegrationSettings = {
@@ -34,11 +18,10 @@ async function main() {
     showBadgeStatus: true,
     excludedHosts: [],
     ignoredFileExtensions: [],
-    capturedFileExtensions: [],
-    authenticatedHandoffEnabled: false,
-    protectedDownloadAuthScope: 'off',
-    authenticatedHandoffHosts: [],
+    capturedFileExtensions: [...DEFAULT_CAPTURED_FILE_EXTENSIONS],
+    downloadCaptureDebugLogging: false,
   };
+
   assert.equal(
     browserDownloadUrl({
       url: 'https://example.com/redirect',
@@ -47,6 +30,7 @@ async function main() {
     'https://cdn.example.com/file.zip',
     'finalUrl should be preferred when the browser exposes it',
   );
+
   assert.equal(
     shouldHandleBrowserDownload({ url: 'https://example.com/file.zip' }, { ...defaultSettings, enabled: false }),
     false,
@@ -86,22 +70,6 @@ async function main() {
   );
   assert.equal(
     shouldHandleBrowserDownload(
-      { url: 'https://download-cdn.example.com/file.zip' },
-      { ...defaultSettings, excludedHosts: ['download*.example.com'] },
-    ),
-    false,
-    'wildcards should match within host labels',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      { url: 'https://example.com/file.zip' },
-      { ...defaultSettings, ignoredFileExtensions: ['zip'] },
-    ),
-    false,
-    'ignored extensions should not capture normal HTTP downloads',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
       {
         url: 'https://downloads.example.com/packages/archive.pkgx?token=abc',
         filename: 'C:\\Users\\Me\\Downloads\\archive.pkgx',
@@ -109,41 +77,15 @@ async function main() {
       { ...defaultSettings, capturedFileExtensions: ['pkgx'] },
     ),
     true,
-    'user captured extensions should allow custom file types to be handed off',
+    'user captured extensions should allow custom file types to be adopted',
   );
   assert.equal(
     shouldHandleBrowserDownload(
-      {
-        url: 'https://downloads.example.com/packages/archive.pkgx?token=abc',
-        filename: 'C:\\Users\\Me\\Downloads\\archive.pkgx',
-      },
-      { ...defaultSettings, capturedFileExtensions: ['pkgx'], ignoredFileExtensions: ['pkgx'] },
+      { url: 'https://example.com/file.zip', filename: 'file.zip' },
+      { ...defaultSettings, capturedFileExtensions: defaultSettings.capturedFileExtensions.filter((extension) => extension !== 'zip') },
     ),
     false,
-    'ignored extensions should still win over user captured extensions',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      { url: 'https://example.com/file.torrent', filename: 'file.torrent' },
-      { ...defaultSettings, ignoredFileExtensions: ['torrent'] },
-    ),
-    true,
-    '.torrent downloads should still be handed off as torrent jobs',
-  );
-  assert.equal(
-    browserDownloadTransferKind({ url: 'https://example.com/file.torrent' }),
-    'torrent',
-    '.torrent URLs should be classified as torrent handoffs',
-  );
-  assert.equal(
-    browserDownloadTransferKind({ url: 'https://example.com/download?id=123', filename: 'C:\\Users\\Me\\linux.iso.torrent' }),
-    'torrent',
-    '.torrent filenames should be classified as torrent handoffs even when the URL is opaque',
-  );
-  assert.equal(
-    browserDownloadTransferKind({ url: 'https://example.com/file.zip', filename: 'file.zip' }),
-    undefined,
-    'normal HTTP downloads should not carry explicit transfer metadata',
+    'removing a built-in extension from captured extensions should stop strong filename capture',
   );
   assert.equal(
     shouldHandleBrowserDownload(
@@ -154,299 +96,78 @@ async function main() {
       defaultSettings,
     ),
     false,
-    'Firefox .xpi packages should stay with the browser because AMO downloads can require browser session context',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://web.telegram.org/k/version',
-        filename: 'C:\\Users\\Me\\Downloads\\version',
-        mime: 'application/octet-stream',
-        totalBytes: 9,
-      },
-      defaultSettings,
-    ),
-    false,
-    'Telegram Web app version probes should not open a download prompt',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://music.youtube.com/youtubei/v1/player?prettyPrint=false',
-        filename: 'player',
-        mime: 'application/octet-stream',
-      },
-      defaultSettings,
-    ),
-    false,
-    'YouTube Music API payloads should not open a download prompt',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://music.youtube.com/verify_session',
-        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
-        mime: 'application/octet-stream',
-        totalBytes: 0,
-        fileSize: 0,
-      },
-      defaultSettings,
-    ),
-    false,
-    'YouTube Music session verification payloads should not open a download prompt',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://music.youtube.com/verify_session',
-        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
-      },
-      defaultSettings,
-    ),
-    false,
-    'YouTube Music session verification browser downloads without size or MIME metadata should not open a prompt',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://music.youtube.com/verify_session',
-        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
-        mime: 'application/octet-stream',
-        totalBytes: 0,
-        fileSize: 0,
-      },
-      { ...defaultSettings, capturedFileExtensions: ['txt'] },
-    ),
-    false,
-    'user captured extensions should not override high-confidence app traffic probes',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://music.youtube.com/verify_session',
-        filename: 'C:\\Users\\Me\\Downloads\\json.txt',
-        mime: 'application/json',
-        totalBytes: 0,
-        fileSize: 0,
-      },
-      defaultSettings,
-    ),
-    false,
-    'structured session verification payloads should not be captured as browser downloads',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://downloads.example.com/archive.zip',
-        filename: 'C:\\Users\\Me\\Downloads\\archive.zip',
-        byExtensionId: 'other-extension@example.test',
-        byExtensionName: 'Other Download Extension',
-      } as any,
-      defaultSettings,
-    ),
-    false,
-    'downloads initiated by another extension should stay out of Simple Download Manager',
-  );
-  assert.equal(
-    shouldHandleBrowserDownload(
-      {
-        url: 'https://canvadocs-sin.instructure.com/v2/documents/fzhs8D-eL9dX',
-        filename: 'C:\\Users\\Me\\Downloads\\file.pdf',
-        mime: 'application/pdf',
-        totalBytes: 0,
-      },
-      defaultSettings,
-    ),
-    true,
-    'Canvadocs PDF browser downloads should remain eligible for protected handoff',
+    'Firefox .xpi packages should stay with the browser',
   );
 
-  await discardBrowserDownload(
+  for (const item of [
     {
-      async cancel(downloadId: number) {
-        calls.push(`cancel:${downloadId}`);
-      },
-      async search(query: { id: number }) {
-        calls.push(`search:${query.id}`);
-        return [
-          {
-            id: query.id,
-            state: 'complete',
-            exists: true,
-          },
-        ];
-      },
-      async removeFile(downloadId: number) {
-        calls.push(`removeFile:${downloadId}`);
-      },
-      async erase(query: { id: number }) {
-        calls.push(`erase:${query.id}`);
-      },
+      url: 'https://www.youtube.com/youtubei/v1/verify?prettyPrint=false',
+      filename: 'verify',
+      mime: 'application/octet-stream',
+      totalBytes: 0,
     },
-    42,
-  );
-
-  assert.deepEqual(calls, ['cancel:42', 'search:42', 'removeFile:42', 'erase:42']);
-  assert.equal(
-    shouldDiscardBrowserDownloadAfterHandoff({
-      ok: true,
-      requestId: 'request_1',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'canceled',
-      },
-    }),
-    false,
-    'prompt-canceled handoffs should return to the browser download',
-  );
-  assert.equal(
-    shouldDiscardBrowserDownloadAfterHandoff({
-      ok: true,
-      requestId: 'request_dismissed',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'dismissed',
-      },
-    }),
-    true,
-    'prompt-dismissed handoffs should cancel outright and discard the browser download',
-  );
-  assert.equal(
-    shouldDiscardBrowserDownloadAfterHandoff({
-      ok: true,
-      requestId: 'request_queued',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'queued',
-      },
-    }),
-    true,
-    'queued handoffs should block the browser download',
-  );
-  assert.equal(
-    shouldDiscardBrowserDownloadAfterHandoff({
-      ok: true,
-      requestId: 'request_duplicate',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'duplicate_existing_job',
-      },
-    }),
-    true,
-    'duplicate handoffs should block the browser download',
-  );
-  assert.equal(
-    shouldDiscardBrowserDownloadAfterHandoff({
-      ok: false,
-      requestId: 'request_2',
-      type: 'app_unreachable',
-      code: 'APP_UNREACHABLE',
-      message: 'app did not respond',
-    }),
-    false,
-    'failed extension handoffs should be handled by the strict error classifier',
-  );
-  assert.deepEqual(
-    classifyBrowserDownloadHandoffResolution({
-      ok: false,
-      requestId: 'request_app_unreachable',
-      type: 'app_unreachable',
-      code: 'APP_UNREACHABLE',
-      message: 'app did not respond',
-    }),
     {
-      action: 'record_error',
-      response: {
-        ok: false,
-        requestId: 'request_app_unreachable',
-        type: 'app_unreachable',
-        code: 'APP_UNREACHABLE',
-        message: 'app did not respond',
-      },
+      url: 'https://www.youtube.com/verify_session',
+      filename: 'json.txt',
+      mime: 'application/octet-stream',
+      totalBytes: 0,
     },
-    'failed handoffs should record the error and keep the browser download blocked after capture',
-  );
-  assert.deepEqual(
-    classifyBrowserDownloadHandoffResolution({
-      ok: false,
-      requestId: 'request_protected',
-      type: 'rejected',
-      code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
-      message: 'This site requires your browser session.',
-    }),
     {
-      action: 'record_error',
-      response: {
-        ok: false,
-        requestId: 'request_protected',
-        type: 'rejected',
-        code: 'PROTECTED_DOWNLOAD_AUTH_REQUIRED',
-        message: 'This site requires your browser session.',
-      },
+      url: 'https://example.com/api/v1/session',
+      filename: 'session',
+      mime: 'application/json',
+      totalBytes: 64,
     },
-    'protected-download auth failures should be recorded and blocked instead of restored',
-  );
-  assert.deepEqual(
-    classifyBrowserDownloadHandoffResolution({
-      ok: true,
-      requestId: 'request_prompt_canceled',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'canceled',
-      },
-    }),
-    { action: 'restore' },
-    'prompt-canceled handoffs should restore the detached browser download',
-  );
-  for (const status of ['queued', 'duplicate_existing_job', 'dismissed'] as const) {
-    assert.deepEqual(
-      classifyBrowserDownloadHandoffResolution({
-        ok: true,
-        requestId: `request_${status}`,
-        type: 'accepted',
-        payload: {
-          appState: 'running',
-          status,
-        },
-      }),
-      { action: 'discard' },
-      `${status} handoffs should leave the detached browser download discarded`,
+  ]) {
+    assert.equal(
+      shouldHandleBrowserDownload(item, defaultSettings),
+      false,
+      `${item.url} should be ignored as app traffic`,
     );
   }
+
   assert.deepEqual(
-    classifyBrowserDownloadHandoffResolution({
-      ok: true,
-      requestId: 'request_finished',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'finished',
-      },
+    classifyBrowserDownloadIntent({
+      url: 'https://music.youtube.com/verify_session',
+      filename: 'C:\\Users\\Me\\Downloads\\json.txt',
+      mime: 'application/octet-stream',
+      totalBytes: 0,
+      fileSize: 0,
     }),
-    { action: 'discard' },
-    'non-swap accepted handoff statuses should keep the browser download blocked',
+    { action: 'ignore', reason: 'app_traffic_probe' },
+    'classifier should explain high-confidence app traffic probes',
   );
   assert.deepEqual(
-    createBrowserDownloadHandoffMetadata(
-      {
-        filename: 'C:\\Users\\Downloads\\html_css_basic_guide (2).pdf',
-        totalBytes: 95437.8,
-        browserFallback: 'unavailable',
-      },
-      { headers: [{ name: 'Cookie', value: 'session=abc' }] },
-    ),
-    {
-      suggestedFilename: 'html_css_basic_guide (2).pdf',
-      totalBytes: 95437,
-      browserFallback: 'unavailable',
-      handoffAuth: { headers: [{ name: 'Cookie', value: 'session=abc' }] },
-    },
-    'browser auto handoffs should include the resolved filename and size for desktop duplicate checks',
+    classifyBrowserDownloadIntent({
+      url: 'https://files.example.com/export',
+      contentDisposition: 'attachment; filename="export.zip"',
+      mime: 'application/octet-stream',
+    }),
+    { action: 'capture', reason: 'attachment_disposition' },
+    'classifier should explain explicit attachment captures',
+  );
+  assert.deepEqual(
+    classifyBrowserDownloadIntent({
+      url: 'https://www.youtube.com/api/timedtext?v=RZpz24nP1P0&ei=xUE',
+      filename: 't.txt',
+      contentDisposition: 'attachment; filename="t.txt"',
+      mime: 'text/plain',
+      totalBytes: 7680,
+    }, defaultSettings.capturedFileExtensions),
+    { action: 'ignore', reason: 'app_traffic_payload' },
+    'attachment responses without a captured extension should not bypass the captured extension list',
+  );
+  assert.deepEqual(
+    classifyBrowserDownloadIntent({
+      url: 'https://api.example.test/v1/player/archive.zip',
+      filename: 'archive.zip',
+      contentDisposition: 'attachment; filename="archive.zip"',
+      mime: 'application/octet-stream',
+      totalBytes: 1048576,
+      resourceType: 'xmlhttprequest',
+    }, ['zip']),
+    { action: 'ignore', reason: 'app_traffic_payload' },
+    'page-internal API endpoints should not be captured',
   );
 
   const suggestionCalls: Array<{ filename?: string; conflictAction?: 'uniquify' | 'overwrite' | 'prompt' } | undefined> = [];
@@ -470,277 +191,6 @@ async function main() {
     [{ filename: 'CymaticsHubSetup.exe', conflictAction: 'uniquify' }],
     'filename listeners should only release the browser callback once',
   );
-
-  const releaseOrder: string[] = [];
-  await discardBrowserDownloadBeforeFilenameRelease(
-    {
-      async cancel(downloadId: number) {
-        releaseOrder.push(`cancel:${downloadId}`);
-      },
-      async search(query: { id: number }) {
-        releaseOrder.push(`search:${query.id}`);
-        return [];
-      },
-      async erase(query: { id: number }) {
-        releaseOrder.push(`erase:${query.id}`);
-      },
-    },
-    99,
-    () => {
-      releaseOrder.push('suggest');
-    },
-  );
-  assert.deepEqual(
-    releaseOrder,
-    ['cancel:99', 'suggest', 'cancel:99', 'search:99', 'erase:99'],
-    'accepted handoffs should cancel before and after releasing filename determination to prevent Save As leakage',
-  );
-
-  const fallbackReleaseOrder: string[] = [];
-  await discardBrowserDownloadBeforeFilenameRelease(
-    {
-      async cancel(downloadId: number) {
-        fallbackReleaseOrder.push(`cancel:${downloadId}`);
-        throw new Error('not in progress');
-      },
-      async search(query: { id: number }) {
-        fallbackReleaseOrder.push(`search:${query.id}`);
-        return [];
-      },
-      async erase(query: { id: number }) {
-        fallbackReleaseOrder.push(`erase:${query.id}`);
-      },
-    },
-    100,
-    () => {
-      fallbackReleaseOrder.push('suggest');
-    },
-  );
-  assert.deepEqual(
-    fallbackReleaseOrder,
-    ['cancel:100', 'suggest', 'cancel:100', 'search:100', 'erase:100'],
-    'accepted handoffs should retry cancel after release if Chrome rejects pre-release cancellation',
-  );
-
-  const promptCaptureOrder: string[] = [];
-  await cancelBrowserDownloadForDesktopPrompt(
-    {
-      async cancel(downloadId: number) {
-        promptCaptureOrder.push(`cancel:${downloadId}`);
-      },
-    },
-    101,
-  );
-  assert.deepEqual(
-    promptCaptureOrder,
-    ['cancel:101'],
-    'filename-interception handoffs should cancel the browser item before waiting on the desktop prompt',
-  );
-
-  const detachBeforePromptOrder: string[] = [];
-  await detachBrowserDownloadForDesktopPrompt(
-    {
-      async cancel(downloadId: number) {
-        detachBeforePromptOrder.push(`cancel:${downloadId}`);
-      },
-      async search(query: { id: number }) {
-        detachBeforePromptOrder.push(`search:${query.id}`);
-        return [];
-      },
-      async erase(query: { id: number }) {
-        detachBeforePromptOrder.push(`erase:${query.id}`);
-      },
-    },
-    102,
-    () => {
-      detachBeforePromptOrder.push('suggest');
-    },
-  );
-  detachBeforePromptOrder.push('desktop-prompt-wait');
-  assert.deepEqual(
-    detachBeforePromptOrder,
-    ['cancel:102', 'suggest', 'cancel:102', 'search:102', 'erase:102', 'desktop-prompt-wait'],
-    'prompt capture should detach the browser download before waiting for the desktop prompt',
-  );
-
-  const detachRetryOrder: string[] = [];
-  await detachBrowserDownloadForDesktopPrompt(
-    {
-      async cancel(downloadId: number) {
-        detachRetryOrder.push(`cancel:${downloadId}`);
-        throw new Error('not in progress');
-      },
-      async search(query: { id: number }) {
-        detachRetryOrder.push(`search:${query.id}`);
-        return [];
-      },
-      async erase(query: { id: number }) {
-        detachRetryOrder.push(`erase:${query.id}`);
-      },
-    },
-    103,
-    () => {
-      detachRetryOrder.push('suggest');
-    },
-  );
-  assert.deepEqual(
-    detachRetryOrder,
-    ['cancel:103', 'suggest', 'cancel:103', 'search:103', 'erase:103'],
-    'prompt capture should retry cancel after filename release when Chrome rejects pre-release cancellation',
-  );
-
-  assert.equal(
-    shouldRestoreBrowserDownloadAfterPromptSwap({
-      ok: true,
-      requestId: 'request_prompt_canceled',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'canceled',
-      },
-    }),
-    true,
-    'Swap should restore the browser download',
-  );
-  assert.equal(
-    shouldRestoreBrowserDownloadAfterPromptSwap({
-      ok: true,
-      requestId: 'request_prompt_dismissed_by_cancel_button',
-      type: 'accepted',
-      payload: {
-        appState: 'running',
-        status: 'dismissed',
-      },
-    }),
-    false,
-    'Cancel should fully cancel the browser download instead of restoring it',
-  );
-  for (const status of ['queued', 'duplicate_existing_job', 'dismissed'] as const) {
-    assert.equal(
-      shouldRestoreBrowserDownloadAfterPromptSwap({
-        ok: true,
-        requestId: `request_prompt_${status}`,
-        type: 'accepted',
-        payload: {
-          appState: 'running',
-          status,
-        },
-      }),
-      false,
-      `${status} prompt results should not restore the browser download after detachment`,
-    );
-  }
-
-  let restartedWith: unknown;
-  const bypass = createBrowserDownloadBypassState();
-  const restartedId = await restartBrowserDownload(
-    {
-      async download(options) {
-        restartedWith = options;
-        assert.equal(
-          shouldBypassBrowserDownload({ id: 500, url: options.url }, bypass),
-          true,
-          'fallback restart should bypass one URL event that races before the id is known',
-        );
-        return 501;
-      },
-    },
-    {
-      id: 100,
-      url: 'https://example.com/download?id=1',
-      finalUrl: 'https://cdn.example.com/File%20Name.zip',
-      filename: 'C:\\Users\\Downloads\\File Name.zip',
-    },
-    bypass,
-  );
-
-  assert.equal(restartedId, 501);
-  assert.deepEqual(restartedWith, {
-    url: 'https://cdn.example.com/File%20Name.zip',
-    filename: 'File Name.zip',
-    conflictAction: 'uniquify',
-    saveAs: false,
-  });
-  assert.equal(
-    shouldBypassBrowserDownload({ id: 501, url: 'https://cdn.example.com/File%20Name.zip' }, bypass),
-    true,
-    'fallback restart should bypass interception by returned download id',
-  );
-  assert.equal(
-    shouldBypassBrowserDownload({ id: 502, url: 'https://cdn.example.com/File%20Name.zip' }, bypass),
-    false,
-    'fallback bypass should be one-shot',
-  );
-
-  const staleUrlBypass = createBrowserDownloadBypassState(10);
-  markBrowserDownloadBypassUrl(staleUrlBypass, 'https://example.com/stale-url.zip', 1_000);
-  assert.equal(
-    shouldBypassBrowserDownload({ id: 601, url: 'https://example.com/stale-url.zip' }, staleUrlBypass, 1_011),
-    false,
-    'stale fallback URL bypasses should expire when no matching browser event consumes them',
-  );
-
-  const staleIdBypass = createBrowserDownloadBypassState(10);
-  markBrowserDownloadBypassId(staleIdBypass, 602, 2_000);
-  assert.equal(
-    shouldBypassBrowserDownload({ id: 602, url: 'https://example.com/stale-id.zip' }, staleIdBypass, 2_011),
-    false,
-    'stale fallback download-id bypasses should expire when no matching browser event consumes them',
-  );
-
-  const freshIdBypass = createBrowserDownloadBypassState(10);
-  markBrowserDownloadBypassId(freshIdBypass, 603, 3_000);
-  assert.equal(
-    shouldBypassBrowserDownload({ id: 603, url: 'https://example.com/fresh-id.zip' }, freshIdBypass, 3_010),
-    true,
-    'fresh fallback download-id bypasses should still be consumed once',
-  );
-
-  const promptFallbackBypass = createBrowserDownloadBypassState();
-  const promptFallbackOrder: string[] = [];
-  let promptFallbackRestartedWith: unknown;
-  const promptFallbackId = await restoreBrowserDownloadAfterPromptFallback(
-    {
-      async cancel(downloadId: number) {
-        promptFallbackOrder.push(`cancel:${downloadId}`);
-      },
-      async search(query: { id: number }) {
-        promptFallbackOrder.push(`search:${query.id}`);
-        return [];
-      },
-      async erase(query: { id: number }) {
-        promptFallbackOrder.push(`erase:${query.id}`);
-      },
-      async download(options) {
-        promptFallbackRestartedWith = options;
-        promptFallbackOrder.push(`download:${options.url}`);
-        return 777;
-      },
-    },
-    {
-      id: 111,
-      url: 'https://example.com/prompt',
-      finalUrl: 'https://cdn.example.com/prompt.zip',
-      filename: 'C:\\Users\\Downloads\\prompt.zip',
-    },
-    promptFallbackBypass,
-    () => {
-      promptFallbackOrder.push('suggest');
-    },
-  );
-
-  assert.equal(promptFallbackId, 777);
-  assert.deepEqual(
-    promptFallbackOrder,
-    ['suggest', 'cancel:111', 'search:111', 'erase:111', 'download:https://cdn.example.com/prompt.zip'],
-    'prompt fallback should release the filename callback, discard the captured item, and restart through the bypass path',
-  );
-  assert.deepEqual(promptFallbackRestartedWith, {
-    url: 'https://cdn.example.com/prompt.zip',
-    filename: 'prompt.zip',
-    conflictAction: 'uniquify',
-    saveAs: false,
-  });
 
   const rawFilenameApi = {
     onDeterminingFilename: {

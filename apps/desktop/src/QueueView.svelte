@@ -45,6 +45,7 @@
     fileBadgeActivityState,
     formatQueueSize,
     formatQueueSizeTitle,
+    isBrowserAdoptedTransferKind,
     isBulkQueueView,
     queueStatusPresentation,
     queueTableColumnsForView,
@@ -1166,6 +1167,8 @@
         <div class="truncate">{job.bulkMemberIds.length} files</div>
       {:else if job.transferKind === 'torrent'}
         {@render TorrentDetailLine(job)}
+      {:else if isBrowserAdoptedTransferKind(job.transferKind)}
+        <div class="truncate" title="This file was completed by the browser and adopted into the queue.">Completed in browser</div>
       {:else}
         <div class="truncate" title={job.url}>{getHost(job.url)}</div>
       {/if}

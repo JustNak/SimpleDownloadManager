@@ -27,7 +27,8 @@ pub(super) fn normalize_extension_settings(settings: &mut ExtensionIntegrationSe
         settings.protected_download_auth_scope != ProtectedDownloadAuthScope::Off;
 
     settings.ignored_file_extensions = normalize_file_extensions(&settings.ignored_file_extensions);
-    settings.captured_file_extensions = normalize_file_extensions(&settings.captured_file_extensions);
+    settings.captured_file_extensions =
+        normalize_file_extensions(&settings.captured_file_extensions);
 }
 
 fn normalize_protected_download_auth_scope(
@@ -147,7 +148,12 @@ pub(super) fn normalize_accent_color(settings: &mut Settings) {
 }
 
 pub(super) fn normalize_file_extension(value: &str) -> String {
-    let extension = match value.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+    let extension = match value
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "7zip" => "7z".to_string(),
         value => value.to_string(),
     };

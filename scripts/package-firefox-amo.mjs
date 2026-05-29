@@ -48,7 +48,7 @@ export function createFirefoxAmoListingMetadata() {
       'en-US': [
         'Simple Download Manager connects Firefox downloads to the local Simple Download Manager desktop app.',
         '',
-        'Use it to send eligible browser downloads to the desktop queue, choose between prompt and silent handoff modes, keep selected sites in Firefox, and opt in to Protected Downloads for sites that require browser session headers.',
+        'Use it to send eligible browser downloads to the desktop queue after Firefox completes them, choose which file extensions are captured, and keep selected sites in Firefox.',
         '',
         'Requires the Simple Download Manager desktop app and native messaging host to be installed on the same Windows device. The extension does not use remote code, analytics, advertising, tracking, or remote configuration.',
       ].join('\n'),
@@ -90,7 +90,7 @@ export function createFirefoxAmoListingMetadata() {
 export function createFirefoxAmoReleaseNotes() {
   return [
     '- Tightened Firefox auto-capture to ignore site session/API probes such as YouTube Music verify_session.',
-    '- Kept Protected Downloads session-header forwarding for eligible real downloads.',
+    '- Reworked automatic capture so Firefox owns the transfer and the app adopts the completed file.',
     '- Preserved Canvas/Instructure and attachment download capture while reducing false prompts.',
   ].join('\n');
 }
@@ -145,9 +145,8 @@ When the extension is enabled and a download is eligible for handoff, it may sen
 - Download URL.
 - Suggested filename and content length when Firefox exposes them.
 - Page URL, page title, referrer, entry point, extension version, and incognito flag when available.
-- User actions such as context-menu handoff, popup handoff, browser-download prompt, accepted handoff, canceled prompt, or fallback.
-- Extension settings such as capture mode, excluded sites, ignored file extensions, Protected Downloads settings, badge preference, and progress-window preference.
-- If Protected Downloads is enabled, bounded browser request headers for the exact download being handed off, such as Cookie or Authorization headers after extension-side filtering.
+- User actions such as context-menu handoff, popup handoff, and completed browser-download adoption.
+- Extension settings such as capture mode, excluded sites, captured file extensions, badge preference, and progress-window preference.
 
 ## Local-Only Use
 
@@ -155,20 +154,22 @@ The extension sends this data only to the local native desktop app installed on 
 
 ## Storage
 
-The extension stores its settings in Firefox extension storage. Protected-download request headers are held only in extension memory for a short time, are capped, and are cleared when Protected Downloads is disabled.
+The extension stores its settings in Firefox extension storage. Completed-download adoption state is held only in extension memory for a short time and is capped.
 
 ## User Controls
 
-Users can disable browser download interception, choose prompt or automatic handoff, exclude sites, ignore file extensions, and disable Protected Downloads from the extension options page.
+Users can disable browser download interception, choose prompt or automatic handoff, exclude sites, and manage captured file extensions from the extension options page.
 `;
 }
 
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Firefox auto-capture now separates download intent from Protected Downloads auth forwarding. Generic app/session traffic such as YouTube Music verify_session, youtubei payloads, json.txt, player, version, and zero-byte probes is ignored before prompting.
+- Firefox auto-capture now separates download intent from browser-session handling. Generic app/session traffic such as YouTube Music verify_session, youtubei payloads, json.txt, player, version, and zero-byte probes is ignored before prompting.
 - Real downloads still capture when Firefox exposes strong evidence: Content-Disposition attachment, strong file extensions, or known explicit download URLs such as Canvas/Instructure file downloads.
-- Protected Downloads behavior is unchanged after capture: sanitized, memory-only browser session headers may be forwarded only to the local native desktop app for eligible HTTP(S) browser downloads.
+- Automatic browser downloads stay in Firefox until complete; the extension then sends the completed local path to the local native desktop app for adoption.
+- Browser-session downloads are handled through browser-owned completed-file adoption rather than cookie/header replay.
+- Manual context-menu and popup sends still hand explicit URLs to the local native desktop app through Firefox native messaging.
 `;
 }
 

@@ -4,7 +4,36 @@ import type { ExtensionIntegrationSettings, Settings } from './types.ts';
 export const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
-export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = [] as const;
+export const DEFAULT_CAPTURED_FILE_EXTENSIONS = [
+  '7z',
+  'apk',
+  'bz2',
+  'cab',
+  'csv',
+  'deb',
+  'dmg',
+  'doc',
+  'docx',
+  'exe',
+  'gz',
+  'iso',
+  'jar',
+  'msi',
+  'pdf',
+  'ppt',
+  'pptx',
+  'rar',
+  'rpm',
+  'tar',
+  'tgz',
+  'torrent',
+  'txz',
+  'xls',
+  'xlsx',
+  'xz',
+  'zip',
+  'zst',
+] as const;
 
 export function defaultBulkDownloadDirectory(downloadDirectory: string): string {
   const trimmed = downloadDirectory.trim();
@@ -23,10 +52,8 @@ export function createDefaultExtensionIntegrationSettings(): ExtensionIntegratio
     showBadgeStatus: true,
     excludedHosts: [...DEFAULT_EXTENSION_EXCLUDED_HOSTS],
     ignoredFileExtensions: [],
-    capturedFileExtensions: [],
-    authenticatedHandoffEnabled: true,
-    protectedDownloadAuthScope: 'legacy_global',
-    authenticatedHandoffHosts: [...DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS],
+    capturedFileExtensions: [...DEFAULT_CAPTURED_FILE_EXTENSIONS],
+    downloadCaptureDebugLogging: false,
   };
 }
 

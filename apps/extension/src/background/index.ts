@@ -1,49 +1,41 @@
-import { isErrorResponse, toUserFacingMessage, type BrowserFallback, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
+import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
 import {
   browserDownloadUrl,
-  browserDownloadTransferKind,
-  classifyBrowserDownloadHandoffResolution,
-  createBrowserDownloadHandoffMetadata,
-  createBrowserDownloadBypassState,
+  classifyBrowserDownloadIntent,
+  completeBrowserDownloadAdoption,
   createAsyncFilenameInterceptionListener,
-  detachBrowserDownloadForDesktopPrompt,
-  discardBrowserDownload,
   firefoxWebRequestDownloadCandidate,
-  markBrowserDownloadBypassUrl,
-  restartBrowserDownload,
-  restoreBrowserDownloadAfterPromptFallback,
-  revokeBrowserDownloadBypassUrl,
   selectFilenameInterceptionApi,
   shouldAllowBrowserDownloadBySettings,
-  shouldBypassBrowserDownload,
-  shouldBypassBrowserDownloadUrl,
-  shouldHandleBrowserDownload,
   type BrowserDownloadFilenameInterceptionApi,
   type BrowserDownloadFilenameInterceptionCandidate,
   type BrowserDownloadFilenameSuggest,
   type BrowserDownloadFilenameSuggestion,
+  type BrowserDownloadAdoption,
+  type BrowserDownloadDelta,
+  type BrowserDownloadIntentDecision,
   type FirefoxWebRequestDownloadCandidate,
   type FirefoxWebRequestDownloadDetails,
 } from './browserDownloads';
 import {
-  captureHandoffAuthHeaders,
-  hasCapturedBrowserSessionHeaders,
-  resolveBrowserHandoffAuthWithCookieFallback,
-  type HandoffAuthCookie,
-  type HandoffAuthRequestDetails,
-} from './handoffAuth';
-import { buildContextMenuPayload, connectionForErrorCode, enqueueDownload, openApp, pingNativeHost, promptDownload, saveExtensionSettings } from './nativeMessaging';
+  adoptBrowserDownload,
+  buildContextMenuPayload,
+  connectionForErrorCode,
+  enqueueDownload,
+  openApp,
+  pingNativeHost,
+  saveExtensionSettings,
+} from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
 import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { normalizeAccentColor } from '../shared/appearance';
-import { defaultExtensionSettings } from '../shared/defaultExtensionSettings';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const APPEARANCE_SYNC_ALARM_NAME = 'appearance-sync';
-const FIREFOX_FALLBACK_BYPASS_TTL_MS = 10_000;
-const activeBrowserDownloadIds = new Set<number>();
-const browserDownloadFallbackBypass = createBrowserDownloadBypassState();
+const BROWSER_ADOPTION_PENDING_TTL_MS = 5 * 60 * 1000;
+const browserDownloadAdoptions = new Map<number, BrowserDownloadAdoption>();
+const pendingBrowserDownloadAdoptions = new Map<string, PendingBrowserDownloadAdoption>();
 let cachedExtensionSettings: ExtensionIntegrationSettings | null = null;
 let cachedExtensionSettingsPromise: Promise<ExtensionIntegrationSettings> | null = null;
 let nativeHostPingPromise: Promise<HostToExtensionResponse> | null = null;
@@ -122,69 +114,30 @@ async function handleContextMenuClick(info: browser.contextMenus.OnClickData, ta
 }
 
 async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem) {
+  const url = browserDownloadUrl(item);
+  if (url && consumePendingBrowserDownloadAdoption(item, url)) {
+    return;
+  }
+
   if (shouldSkipBrowserDownloadInterception(item)) {
     return;
   }
 
-  const url = browserDownloadUrl(item);
   if (!url) {
     return;
   }
 
   let settings = await getCachedExtensionSettings();
-  if (!shouldHandleBrowserDownload(item, settings)) {
+  if (!shouldAllowBrowserDownloadBySettings(item, settings)) {
     return;
   }
 
-  activeBrowserDownloadIds.add(item.id);
-
-  try {
-    await browser.downloads.cancel(item.id).catch(() => undefined);
-
-    const pingResponse = await pingNativeHostCoalesced();
-    if (isErrorResponse(pingResponse)) {
-      await recordHostError(pingResponse);
-      await blockBrowserDownloadAfterCapture(item);
-      return;
-    }
-
-    rememberStateSettings(await setLastResult('connected', pingResponse));
-    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldHandleBrowserDownload(item, settings)) {
-      await blockBrowserDownloadAfterCapture(item);
-      return;
-    }
-
-    const response = await handOffBrowserDownload(url, item, settings);
-
-    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error') {
-      await recordHostError(handoffResolution.response);
-      await blockBrowserDownloadAfterCapture(item);
-      return;
-    }
-
-    if (handoffResolution.action === 'discard') {
-      await discardBrowserDownload(browser.downloads, item.id);
-      const state = rememberStateSettings(await setLastResult('connected', response));
-      await updateBrowserBadge(state);
-      return;
-    }
-
-    const state = rememberStateSettings(await setLastResult('connected', response));
-    await updateBrowserBadge(state);
-    await restoreBrowserDownloadFallback(item);
-  } catch (error) {
-    const state = await setHostError(
-      'HOST_NOT_AVAILABLE',
-      error instanceof Error ? error.message : 'Could not hand the browser download to the desktop app.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-    await blockBrowserDownloadAfterCapture(item);
-  } finally {
-    activeBrowserDownloadIds.delete(item.id);
+  const decision = classifyBrowserDownloadIntent({ ...item, url }, settings.capturedFileExtensions);
+  logDownloadCaptureDecision('chromium-downloads', item, settings, decision);
+  if (decision.action !== 'capture') {
+    return;
   }
+  trackBrowserDownloadForAdoption(url, item, 'browser_download');
 }
 
 async function handleBrowserDownloadDeterminingFilename(
@@ -203,55 +156,19 @@ async function handleBrowserDownloadDeterminingFilename(
   }
 
   let settings = await getCachedExtensionSettings();
-  if (!shouldHandleBrowserDownload(item, settings)) {
+  if (!shouldAllowBrowserDownloadBySettings(item, settings)) {
     suggestBrowserDownload(item, suggest);
     return;
   }
 
-  activeBrowserDownloadIds.add(item.id);
-  const releaseFilename = () => {
+  const decision = classifyBrowserDownloadIntent({ ...item, url }, settings.capturedFileExtensions);
+  logDownloadCaptureDecision('chromium-downloads', item, settings, decision);
+  if (decision.action !== 'capture') {
     suggestBrowserDownload(item, suggest);
-  };
-
-  try {
-    await detachBrowserDownloadForDesktopPrompt(browser.downloads, item.id, releaseFilename);
-
-    const pingResponse = await pingNativeHostCoalesced();
-    if (isErrorResponse(pingResponse)) {
-      await recordHostError(pingResponse);
-      return;
-    }
-
-    const pingState = rememberStateSettings(await setLastResult('connected', pingResponse));
-    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldHandleBrowserDownload(item, settings)) {
-      await updateBrowserBadge(pingState);
-      return;
-    }
-
-    const response = await handOffBrowserDownload(url, item, settings);
-
-    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error') {
-      await recordHostError(handoffResolution.response);
-      return;
-    }
-
-    const state = rememberStateSettings(await setLastResult('connected', response));
-    await updateBrowserBadge(state);
-    if (handoffResolution.action === 'restore') {
-      await restoreBrowserDownloadFallback(item);
-    }
-  } catch (error) {
-    const state = await setHostError(
-      'HOST_NOT_AVAILABLE',
-      error instanceof Error ? error.message : 'Could not hand the browser download to the desktop app.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-  } finally {
-    activeBrowserDownloadIds.delete(item.id);
+    return;
   }
+  trackBrowserDownloadForAdoption(url, item, 'browser_download');
+  suggestBrowserDownload(item, suggest);
 }
 
 browser.runtime.onInstalled.addListener(() => {
@@ -291,6 +208,9 @@ if (filenameInterceptionApi) {
   });
   registerFirefoxWebRequestInterception();
 }
+browser.downloads?.onChanged.addListener((delta) => {
+  void handleBrowserDownloadChanged(delta as BrowserDownloadDelta);
+});
 
 browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   switch (message.type) {
@@ -356,7 +276,6 @@ browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   }
 });
 
-registerHandoffAuthHeaderCapture();
 void ensureAppearanceSyncAlarm();
 
 async function ensureAppearanceSyncAlarm(): Promise<void> {
@@ -371,17 +290,11 @@ async function ensureAppearanceSyncAlarm(): Promise<void> {
 }
 
 function shouldSkipBrowserDownloadInterception(item: browser.downloads.DownloadItem): boolean {
-  return shouldBypassBrowserDownload(item, browserDownloadFallbackBypass)
-    || activeBrowserDownloadIds.has(item.id)
-    || !browserDownloadUrl(item);
+  return !browserDownloadUrl(item);
 }
 
-async function handOffBrowserDownload(
-  url: string,
-  item: BrowserDownloadHandoffItem,
-  settings: ExtensionIntegrationSettings,
-): Promise<HostToExtensionResponse> {
-  const source = {
+function browserDownloadSource(item: BrowserDownloadHandoffItem) {
+  return {
     entryPoint: 'browser_download' as const,
     extensionVersion: browser.runtime.getManifest().version,
     incognito: item.incognito,
@@ -389,147 +302,12 @@ async function handOffBrowserDownload(
     pageTitle: item.pageTitle,
     referrer: item.referrer,
   };
-  const handoffDetails = {
-    requestId: 'requestId' in item ? item.requestId : undefined,
-    url,
-    incognito: item.incognito,
-    cookieStoreId: item.cookieStoreId,
-  };
-  const authResolution = await resolveBrowserHandoffAuthWithCookieFallback(handoffDetails, settings, {
-    cookieLookup: getCookieLookup(),
-    userAgent: browserUserAgent(),
-  });
-
-  const metadata = createBrowserDownloadHandoffMetadata(item, authResolution.handoffAuth);
-  const transferKind = browserDownloadTransferKind(item);
-
-  if (transferKind === 'torrent') {
-    return enqueueDownload(url, source, { ...metadata, transferKind });
-  }
-
-  if (settings.downloadHandoffMode === 'auto') {
-    return enqueueDownload(url, source, metadata);
-  }
-
-  return promptDownload(url, source, metadata);
 }
 
 async function recordHostError(response: Extract<HostToExtensionResponse, { ok: false }>): Promise<void> {
   const connection = connectionForErrorCode(response.code);
   const state = await setHostError(response.code, toUserFacingMessage(response.code, response.message), connection);
   await updateBrowserBadge(state);
-}
-
-async function restoreBrowserDownloadFallback(
-  item: browser.downloads.DownloadItem,
-  releaseFilename?: () => void,
-): Promise<void> {
-  try {
-    if (releaseFilename) {
-      await restoreBrowserDownloadAfterPromptFallback(
-        browser.downloads,
-        item,
-        browserDownloadFallbackBypass,
-        releaseFilename,
-      );
-      return;
-    }
-
-    await discardBrowserDownload(browser.downloads, item.id);
-    await restartBrowserDownload(browser.downloads, item, browserDownloadFallbackBypass);
-  } catch (error) {
-    const state = await setHostError(
-      'DOWNLOAD_FAILED',
-      error instanceof Error
-        ? `Could not return the download to the browser: ${error.message}`
-        : 'Could not return the download to the browser.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-  }
-}
-
-async function blockBrowserDownloadAfterCapture(item: browser.downloads.DownloadItem): Promise<void> {
-  try {
-    await discardBrowserDownload(browser.downloads, item.id);
-  } catch (error) {
-    const state = await setHostError(
-      'DOWNLOAD_FAILED',
-      error instanceof Error
-        ? `Could not discard the captured browser download: ${error.message}`
-        : 'Could not discard the captured browser download.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-  }
-}
-
-async function handleFirefoxWebRequestDownload(
-  candidate: FirefoxWebRequestDownloadCandidate,
-  initialSettings: ExtensionIntegrationSettings,
-): Promise<void> {
-  let settings = rememberSettings(initialSettings);
-
-  try {
-    const pingResponse = await pingNativeHostCoalesced();
-    if (isErrorResponse(pingResponse)) {
-      await recordHostError(pingResponse);
-      return;
-    }
-
-    rememberStateSettings(await setLastResult('connected', pingResponse));
-    settings = rememberSettings(getSyncedSettings(pingResponse, settings));
-    if (!shouldAllowBrowserDownloadBySettings({ url: candidate.url, filename: candidate.filename }, settings)) {
-      return;
-    }
-
-    const response = await handOffBrowserDownload(candidate.url, candidate, settings);
-
-    const handoffResolution = classifyBrowserDownloadHandoffResolution(response);
-    if (handoffResolution.action === 'record_error') {
-      await recordHostError(handoffResolution.response);
-      return;
-    }
-
-    const state = rememberStateSettings(await setLastResult('connected', response));
-    await updateBrowserBadge(state);
-    if (handoffResolution.action === 'restore' && canReplayBrowserFallback(candidate)) {
-      await restoreFirefoxWebRequestFallback(candidate);
-    }
-  } catch (error) {
-    const state = await setHostError(
-      'HOST_NOT_AVAILABLE',
-      error instanceof Error ? error.message : 'Could not hand the Firefox download to the desktop app.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-  }
-}
-
-async function restoreFirefoxWebRequestFallback(candidate: FirefoxWebRequestDownloadCandidate): Promise<void> {
-  const releaseExtraBypass = markFirefoxWebRequestBypass(candidate.url);
-
-  try {
-    await restartBrowserDownload(
-      browser.downloads,
-      {
-        id: -1,
-        url: candidate.url,
-        filename: candidate.filename,
-      },
-      browserDownloadFallbackBypass,
-    );
-  } catch (error) {
-    releaseExtraBypass();
-    const state = await setHostError(
-      'DOWNLOAD_FAILED',
-      error instanceof Error
-        ? `Could not return the Firefox download to the browser: ${error.message}`
-        : 'Could not return the Firefox download to the browser.',
-      'error',
-    );
-    await updateBrowserBadge(state);
-  }
 }
 
 function basenameFromUrl(url: string): string | undefined {
@@ -649,84 +427,146 @@ function registerFirefoxWebRequestInterception(): void {
   );
 }
 
-function registerHandoffAuthHeaderCapture(): void {
-  const webRequest = getWebRequestApi();
-  const headerEvent = webRequest?.onSendHeaders ?? webRequest?.onBeforeSendHeaders;
-  if (!headerEvent) {
-    return;
-  }
-
-  const listener = (details: HandoffAuthRequestDetails): void => {
-    captureHandoffAuthHeaders(details, cachedExtensionSettings ?? defaultExtensionSettings);
-    void getCachedExtensionSettings().then((settings) => {
-      captureHandoffAuthHeaders(details, settings);
-    });
-  };
-  const filter = {
-    urls: ['http://*/*', 'https://*/*'],
-    types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'],
-  };
-
-  try {
-    headerEvent.addListener(listener, filter, ['requestHeaders', 'extraHeaders']);
-  } catch {
-    headerEvent.addListener(listener, filter, ['requestHeaders']);
-  }
-}
-
 async function handleFirefoxWebRequestHeadersReceived(
   details: FirefoxWebRequestDownloadDetails,
 ): Promise<{ cancel?: boolean }> {
   try {
-    if (shouldBypassBrowserDownloadUrl(details.url, browserDownloadFallbackBypass)) {
-      return {};
-    }
-
     const settings = await getCachedExtensionSettings();
     const candidate = firefoxWebRequestDownloadCandidate(details, settings);
     if (!candidate) {
       return {};
     }
+    logDownloadCaptureDecision('firefox-webrequest', candidate, settings, {
+      action: 'capture',
+      reason: candidate.reason,
+    });
 
-    const protectedDetails = {
-      requestId: candidate.requestId,
-      url: candidate.url,
-      incognito: candidate.incognito,
-    };
-    const browserFallback: BrowserFallback = hasCapturedBrowserSessionHeaders(protectedDetails)
-      ? 'unavailable'
-      : candidate.browserFallback ?? 'replay';
-
-    void handleFirefoxWebRequestDownload({ ...candidate, browserFallback }, settings);
-    return { cancel: true };
+    markBrowserDownloadUrlForAdoption(candidate);
+    return {};
   } catch {
     return {};
   }
 }
 
-function canReplayBrowserFallback(item: { browserFallback?: BrowserFallback }): boolean {
-  return item.browserFallback !== 'unavailable';
+async function handleBrowserDownloadChanged(delta: BrowserDownloadDelta): Promise<void> {
+  await completeBrowserDownloadAdoption(delta, browserDownloadAdoptions, {
+    searchDownloads: (query) => browser.downloads.search(query),
+    browserDownloadSource,
+    adoptBrowserDownload,
+    isErrorResponse,
+    onError: (response) => recordHostError(response as Extract<HostToExtensionResponse, { ok: false }>),
+    onSuccess: async (response) => {
+      const state = rememberStateSettings(await setLastResult('connected', response));
+      await updateBrowserBadge(state);
+    },
+  });
 }
 
-function markFirefoxWebRequestBypass(url: string): () => void {
-  let released = false;
-  markBrowserDownloadBypassUrl(browserDownloadFallbackBypass, url);
-
-  const timeout = globalThis.setTimeout(() => {
-    release();
-  }, FIREFOX_FALLBACK_BYPASS_TTL_MS);
-
-  function release() {
-    if (released) {
-      return;
-    }
-
-    released = true;
-    globalThis.clearTimeout(timeout);
-    revokeBrowserDownloadBypassUrl(browserDownloadFallbackBypass, url);
+function trackBrowserDownloadForAdoption(
+  url: string,
+  item: BrowserDownloadHandoffItem & { id?: number; mime?: string },
+  reason: BrowserDownloadAdoption['reason'],
+): void {
+  if (typeof item.id !== 'number' || item.id < 0) {
+    return;
   }
 
-  return release;
+  browserDownloadAdoptions.set(item.id, {
+    url,
+    suggestedFilename: basenameOnly(item.filename) ?? basenameFromUrl(url),
+    totalBytes: normalizedDownloadSize(item.totalBytes),
+    incognito: item.incognito,
+    pageUrl: item.pageUrl,
+    pageTitle: item.pageTitle,
+    referrer: item.referrer,
+    reason,
+  });
+}
+
+function markBrowserDownloadUrlForAdoption(candidate: FirefoxWebRequestDownloadCandidate): void {
+  prunePendingBrowserDownloadAdoptions();
+  pendingBrowserDownloadAdoptions.set(adoptionUrlKey(candidate.url), {
+    url: candidate.url,
+    suggestedFilename: candidate.filename,
+    totalBytes: normalizedDownloadSize(candidate.totalBytes),
+    incognito: candidate.incognito,
+    expiresAt: Date.now() + BROWSER_ADOPTION_PENDING_TTL_MS,
+    reason: 'browser_session',
+  });
+}
+
+function consumePendingBrowserDownloadAdoption(item: browser.downloads.DownloadItem, url: string): boolean {
+  prunePendingBrowserDownloadAdoptions();
+  const finalUrl = (item as browser.downloads.DownloadItem & { finalUrl?: string }).finalUrl;
+  const keys = [url, finalUrl].filter((value): value is string => Boolean(value)).map(adoptionUrlKey);
+  const key = keys.find((candidateKey) => pendingBrowserDownloadAdoptions.has(candidateKey));
+  if (!key) {
+    return false;
+  }
+
+  const pending = pendingBrowserDownloadAdoptions.get(key);
+  pendingBrowserDownloadAdoptions.delete(key);
+  if (!pending) {
+    return false;
+  }
+
+  trackBrowserDownloadForAdoption(url, { ...item, ...pending }, pending.reason);
+  return true;
+}
+
+function prunePendingBrowserDownloadAdoptions(now = Date.now()): void {
+  for (const [key, pending] of pendingBrowserDownloadAdoptions) {
+    if (pending.expiresAt < now) {
+      pendingBrowserDownloadAdoptions.delete(key);
+    }
+  }
+}
+
+function adoptionUrlKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return url;
+  }
+}
+
+function normalizedDownloadSize(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function logDownloadCaptureDecision(
+  browserPath: 'chromium-downloads' | 'firefox-webrequest',
+  item: { url?: string; finalUrl?: string; filename?: string; mime?: string; totalBytes?: number },
+  settings: ExtensionIntegrationSettings,
+  decision: BrowserDownloadIntentDecision,
+): void {
+  if (!settings.downloadCaptureDebugLogging) {
+    return;
+  }
+
+  console.debug('download-capture-policy', {
+    browserPath,
+    urlHost: hostFromUrl(browserDownloadUrl(item) ?? item.url),
+    basename: basenameOnly(item.filename) ?? basenameFromUrl(browserDownloadUrl(item) ?? item.url ?? ''),
+    mime: item.mime,
+    totalBytes: item.totalBytes,
+    decision: decision.action,
+    reason: decision.reason,
+  });
+}
+
+function hostFromUrl(url: string | undefined): string | undefined {
+  if (!url) {
+    return undefined;
+  }
+
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
 }
 
 function getFirefoxWebRequestApi(): FirefoxWebRequestApi | null {
@@ -735,14 +575,6 @@ function getFirefoxWebRequestApi(): FirefoxWebRequestApi | null {
   };
 
   return runtimeBrowser.webRequest?.onHeadersReceived ? runtimeBrowser.webRequest : null;
-}
-
-function getWebRequestApi(): BrowserWebRequestApi | null {
-  const runtimeBrowser = browser as typeof browser & {
-    webRequest?: BrowserWebRequestApi;
-  };
-
-  return runtimeBrowser.webRequest ?? null;
 }
 
 function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: BrowserDownloadFilenameSuggest) {
@@ -775,33 +607,17 @@ async function openOptionsPage() {
 }
 
 type BrowserDownloadHandoffItem = {
-  requestId?: string;
   filename?: string;
   totalBytes?: number;
   incognito?: boolean;
-  cookieStoreId?: string;
-  browserFallback?: BrowserFallback;
   pageUrl?: string;
   pageTitle?: string;
   referrer?: string;
 };
 
-function getCookieLookup() {
-  const runtimeBrowser = browser as typeof browser & {
-    cookies?: {
-      getAll(details: { url: string; storeId?: string }): Promise<HandoffAuthCookie[]>;
-    };
-  };
-
-  return runtimeBrowser.cookies?.getAll
-    ? (details: { url: string; storeId?: string }) => runtimeBrowser.cookies?.getAll(details) ?? Promise.resolve([])
-    : undefined;
-}
-
-function browserUserAgent(): string | undefined {
-  const userAgent = globalThis.navigator?.userAgent;
-  return userAgent && userAgent.trim() ? userAgent : undefined;
-}
+type PendingBrowserDownloadAdoption = BrowserDownloadAdoption & {
+  expiresAt: number;
+};
 
 type FirefoxWebRequestApi = {
   onHeadersReceived: {
@@ -809,23 +625,6 @@ type FirefoxWebRequestApi = {
       listener: (details: FirefoxWebRequestDownloadDetails) => Promise<{ cancel?: boolean }> | { cancel?: boolean },
       filter: { urls: string[]; types: string[] },
       extraInfoSpec: string[],
-    ): void;
-  };
-};
-
-type BrowserWebRequestApi = FirefoxWebRequestApi & {
-  onSendHeaders?: {
-    addListener(
-      listener: (details: HandoffAuthRequestDetails) => void,
-      filter: { urls: string[]; types?: string[] },
-      extraInfoSpec?: string[],
-    ): void;
-  };
-  onBeforeSendHeaders?: {
-    addListener(
-      listener: (details: HandoffAuthRequestDetails) => void,
-      filter: { urls: string[]; types?: string[] },
-      extraInfoSpec?: string[],
     ): void;
   };
 };

@@ -12,15 +12,12 @@ const progressSources = [
   ['batch download progress', await readFile(path.join(repoRoot, 'apps/desktop/src/BatchProgressWindow.svelte'), 'utf8')],
 ];
 
-assert.match(backendSource, /export async function swapDownloadPrompt/, 'desktop backend should expose a swapDownloadPrompt action');
-assert.match(backendSource, /swap_download_prompt/, 'swapDownloadPrompt should call the swap_download_prompt Tauri command');
 assert.match(backendSource, /duplicateAction/, 'confirmDownloadPrompt should send an explicit duplicate action instead of a boolean allowDuplicate flag');
 assert.match(backendSource, /renamedFilename/, 'confirmDownloadPrompt should support an explicit renamed filename for duplicate prompts');
-assert.match(promptSource, /#snippet BrowserWindowIcon/, 'prompt should include a generic browser SVG icon');
-assert.match(promptSource, /\bSwap\b/, 'prompt should still render a Swap button for non-duplicate browser prompts');
-assert.match(promptSource, /bg-foreground px-3 text-xs font-semibold text-background/, 'Swap button should use inverse high-contrast foreground/background styling');
+assert.doesNotMatch(promptSource, /#snippet BrowserWindowIcon/, 'prompt should not include the removed browser replay icon');
+assert.doesNotMatch(promptSource, /\bSwap\b/, 'prompt should not render a Swap button after browser replay removal');
 assert.match(promptSource, /bg-destructive px-3 text-xs font-semibold text-destructive-foreground/, 'Cancel button should use destructive red styling');
-assert.match(promptSource, /prompt\?\.source\?\.entryPoint === 'browser_download' && prompt\?\.browserFallback !== 'unavailable' && !isDuplicate/, 'Swap button should only be shown for non-duplicate browser download prompts with replay fallback');
+assert.doesNotMatch(promptSource, /browserFallback/, 'prompt should not branch on removed replay fallback metadata');
 assert.match(promptSource, /prompt\?\.duplicateJob \|\| prompt\?\.duplicatePath/, 'destination-only duplicate prompts should render the same duplicate action UI as URL duplicates');
 
 for (const label of ['Choose Action', 'Overwrite', 'Rename', 'Download Anyway']) {
@@ -40,7 +37,7 @@ assert.match(promptSource, /title=\{duplicateLabel\}/, 'duplicate prompt filenam
 assert.match(ipcSource, /"enqueue_download"[\s\S]*handoff_transfer_kind\([\s\S]*if source\.entry_point == "browser_download" && transfer_kind == TransferKind::Http[\s\S]*prepare_download_prompt[\s\S]*prompt_has_duplicate[\s\S]*run_prompt_download/, 'HTTP auto enqueue handoffs should still reroute detected duplicates through the prompt flow');
 assert.match(ipcSource, /"prompt_download"[\s\S]*handoff_transfer_kind\([\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent prompt handoffs should bypass the download prompt and enqueue directly');
 assert.match(ipcSource, /"enqueue_download"[\s\S]*if transfer_kind == TransferKind::Torrent[\s\S]*return enqueue_handoff_download\(/, 'torrent enqueue handoffs should bypass duplicate prompt routing');
-assert.match(ipcSource, /prompt\.browser_fallback == BrowserFallback::Unavailable[\s\S]*PromptDecision::Cancel[\s\S]*PromptDecision::SwapToBrowser/, 'unsafe browser fallback prompts should dismiss instead of replaying when the prompt receiver closes');
+assert.doesNotMatch(ipcSource, /probe_browser_download_access|probe_browser_handoff_access|browser_fallback/, 'extension handoffs should not use protected replay probes or replay fallback metadata');
 
 for (const [name, source] of progressSources) {
   assert.doesNotMatch(source, />\s*Swap\s*</, `${name} UI should not render a Swap button`);

@@ -7,6 +7,7 @@ import {
   formatTorrentFetchedSize,
   formatTorrentProgressStripText,
   formatTorrentVerifiedSize,
+  isBrowserAdoptedTransferKind,
   isTorrentCheckingFiles,
   isTorrentSeedingRestore,
   BULK_QUEUE_TABLE_COLUMNS,
@@ -182,6 +183,13 @@ assert.deepEqual(
 assert.deepEqual(
   queueStatusPresentation({ ...baseJob, state: 'completed' }),
   { label: 'Done', tone: 'success' },
+);
+
+assert.equal(isBrowserAdoptedTransferKind('browser_blob'), true, 'legacy browser-owned rows should still be recognized');
+assert.deepEqual(
+  queueStatusPresentation({ ...baseJob, transferKind: 'browser_adopted', state: 'completed' }),
+  { label: 'Browser file', tone: 'success' },
+  'adopted browser files should not look like app-downloaded transfers',
 );
 
 assert.deepEqual(
@@ -512,6 +520,12 @@ assert.equal(
   formatQueueSizeTitle(torrentWithCheckedProgressJump, byteLabel),
   'Verified 1700000000 B / 2700000000 B; Downloaded 0 B / 2700000000 B from peers',
   'torrent size tooltip should expose verified progress separately from peer-fetched bytes',
+);
+
+assert.equal(
+  formatQueueSizeTitle({ ...baseJob, transferKind: 'browser_adopted', state: 'completed', downloadedBytes: 100, totalBytes: 100 }, byteLabel),
+  'Completed by browser; adopted into queue. 100 B',
+  'adopted browser file tooltips should explain the browser-owned completion path',
 );
 
 assert.equal(

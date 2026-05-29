@@ -3,13 +3,39 @@ export const HOST_NAME = 'com.myapp.download_manager';
 export const PIPE_NAME = '\\\\.\\pipe\\myapp.downloads.v1';
 export const MAX_URL_LENGTH = 2048;
 export const MAX_METADATA_LENGTH = 512;
-export const MAX_HANDOFF_AUTH_HEADERS = 16;
-export const MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH = 64;
-export const MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH = 16 * 1024;
 export const ALLOWED_URL_PROTOCOLS = ['http:', 'https:', 'magnet:'] as const;
 export const DEFAULT_EXTENSION_LISTEN_PORT = 1420;
 export const DEFAULT_EXTENSION_EXCLUDED_HOSTS = ['web.telegram.org'] as const;
-export const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS = [] as const;
+export const DEFAULT_CAPTURED_FILE_EXTENSIONS = [
+  '7z',
+  'apk',
+  'bz2',
+  'cab',
+  'csv',
+  'deb',
+  'dmg',
+  'doc',
+  'docx',
+  'exe',
+  'gz',
+  'iso',
+  'jar',
+  'msi',
+  'pdf',
+  'ppt',
+  'pptx',
+  'rar',
+  'rpm',
+  'tar',
+  'tgz',
+  'torrent',
+  'txz',
+  'xls',
+  'xlsx',
+  'xz',
+  'zip',
+  'zst',
+] as const;
 
 export type BrowserKind = 'chrome' | 'edge' | 'firefox';
 export type ExtensionEntryPoint = 'context_menu' | 'popup' | 'browser_download';
@@ -17,10 +43,7 @@ export type ExtensionRequestType =
   | 'ping'
   | 'enqueue_download'
   | 'prompt_download'
-  | 'begin_browser_blob_download'
-  | 'append_browser_blob_download_chunk'
-  | 'finish_browser_blob_download'
-  | 'cancel_browser_blob_download'
+  | 'adopt_browser_download'
   | 'open_app'
   | 'get_status'
   | 'save_extension_settings';
@@ -36,20 +59,13 @@ export type AppRequestType =
   | 'get_status'
   | 'enqueue_download'
   | 'prompt_download'
-  | 'begin_browser_blob_download'
-  | 'append_browser_blob_download_chunk'
-  | 'finish_browser_blob_download'
-  | 'cancel_browser_blob_download'
+  | 'adopt_browser_download'
   | 'show_window'
   | 'save_extension_settings';
 export type AppResponseType =
   | 'queued'
   | 'duplicate_existing_job'
-  | 'prompt_canceled'
   | 'prompt_dismissed'
-  | 'blob_stream_accepted'
-  | 'blob_stream_finished'
-  | 'blob_stream_canceled'
   | 'invalid_url'
   | 'blocked_by_policy'
   | 'ready';
@@ -58,7 +74,6 @@ export type DesktopConnectionState = 'checking' | 'connected' | 'host_missing' |
 export type DownloadHandoffMode = 'off' | 'ask' | 'auto';
 export type AppearanceTheme = 'light' | 'dark' | 'oled_dark' | 'system';
 export type TransferKind = 'http' | 'torrent';
-export type BrowserFallback = 'replay' | 'unavailable';
 
 export type ErrorCode =
   | 'INVALID_PAYLOAD'
@@ -76,7 +91,6 @@ export type ErrorCode =
   | 'DESTINATION_INVALID'
   | 'DUPLICATE_JOB'
   | 'PERMISSION_DENIED'
-  | 'PROTECTED_DOWNLOAD_AUTH_REQUIRED'
   | 'RATE_LIMITED'
   | 'DOWNLOAD_FAILED'
   | 'INTERNAL_ERROR';
@@ -91,23 +105,12 @@ export interface RequestSource {
   incognito?: boolean;
 }
 
-export interface HandoffAuthHeader {
-  name: string;
-  value: string;
-}
-
-export interface HandoffAuth {
-  headers: HandoffAuthHeader[];
-}
-
 export interface EnqueueDownloadPayload {
   url: string;
   source: RequestSource;
   suggestedFilename?: string;
   totalBytes?: number;
-  handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
-  browserFallback?: BrowserFallback;
 }
 
 export interface PromptDownloadPayload {
@@ -115,36 +118,22 @@ export interface PromptDownloadPayload {
   source: RequestSource;
   suggestedFilename?: string;
   totalBytes?: number;
-  handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
-  browserFallback?: BrowserFallback;
 }
 
 export interface DownloadRequestMetadata {
   suggestedFilename?: string;
   totalBytes?: number;
-  handoffAuth?: HandoffAuth;
   transferKind?: TransferKind;
-  browserFallback?: BrowserFallback;
 }
 
-export interface BrowserBlobDownloadBeginPayload {
-  streamId: string;
+export interface AdoptBrowserDownloadPayload {
+  url: string;
   source: RequestSource;
+  localPath: string;
   suggestedFilename?: string;
   totalBytes?: number;
   mimeType?: string;
-}
-
-export interface BrowserBlobDownloadChunkPayload {
-  streamId: string;
-  offset: number;
-  data: string;
-}
-
-export interface BrowserBlobDownloadStreamPayload {
-  streamId: string;
-  reason?: string;
 }
 
 export interface OpenAppPayload {
@@ -199,8 +188,6 @@ export interface AppearanceSettings {
   accentColor: string;
 }
 
-export type ProtectedDownloadAuthScope = 'off' | 'allowlist' | 'legacy_global';
-
 export interface ExtensionIntegrationSettings {
   enabled: boolean;
   downloadHandoffMode: DownloadHandoffMode;
@@ -211,9 +198,7 @@ export interface ExtensionIntegrationSettings {
   excludedHosts: string[];
   ignoredFileExtensions: string[];
   capturedFileExtensions: string[];
-  authenticatedHandoffEnabled: boolean;
-  protectedDownloadAuthScope: ProtectedDownloadAuthScope;
-  authenticatedHandoffHosts: string[];
+  downloadCaptureDebugLogging: boolean;
 }
 
 export function normalizeExcludedHostPattern(value: string): string {
@@ -265,19 +250,6 @@ export function isUrlHostExcludedByPatterns(url: string, patterns: string[]): bo
   }
 }
 
-export function isProtectedDownloadAuthAllowedForUrl(
-  url: string,
-  settings: Pick<
-    ExtensionIntegrationSettings,
-    'authenticatedHandoffEnabled' | 'protectedDownloadAuthScope' | 'authenticatedHandoffHosts'
-  > & Partial<Pick<ExtensionIntegrationSettings, 'excludedHosts'>>,
-): boolean {
-  if (!settings.authenticatedHandoffEnabled) return false;
-  if (settings.protectedDownloadAuthScope === 'off') return false;
-  if (isUrlHostExcludedByPatterns(url, settings.excludedHosts ?? [])) return false;
-  return true;
-}
-
 function wildcardHostPatternRegex(pattern: string): RegExp {
   const escaped = pattern
     .split('*')
@@ -325,10 +297,7 @@ export type ExtensionToHostRequest =
   | RequestEnvelope<'ping', EmptyPayload>
   | RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | RequestEnvelope<'prompt_download', PromptDownloadPayload>
-  | RequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload>
-  | RequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload>
-  | RequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload>
-  | RequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload>
+  | RequestEnvelope<'adopt_browser_download', AdoptBrowserDownloadPayload>
   | RequestEnvelope<'open_app', OpenAppPayload>
   | RequestEnvelope<'get_status', EmptyPayload>
   | RequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
@@ -343,10 +312,7 @@ export type AppRequest =
   | AppRequestEnvelope<'get_status', EmptyPayload>
   | AppRequestEnvelope<'enqueue_download', EnqueueDownloadPayload>
   | AppRequestEnvelope<'prompt_download', PromptDownloadPayload>
-  | AppRequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload>
-  | AppRequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload>
-  | AppRequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload>
-  | AppRequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload>
+  | AppRequestEnvelope<'adopt_browser_download', AdoptBrowserDownloadPayload>
   | AppRequestEnvelope<'show_window', OpenAppPayload>
   | AppRequestEnvelope<'save_extension_settings', ExtensionIntegrationSettings>;
 
@@ -366,7 +332,6 @@ export type AppResponse =
       'duplicate_existing_job',
       { jobId: string; filename?: string; status: 'duplicate_existing_job' }
     >
-  | AppSuccessResponse<'prompt_canceled', { status: 'canceled' }>
   | AppSuccessResponse<'prompt_dismissed', { status: 'dismissed' }>
   | AppErrorResponse;
 
@@ -422,61 +387,6 @@ export function sanitizeSource(source: RequestSource): RequestSource {
   };
 }
 
-export function isAllowedHandoffAuthHeaderName(name: string): boolean {
-  const normalized = name.trim().toLowerCase();
-  return normalized === 'cookie'
-    || normalized === 'authorization'
-    || normalized === 'referer'
-    || normalized === 'origin'
-    || normalized === 'user-agent'
-    || normalized === 'accept'
-    || normalized === 'accept-language'
-    || normalized.startsWith('sec-fetch-')
-    || normalized.startsWith('sec-ch-ua');
-}
-
-export function sanitizeHandoffAuth(auth: HandoffAuth | undefined): HandoffAuth | undefined {
-  if (!auth?.headers?.length) {
-    return undefined;
-  }
-
-  const headers: HandoffAuthHeader[] = [];
-  for (const header of auth.headers) {
-    if (headers.length >= MAX_HANDOFF_AUTH_HEADERS) {
-      break;
-    }
-
-    const name = header.name.trim();
-    const value = header.value;
-    if (
-      !name
-      || name.length > MAX_HANDOFF_AUTH_HEADER_NAME_LENGTH
-      || value.length > MAX_HANDOFF_AUTH_HEADER_VALUE_LENGTH
-      || /[\r\n:]/.test(name)
-      || /[\r\n]/.test(value)
-      || !isAllowedHandoffAuthHeaderName(name)
-    ) {
-      continue;
-    }
-
-    headers.push({ name, value });
-  }
-
-  return headers.length > 0 ? { headers } : undefined;
-}
-
-function normalizeDownloadRequestMetadata(metadata: DownloadRequestMetadata | HandoffAuth | undefined): DownloadRequestMetadata {
-  if (!metadata) {
-    return {};
-  }
-
-  if ('headers' in metadata) {
-    return { handoffAuth: metadata };
-  }
-
-  return metadata;
-}
-
 function normalizeTotalBytes(totalBytes: number | undefined): number | undefined {
   return typeof totalBytes === 'number' && Number.isFinite(totalBytes) && totalBytes > 0
     ? Math.floor(totalBytes)
@@ -485,10 +395,6 @@ function normalizeTotalBytes(totalBytes: number | undefined): number | undefined
 
 function normalizeTransferKind(transferKind: TransferKind | undefined): TransferKind | undefined {
   return transferKind === 'http' || transferKind === 'torrent' ? transferKind : undefined;
-}
-
-function normalizeBrowserFallback(browserFallback: BrowserFallback | undefined): BrowserFallback | undefined {
-  return browserFallback === 'unavailable' ? browserFallback : undefined;
 }
 
 export function createPingRequest(requestId = createRequestId()): RequestEnvelope<'ping', EmptyPayload> {
@@ -525,19 +431,16 @@ export function createEnqueueDownloadRequest(
   url: string,
   source: RequestSource,
   requestId = createRequestId(),
-  metadata: DownloadRequestMetadata | HandoffAuth = {},
+  metadata: DownloadRequestMetadata = {},
 ): ValidationResult<RequestEnvelope<'enqueue_download', EnqueueDownloadPayload>> {
   const validatedUrl = validateHttpUrl(url);
   if (!validatedUrl.ok) {
     return validatedUrl;
   }
 
-  const normalizedMetadata = normalizeDownloadRequestMetadata(metadata);
-  const totalBytes = normalizeTotalBytes(normalizedMetadata.totalBytes);
-  const suggestedFilename = trimMetadata(normalizedMetadata.suggestedFilename);
-  const sanitizedAuth = sanitizeHandoffAuth(normalizedMetadata.handoffAuth);
-  const transferKind = normalizeTransferKind(normalizedMetadata.transferKind);
-  const browserFallback = normalizeBrowserFallback(normalizedMetadata.browserFallback);
+  const totalBytes = normalizeTotalBytes(metadata.totalBytes);
+  const suggestedFilename = trimMetadata(metadata.suggestedFilename);
+  const transferKind = normalizeTransferKind(metadata.transferKind);
   return {
     ok: true,
     value: {
@@ -549,9 +452,7 @@ export function createEnqueueDownloadRequest(
         source: sanitizeSource(source),
         suggestedFilename,
         totalBytes,
-        ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
         ...(transferKind ? { transferKind } : {}),
-        ...(browserFallback ? { browserFallback } : {}),
       },
     },
   };
@@ -570,9 +471,7 @@ export function createPromptDownloadRequest(
 
   const totalBytes = normalizeTotalBytes(metadata.totalBytes);
 
-  const sanitizedAuth = sanitizeHandoffAuth(metadata.handoffAuth);
   const transferKind = normalizeTransferKind(metadata.transferKind);
-  const browserFallback = normalizeBrowserFallback(metadata.browserFallback);
   return {
     ok: true,
     value: {
@@ -584,82 +483,46 @@ export function createPromptDownloadRequest(
         source: sanitizeSource(source),
         suggestedFilename: trimMetadata(metadata.suggestedFilename),
         totalBytes,
-        ...(sanitizedAuth ? { handoffAuth: sanitizedAuth } : {}),
         ...(transferKind ? { transferKind } : {}),
-        ...(browserFallback ? { browserFallback } : {}),
       },
     },
   };
 }
 
-export function createBrowserBlobBeginRequest(
-  payload: BrowserBlobDownloadBeginPayload,
+export function createAdoptBrowserDownloadRequest(
+  payload: AdoptBrowserDownloadPayload,
   requestId = createRequestId(),
-): RequestEnvelope<'begin_browser_blob_download', BrowserBlobDownloadBeginPayload> {
+): ValidationResult<RequestEnvelope<'adopt_browser_download', AdoptBrowserDownloadPayload>> {
+  const validatedUrl = validateHttpUrl(payload.url);
+  if (!validatedUrl.ok) {
+    return validatedUrl;
+  }
+
+  const localPath = payload.localPath.trim();
+  if (!localPath) {
+    return {
+      ok: false,
+      code: 'INVALID_PAYLOAD',
+      message: 'Browser download path is required.',
+    };
+  }
+
   return {
-    protocolVersion: PROTOCOL_VERSION,
-    requestId,
-    type: 'begin_browser_blob_download',
-    payload: {
-      streamId: trimMetadata(payload.streamId) ?? '',
-      source: sanitizeSource(payload.source),
-      suggestedFilename: trimMetadata(payload.suggestedFilename),
-      totalBytes: normalizeTotalBytes(payload.totalBytes),
-      mimeType: trimMetadata(payload.mimeType),
+    ok: true,
+    value: {
+      protocolVersion: PROTOCOL_VERSION,
+      requestId,
+      type: 'adopt_browser_download',
+      payload: {
+        url: validatedUrl.value,
+        source: sanitizeSource(payload.source),
+        localPath,
+        suggestedFilename: trimMetadata(payload.suggestedFilename),
+        totalBytes: normalizeTotalBytes(payload.totalBytes),
+        mimeType: trimMetadata(payload.mimeType),
+      },
     },
   };
-}
-
-export function createBrowserBlobChunkRequest(
-  streamId: string,
-  offset: number,
-  data: string,
-  requestId = createRequestId(),
-): RequestEnvelope<'append_browser_blob_download_chunk', BrowserBlobDownloadChunkPayload> {
-  return {
-    protocolVersion: PROTOCOL_VERSION,
-    requestId,
-    type: 'append_browser_blob_download_chunk',
-    payload: {
-      streamId: trimMetadata(streamId) ?? '',
-      offset: normalizeNonNegativeInteger(offset),
-      data,
-    },
-  };
-}
-
-export function createBrowserBlobFinishRequest(
-  streamId: string,
-  requestId = createRequestId(),
-): RequestEnvelope<'finish_browser_blob_download', BrowserBlobDownloadStreamPayload> {
-  return {
-    protocolVersion: PROTOCOL_VERSION,
-    requestId,
-    type: 'finish_browser_blob_download',
-    payload: { streamId: trimMetadata(streamId) ?? '' },
-  };
-}
-
-export function createBrowserBlobCancelRequest(
-  streamId: string,
-  reason?: string,
-  requestId = createRequestId(),
-): RequestEnvelope<'cancel_browser_blob_download', BrowserBlobDownloadStreamPayload> {
-  return {
-    protocolVersion: PROTOCOL_VERSION,
-    requestId,
-    type: 'cancel_browser_blob_download',
-    payload: {
-      streamId: trimMetadata(streamId) ?? '',
-      reason: trimMetadata(reason),
-    },
-  };
-}
-
-function normalizeNonNegativeInteger(value: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
-    : 0;
 }
 
 export function createSaveExtensionSettingsRequest(
@@ -692,8 +555,6 @@ export function toUserFacingMessage(code: ErrorCode, fallback: string): string {
     case 'INVALID_URL':
     case 'UNSUPPORTED_SCHEME':
       return 'Enter a valid http, https, or magnet URL.';
-    case 'PROTECTED_DOWNLOAD_AUTH_REQUIRED':
-      return 'This site requires your browser session. Enable Protected Downloads or let the browser handle this download.';
     default:
       return fallback;
   }

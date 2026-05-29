@@ -4,7 +4,7 @@ use crate::storage::{
     default_download_directory, default_extension_listen_port,
     default_torrent_download_directory_for, default_torrent_port_forwarding_port,
     load_persisted_state_with_recovery, normalize_bulk_settings_for_download_directory,
-    persist_state, persist_state_blocking, BrowserFallback, BulkArchiveInfo, BulkArchiveOutputKind,
+    persist_state, persist_state_blocking, BulkArchiveInfo, BulkArchiveOutputKind,
     BulkArchiveStatus, BulkFinalizeMode, BulkHosterAccelerationMode, BulkHosterFairnessMode,
     ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsExport,
     DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use url::Url;
 
-mod blob_stream;
+mod browser_adoption;
 mod diagnostics;
 mod enqueue;
 mod jobs;
@@ -666,17 +666,7 @@ pub struct SharedState {
     storage_path: Arc<PathBuf>,
     diagnostic_event_store: Arc<DiagnosticEventStore>,
     handoff_auth: Arc<RwLock<HashMap<String, HandoffAuth>>>,
-    browser_blob_streams: Arc<RwLock<HashMap<String, BrowserBlobStream>>>,
     scheduler_wake: Arc<StdMutex<SchedulerWakeState>>,
-}
-
-#[derive(Debug, Clone)]
-struct BrowserBlobStream {
-    job_id: String,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
-    target_path: PathBuf,
-    temp_path: PathBuf,
 }
 
 #[derive(Debug, Default)]

@@ -9,7 +9,6 @@
     confirmDownloadPrompt,
     getCurrentDownloadPrompt,
     getSettingsSnapshot,
-    swapDownloadPrompt,
     subscribeToDownloadPromptChanged,
     subscribeToSettingsSnapshot,
   } from './backend';
@@ -41,7 +40,6 @@
   const duplicateLabel = $derived(prompt?.duplicateJob?.filename ?? prompt?.duplicateFilename ?? prompt?.duplicatePath ?? '');
   const duplicateMessage = $derived(prompt?.duplicateJob ? 'Already in queue: ' : 'Destination exists: ');
   const overwriteLabel = $derived(prompt?.duplicateJob ? 'replace queue' : 'replace file');
-  const canSwapToBrowser = $derived(prompt?.source?.entryPoint === 'browser_download' && prompt?.browserFallback !== 'unavailable' && !isDuplicate);
   const sourceLabel = $derived(prompt?.source
     ? `${prompt.source.browser} ${prompt.source.entryPoint.replaceAll('_', ' ')}`
     : 'Browser download');
@@ -262,16 +260,6 @@
             >
               Cancel
             </button>
-            {#if canSwapToBrowser}
-              <button
-                onclick={() => void runAction(() => swapDownloadPrompt(activePrompt.id))}
-                disabled={isBusy}
-                class="flex h-8 items-center gap-2 rounded bg-foreground px-3 text-xs font-semibold text-background transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {@render BrowserWindowIcon()}
-                Swap
-              </button>
-            {/if}
             {#if isDuplicate}
               <div class="relative">
                 <button
@@ -316,18 +304,6 @@
     </main>
   </div>
 {/if}
-
-{#snippet BrowserWindowIcon()}
-  <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="3" y="4" width="18" height="16" rx="2" />
-    <path d="M3 9h18" />
-    <path d="M7 6.5h.01" />
-    <path d="M10 6.5h.01" />
-    <path d="M13 6.5h.01" />
-    <path d="M9 14h6" />
-    <path d="m13 12 2 2-2 2" />
-  </svg>
-{/snippet}
 
 {#snippet MetaLabel(icon: typeof Globe, label: string)}
   {@const Icon = icon}

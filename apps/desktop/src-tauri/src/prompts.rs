@@ -24,7 +24,6 @@ pub enum PromptDecision {
         renamed_filename: Option<String>,
     },
     ShowExisting,
-    SwapToBrowser,
     Cancel,
 }
 
@@ -129,7 +128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_cancel_and_browser_swap_resolve_as_distinct_decisions() {
+    async fn terminal_cancel_resolves_prompt() {
         let registry = PromptRegistry::default();
         let cancel_receiver = registry.enqueue(prompt("prompt_cancel")).await;
         registry
@@ -137,17 +136,7 @@ mod tests {
             .await
             .expect("cancel prompt should resolve");
 
-        let swap_receiver = registry.enqueue(prompt("prompt_swap")).await;
-        registry
-            .resolve("prompt_swap", PromptDecision::SwapToBrowser)
-            .await
-            .expect("swap prompt should resolve");
-
         assert!(matches!(cancel_receiver.await, Ok(PromptDecision::Cancel)));
-        assert!(matches!(
-            swap_receiver.await,
-            Ok(PromptDecision::SwapToBrowser)
-        ));
     }
 
     fn prompt(id: &str) -> DownloadPrompt {
@@ -156,7 +145,6 @@ mod tests {
             url: format!("https://example.com/{id}.zip"),
             filename: format!("{id}.zip"),
             source: None,
-            browser_fallback: crate::storage::BrowserFallback::Replay,
             total_bytes: None,
             default_directory: "C:/Downloads".into(),
             target_path: format!("C:/Downloads/{id}.zip"),

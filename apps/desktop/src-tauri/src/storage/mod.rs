@@ -68,15 +68,8 @@ pub enum TransferKind {
     #[default]
     Http,
     Torrent,
-    BrowserBlob,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserFallback {
-    #[default]
-    Replay,
-    Unavailable,
+    #[serde(alias = "browser_blob")]
+    BrowserAdopted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,8 +366,6 @@ pub struct DownloadPrompt {
     pub filename: String,
     #[serde(default)]
     pub source: Option<DownloadSource>,
-    #[serde(default)]
-    pub browser_fallback: BrowserFallback,
     pub total_bytes: Option<u64>,
     pub default_directory: String,
     pub target_path: String,
@@ -627,8 +618,10 @@ pub struct ExtensionIntegrationSettings {
     pub excluded_hosts: Vec<String>,
     #[serde(default)]
     pub ignored_file_extensions: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_captured_file_extensions")]
     pub captured_file_extensions: Vec<String>,
+    #[serde(default)]
+    pub download_capture_debug_logging: bool,
     #[serde(default = "default_authenticated_handoff_enabled")]
     pub authenticated_handoff_enabled: bool,
     #[serde(default = "default_protected_download_auth_scope")]
@@ -639,6 +632,11 @@ pub struct ExtensionIntegrationSettings {
 
 const DEFAULT_EXCLUDED_HOSTS: &[&str] = &["web.telegram.org"];
 const DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS: &[&str] = &[];
+const DEFAULT_CAPTURED_FILE_EXTENSIONS: &[&str] = &[
+    "7z", "apk", "bz2", "cab", "csv", "deb", "dmg", "doc", "docx", "exe", "gz", "iso", "jar",
+    "msi", "pdf", "ppt", "pptx", "rar", "rpm", "tar", "tgz", "torrent", "txz", "xls", "xlsx", "xz",
+    "zip", "zst",
+];
 
 fn default_authenticated_handoff_enabled() -> bool {
     true
@@ -652,6 +650,13 @@ fn default_authenticated_handoff_hosts() -> Vec<String> {
     DEFAULT_PROTECTED_DOWNLOAD_AUTH_HOSTS
         .iter()
         .map(|host| (*host).to_string())
+        .collect()
+}
+
+fn default_captured_file_extensions() -> Vec<String> {
+    DEFAULT_CAPTURED_FILE_EXTENSIONS
+        .iter()
+        .map(|extension| (*extension).to_string())
         .collect()
 }
 
@@ -982,7 +987,8 @@ impl Default for ExtensionIntegrationSettings {
                 .map(|host| (*host).to_string())
                 .collect(),
             ignored_file_extensions: Vec::new(),
-            captured_file_extensions: Vec::new(),
+            captured_file_extensions: default_captured_file_extensions(),
+            download_capture_debug_logging: false,
             authenticated_handoff_enabled: default_authenticated_handoff_enabled(),
             protected_download_auth_scope: default_protected_download_auth_scope(),
             authenticated_handoff_hosts: default_authenticated_handoff_hosts(),
@@ -1942,6 +1948,39 @@ mod tests {
     }
 
     #[test]
+    fn persisted_browser_blob_transfer_kind_migrates_to_browser_adopted() {
+        let state = serde_json::from_str::<PersistedState>(
+            r#"{
+              "jobs": [{
+                "id": "job_1",
+                "url": "https://example.com/file.zip",
+                "filename": "file.zip",
+                "transferKind": "browser_blob",
+                "state": "completed",
+                "progress": 100,
+                "totalBytes": 100,
+                "downloadedBytes": 100,
+                "speed": 0,
+                "eta": 0,
+                "targetPath": "C:/Downloads/file.zip",
+                "tempPath": "C:/Downloads/file.zip.part"
+              }],
+              "settings": {
+                "downloadDirectory": "C:/Downloads",
+                "maxConcurrentDownloads": 3,
+                "notificationsEnabled": true,
+                "theme": "system"
+              }
+            }"#,
+        )
+        .expect("legacy adopted browser rows should still parse");
+
+        assert_eq!(state.jobs[0].transfer_kind, TransferKind::BrowserAdopted);
+        let serialized = serde_json::to_value(&state.jobs[0]).expect("job should serialize");
+        assert_eq!(serialized["transferKind"], "browser_adopted");
+    }
+
+    #[test]
     fn persisted_jobs_reject_unknown_future_transfer_kind() {
         let state = serde_json::from_str::<PersistedState>(
             r#"{
@@ -2252,6 +2291,15 @@ mod tests {
             .extension_integration
             .ignored_file_extensions
             .is_empty());
+        assert_eq!(
+            settings.extension_integration.captured_file_extensions,
+            default_captured_file_extensions()
+        );
+        assert!(
+            !settings
+                .extension_integration
+                .download_capture_debug_logging
+        );
     }
 
     #[test]
@@ -2312,6 +2360,19 @@ mod tests {
             .extension_integration
             .ignored_file_extensions
             .is_empty());
+        assert_eq!(
+            state
+                .settings
+                .extension_integration
+                .captured_file_extensions,
+            default_captured_file_extensions()
+        );
+        assert!(
+            !state
+                .settings
+                .extension_integration
+                .download_capture_debug_logging
+        );
     }
 
     fn test_runtime_dir(name: &str) -> PathBuf {
