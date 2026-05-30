@@ -1,8 +1,32 @@
 # Simple Download Manager
 
-Simple Download Manager is a local-first desktop download manager with a companion browser extension. It is built around a Tauri desktop app, a Rust download backend, a native messaging host, and WebExtension packages for browser handoff.
+Simple Download Manager is a local-first Windows download manager with browser handoff, torrent support, bulk downloads, and a native desktop queue.
 
-The project is currently beta software and is Windows-first. The release pipeline, installer, native-host registration, and updater artifacts are focused on Windows x64 and Windows ARM64.
+**Latest beta:** [download from the beta release page](https://github.com/JustNak/SimpleDownloadManager/releases/tag/updater-beta)
+
+It is built around a Tauri desktop app, a Rust download backend, a native messaging host, and WebExtension packages for browser integration. The project is currently beta software and is Windows-first; the installer, native-host registration, release pipeline, and updater artifacts target Windows x64 and Windows ARM64.
+
+## Installation
+
+Download the latest beta installer from the beta release page:
+
+- [Latest beta release page](https://github.com/JustNak/SimpleDownloadManager/releases/tag/updater-beta)
+- Windows x64 / Intel / AMD: choose the newest `Simple.Download.Manager_*_x64-setup.exe`
+- Windows ARM64: choose the newest `Simple.Download.Manager_*_arm64-setup.exe`
+
+Current direct installer links from the beta updater feed:
+
+- [Windows x64 installer](https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/Simple.Download.Manager_0.8.5-beta_x64-setup.exe)
+- [Windows ARM64 installer](https://github.com/JustNak/SimpleDownloadManager/releases/download/updater-beta/Simple.Download.Manager_0.8.5-beta_arm64-setup.exe)
+
+Installer notes:
+
+- The Windows installer includes the desktop app and native messaging host.
+- Native-host registration is handled for Chrome, Edge, and Firefox during install.
+- The browser extension still needs to be installed or loaded for browser download capture.
+- The app can check the beta updater feed for newer desktop builds after installation.
+
+GitHub release asset filenames include the app version, so the beta release page is the most reliable always-current link. The direct links above are convenience links for the current beta build.
 
 ## What It Does
 
