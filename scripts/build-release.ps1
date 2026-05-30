@@ -48,6 +48,29 @@ function Invoke-ReleaseCommand {
   }
 }
 
+function Enable-RustCompilerCache {
+  if (![string]::IsNullOrWhiteSpace($env:RUSTC_WRAPPER) -or ![string]::IsNullOrWhiteSpace($env:CARGO_BUILD_RUSTC_WRAPPER)) {
+    Write-Host "Using configured Rust compiler wrapper."
+    return
+  }
+
+  $sccache = Get-Command 'sccache' -ErrorAction SilentlyContinue
+  if ($null -eq $sccache) {
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machinePath;$userPath"
+    $sccache = Get-Command 'sccache' -ErrorAction SilentlyContinue
+  }
+
+  if ($null -eq $sccache) {
+    Write-Host "sccache not found; Rust builds will use Cargo's normal target cache."
+    return
+  }
+
+  $env:RUSTC_WRAPPER = $sccache.Source
+  Write-Host "Using sccache for Rust compiler caching: $($sccache.Source)"
+}
+
 function Resolve-WindowsReleaseTarget {
   param(
     [Parameter(Mandatory = $true)]
@@ -124,6 +147,8 @@ $env:TEMP = $releaseTempRoot
 
 Push-Location $workspaceRoot
 try {
+  Enable-RustCompilerCache
+
   Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:extension')
   Invoke-ReleaseCommand -FilePath 'npm' -ArgumentList @('run', 'build:desktop')
 

@@ -143,7 +143,14 @@ async function writeTauriConfigOverride({ configPath, resources }) {
   );
   await writeFile(
     configPath,
-    `${JSON.stringify({ bundle: { resources: resourceMap } }, null, 2)}\n`,
+    `${JSON.stringify({
+      build: {
+        beforeBuildCommand: null,
+      },
+      bundle: {
+        resources: resourceMap,
+      },
+    }, null, 2)}\n`,
     'utf8',
   );
 }
