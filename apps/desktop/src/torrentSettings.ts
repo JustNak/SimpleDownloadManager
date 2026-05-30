@@ -6,6 +6,46 @@ type TorrentSettingsInput = Partial<
   }
 >;
 
+export const DEFAULT_TORRENT_TRACKERS = [
+  'udp://zer0day.ch:1337/announce',
+  'udp://tracker.publictracker.xyz:6969/announce',
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.demonii.com:1337/announce',
+  'udp://open.stealth.si:80/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'udp://tracker.theoks.net:6969/announce',
+  'udp://wepzone.net:6969/announce',
+  'udp://vito-tracker.space:6969/announce',
+  'udp://vito-tracker.duckdns.org:6969/announce',
+  'udp://udp.tracker.projectk.org:23333/announce',
+  'udp://tracker.tryhackx.org:6969/announce',
+  'udp://tracker.t-1.org:6969/announce',
+  'udp://tracker.srv00.com:6969/announce',
+  'udp://tracker.qu.ax:6969/announce',
+  'udp://tracker.auctor.tv:6969/announce',
+  'udp://tracker.plx.im:6969/announce',
+  'udp://tracker.opentorrent.top:6969/announce',
+  'udp://tracker.gmi.gd:6969/announce',
+  'udp://tracker.ducks.party:1984/announce',
+  'udp://tracker.bluefrog.pw:2710/announce',
+  'udp://tracker.bittor.pw:1337/announce',
+  'udp://tracker.1h.is:1337/announce',
+  'udp://tracker.004430.xyz:1337/announce',
+  'udp://tracker-udp.gbitt.info:80/announce',
+  'udp://tr4ck3r.duckdns.org:6969/announce',
+  'udp://torrents.tmtime.dev:6969/announce',
+  'udp://retracker01-msk-virt.corbina.net:80/announce',
+  'https://tracker.zhuqiy.com:443/announce',
+  'https://tracker.yemekyedim.com:443/announce',
+  'https://tracker.pmman.tech:443/announce',
+  'https://tracker.nekomi.cn:443/announce',
+  'https://tracker.moeking.me:443/announce',
+  'https://tracker.bt4g.com:443/announce',
+  'https://torrents.tmtime.dev:443/announce',
+  'https://open.ftorrent.com:443/announce',
+  'http://tracker.zhuqiy.com:80/announce',
+] as const;
+
 const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   enabled: true,
   downloadDirectory: '',
@@ -16,7 +56,7 @@ const DEFAULT_TORRENT_SETTINGS: TorrentSettings = {
   portForwardingEnabled: false,
   portForwardingPort: 42000,
   peerConnectionWatchdogMode: 'assist',
-  customTrackers: [],
+  customTrackers: [...DEFAULT_TORRENT_TRACKERS],
 };
 
 export function normalizeTorrentSettings(
@@ -38,7 +78,9 @@ export function normalizeTorrentSettings(
     portForwardingEnabled: value?.portForwardingEnabled ?? DEFAULT_TORRENT_SETTINGS.portForwardingEnabled,
     portForwardingPort: normalizeForwardingPort(value?.portForwardingPort),
     peerConnectionWatchdogMode: normalizePeerConnectionWatchdogMode(value?.peerConnectionWatchdogMode),
-    customTrackers: normalizeCustomTrackers(value?.customTrackers),
+    customTrackers: value && 'customTrackers' in value
+      ? normalizeCustomTrackers(value.customTrackers)
+      : [...DEFAULT_TORRENT_SETTINGS.customTrackers],
   };
 }
 

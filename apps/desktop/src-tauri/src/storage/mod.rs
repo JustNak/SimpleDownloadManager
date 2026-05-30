@@ -497,7 +497,7 @@ pub struct TorrentSettings {
     pub port_forwarding_port: u32,
     #[serde(default)]
     pub peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode,
-    #[serde(default)]
+    #[serde(default = "default_torrent_trackers")]
     pub custom_trackers: Vec<String>,
 }
 
@@ -1008,7 +1008,7 @@ impl Default for TorrentSettings {
             port_forwarding_enabled: false,
             port_forwarding_port: default_torrent_port_forwarding_port(),
             peer_connection_watchdog_mode: TorrentPeerConnectionWatchdogMode::Assist,
-            custom_trackers: Vec::new(),
+            custom_trackers: default_torrent_trackers(),
         }
     }
 }
@@ -1031,6 +1031,13 @@ fn default_seed_ratio_limit() -> f64 {
 
 fn default_seed_time_limit_minutes() -> u32 {
     60
+}
+
+fn default_torrent_trackers() -> Vec<String> {
+    crate::torrent::FALLBACK_TORRENT_TRACKERS
+        .iter()
+        .map(|tracker| (*tracker).to_string())
+        .collect()
 }
 
 pub fn default_torrent_port_forwarding_port() -> u32 {

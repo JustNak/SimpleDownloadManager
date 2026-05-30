@@ -1,5 +1,7 @@
 use crate::storage::TorrentSettings;
-use crate::torrent::{prepare_torrent_source, TorrentEngine};
+use crate::torrent::{
+    prepare_torrent_source_with_custom_trackers, TorrentEngine, FALLBACK_TORRENT_TRACKERS,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
@@ -138,7 +140,8 @@ pub struct Aria2StatusSnapshot {
 }
 
 pub fn benchmark_source_summary(source: &str) -> BenchmarkSourceSummary {
-    let prepared = prepare_torrent_source(source);
+    let default_trackers = default_benchmark_trackers();
+    let prepared = prepare_torrent_source_with_custom_trackers(source, &default_trackers);
     let original_tracker_count = magnet_tracker_values(source).len();
     let effective_tracker_count = match prepared.source_kind {
         crate::torrent::TorrentSourceKind::Magnet => magnet_tracker_values(&prepared.source).len(),
@@ -146,21 +149,25 @@ pub fn benchmark_source_summary(source: &str) -> BenchmarkSourceSummary {
             prepared.fallback_trackers_for_options.len()
         }
     };
+    let appended_tracker_count = effective_tracker_count.saturating_sub(original_tracker_count);
     let info_hash = magnet_info_hash(source);
     let info_hash_prefix = info_hash.as_ref().map(|hash| redacted_hash_prefix(hash));
 
     BenchmarkSourceSummary {
-        source_redacted: redact_source(
-            source,
-            original_tracker_count,
-            prepared.fallback_trackers_added,
-        ),
+        source_redacted: redact_source(source, original_tracker_count, appended_tracker_count),
         source_kind: prepared.source_kind.label().to_string(),
         info_hash_prefix,
         original_tracker_count,
         effective_tracker_count,
-        fallback_tracker_count: prepared.fallback_trackers_added,
+        fallback_tracker_count: appended_tracker_count,
     }
+}
+
+fn default_benchmark_trackers() -> Vec<String> {
+    FALLBACK_TORRENT_TRACKERS
+        .iter()
+        .map(|tracker| (*tracker).to_string())
+        .collect()
 }
 
 pub fn aggregate_speed_samples(samples: &[BenchmarkSpeedSample]) -> BenchmarkSpeedAggregate {
@@ -341,7 +348,8 @@ async fn run_librqbit_benchmark(
             }
         };
 
-    let prepared = prepare_torrent_source(source);
+    let prepared =
+        prepare_torrent_source_with_custom_trackers(source, &default_benchmark_trackers());
     let add_timeout = duration.max(LIBRQBIT_METADATA_TIMEOUT);
     let add_result = timeout(
         add_timeout,

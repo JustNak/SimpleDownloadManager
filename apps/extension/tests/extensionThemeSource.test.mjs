@@ -18,15 +18,21 @@ for (const [name, html] of [['popup', popupHtml], ['options', optionsHtml]]) {
 }
 
 assert.doesNotMatch(popupHtml, /active-count|attention-count|>Active<|>Attention</, 'popup quick actions should not render queue counters');
+assert.match(popupHtml, /<h1>SDM<span id="connection-status" class="connection-dot checking" aria-hidden="true"><\/span><span id="connection-status-label" class="visually-hidden">Checking connection<\/span><\/h1>/, 'popup header should use compact SDM branding with an icon-only connection dot');
 assert.match(popupHtml, /id="capture-mode-label"[^>]*>Silent Download</, 'popup quick toggle should always be labeled Silent Download');
 assert.match(popupHtml, /On skips the prompt unless a duplicate needs review\./, 'popup should explain the simple silent-download on behavior');
+assert.match(popupHtml, /id="extension-enabled-label"[^>]*>Web extension</, 'popup should expose extension enablement as an integrated settings row');
 assert.doesNotMatch(popupHtml, /Ask Before Sending|Ask before sending downloads|Browser Only/, 'popup should not expose alternate handoff mode names');
-assert.match(popupHtml, /id="sync-button"/, 'popup should expose a manual theme/status sync action');
+assert.match(popupHtml, /id="sync-button"[\s\S]*aria-label="Sync extension status"/, 'popup should expose an icon-only manual theme/status sync action');
+assert.match(popupHtml, /id="advanced-button"[\s\S]*aria-label="Open extension settings"/, 'popup should expose an icon-only settings action');
+assert.doesNotMatch(popupHtml, />Connected<|>Checking<|>Sync<|>Advanced<|>Disable Extension<|>Enable Extension</, 'popup should not render verbose status/action labels');
 assert.match(buildSource, /theme\.css/, 'extension build should copy the shared theme stylesheet into each dist folder');
 assert.match(buildSource, /appearance-preload\.js/, 'extension build should copy the appearance preload script into each dist folder');
 
 assert.match(popupSource, /applyExtensionAppearance/, 'popup script should apply the synced desktop appearance');
 assert.match(popupSource, /sync-button/, 'popup script should wire the manual sync action');
+assert.match(popupSource, /extension-enabled-toggle/, 'popup script should wire the integrated extension enablement toggle');
+assert.match(popupSource, /connection-dot connected|connection-dot checking|connection-dot disconnected/, 'popup script should map connection states to dot color classes');
 assert.match(popupSource, /state\.connection === 'connected' && state\.appearanceSettings/, 'popup should only cache/apply desktop appearance after a successful sync');
 {
   const refreshStateStart = popupSource.indexOf('async function refreshState');

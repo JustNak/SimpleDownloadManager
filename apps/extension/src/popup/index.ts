@@ -4,10 +4,11 @@ import type { PopupRequest, PopupStateResponse } from '../shared/messages';
 import { createDefaultExtensionSettings } from '../shared/defaultExtensionSettings';
 import { applyExtensionAppearance } from '../shared/appearance';
 
-const statusBadge = document.querySelector<HTMLSpanElement>('#connection-status');
+const connectionStatusDot = document.querySelector<HTMLSpanElement>('#connection-status');
+const connectionStatusLabel = document.querySelector<HTMLSpanElement>('#connection-status-label');
 const syncButton = document.querySelector<HTMLButtonElement>('#sync-button');
 const silentDownloadToggle = document.querySelector<HTMLInputElement>('#silent-download-toggle');
-const extensionToggleButton = document.querySelector<HTMLButtonElement>('#extension-toggle-button');
+const extensionEnabledToggle = document.querySelector<HTMLInputElement>('#extension-enabled-toggle');
 const advancedButton = document.querySelector<HTMLButtonElement>('#advanced-button');
 
 let currentState: PopupStateResponse | null = null;
@@ -31,11 +32,10 @@ function renderState(state: PopupStateResponse) {
     silentDownloadToggle.disabled = isUpdating || settings?.enabled === false;
   }
 
-  if (extensionToggleButton) {
+  if (extensionEnabledToggle) {
     const isEnabled = settings?.enabled !== false;
-    extensionToggleButton.textContent = isEnabled ? 'Disable Extension' : 'Enable Extension';
-    extensionToggleButton.className = isEnabled ? 'button danger' : 'button primary';
-    extensionToggleButton.disabled = isUpdating;
+    extensionEnabledToggle.checked = isEnabled;
+    extensionEnabledToggle.disabled = isUpdating;
   }
 
   if (advancedButton) {
@@ -48,27 +48,27 @@ function renderState(state: PopupStateResponse) {
 }
 
 function updateConnectionStatus(connection: PopupStateResponse['connection']) {
-  if (!statusBadge) return;
+  if (!connectionStatusDot) return;
 
-  statusBadge.className = `status ${connection}`;
   switch (connection) {
     case 'connected':
-      statusBadge.textContent = 'Connected';
+      connectionStatusDot.className = 'connection-dot connected';
+      if (connectionStatusLabel) connectionStatusLabel.textContent = 'Connected';
+      break;
+    case 'checking':
+      connectionStatusDot.className = 'connection-dot checking';
+      if (connectionStatusLabel) connectionStatusLabel.textContent = 'Checking connection';
       break;
     case 'host_missing':
-      statusBadge.textContent = 'Host Missing';
-      break;
     case 'app_missing':
-      statusBadge.textContent = 'App Missing';
-      break;
     case 'app_unreachable':
-      statusBadge.textContent = 'Unreachable';
-      break;
     case 'error':
-      statusBadge.textContent = 'Error';
+      connectionStatusDot.className = 'connection-dot disconnected';
+      if (connectionStatusLabel) connectionStatusLabel.textContent = 'Disconnected';
       break;
     default:
-      statusBadge.textContent = 'Checking';
+      connectionStatusDot.className = 'connection-dot checking';
+      if (connectionStatusLabel) connectionStatusLabel.textContent = 'Checking connection';
       break;
   }
 }
@@ -102,9 +102,8 @@ silentDownloadToggle?.addEventListener('change', () => {
   });
 });
 
-extensionToggleButton?.addEventListener('click', () => {
-  const isEnabled = currentState?.extensionSettings?.enabled !== false;
-  void updateSettings({ enabled: !isEnabled });
+extensionEnabledToggle?.addEventListener('change', () => {
+  void updateSettings({ enabled: extensionEnabledToggle.checked });
 });
 
 syncButton?.addEventListener('click', () => {

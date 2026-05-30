@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { normalizeTorrentSettings, shouldStopSeeding } from '../src/torrentSettings.ts';
+import { DEFAULT_TORRENT_TRACKERS, normalizeTorrentSettings, shouldStopSeeding } from '../src/torrentSettings.ts';
 import type { TorrentSettings } from '../src/types.ts';
 
 const defaults = normalizeTorrentSettings({});
@@ -16,9 +16,20 @@ assert.deepEqual(
     portForwardingEnabled: false,
     portForwardingPort: 42000,
     peerConnectionWatchdogMode: 'assist',
-    customTrackers: [],
+    customTrackers: DEFAULT_TORRENT_TRACKERS,
   },
-  'torrent settings should default to enabled unlimited seeding with safe peer assist',
+  'torrent settings should default to enabled unlimited seeding with safe peer assist and fallback tracker defaults',
+);
+
+assert.ok(
+  DEFAULT_TORRENT_TRACKERS.includes('udp://tracker.opentrackr.org:1337/announce'),
+  'torrent tracker defaults should include the core public fallback tracker',
+);
+
+assert.deepEqual(
+  normalizeTorrentSettings({ customTrackers: [] }).customTrackers,
+  [],
+  'torrent settings should preserve an intentionally empty tracker list',
 );
 
 assert.equal(

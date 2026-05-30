@@ -185,6 +185,9 @@ p {
 }
 
 .brand-text h1 {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   overflow: hidden;
   font-size: 13px;
   line-height: 18px;
@@ -342,6 +345,97 @@ button:hover {
   border-color: color-mix(in oklch, var(--color-destructive) 42%, var(--color-border));
   background: var(--color-destructive-soft);
   color: var(--color-destructive);
+}
+
+.popup-icon-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.icon-action {
+  width: 30px;
+  min-height: 30px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-muted-foreground);
+  padding: 0;
+}
+
+.icon-action:hover {
+  color: var(--color-foreground);
+}
+
+.icon-action svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.connection-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.connection-dot.connected {
+  background: var(--color-success);
+  animation: connection-pulse-success 1.8s ease-out infinite;
+}
+
+.connection-dot.checking {
+  background: var(--color-warning);
+  animation: connection-pulse-warning 1.8s ease-out infinite;
+}
+
+.connection-dot.disconnected {
+  background: var(--color-destructive);
+  animation: connection-pulse-destructive 1.8s ease-out infinite;
+}
+
+@keyframes connection-pulse-success {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-success) 34%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in oklch, var(--color-success) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-success) 0%, transparent); }
+}
+
+@keyframes connection-pulse-warning {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-warning) 34%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in oklch, var(--color-warning) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-warning) 0%, transparent); }
+}
+
+@keyframes connection-pulse-destructive {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-destructive) 34%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in oklch, var(--color-destructive) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--color-destructive) 0%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-dot.connected,
+  .connection-dot.checking,
+  .connection-dot.disconnected {
+    animation: none;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
 }
 
 .button:disabled,

@@ -1,4 +1,5 @@
 import { DEFAULT_ACCENT_COLOR } from './appearance.ts';
+import { DEFAULT_TORRENT_TRACKERS } from './torrentSettings.ts';
 import type { ExtensionIntegrationSettings, Settings } from './types.ts';
 
 export const DEFAULT_DOWNLOAD_DIRECTORY = 'C:\\Users\\You\\Downloads';
@@ -74,7 +75,7 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       portForwardingEnabled: false,
       portForwardingPort: 42000,
       peerConnectionWatchdogMode: 'assist',
-      customTrackers: [],
+      customTrackers: [...DEFAULT_TORRENT_TRACKERS],
     },
     bulk: {
       outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),

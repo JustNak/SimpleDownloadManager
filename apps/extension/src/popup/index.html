@@ -13,13 +13,25 @@
         <div class="brand-lockup">
           <img class="brand-icon" src="./icons/icon-32.png" alt="" />
           <div class="brand-text">
-            <h1>Simple Download Manager</h1>
+            <h1>SDM<span id="connection-status" class="connection-dot checking" aria-hidden="true"></span><span id="connection-status-label" class="visually-hidden">Checking connection</span></h1>
             <p>Browser handoff</p>
           </div>
         </div>
-        <div class="status-actions">
-          <span id="connection-status" class="status checking">Checking</span>
-          <button id="sync-button" type="button" class="button compact-button">Sync</button>
+        <div class="popup-icon-actions" aria-label="Popup actions">
+          <button id="sync-button" type="button" class="icon-action" aria-label="Sync extension status" title="Sync extension status">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M21 12a9 9 0 0 1-15.1 6.6" />
+              <path d="M3 12A9 9 0 0 1 18.1 5.4" />
+              <path d="M18 2v4h-4" />
+              <path d="M6 22v-4h4" />
+            </svg>
+          </button>
+          <button id="advanced-button" type="button" class="icon-action" aria-label="Open extension settings" title="Open extension settings">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.2a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z" />
+            </svg>
+          </button>
         </div>
       </header>
 
@@ -35,10 +47,17 @@
         </label>
       </section>
 
-      <div class="actions">
-        <button id="extension-toggle-button" type="button" class="button danger">Disable Extension</button>
-        <button id="advanced-button" type="button" class="button primary">Advanced</button>
-      </div>
+      <section class="control compact-control extension-control">
+        <div>
+          <div id="extension-enabled-label" class="label">Web extension</div>
+          <div id="extension-enabled-hint" class="hint">Capture browser downloads</div>
+        </div>
+        <label class="switch" for="extension-enabled-toggle" aria-label="Toggle web extension download capture">
+          <input id="extension-enabled-toggle" type="checkbox" />
+          <span class="track"></span>
+          <span class="thumb"></span>
+        </label>
+      </section>
     </main>
 
     <script type="module" src="./popup.js"></script>

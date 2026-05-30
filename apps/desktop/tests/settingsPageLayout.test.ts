@@ -69,9 +69,12 @@ assert.doesNotMatch(source, /#snippet CompactSetting[\s\S]*rounded-md border bor
 assert.doesNotMatch(source, /<div class="rounded-md border border-border bg-surface p-4">/, 'settings content should not use nested page cards');
 assert.doesNotMatch(source, /border-border\/70/, 'settings page separators should avoid the heavier hairline treatment');
 assert.match(source, /bind:value=\{formData\.torrent\.downloadDirectory\}/, 'torrent settings should expose the torrent download directory field');
-assert.match(source, /Additional trackers/, 'torrent settings should expose an advanced additional trackers field');
-assert.match(source, /bind:value=\{customTrackersInput\}/, 'additional tracker textarea should bind to the normalized settings draft');
-assert.match(source, /customTrackersInput\.split\('\\n'\)/, 'additional tracker textarea should save newline-separated custom trackers');
+assert.match(source, /Tracker List/, 'torrent settings should expose the editable tracker list field');
+assert.match(source, /Fallback trackers added to magnet links for peer discovery\. Private `\.torrent` files keep their own tracker list\./, 'tracker list helper should clarify magnet-only fallback behavior');
+assert.match(source, /bind:value=\{customTrackersInput\}/, 'tracker list textarea should bind to the normalized settings draft');
+assert.match(source, /customTrackersInput\.split\('\\n'\)/, 'tracker list textarea should save newline-separated custom trackers');
+assert.match(source, /resetDefaultTorrentTrackers/, 'tracker list should expose a reset-to-defaults action');
+assert.match(source, /Reset to defaults/, 'tracker list reset action should use clear defaults wording');
 assert.match(source, /<option value="assist">Safe assist<\/option>[\s\S]*<option value="diagnose">Diagnose only<\/option>[\s\S]*<option value="recover">Refresh peers<\/option>/, 'torrent peer watchdog should default to safe assist with explicit diagnose-only and refresh options');
 assert.doesNotMatch(source, /<option value="experimental">Experimental<\/option>/, 'torrent peer watchdog should no longer expose experimental wording');
 assert.match(source, /Clear torrent session cache/, 'torrent settings should expose the torrent session cache cleanup action');

@@ -30,7 +30,7 @@
   import type { DiagnosticsSnapshot, QueueRowSize, Settings } from './types';
   import { updateVersionIndicator, type AppUpdateState, type AppUpdateVersionTone } from './appUpdates';
   import { DEFAULT_ACCENT_COLOR, normalizeAccentColor } from './appearance';
-  import { defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
+  import { DEFAULT_TORRENT_TRACKERS, defaultTorrentDownloadDirectory, normalizeTorrentSettings } from './torrentSettings';
   import { settingsEqual, shouldAdoptIncomingSettingsDraft } from './settingsDraftSync';
   import {
     addCapturedExtensions,
@@ -209,6 +209,10 @@
 
   function formatCustomTrackersInput(trackers: string[] | undefined): string {
     return (trackers ?? []).join('\n');
+  }
+
+  function resetDefaultTorrentTrackers() {
+    customTrackersInput = formatCustomTrackersInput([...DEFAULT_TORRENT_TRACKERS]);
   }
 
   function submit(event: SubmitEvent) {
@@ -461,7 +465,7 @@
       {@render FieldRow('Forwarded Port', 'Router listen port.', forwardingPortControl)}
     {/if}
     {@render FieldRow('Peer Watchdog', 'Peer connection diagnostics.', peerWatchdogControl)}
-    {@render FieldRow('Additional trackers', 'Advanced tracker list.', additionalTrackersControl, 'Advanced tracker list.', true)}
+    {@render FieldRow('Tracker List', 'Fallback trackers added to magnet links for peer discovery. Private `.torrent` files keep their own tracker list.', additionalTrackersControl, 'Fallback trackers added to magnet links for peer discovery. Private `.torrent` files keep their own tracker list.', true)}
     <div class="grid grid-cols-[minmax(160px,220px)_minmax(0,1fr)] items-center gap-4 border-t border-border/35 py-3">
       <div class="text-sm text-muted-foreground">
         {hasActiveTorrentJobs ? 'Active torrents are running. Clearing the cache may require a restart.' : 'Clear stale torrent engine session data.'}
@@ -817,12 +821,20 @@
 {/snippet}
 
 {#snippet additionalTrackersControl()}
-  <textarea
-    bind:value={customTrackersInput}
-    rows="4"
-    spellcheck="false"
-    class="min-h-24 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
-  ></textarea>
+  <div class="grid gap-2">
+    <textarea
+      bind:value={customTrackersInput}
+      rows="4"
+      spellcheck="false"
+      class="min-h-24 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+    ></textarea>
+    <div class="flex justify-end">
+      <button type="button" onclick={resetDefaultTorrentTrackers} class="flex h-8 items-center gap-2 rounded-md border border-input bg-background px-3 text-xs font-medium text-foreground transition hover:bg-muted">
+        <RotateCw size={14} />
+        Reset to defaults
+      </button>
+    </div>
+  </div>
 {/snippet}
 
 {#snippet themeControl()}

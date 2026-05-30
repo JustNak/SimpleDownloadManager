@@ -33,9 +33,14 @@ pub const TORRENT_PEER_CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 6
 pub const MAX_TORRENT_PEER_CACHE_PEERS: usize = 64;
 pub const MAX_CUSTOM_TORRENT_TRACKERS: usize = 64;
 const BYTES_PER_MEBIBYTE: f64 = 1024.0 * 1024.0;
-pub const FALLBACK_TORRENT_TRACKERS: [&str; 24] = [
+pub const FALLBACK_TORRENT_TRACKERS: [&str; 37] = [
+    "udp://zer0day.ch:1337/announce",
+    "udp://tracker.publictracker.xyz:6969/announce",
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.demonii.com:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.theoks.net:6969/announce",
     "udp://wepzone.net:6969/announce",
     "udp://vito-tracker.space:6969/announce",
     "udp://vito-tracker.duckdns.org:6969/announce",
@@ -44,6 +49,7 @@ pub const FALLBACK_TORRENT_TRACKERS: [&str; 24] = [
     "udp://tracker.t-1.org:6969/announce",
     "udp://tracker.srv00.com:6969/announce",
     "udp://tracker.qu.ax:6969/announce",
+    "udp://tracker.auctor.tv:6969/announce",
     "udp://tracker.plx.im:6969/announce",
     "udp://tracker.opentorrent.top:6969/announce",
     "udp://tracker.gmi.gd:6969/announce",
@@ -52,12 +58,19 @@ pub const FALLBACK_TORRENT_TRACKERS: [&str; 24] = [
     "udp://tracker.bittor.pw:1337/announce",
     "udp://tracker.1h.is:1337/announce",
     "udp://tracker.004430.xyz:1337/announce",
+    "udp://tracker-udp.gbitt.info:80/announce",
     "udp://tr4ck3r.duckdns.org:6969/announce",
     "udp://torrents.tmtime.dev:6969/announce",
+    "udp://retracker01-msk-virt.corbina.net:80/announce",
     "https://tracker.zhuqiy.com:443/announce",
+    "https://tracker.yemekyedim.com:443/announce",
+    "https://tracker.pmman.tech:443/announce",
+    "https://tracker.nekomi.cn:443/announce",
+    "https://tracker.moeking.me:443/announce",
     "https://tracker.bt4g.com:443/announce",
     "https://torrents.tmtime.dev:443/announce",
     "https://open.ftorrent.com:443/announce",
+    "http://tracker.zhuqiy.com:80/announce",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,25 +700,15 @@ pub fn prepare_torrent_source_with_custom_trackers(
         let mut seen = tracker_seen_set(existing_trackers.iter().map(String::as_str));
         let custom_trackers =
             missing_trackers(&mut seen, custom_trackers.iter().map(String::as_str));
-        let fallback_trackers =
-            missing_trackers(&mut seen, FALLBACK_TORRENT_TRACKERS.iter().copied());
         let mut effective_trackers = existing_trackers.clone();
         effective_trackers.extend(custom_trackers.iter().cloned());
-        effective_trackers.extend(fallback_trackers.iter().cloned());
         return PreparedTorrentSource {
-            source: append_trackers_to_magnet(
-                source,
-                &custom_trackers
-                    .iter()
-                    .chain(fallback_trackers.iter())
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            ),
+            source: append_trackers_to_magnet(source, &custom_trackers),
             source_kind: TorrentSourceKind::Magnet,
             info_hash_hint,
             original_tracker_count: existing_trackers.len(),
             custom_trackers_added: custom_trackers.len(),
-            fallback_trackers_added: fallback_trackers.len(),
+            fallback_trackers_added: 0,
             fallback_trackers_for_options: Vec::new(),
             tracker_protocol_counts: tracker_protocol_counts(
                 effective_trackers.iter().map(String::as_str),
@@ -716,19 +719,16 @@ pub fn prepare_torrent_source_with_custom_trackers(
 
     let mut seen = HashSet::new();
     let custom_trackers = missing_trackers(&mut seen, custom_trackers.iter().map(String::as_str));
-    let fallback_trackers = missing_trackers(&mut seen, FALLBACK_TORRENT_TRACKERS.iter().copied());
-    let mut trackers_for_options = custom_trackers.clone();
-    trackers_for_options.extend(fallback_trackers.iter().cloned());
     PreparedTorrentSource {
         source: source.to_string(),
         source_kind: TorrentSourceKind::TorrentFile,
         info_hash_hint: None,
         original_tracker_count: 0,
         custom_trackers_added: custom_trackers.len(),
-        fallback_trackers_added: fallback_trackers.len(),
-        fallback_trackers_for_options: trackers_for_options.clone(),
+        fallback_trackers_added: 0,
+        fallback_trackers_for_options: custom_trackers.clone(),
         tracker_protocol_counts: tracker_protocol_counts(
-            trackers_for_options.iter().map(String::as_str),
+            custom_trackers.iter().map(String::as_str),
         ),
         tracker_first_metadata: false,
     }
@@ -1460,7 +1460,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bare_magnet_appends_fallback_trackers_encoded() {
+    fn bare_magnet_without_configured_trackers_stays_unchanged() {
         let prepared =
             prepare_torrent_source("magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6");
 
@@ -1472,21 +1472,19 @@ mod tests {
 
         assert_eq!(prepared.source_kind, TorrentSourceKind::Magnet);
         assert!(prepared.tracker_first_metadata);
-        assert_eq!(
-            prepared.fallback_trackers_added,
-            FALLBACK_TORRENT_TRACKERS.len()
-        );
-        assert_eq!(trackers.len(), FALLBACK_TORRENT_TRACKERS.len());
-        assert_eq!(trackers[0], FALLBACK_TORRENT_TRACKERS[0]);
-        assert!(prepared
-            .source
-            .contains("tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"));
+        assert_eq!(prepared.custom_trackers_added, 0);
+        assert_eq!(prepared.fallback_trackers_added, 0);
+        assert!(trackers.is_empty());
     }
 
     #[test]
-    fn magnet_preserves_existing_trackers_first_and_dedupes_fallbacks() {
-        let prepared = prepare_torrent_source(
+    fn magnet_preserves_existing_trackers_first_and_dedupes_configured_trackers() {
+        let prepared = prepare_torrent_source_with_custom_trackers(
             "magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fcustom.example%3A1337%2Fannounce",
+            &[
+                "udp://tracker.opentrackr.org:1337/announce".to_string(),
+                "https://configured.example/announce".to_string(),
+            ],
         );
 
         let parsed = url::Url::parse(&prepared.source).expect("prepared magnet should parse");
@@ -1497,6 +1495,7 @@ mod tests {
 
         assert_eq!(trackers[0], "udp://tracker.opentrackr.org:1337/announce");
         assert_eq!(trackers[1], "udp://custom.example:1337/announce");
+        assert_eq!(trackers[2], "https://configured.example/announce");
         assert_eq!(
             trackers
                 .iter()
@@ -1504,10 +1503,8 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(
-            prepared.fallback_trackers_added,
-            FALLBACK_TORRENT_TRACKERS.len() - 1
-        );
+        assert_eq!(prepared.custom_trackers_added, 1);
+        assert_eq!(prepared.fallback_trackers_added, 0);
     }
 
     #[test]
@@ -1557,17 +1554,14 @@ mod tests {
         assert_eq!(trackers[2], "udp://tracker.opentrackr.org:1337/announce");
         assert_eq!(prepared.original_tracker_count, 1);
         assert_eq!(prepared.custom_trackers_added, 2);
-        assert_eq!(
-            prepared.fallback_trackers_added,
-            FALLBACK_TORRENT_TRACKERS.len() - 1
-        );
+        assert_eq!(prepared.fallback_trackers_added, 0);
         assert!(prepared.tracker_source_summary().contains("original 1"));
         assert!(prepared.tracker_source_summary().contains("custom 2"));
         assert!(!prepared.tracker_source_summary().contains("custom.example"));
     }
 
     #[test]
-    fn torrent_file_options_include_fallback_trackers() {
+    fn torrent_file_options_include_custom_trackers_only() {
         let prepared = prepare_torrent_source_with_custom_trackers(
             "https://example.com/releases/file.torrent",
             &["https://custom.example/announce".to_string()],
@@ -1583,9 +1577,45 @@ mod tests {
         assert_eq!(prepared.source, "https://example.com/releases/file.torrent");
         assert_eq!(prepared.source_kind, TorrentSourceKind::TorrentFile);
         assert!(!prepared.tracker_first_metadata);
-        let trackers = options.trackers.as_ref().expect("fallback trackers");
+        assert_eq!(prepared.fallback_trackers_added, 0);
+        let trackers = options.trackers.as_ref().expect("custom trackers");
         assert_eq!(trackers[0], "https://custom.example/announce");
-        assert_eq!(trackers[1], FALLBACK_TORRENT_TRACKERS[0]);
+        assert_eq!(trackers.len(), 1);
+    }
+
+    #[test]
+    fn magnet_fallback_trackers_include_current_best_public_trackers() {
+        let prepared = prepare_torrent_source_with_custom_trackers(
+            "magnet:?xt=urn:btih:a634dc946d49989526058626caa3bbabba4607b6",
+            &FALLBACK_TORRENT_TRACKERS
+                .iter()
+                .map(|tracker| (*tracker).to_string())
+                .collect::<Vec<_>>(),
+        );
+        let trackers = magnet_tracker_values(&prepared.source);
+
+        assert!(trackers.contains(&"udp://zer0day.ch:1337/announce".to_string()));
+        assert!(trackers.contains(&"udp://tracker.publictracker.xyz:6969/announce".to_string()));
+        assert!(trackers.contains(&"udp://open.stealth.si:80/announce".to_string()));
+        assert!(trackers.contains(&"udp://tracker.torrent.eu.org:451/announce".to_string()));
+        assert!(trackers.contains(&"udp://tracker.theoks.net:6969/announce".to_string()));
+        assert!(trackers.contains(&"http://tracker.zhuqiy.com/announce".to_string()));
+    }
+
+    #[test]
+    fn torrent_file_sources_do_not_inject_bundled_public_trackers() {
+        let prepared = prepare_torrent_source_with_custom_trackers(
+            "C:/Downloads/private-example.torrent",
+            &["https://custom.example/announce".to_string()],
+        );
+
+        assert_eq!(prepared.source_kind, TorrentSourceKind::TorrentFile);
+        assert_eq!(prepared.custom_trackers_added, 1);
+        assert_eq!(prepared.fallback_trackers_added, 0);
+        assert_eq!(
+            prepared.fallback_trackers_for_options,
+            vec!["https://custom.example/announce".to_string()]
+        );
     }
 
     #[test]
