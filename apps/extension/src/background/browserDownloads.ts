@@ -38,6 +38,7 @@ export type BrowserDownloadIntentReason =
   | 'app_traffic_probe'
   | 'attachment_disposition'
   | 'strong_filename'
+  | 'download_mime'
   | 'app_traffic_payload'
   | 'download_mime_without_intent'
   | 'no_download_intent';
@@ -48,16 +49,6 @@ export type BrowserDownloadIntentDecision = {
 export type BrowserDownloadDelta = {
   id: number;
   state?: { current?: string };
-};
-export type BrowserDownloadAdoption = {
-  url: string;
-  suggestedFilename?: string;
-  totalBytes?: number;
-  incognito?: boolean;
-  pageUrl?: string;
-  pageTitle?: string;
-  referrer?: string;
-  reason: 'browser_download' | 'browser_session' | 'protected_auth_required';
 };
 export type CompletedBrowserDownloadItem = {
   state?: string;
@@ -75,9 +66,9 @@ export type AdoptCompletedBrowserDownloadPayload<TSource> = {
   totalBytes?: number;
   mimeType?: string;
 };
-export type CompletedBrowserDownloadAdoptionDependencies<TSource, TResponse> = {
+export type CompletedBrowserDownloadAdoptionDependencies<TAdoption, TSource, TResponse> = {
   searchDownloads: (query: { id: number }) => Promise<CompletedBrowserDownloadItem[]>;
-  browserDownloadSource: (item: BrowserDownloadAdoption & { filename: string }) => TSource;
+  browserDownloadSource: (adoption: TAdoption & { filename: string }) => TSource;
   adoptBrowserDownload: (payload: AdoptCompletedBrowserDownloadPayload<TSource>) => Promise<TResponse>;
   isErrorResponse: (response: TResponse) => boolean;
   onError: (response: TResponse) => Promise<void> | void;
@@ -258,6 +249,10 @@ export function classifyBrowserDownloadIntent(
     return { action: 'ignore', reason: 'app_traffic_payload' };
   }
 
+  if (contentType && DOWNLOAD_MIME_TYPES.has(contentType) && isDownloadMimeCaptureCandidate(item)) {
+    return { action: 'capture', reason: 'download_mime' };
+  }
+
   if (contentType && DOWNLOAD_MIME_TYPES.has(contentType)) {
     return { action: 'ignore', reason: 'download_mime_without_intent' };
   }
@@ -342,10 +337,17 @@ export function selectFilenameInterceptionApi<TItem>(
   return null;
 }
 
-export async function completeBrowserDownloadAdoption<TSource, TResponse>(
+export function browserDownloadFilenameSuggestion(
+  item: Pick<BrowserDownloadPolicyItem, 'filename' | 'url'>,
+): BrowserDownloadFilenameSuggestion | undefined {
+  const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url ?? '');
+  return filename ? { filename, conflictAction: 'uniquify' } : undefined;
+}
+
+export async function completeBrowserDownloadAdoption<TAdoption extends { url: string; suggestedFilename?: string; totalBytes?: number }, TSource, TResponse>(
   delta: BrowserDownloadDelta,
-  adoptions: Map<number, BrowserDownloadAdoption>,
-  dependencies: CompletedBrowserDownloadAdoptionDependencies<TSource, TResponse>,
+  adoptions: Map<number, TAdoption>,
+  dependencies: CompletedBrowserDownloadAdoptionDependencies<TAdoption, TSource, TResponse>,
 ): Promise<boolean> {
   if (delta.state?.current !== 'complete') {
     return false;
@@ -510,6 +512,15 @@ function isLikelyApplicationTrafficUrl(url: string): boolean {
 
 function isPageInternalResourceType(resourceType: string | undefined): boolean {
   return Boolean(resourceType && PAGE_INTERNAL_RESOURCE_TYPES.has(resourceType.toLowerCase()));
+}
+
+function isDownloadMimeCaptureCandidate(item: BrowserDownloadPolicyItem): boolean {
+  if (isPageInternalResourceType(item.resourceType)) {
+    return false;
+  }
+
+  const byteLength = browserDownloadByteLength(item);
+  return byteLength === undefined || byteLength > 1024;
 }
 
 function isExplicitDownloadUrl(url: string): boolean {

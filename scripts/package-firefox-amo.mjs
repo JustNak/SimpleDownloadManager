@@ -90,7 +90,7 @@ export function createFirefoxAmoListingMetadata() {
 export function createFirefoxAmoReleaseNotes() {
   return [
     '- Tightened Firefox auto-capture to ignore site session/API probes such as YouTube Music verify_session.',
-    '- Reworked automatic capture so Firefox owns the transfer and the app adopts the completed file.',
+    '- Reworked automatic capture so redirected Canvas/Instructure downloads hand off the original source URL instead of the signed CDN URL.',
     '- Preserved Canvas/Instructure and attachment download capture while reducing false prompts.',
   ].join('\n');
 }
@@ -145,7 +145,7 @@ When the extension is enabled and a download is eligible for handoff, it may sen
 - Download URL.
 - Suggested filename and content length when Firefox exposes them.
 - Page URL, page title, referrer, entry point, extension version, and incognito flag when available.
-- User actions such as context-menu handoff, popup handoff, and completed browser-download adoption.
+- User actions such as context-menu handoff, popup handoff, and captured browser-download handoff.
 - Extension settings such as capture mode, excluded sites, captured file extensions, badge preference, and progress-window preference.
 
 ## Local-Only Use
@@ -154,7 +154,7 @@ The extension sends this data only to the local native desktop app installed on 
 
 ## Storage
 
-The extension stores its settings in Firefox extension storage. Completed-download adoption state is held only in extension memory for a short time and is capped.
+The extension stores its settings in Firefox extension storage. Redirect and request-header handoff state is held only in extension memory for a short time and is capped.
 
 ## User Controls
 
@@ -167,8 +167,8 @@ export function createFirefoxAmoReviewerNotes() {
 
 - Firefox auto-capture now separates download intent from browser-session handling. Generic app/session traffic such as YouTube Music verify_session, youtubei payloads, json.txt, player, version, and zero-byte probes is ignored before prompting.
 - Real downloads still capture when Firefox exposes strong evidence: Content-Disposition attachment, strong file extensions, or known explicit download URLs such as Canvas/Instructure file downloads.
-- Automatic browser downloads stay in Firefox until complete; the extension then sends the completed local path to the local native desktop app for adoption.
-- Browser-session downloads are handled through browser-owned completed-file adoption rather than cookie/header replay.
+- Redirected Canvas/Instructure downloads preserve the original download endpoint before the signed CDN redirect and hand that source URL to the local native desktop app.
+- Eligible browser downloads are canceled in Firefox and handed to the local native desktop app instead of relying on completed-file adoption.
 - Manual context-menu and popup sends still hand explicit URLs to the local native desktop app through Firefox native messaging.
 `;
 }

@@ -6,39 +6,39 @@ const repoRoot = path.resolve();
 const backgroundSource = await readFile(path.join(repoRoot, 'apps/extension/src/background/index.ts'), 'utf8');
 
 const handlerStart = backgroundSource.indexOf('async function handleFirefoxWebRequestHeadersReceived');
-const handlerEnd = backgroundSource.indexOf('async function handleBrowserDownloadChanged', handlerStart);
+const handlerEnd = backgroundSource.indexOf('function normalizedDownloadSize', handlerStart);
 
 assert.notEqual(handlerStart, -1, 'Firefox webRequest headers handler should exist');
 assert.notEqual(handlerEnd, -1, 'Firefox webRequest handler should be sliceable');
-assert.equal(
-  backgroundSource.indexOf('function registerHandoffAuthHeaderCapture'),
+assert.notEqual(
+  backgroundSource.indexOf('function registerBrowserHandoffAuthHeaderCapture'),
   -1,
-  'rebuilt automatic capture should not collect browser auth headers for URL replay',
+  'automatic capture should collect bounded browser request headers for memory-only SDM handoff',
 );
 
 const handlerSource = backgroundSource.slice(handlerStart, handlerEnd);
 const passThroughIndex = handlerSource.indexOf('shouldKeepBrowserSessionDownloadInBrowser(candidate, settings)');
 const cancelIndex = handlerSource.indexOf('return { cancel: true };');
-const adoptIndex = handlerSource.indexOf('markBrowserDownloadUrlForAdoption(candidate)');
+const handoffIndex = handlerSource.indexOf('void handOffCapturedBrowserDownload(');
 
-assert.equal(cancelIndex, -1, 'Firefox webRequest interception should not cancel classified browser downloads');
+assert.notEqual(cancelIndex, -1, 'Firefox webRequest interception should cancel classified browser downloads before SDM handoff');
 assert.equal(
   passThroughIndex,
   -1,
   'Firefox should not bypass classified downloads merely because the browser sent cookies',
 );
 assert.notEqual(
-  adoptIndex,
+  handoffIndex,
   -1,
-  'Firefox classified downloads should be marked for completed-file adoption',
+  'Firefox classified downloads should be handed to SDM prompt/auto flow',
 );
 assert.match(
-  handlerSource,
-  /markBrowserDownloadUrlForAdoption\(candidate\);[\s\S]*return \{\};/,
-  'Firefox classified downloads should let the original browser request finish before the app adopts the file',
+  backgroundSource,
+  /captureHandoffAuthHeaders[\s\S]*handoffAuthFromRequestHeaders[\s\S]*resolveBrowserHandoffAuth/,
+  'Firefox automatic capture should pair the classified download with the browser-sent request headers',
 );
 assert.doesNotMatch(
   backgroundSource,
-  /captureHandoffAuthHeaders|shouldKeepBrowserSessionDownloadInBrowser|markFirefoxWebRequestBypass/,
-  'Firefox automatic capture should avoid the old protected-download replay fallback stack',
+  /shouldKeepBrowserSessionDownloadInBrowser|markFirefoxWebRequestBypass|markBrowserDownloadUrlForAdoption/,
+  'Firefox automatic capture should avoid browser-session adoption and the old protected-download fallback stack',
 );

@@ -57,7 +57,11 @@ export async function setExtensionSettings(settings: ExtensionIntegrationSetting
   return normalized;
 }
 
-export async function setHostError(code: ErrorCode, message: string, connection: PopupStateResponse['connection']) {
+export async function setHostError(
+  code: ErrorCode,
+  message: string,
+  connection: PopupStateResponse['connection'],
+) {
   const extensionSettings = await getExtensionSettings();
   return updatePopupState({
     connection,

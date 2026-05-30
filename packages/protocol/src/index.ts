@@ -111,6 +111,7 @@ export interface EnqueueDownloadPayload {
   suggestedFilename?: string;
   totalBytes?: number;
   transferKind?: TransferKind;
+  handoffAuth?: HandoffAuth;
 }
 
 export interface PromptDownloadPayload {
@@ -119,12 +120,23 @@ export interface PromptDownloadPayload {
   suggestedFilename?: string;
   totalBytes?: number;
   transferKind?: TransferKind;
+  handoffAuth?: HandoffAuth;
 }
 
 export interface DownloadRequestMetadata {
   suggestedFilename?: string;
   totalBytes?: number;
   transferKind?: TransferKind;
+  handoffAuth?: HandoffAuth;
+}
+
+export interface HandoffAuthHeader {
+  name: string;
+  value: string;
+}
+
+export interface HandoffAuth {
+  headers: HandoffAuthHeader[];
 }
 
 export interface AdoptBrowserDownloadPayload {
@@ -441,6 +453,7 @@ export function createEnqueueDownloadRequest(
   const totalBytes = normalizeTotalBytes(metadata.totalBytes);
   const suggestedFilename = trimMetadata(metadata.suggestedFilename);
   const transferKind = normalizeTransferKind(metadata.transferKind);
+  const handoffAuth = normalizeHandoffAuth(metadata.handoffAuth);
   return {
     ok: true,
     value: {
@@ -453,6 +466,7 @@ export function createEnqueueDownloadRequest(
         suggestedFilename,
         totalBytes,
         ...(transferKind ? { transferKind } : {}),
+        ...(handoffAuth ? { handoffAuth } : {}),
       },
     },
   };
@@ -472,6 +486,7 @@ export function createPromptDownloadRequest(
   const totalBytes = normalizeTotalBytes(metadata.totalBytes);
 
   const transferKind = normalizeTransferKind(metadata.transferKind);
+  const handoffAuth = normalizeHandoffAuth(metadata.handoffAuth);
   return {
     ok: true,
     value: {
@@ -484,9 +499,25 @@ export function createPromptDownloadRequest(
         suggestedFilename: trimMetadata(metadata.suggestedFilename),
         totalBytes,
         ...(transferKind ? { transferKind } : {}),
+        ...(handoffAuth ? { handoffAuth } : {}),
       },
     },
   };
+}
+
+function normalizeHandoffAuth(handoffAuth: HandoffAuth | undefined): HandoffAuth | undefined {
+  if (!handoffAuth?.headers?.length) {
+    return undefined;
+  }
+
+  const headers = handoffAuth.headers
+    .map((header) => ({
+      name: trimMetadata(header.name)?.trim() ?? '',
+      value: header.value.slice(0, 16 * 1024),
+    }))
+    .filter((header) => header.name && header.value);
+
+  return headers.length ? { headers } : undefined;
 }
 
 export function createAdoptBrowserDownloadRequest(

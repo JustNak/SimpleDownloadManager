@@ -100,6 +100,34 @@ if (enqueueWithMetadata.ok) {
   );
 }
 
+const enqueueWithHandoffAuth = createEnqueueDownloadRequest(
+  'https://canvas.example.edu/files/569/download?download_frd=1&verifier=abc',
+  { ...source, entryPoint: 'browser_download' },
+  'request_handoff_auth',
+  {
+    suggestedFilename: 'lecture.pdf',
+    handoffAuth: {
+      headers: [
+        { name: 'Cookie', value: 'canvas_session=abc' },
+        { name: 'Referer', value: 'https://canvas.example.edu/courses/1/files' },
+      ],
+    },
+  },
+);
+assert.equal(enqueueWithHandoffAuth.ok, true, 'browser download handoff should accept captured request headers');
+if (enqueueWithHandoffAuth.ok) {
+  assert.deepEqual(
+    enqueueWithHandoffAuth.value.payload.handoffAuth,
+    {
+      headers: [
+        { name: 'Cookie', value: 'canvas_session=abc' },
+        { name: 'Referer', value: 'https://canvas.example.edu/courses/1/files' },
+      ],
+    },
+    'enqueue handoff should preserve bounded browser request headers for desktop validation',
+  );
+}
+
 const backgroundSource = readFileSync(new URL('../src/background/index.ts', import.meta.url), 'utf8');
 assert.doesNotMatch(
   backgroundSource,
@@ -108,6 +136,6 @@ assert.doesNotMatch(
 );
 assert.match(
   backgroundSource,
-  /trackBrowserDownloadForAdoption\(url, item, 'browser_download'\)/,
-  'automatic browser downloads, including .torrent files, should stay browser-owned until completed-file adoption',
+  /handOffCapturedBrowserDownload\(/,
+  'automatic browser downloads, including .torrent files, should use the prompt-first SDM handoff path',
 );

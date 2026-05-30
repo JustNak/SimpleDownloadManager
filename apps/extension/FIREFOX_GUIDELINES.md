@@ -14,8 +14,8 @@ This file documents the Firefox-specific review and packaging rules for the Simp
 ## Permission Rationale
 
 - `nativeMessaging` is required to communicate with the installed native desktop host.
-- `downloads` is required to observe browser downloads and adopt completed files into the desktop app queue.
-- `webRequest` and `webRequestBlocking` are required so Firefox can distinguish real attachment/download responses from page-internal traffic before completed-file adoption.
+- `downloads` is required to observe eligible browser downloads, cancel browser-owned transfers, and hand them to the desktop app queue.
+- `webRequest` and `webRequestBlocking` are required so Firefox can distinguish real attachment/download responses from page-internal traffic, preserve original download URLs before CDN redirects, and cancel eligible browser transfers for SDM handoff.
 - `<all_urls>` is required because download links can originate from arbitrary HTTP(S) hosts. Runtime filtering still applies by scheme, excluded host patterns, captured file extensions, and user settings.
 - `storage` is required for extension settings.
 - `contextMenus` is required for the link context menu action.
@@ -26,7 +26,7 @@ This file documents the Firefox-specific review and packaging rules for the Simp
 - No remote code is used. The submitted ZIP must contain only bundled extension JavaScript, static assets, and `manifest.json`.
 - The extension does not include analytics, advertising, tracking, or remote configuration.
 - Data is transmitted only to the local native desktop application through Firefox native messaging.
-- Reviewer notes should explain the native app dependency, completed-file adoption flow, wildcard excluded hosts, and why each permission is needed.
+- Reviewer notes should explain the native app dependency, browser download handoff flow, wildcard excluded hosts, and why each permission is needed.
 - The AMO upload ZIP must contain extension files at the archive root, not inside a nested folder.
 - The source ZIP should include source files and build scripts, while excluding generated or heavy folders such as `node_modules`, `dist`, `release`, `.tmp`, and Rust `target`.
 - `AMO_LISTING_METADATA.json` is generated for `web-ext sign --channel=listed --amo-metadata=...`.

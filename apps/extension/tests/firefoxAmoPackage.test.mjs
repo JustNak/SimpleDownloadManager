@@ -80,7 +80,7 @@ assert.equal(listingMetadata.requires_payment, false);
 assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
 assert.match(listingMetadata.version.release_notes['en-US'], /site session\/API probes/);
-assert.match(listingMetadata.version.release_notes['en-US'], /Firefox owns the transfer/);
+assert.match(listingMetadata.version.release_notes['en-US'], /source URL/);
 assert.match(listingMetadata.version.approval_notes, /download intent/);
 assert.match(listingMetadata.version.approval_notes, /local native desktop app/);
 
@@ -93,7 +93,7 @@ const reviewerNotes = createFirefoxAmoReviewerNotes();
 assert.match(reviewerNotes, /download intent/);
 assert.match(reviewerNotes, /YouTube Music verify_session/);
 assert.match(reviewerNotes, /local native desktop app/);
-assert.match(reviewerNotes, /browser-owned completed-file adoption/);
+assert.match(reviewerNotes, /original download endpoint/);
 
 const releaseNotes = createFirefoxAmoReleaseNotes();
 assert.match(releaseNotes, /^- Tightened Firefox auto-capture/m);

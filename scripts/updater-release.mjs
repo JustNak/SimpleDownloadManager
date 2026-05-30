@@ -2,6 +2,7 @@ import { readFile as readFileFromDisk, writeFile as writeFileToDisk } from 'node
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  resolveWindowsReleaseTargets,
   windowsInstallerName,
   windowsReleaseTargetList,
   windowsReleaseTargets,
@@ -121,11 +122,12 @@ export async function writeReleaseUpdaterMetadata({
   version,
   signature,
   signatures,
+  targets = windowsReleaseTargetList,
   readFile = readFileFromDisk,
   writeFile = writeFileToDisk,
 } = {}) {
   const resolvedVersion = version ?? JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
-  const paths = updaterReleasePaths(root, resolvedVersion, channel);
+  const paths = updaterReleasePaths(root, resolvedVersion, channel, targets);
   const platformAssets = await Promise.all(paths.installers.map(async (installer) => ({
     target: installer.target,
     url: updaterAssetUrl(
@@ -181,6 +183,7 @@ export async function writeAllReleaseUpdaterMetadata({
   pubDate = new Date().toISOString(),
   betaNotes = process.env.SDM_UPDATER_NOTES || releaseChannels.beta.notes,
   alphaBridgeNotes = process.env.SDM_ALPHA_BRIDGE_UPDATER_NOTES || releaseChannels.alphaBridge.notes,
+  targets = windowsReleaseTargetList,
 } = {}) {
   const beta = await writeReleaseUpdaterMetadata({
     root,
@@ -188,6 +191,7 @@ export async function writeAllReleaseUpdaterMetadata({
     channel: releaseChannels.beta,
     notes: betaNotes,
     pubDate,
+    targets,
   });
   const alphaBridge = await writeReleaseUpdaterMetadata({
     root,
@@ -195,6 +199,7 @@ export async function writeAllReleaseUpdaterMetadata({
     channel: releaseChannels.alphaBridge,
     notes: alphaBridgeNotes,
     pubDate,
+    targets,
   });
   return { beta, alphaBridge };
 }
@@ -209,7 +214,11 @@ export async function writeLatestAlphaJson(options = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const __filename = fileURLToPath(import.meta.url);
   const root = path.resolve(path.dirname(__filename), '..');
-  const result = await writeAllReleaseUpdaterMetadata({ root });
+  const targetsArgIndex = process.argv.findIndex((arg) => arg === '--targets');
+  const targets = targetsArgIndex >= 0
+    ? resolveWindowsReleaseTargets(process.argv[targetsArgIndex + 1])
+    : windowsReleaseTargetList;
+  const result = await writeAllReleaseUpdaterMetadata({ root, targets });
   console.log(`Beta updater metadata written to ${result.beta.paths.metadataPath}`);
   console.log(`Alpha bridge updater metadata written to ${result.alphaBridge.paths.metadataPath}`);
 }

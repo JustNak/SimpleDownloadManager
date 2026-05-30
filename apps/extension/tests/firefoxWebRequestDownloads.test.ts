@@ -114,7 +114,7 @@ assert.deepEqual(
     reason: 'attachment_disposition',
     incognito: false,
   },
-  'POST downloads should be marked for browser-owned completed-file adoption without replay fallback metadata',
+  'POST downloads with strong attachment evidence should still be classified for SDM handoff',
 );
 
 assert.equal(
@@ -173,6 +173,28 @@ assert.deepEqual(
     incognito: true,
   },
   'known downloadable MIME types should use the URL basename when no attachment filename is present',
+);
+
+assert.deepEqual(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://downloads.example.com/download?id=opaque',
+      type: 'main_frame',
+      responseHeaders: [
+        { name: 'Content-Type', value: 'application/zip' },
+        { name: 'Content-Length', value: String(8 * 1024 * 1024) },
+      ],
+    }),
+    defaultSettings,
+  ),
+  {
+    url: 'https://downloads.example.com/download?id=opaque',
+    filename: 'download',
+    totalBytes: 8 * 1024 * 1024,
+    reason: 'download_mime',
+    incognito: false,
+  },
+  'Firefox should catch large top-level opaque responses with known download MIME types',
 );
 
 assert.deepEqual(

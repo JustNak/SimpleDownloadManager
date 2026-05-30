@@ -118,6 +118,22 @@ assert.match(
 );
 assert.equal(alphaBridge.metadata.notes, 'Beta migration update');
 
+const x64Only = await writeReleaseUpdaterMetadata({
+  root: 'virtual-root',
+  version: '0.5.12-beta',
+  targets: [windowsReleaseTargets.x64],
+  signatures: new Map([['x64', 'signed-content-x64']]),
+  writeFile: async () => undefined,
+  readFile: async () => '{"version":"0.5.12-beta"}',
+  pubDate: '2026-04-27T00:00:00.000Z',
+});
+
+assert.deepEqual(
+  Object.keys(x64Only.metadata.platforms),
+  ['windows-x86_64'],
+  'single-target release metadata should not require unbuilt installers',
+);
+
 const releasePaths = updaterReleasePaths('virtual-root', '0.5.12-beta');
 assert.deepEqual(
   releasePaths.installers.map((installer) => installer.target.name),

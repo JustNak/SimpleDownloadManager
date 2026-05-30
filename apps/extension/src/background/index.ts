@@ -1,9 +1,9 @@
-import { isErrorResponse, toUserFacingMessage, type ExtensionIntegrationSettings, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
+import { isErrorResponse, toUserFacingMessage, type DownloadRequestMetadata, type ExtensionIntegrationSettings, type HandoffAuth, type HostToExtensionResponse, type PongPayload } from '@myapp/protocol';
 import browser from './browser';
 import {
   browserDownloadUrl,
+  browserDownloadFilenameSuggestion,
   classifyBrowserDownloadIntent,
-  completeBrowserDownloadAdoption,
   createAsyncFilenameInterceptionListener,
   firefoxWebRequestDownloadCandidate,
   selectFilenameInterceptionApi,
@@ -11,20 +11,19 @@ import {
   type BrowserDownloadFilenameInterceptionApi,
   type BrowserDownloadFilenameInterceptionCandidate,
   type BrowserDownloadFilenameSuggest,
-  type BrowserDownloadFilenameSuggestion,
-  type BrowserDownloadAdoption,
-  type BrowserDownloadDelta,
   type BrowserDownloadIntentDecision,
   type FirefoxWebRequestDownloadCandidate,
   type FirefoxWebRequestDownloadDetails,
+  type FirefoxWebRequestHeader,
 } from './browserDownloads';
 import {
-  adoptBrowserDownload,
   buildContextMenuPayload,
   connectionForErrorCode,
+  detectBrowser,
   enqueueDownload,
   openApp,
   pingNativeHost,
+  promptDownload,
   saveExtensionSettings,
 } from './nativeMessaging';
 import { getExtensionSettings, getPopupState, setExtensionSettings, setHostError, setLastResult, updatePopupState } from './state';
@@ -33,13 +32,27 @@ import { normalizeAccentColor } from '../shared/appearance';
 
 const CONTEXT_MENU_ID = 'download-with-myapp';
 const APPEARANCE_SYNC_ALARM_NAME = 'appearance-sync';
-const BROWSER_ADOPTION_PENDING_TTL_MS = 5 * 60 * 1000;
-const browserDownloadAdoptions = new Map<number, BrowserDownloadAdoption>();
-const pendingBrowserDownloadAdoptions = new Map<string, PendingBrowserDownloadAdoption>();
 let cachedExtensionSettings: ExtensionIntegrationSettings | null = null;
 let cachedExtensionSettingsPromise: Promise<ExtensionIntegrationSettings> | null = null;
 let nativeHostPingPromise: Promise<HostToExtensionResponse> | null = null;
 let refreshConnectionStatePromise: Promise<HostToExtensionResponse> | null = null;
+const handoffAuthByRequestId = new Map<string, BrowserHandoffAuthSnapshot>();
+const handoffAuthByUrl = new Map<string, BrowserHandoffAuthSnapshot[]>();
+const redirectOriginalByRequestId = new Map<string, BrowserRedirectSnapshot>();
+const redirectOriginalByUrl = new Map<string, BrowserRedirectSnapshot[]>();
+const HANDOFF_AUTH_SNAPSHOT_TTL_MS = 30_000;
+const REDIRECT_ORIGINAL_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
+const MAX_HANDOFF_AUTH_SNAPSHOTS_PER_URL = 5;
+const MAX_REDIRECT_ORIGINAL_SNAPSHOTS_PER_URL = 5;
+const ALLOWED_HANDOFF_AUTH_HEADERS = new Set([
+  'cookie',
+  'authorization',
+  'referer',
+  'origin',
+  'user-agent',
+  'accept',
+  'accept-language',
+]);
 
 async function ensureContextMenu() {
   const settings = await getCachedExtensionSettings();
@@ -115,10 +128,6 @@ async function handleContextMenuClick(info: browser.contextMenus.OnClickData, ta
 
 async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem) {
   const url = browserDownloadUrl(item);
-  if (url && consumePendingBrowserDownloadAdoption(item, url)) {
-    return;
-  }
-
   if (shouldSkipBrowserDownloadInterception(item)) {
     return;
   }
@@ -137,7 +146,10 @@ async function handleBrowserDownloadCreated(item: browser.downloads.DownloadItem
   if (decision.action !== 'capture') {
     return;
   }
-  trackBrowserDownloadForAdoption(url, item, 'browser_download');
+
+  if (await cancelBrowserDownload(item)) {
+    void handOffCapturedBrowserDownload(url, item, settings);
+  }
 }
 
 async function handleBrowserDownloadDeterminingFilename(
@@ -167,8 +179,11 @@ async function handleBrowserDownloadDeterminingFilename(
     suggestBrowserDownload(item, suggest);
     return;
   }
-  trackBrowserDownloadForAdoption(url, item, 'browser_download');
-  suggestBrowserDownload(item, suggest);
+
+  if (await cancelBrowserDownload(item)) {
+    void handOffCapturedBrowserDownload(url, item, settings);
+  }
+  suggest();
 }
 
 browser.runtime.onInstalled.addListener(() => {
@@ -208,10 +223,7 @@ if (filenameInterceptionApi) {
   });
   registerFirefoxWebRequestInterception();
 }
-browser.downloads?.onChanged.addListener((delta) => {
-  void handleBrowserDownloadChanged(delta as BrowserDownloadDelta);
-});
-
+registerBrowserHandoffAuthHeaderCapture();
 browser.runtime.onMessage.addListener(async (message: PopupRequest) => {
   switch (message.type) {
     case 'popup_ping':
@@ -304,9 +316,41 @@ function browserDownloadSource(item: BrowserDownloadHandoffItem) {
   };
 }
 
-async function recordHostError(response: Extract<HostToExtensionResponse, { ok: false }>): Promise<void> {
+async function handOffCapturedBrowserDownload(
+  url: string,
+  item: BrowserDownloadHandoffItem,
+  settings: ExtensionIntegrationSettings,
+): Promise<void> {
+  await updatePopupState({ isSubmitting: true });
+  const handoffUrl = resolveOriginalBrowserDownloadUrl(url, item) ?? url;
+  const source = browserDownloadSource(item);
+  const metadata: DownloadRequestMetadata = {
+    suggestedFilename: basenameOnly(item.filename) ?? basenameFromUrl(url),
+    totalBytes: normalizedDownloadSize(item.totalBytes),
+    handoffAuth: resolveBrowserHandoffAuth(handoffUrl, item),
+  };
+  const response = settings.downloadHandoffMode === 'auto'
+    ? await enqueueDownload(handoffUrl, source, metadata)
+    : await promptDownload(handoffUrl, source, metadata);
+
+  if (isErrorResponse(response)) {
+    await recordHostError(response);
+    return;
+  }
+
+  const state = rememberStateSettings(await setLastResult('connected', response));
+  await updateBrowserBadge(state);
+}
+
+async function recordHostError(
+  response: Extract<HostToExtensionResponse, { ok: false }>,
+): Promise<void> {
   const connection = connectionForErrorCode(response.code);
-  const state = await setHostError(response.code, toUserFacingMessage(response.code, response.message), connection);
+  const state = await setHostError(
+    response.code,
+    toUserFacingMessage(response.code, response.message),
+    connection,
+  );
   await updateBrowserBadge(state);
 }
 
@@ -441,99 +485,225 @@ async function handleFirefoxWebRequestHeadersReceived(
       reason: candidate.reason,
     });
 
-    markBrowserDownloadUrlForAdoption(candidate);
-    return {};
+    void handOffCapturedBrowserDownload(candidate.url, candidate, settings);
+    return { cancel: true };
   } catch {
     return {};
-  }
-}
-
-async function handleBrowserDownloadChanged(delta: BrowserDownloadDelta): Promise<void> {
-  await completeBrowserDownloadAdoption(delta, browserDownloadAdoptions, {
-    searchDownloads: (query) => browser.downloads.search(query),
-    browserDownloadSource,
-    adoptBrowserDownload,
-    isErrorResponse,
-    onError: (response) => recordHostError(response as Extract<HostToExtensionResponse, { ok: false }>),
-    onSuccess: async (response) => {
-      const state = rememberStateSettings(await setLastResult('connected', response));
-      await updateBrowserBadge(state);
-    },
-  });
-}
-
-function trackBrowserDownloadForAdoption(
-  url: string,
-  item: BrowserDownloadHandoffItem & { id?: number; mime?: string },
-  reason: BrowserDownloadAdoption['reason'],
-): void {
-  if (typeof item.id !== 'number' || item.id < 0) {
-    return;
-  }
-
-  browserDownloadAdoptions.set(item.id, {
-    url,
-    suggestedFilename: basenameOnly(item.filename) ?? basenameFromUrl(url),
-    totalBytes: normalizedDownloadSize(item.totalBytes),
-    incognito: item.incognito,
-    pageUrl: item.pageUrl,
-    pageTitle: item.pageTitle,
-    referrer: item.referrer,
-    reason,
-  });
-}
-
-function markBrowserDownloadUrlForAdoption(candidate: FirefoxWebRequestDownloadCandidate): void {
-  prunePendingBrowserDownloadAdoptions();
-  pendingBrowserDownloadAdoptions.set(adoptionUrlKey(candidate.url), {
-    url: candidate.url,
-    suggestedFilename: candidate.filename,
-    totalBytes: normalizedDownloadSize(candidate.totalBytes),
-    incognito: candidate.incognito,
-    expiresAt: Date.now() + BROWSER_ADOPTION_PENDING_TTL_MS,
-    reason: 'browser_session',
-  });
-}
-
-function consumePendingBrowserDownloadAdoption(item: browser.downloads.DownloadItem, url: string): boolean {
-  prunePendingBrowserDownloadAdoptions();
-  const finalUrl = (item as browser.downloads.DownloadItem & { finalUrl?: string }).finalUrl;
-  const keys = [url, finalUrl].filter((value): value is string => Boolean(value)).map(adoptionUrlKey);
-  const key = keys.find((candidateKey) => pendingBrowserDownloadAdoptions.has(candidateKey));
-  if (!key) {
-    return false;
-  }
-
-  const pending = pendingBrowserDownloadAdoptions.get(key);
-  pendingBrowserDownloadAdoptions.delete(key);
-  if (!pending) {
-    return false;
-  }
-
-  trackBrowserDownloadForAdoption(url, { ...item, ...pending }, pending.reason);
-  return true;
-}
-
-function prunePendingBrowserDownloadAdoptions(now = Date.now()): void {
-  for (const [key, pending] of pendingBrowserDownloadAdoptions) {
-    if (pending.expiresAt < now) {
-      pendingBrowserDownloadAdoptions.delete(key);
-    }
-  }
-}
-
-function adoptionUrlKey(url: string): string {
-  try {
-    const parsed = new URL(url);
-    parsed.hash = '';
-    return parsed.href;
-  } catch {
-    return url;
   }
 }
 
 function normalizedDownloadSize(value: number | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+function registerBrowserHandoffAuthHeaderCapture(): void {
+  const webRequest = getFirefoxWebRequestApi();
+  if (!webRequest) {
+    return;
+  }
+
+  webRequest.onSendHeaders?.addListener(
+    captureHandoffAuthHeaders,
+    {
+      urls: ['http://*/*', 'https://*/*'],
+      types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'],
+    },
+    handoffAuthHeaderExtraInfoSpec(),
+  );
+
+  webRequest.onBeforeRedirect?.addListener(
+    captureBrowserDownloadRedirect,
+    {
+      urls: ['http://*/*', 'https://*/*'],
+      types: ['main_frame', 'sub_frame', 'xmlhttprequest', 'object', 'other'],
+    },
+  );
+}
+
+function captureHandoffAuthHeaders(details: FirefoxWebRequestSendHeadersDetails): void {
+  const url = browserDownloadUrl({ url: details.url });
+  if (!url || !details.requestHeaders?.length) {
+    return;
+  }
+
+  const handoffAuth = handoffAuthFromRequestHeaders(details.requestHeaders);
+  if (!handoffAuth) {
+    return;
+  }
+
+  const snapshot: BrowserHandoffAuthSnapshot = {
+    url,
+    createdAt: Date.now(),
+    handoffAuth,
+  };
+
+  if (details.requestId) {
+    handoffAuthByRequestId.set(details.requestId, handoffAuthByRequestId.get(details.requestId) ?? snapshot);
+  }
+
+  const snapshots = handoffAuthByUrl.get(url) ?? [];
+  snapshots.unshift(snapshot);
+  handoffAuthByUrl.set(url, snapshots.slice(0, MAX_HANDOFF_AUTH_SNAPSHOTS_PER_URL));
+  pruneHandoffAuthSnapshots();
+}
+
+function captureBrowserDownloadRedirect(details: FirefoxWebRequestRedirectDetails): void {
+  const redirectUrl = browserDownloadUrl({ url: details.redirectUrl });
+  const currentUrl = browserDownloadUrl({ url: details.url });
+  if (!redirectUrl || !currentUrl) {
+    return;
+  }
+
+  const existing = details.requestId ? redirectOriginalByRequestId.get(details.requestId) : undefined;
+  const originalUrl = existing?.originalUrl ?? currentUrl;
+  if (!isPreferredOriginalDownloadUrl(originalUrl)) {
+    return;
+  }
+
+  const snapshot: BrowserRedirectSnapshot = {
+    originalUrl,
+    redirectedUrl: redirectUrl,
+    createdAt: Date.now(),
+  };
+
+  if (details.requestId) {
+    redirectOriginalByRequestId.set(details.requestId, snapshot);
+  }
+
+  const snapshots = redirectOriginalByUrl.get(redirectUrl) ?? [];
+  snapshots.unshift(snapshot);
+  redirectOriginalByUrl.set(redirectUrl, snapshots.slice(0, MAX_REDIRECT_ORIGINAL_SNAPSHOTS_PER_URL));
+  pruneRedirectOriginalSnapshots();
+}
+
+function resolveOriginalBrowserDownloadUrl(
+  url: string,
+  item: { requestId?: string; url?: string; finalUrl?: string },
+): string | undefined {
+  pruneRedirectOriginalSnapshots();
+
+  if (item.requestId) {
+    const snapshot = redirectOriginalByRequestId.get(item.requestId);
+    if (snapshot && !redirectOriginalSnapshotExpired(snapshot)) {
+      return snapshot.originalUrl;
+    }
+  }
+
+  const candidates = [url, item.finalUrl, item.url].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    const snapshots = redirectOriginalByUrl.get(candidate) ?? [];
+    const snapshot = snapshots.find((entry) => !redirectOriginalSnapshotExpired(entry));
+    if (snapshot) {
+      return snapshot.originalUrl;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveBrowserHandoffAuth(
+  url: string,
+  item: { requestId?: string; url?: string; finalUrl?: string },
+): HandoffAuth | undefined {
+  pruneHandoffAuthSnapshots();
+
+  if (item.requestId) {
+    const snapshot = handoffAuthByRequestId.get(item.requestId);
+    if (snapshot && snapshot.url === url && !handoffAuthSnapshotExpired(snapshot)) {
+      return snapshot.handoffAuth;
+    }
+  }
+
+  const candidates = handoffAuthByUrl.get(url) ?? [];
+  return candidates.find((snapshot) => !handoffAuthSnapshotExpired(snapshot))?.handoffAuth;
+}
+
+function handoffAuthFromRequestHeaders(headers: FirefoxWebRequestHeader[]): HandoffAuth | undefined {
+  const filtered = headers
+    .filter((header) => header.value && isAllowedHandoffAuthHeader(header.name))
+    .map((header) => ({
+      name: canonicalHandoffAuthHeaderName(header.name),
+      value: header.value ?? '',
+    }))
+    .filter((header) => header.value);
+
+  return filtered.length ? { headers: filtered } : undefined;
+}
+
+function isAllowedHandoffAuthHeader(name: string): boolean {
+  const lower = name.trim().toLowerCase();
+  return ALLOWED_HANDOFF_AUTH_HEADERS.has(lower)
+    || lower.startsWith('sec-fetch-')
+    || lower.startsWith('sec-ch-ua');
+}
+
+function canonicalHandoffAuthHeaderName(name: string): string {
+  return name.trim().toLowerCase().replace(/(^|-)([a-z])/g, (_, prefix: string, letter: string) => (
+    `${prefix}${letter.toUpperCase()}`
+  ));
+}
+
+function handoffAuthHeaderExtraInfoSpec(): string[] {
+  const spec = ['requestHeaders'];
+  if (!detectBrowser().includes('firefox')) {
+    spec.push('extraHeaders');
+  }
+  return spec;
+}
+
+function pruneHandoffAuthSnapshots(): void {
+  const now = Date.now();
+  for (const [requestId, snapshot] of handoffAuthByRequestId) {
+    if (now - snapshot.createdAt > HANDOFF_AUTH_SNAPSHOT_TTL_MS) {
+      handoffAuthByRequestId.delete(requestId);
+    }
+  }
+
+  for (const [url, snapshots] of handoffAuthByUrl) {
+    const active = snapshots.filter((snapshot) => now - snapshot.createdAt <= HANDOFF_AUTH_SNAPSHOT_TTL_MS);
+    if (active.length) {
+      handoffAuthByUrl.set(url, active);
+    } else {
+      handoffAuthByUrl.delete(url);
+    }
+  }
+}
+
+function handoffAuthSnapshotExpired(snapshot: BrowserHandoffAuthSnapshot): boolean {
+  return Date.now() - snapshot.createdAt > HANDOFF_AUTH_SNAPSHOT_TTL_MS;
+}
+
+function pruneRedirectOriginalSnapshots(): void {
+  const now = Date.now();
+  for (const [requestId, snapshot] of redirectOriginalByRequestId) {
+    if (now - snapshot.createdAt > REDIRECT_ORIGINAL_SNAPSHOT_TTL_MS) {
+      redirectOriginalByRequestId.delete(requestId);
+    }
+  }
+
+  for (const [url, snapshots] of redirectOriginalByUrl) {
+    const active = snapshots.filter((snapshot) => now - snapshot.createdAt <= REDIRECT_ORIGINAL_SNAPSHOT_TTL_MS);
+    if (active.length) {
+      redirectOriginalByUrl.set(url, active);
+    } else {
+      redirectOriginalByUrl.delete(url);
+    }
+  }
+}
+
+function redirectOriginalSnapshotExpired(snapshot: BrowserRedirectSnapshot): boolean {
+  return Date.now() - snapshot.createdAt > REDIRECT_ORIGINAL_SNAPSHOT_TTL_MS;
+}
+
+function isPreferredOriginalDownloadUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname.toLowerCase();
+    return parsed.searchParams.get('download_frd') === '1'
+      && /(?:^|\/)(?:courses\/\d+\/)?files\/\d+\/download\/?$/.test(pathname);
+  } catch {
+    return false;
+  }
 }
 
 function logDownloadCaptureDecision(
@@ -578,13 +748,49 @@ function getFirefoxWebRequestApi(): FirefoxWebRequestApi | null {
 }
 
 function suggestBrowserDownload(item: browser.downloads.DownloadItem, suggest: BrowserDownloadFilenameSuggest) {
-  const filename = basenameOnly(item.filename) ?? basenameFromUrl(item.url);
-  if (filename) {
-    suggest({ filename, conflictAction: 'uniquify' } satisfies BrowserDownloadFilenameSuggestion);
-    return;
+  suggest(browserDownloadFilenameSuggestion(item));
+}
+
+async function cancelBrowserDownload(item: browser.downloads.DownloadItem): Promise<boolean> {
+  if (typeof item.id !== 'number' || item.id < 0) {
+    await recordHostError(browserCaptureError('INVALID_PAYLOAD', 'Browser download did not expose a cancellable id.'));
+    return false;
   }
 
-  suggest();
+  const downloads = browser.downloads as typeof browser.downloads & {
+    cancel?: (downloadId: number) => Promise<void>;
+    removeFile?: (downloadId: number) => Promise<void>;
+    erase?: (query: { id: number }) => Promise<unknown>;
+  };
+
+  if (!downloads.cancel) {
+    await recordHostError(browserCaptureError('INTERNAL_ERROR', 'Browser download cancellation is not available.'));
+    return false;
+  }
+
+  try {
+    await downloads.cancel(item.id);
+    await downloads.removeFile?.(item.id).catch(() => undefined);
+    await downloads.erase?.({ id: item.id }).catch(() => undefined);
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Browser download cancellation failed.';
+    await recordHostError(browserCaptureError('INTERNAL_ERROR', message));
+    return false;
+  }
+}
+
+function browserCaptureError(
+  code: Extract<HostToExtensionResponse, { ok: false }>['code'],
+  message: string,
+): Extract<HostToExtensionResponse, { ok: false }> {
+  return {
+    ok: false,
+    requestId: 'browser_capture_error',
+    type: 'rejected',
+    code,
+    message,
+  };
 }
 
 async function openOptionsPage() {
@@ -613,13 +819,37 @@ type BrowserDownloadHandoffItem = {
   pageUrl?: string;
   pageTitle?: string;
   referrer?: string;
+  requestId?: string;
+  url?: string;
+  finalUrl?: string;
 };
 
-type PendingBrowserDownloadAdoption = BrowserDownloadAdoption & {
-  expiresAt: number;
+type BrowserHandoffAuthSnapshot = {
+  url: string;
+  createdAt: number;
+  handoffAuth: HandoffAuth;
+};
+
+type BrowserRedirectSnapshot = {
+  originalUrl: string;
+  redirectedUrl: string;
+  createdAt: number;
 };
 
 type FirefoxWebRequestApi = {
+  onSendHeaders?: {
+    addListener(
+      listener: (details: FirefoxWebRequestSendHeadersDetails) => void,
+      filter: { urls: string[]; types: string[] },
+      extraInfoSpec: string[],
+    ): void;
+  };
+  onBeforeRedirect?: {
+    addListener(
+      listener: (details: FirefoxWebRequestRedirectDetails) => void,
+      filter: { urls: string[]; types: string[] },
+    ): void;
+  };
   onHeadersReceived: {
     addListener(
       listener: (details: FirefoxWebRequestDownloadDetails) => Promise<{ cancel?: boolean }> | { cancel?: boolean },
@@ -627,4 +857,16 @@ type FirefoxWebRequestApi = {
       extraInfoSpec: string[],
     ): void;
   };
+};
+
+type FirefoxWebRequestSendHeadersDetails = {
+  requestId?: string;
+  url: string;
+  requestHeaders?: FirefoxWebRequestHeader[];
+};
+
+type FirefoxWebRequestRedirectDetails = {
+  requestId?: string;
+  url: string;
+  redirectUrl: string;
 };

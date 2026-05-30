@@ -148,6 +148,17 @@ async function main() {
   );
   assert.deepEqual(
     classifyBrowserDownloadIntent({
+      url: 'https://files.example.com/download?id=opaque',
+      filename: 'download',
+      mime: 'application/zip',
+      totalBytes: 8 * 1024 * 1024,
+      resourceType: 'main_frame',
+    }, defaultSettings.capturedFileExtensions),
+    { action: 'capture', reason: 'download_mime' },
+    'large top-level responses with a known download MIME type should be captured even when the URL is opaque',
+  );
+  assert.deepEqual(
+    classifyBrowserDownloadIntent({
       url: 'https://www.youtube.com/api/timedtext?v=RZpz24nP1P0&ei=xUE',
       filename: 't.txt',
       contentDisposition: 'attachment; filename="t.txt"',

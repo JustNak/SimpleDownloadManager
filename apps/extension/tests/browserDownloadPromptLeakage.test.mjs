@@ -20,9 +20,11 @@ assert.equal(blobStreamIndex, -1, 'automatic browser capture should not stream b
 const handlerSource = backgroundSource.slice(handlerStart, handlerEnd);
 const detachIndex = handlerSource.indexOf('await detachBrowserDownloadForDesktopPrompt');
 const pingIndex = handlerSource.indexOf('const pingResponse = await pingNativeHost');
-const adoptionIndex = handlerSource.indexOf("trackBrowserDownloadForAdoption(url, item, 'browser_download')");
+const cancelIndex = handlerSource.indexOf('await cancelBrowserDownload(item)');
+const handoffIndex = handlerSource.indexOf('void handOffCapturedBrowserDownload(');
 
-assert.notEqual(adoptionIndex, -1, 'filename interception should adopt browser-owned downloads after completion');
+assert.notEqual(cancelIndex, -1, 'filename interception should cancel the browser download before SDM handoff');
+assert.notEqual(handoffIndex, -1, 'filename interception should hand the cancelled download to SDM prompt/auto flow');
 assert.equal(
   detachIndex,
   -1,
@@ -34,11 +36,10 @@ assert.doesNotMatch(
   /discardBrowserDownloadBeforeFilenameRelease/,
   'detached prompt flow should not keep the filename callback open until after the desktop prompt resolves',
 );
-
-assert.match(
+assert.doesNotMatch(
   handlerSource,
-  /trackBrowserDownloadForAdoption\(url, item, 'browser_download'\);[\s\S]*?suggestBrowserDownload\(item, suggest\);/,
-  'filename interception should release the browser save and adopt the completed file later',
+  /trackBrowserDownloadForAdoption\(url, item, 'browser_download'\)/,
+  'ask/auto browser capture should not let the browser save first and adopt the completed file later',
 );
 assert.doesNotMatch(
   backgroundSource,

@@ -191,7 +191,11 @@ try {
   Compress-Archive -Path "$extensionRoot\dist\firefox\*" -DestinationPath $firefoxZip
 
   Copy-Item -Path "$workspaceRoot\config\release.json" -Destination $releaseRoot
-  Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @('.\scripts\updater-release.mjs')
+  Invoke-ReleaseCommand -FilePath 'node' -ArgumentList @(
+    '.\scripts\updater-release.mjs',
+    '--targets',
+    ($releaseTargets.Name -join ',')
+  )
 
   Write-Host "Release artifacts written to $releaseRoot"
 }

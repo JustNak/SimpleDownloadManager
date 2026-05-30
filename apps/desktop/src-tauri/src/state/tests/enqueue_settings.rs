@@ -390,6 +390,40 @@ fn enqueue_options_replace_duplicate_rejects_active_duplicate() {
 }
 
 #[test]
+fn enqueue_options_replace_duplicate_rejects_canceled_active_duplicate() {
+    let download_dir = test_runtime_dir("duplicate-replace-canceled-active");
+    let temp_path = download_dir.join("file.zip.part");
+    std::fs::write(&temp_path, b"partial").unwrap();
+
+    let mut existing_job = download_job("job_9", JobState::Canceled, ResumeSupport::Supported, 25);
+    existing_job.url = "https://example.com/file.zip".into();
+    existing_job.filename = "file.zip".into();
+    existing_job.target_path = download_dir.join("file.zip").display().to_string();
+    existing_job.temp_path = temp_path.display().to_string();
+
+    let mut state = runtime_state_with_jobs(vec![existing_job]);
+    state.settings.download_directory = download_dir.display().to_string();
+    state.active_workers.insert("job_9".into());
+
+    let error = state
+        .enqueue_download_in_memory(
+            "https://example.com/file.zip",
+            EnqueueOptions {
+                duplicate_policy: DuplicatePolicy::ReplaceExisting,
+                ..Default::default()
+            },
+        )
+        .expect_err("canceled active duplicate should wait for worker release");
+
+    assert_eq!(error.code, "DUPLICATE_ACTIVE");
+    assert_eq!(state.jobs.len(), 1);
+    assert!(state.active_workers.contains("job_9"));
+    assert!(temp_path.exists());
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[test]
 fn enqueue_options_replace_duplicate_keeps_completed_target_file() {
     let download_dir = test_runtime_dir("duplicate-replace-completed");
     let target_path = download_dir.join("file.zip");

@@ -5,6 +5,7 @@ release/
 test-runtime/
 .tmp/
 .codex-tmp/
+docs/superpowers/
 .cargo-temp/
 .codex-*.log
 apps/desktop/src-tauri/binaries/

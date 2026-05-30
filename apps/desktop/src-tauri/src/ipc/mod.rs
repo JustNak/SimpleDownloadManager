@@ -6,7 +6,7 @@ use crate::state::{
 };
 use crate::storage::{
     AppearanceSettings, ConnectionState, DiagnosticLevel, DownloadSource,
-    ExtensionIntegrationSettings, HostRegistrationDiagnostics, HostRegistrationEntry,
+    ExtensionIntegrationSettings, HandoffAuth, HostRegistrationDiagnostics, HostRegistrationEntry,
     HostRegistrationStatus, QueueSummary, TransferKind,
 };
 use crate::windows::{
@@ -36,6 +36,7 @@ const MAX_METADATA_LENGTH: usize = 512;
 const MAX_LOCAL_PATH_LENGTH: usize = 32 * 1024;
 const SIDE_EFFECT_REQUEST_LIMIT: usize = 30;
 const SIDE_EFFECT_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
+const DOWNLOAD_PROMPT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 static SIDE_EFFECT_REQUEST_TIMES: OnceLock<Mutex<VecDeque<Instant>>> = OnceLock::new();
 #[cfg(windows)]
 const HOST_CONTACT_TTL: Duration = Duration::from_secs(20);
@@ -100,6 +101,7 @@ struct EnqueuePayload {
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
     transfer_kind: Option<TransferKind>,
+    handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +112,7 @@ struct PromptDownloadPayload {
     suggested_filename: Option<String>,
     total_bytes: Option<u64>,
     transfer_kind: Option<TransferKind>,
+    handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -544,6 +547,7 @@ async fn handle_request(
                         source,
                         filename_hint: payload.suggested_filename,
                         transfer_kind,
+                        handoff_auth: payload.handoff_auth,
                     },
                 )
                 .await;
@@ -563,7 +567,16 @@ async fn handle_request(
                 Err(error) => return map_backend_error(request.request_id, error),
             };
 
-            run_prompt_download(&app, state, prompts, request.request_id, prompt, source).await
+            run_prompt_download(
+                &app,
+                state,
+                prompts,
+                request.request_id,
+                prompt,
+                source,
+                payload.handoff_auth,
+            )
+            .await
         }
         "adopt_browser_download" => {
             let payload =
@@ -629,6 +642,7 @@ async fn handle_request(
                         source,
                         filename_hint: payload.suggested_filename,
                         transfer_kind,
+                        handoff_auth: payload.handoff_auth,
                     },
                 )
                 .await;
@@ -657,6 +671,7 @@ async fn handle_request(
                         request.request_id,
                         prompt,
                         source,
+                        payload.handoff_auth,
                     )
                     .await;
                 }
@@ -668,7 +683,7 @@ async fn handle_request(
                     EnqueueOptions {
                         source: Some(source),
                         filename_hint: payload.suggested_filename,
-                        handoff_auth: None,
+                        handoff_auth: payload.handoff_auth,
                         transfer_kind: Some(transfer_kind),
                         ..Default::default()
                     },
@@ -1457,6 +1472,7 @@ struct HandoffDownloadRequest {
     source: DownloadSource,
     filename_hint: Option<String>,
     transfer_kind: TransferKind,
+    handoff_auth: Option<HandoffAuth>,
 }
 
 async fn enqueue_handoff_download(
@@ -1470,6 +1486,7 @@ async fn enqueue_handoff_download(
         source,
         filename_hint,
         transfer_kind,
+        handoff_auth,
     } = request;
 
     match state
@@ -1478,7 +1495,7 @@ async fn enqueue_handoff_download(
             EnqueueOptions {
                 source: Some(source),
                 filename_hint,
-                handoff_auth: None,
+                handoff_auth,
                 transfer_kind: Some(transfer_kind),
                 ..Default::default()
             },
@@ -1516,6 +1533,7 @@ async fn run_prompt_download(
     request_id: String,
     prompt: crate::storage::DownloadPrompt,
     source: DownloadSource,
+    handoff_auth: Option<HandoffAuth>,
 ) -> HostResponse {
     let receiver = prompts.enqueue(prompt.clone()).await;
     if let Err(error) = show_download_prompt_window(app).await {
@@ -1531,7 +1549,13 @@ async fn run_prompt_download(
         let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, active_prompt);
     }
 
-    match receiver.await.unwrap_or(PromptDecision::Cancel) {
+    let (decision, next_prompt_after_timeout) =
+        prompt_decision_or_timeout(&prompts, &prompt.id, receiver, DOWNLOAD_PROMPT_TIMEOUT).await;
+    if let Some(next_prompt) = next_prompt_after_timeout {
+        let _ = app.emit_to(DOWNLOAD_PROMPT_WINDOW, PROMPT_CHANGED_EVENT, next_prompt);
+    }
+
+    match decision {
         PromptDecision::Cancel => HostResponse::prompt_dismissed(request_id),
         PromptDecision::ShowExisting => {
             if let Some(job) = prompt.duplicate_job {
@@ -1559,7 +1583,7 @@ async fn run_prompt_download(
                         source: Some(source),
                         directory_override,
                         filename_hint: Some(filename_hint),
-                        handoff_auth: None,
+                        handoff_auth,
                         duplicate_policy,
                         ..Default::default()
                     },
@@ -1592,6 +1616,25 @@ async fn run_prompt_download(
                 }
                 Err(error) => map_backend_error(request_id, error),
             }
+        }
+    }
+}
+
+async fn prompt_decision_or_timeout(
+    prompts: &PromptRegistry,
+    prompt_id: &str,
+    mut receiver: tokio::sync::oneshot::Receiver<PromptDecision>,
+    timeout: Duration,
+) -> (PromptDecision, Option<crate::storage::DownloadPrompt>) {
+    tokio::select! {
+        decision = &mut receiver => (decision.unwrap_or(PromptDecision::Cancel), None),
+        _ = tokio::time::sleep(timeout) => {
+            let next_prompt = prompts
+                .resolve(prompt_id, PromptDecision::Cancel)
+                .await
+                .ok()
+                .flatten();
+            (PromptDecision::Cancel, next_prompt)
         }
     }
 }
@@ -1654,6 +1697,54 @@ mod tests {
         assert!(!super::should_register_host_contact_before_response(
             "enqueue_download"
         ));
+    }
+
+    #[tokio::test]
+    async fn prompt_decision_timeout_resolves_as_cancel_and_activates_next_prompt() {
+        let prompts = PromptRegistry::default();
+        let first = crate::storage::DownloadPrompt {
+            id: "prompt_timeout".into(),
+            url: "https://example.com/timeout.zip".into(),
+            filename: "timeout.zip".into(),
+            source: None,
+            total_bytes: None,
+            default_directory: "C:/Downloads".into(),
+            target_path: "C:/Downloads/timeout.zip".into(),
+            duplicate_job: None,
+            duplicate_path: None,
+            duplicate_filename: None,
+            duplicate_reason: None,
+        };
+        let second = crate::storage::DownloadPrompt {
+            id: "prompt_next".into(),
+            url: "https://example.com/next.zip".into(),
+            filename: "next.zip".into(),
+            source: None,
+            total_bytes: None,
+            default_directory: "C:/Downloads".into(),
+            target_path: "C:/Downloads/next.zip".into(),
+            duplicate_job: None,
+            duplicate_path: None,
+            duplicate_filename: None,
+            duplicate_reason: None,
+        };
+        let first_receiver = prompts.enqueue(first).await;
+        let _second_receiver = prompts.enqueue(second).await;
+
+        let (decision, next_prompt) = super::prompt_decision_or_timeout(
+            &prompts,
+            "prompt_timeout",
+            first_receiver,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(matches!(decision, PromptDecision::Cancel));
+        assert_eq!(next_prompt.map(|prompt| prompt.id), Some("prompt_next".into()));
+        assert_eq!(
+            prompts.active_prompt().await.map(|prompt| prompt.id),
+            Some("prompt_next".into())
+        );
     }
 
     #[test]
@@ -1832,6 +1923,51 @@ mod tests {
                 .and_then(|payload| payload.get("status"))
                 .and_then(|status| status.as_str()),
             Some("dismissed")
+        );
+    }
+
+    #[test]
+    fn browser_download_payloads_accept_handoff_auth() {
+        let enqueue = serde_json::from_value::<EnqueuePayload>(json!({
+            "url": "https://canvas.example.edu/files/569/download?download_frd=1",
+            "source": valid_source(),
+            "suggestedFilename": "lecture.pdf",
+            "handoffAuth": {
+                "headers": [
+                    { "name": "Cookie", "value": "canvas_session=abc" },
+                    { "name": "Referer", "value": "https://canvas.example.edu/courses/1/files" }
+                ]
+            }
+        }))
+        .expect("enqueue payload should parse handoff auth");
+
+        assert_eq!(
+            enqueue
+                .handoff_auth
+                .as_ref()
+                .map(|auth| auth.headers.len()),
+            Some(2)
+        );
+
+        let prompt = serde_json::from_value::<PromptDownloadPayload>(json!({
+            "url": "https://canvas.example.edu/files/569/download?download_frd=1",
+            "source": valid_source(),
+            "suggestedFilename": "lecture.pdf",
+            "handoffAuth": {
+                "headers": [
+                    { "name": "Cookie", "value": "canvas_session=abc" }
+                ]
+            }
+        }))
+        .expect("prompt payload should parse handoff auth");
+
+        assert_eq!(
+            prompt
+                .handoff_auth
+                .as_ref()
+                .and_then(|auth| auth.headers.first())
+                .map(|header| header.name.as_str()),
+            Some("Cookie")
         );
     }
 

@@ -58,12 +58,12 @@ assert.doesNotMatch(
 assert.doesNotMatch(
   optionsSource,
   /authHandoffToggle|protectedDownloadAuthScope: authHandoffToggle/,
-  'options script should not wire a browser-session toggle now that automatic capture is browser-owned',
+  'options script should not wire a browser-session toggle for automatic capture',
 );
 assert.doesNotMatch(
   optionsHtml,
   /Browser Session Downloads|auth-handoff-toggle/,
-  'options page should not expose a browser-session toggle now that automatic capture is browser-owned',
+  'options page should not expose a browser-session toggle for automatic capture',
 );
 assert.doesNotMatch(
   optionsHtml,

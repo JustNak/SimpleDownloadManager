@@ -53,6 +53,8 @@ pub struct EnqueueDownloadPayload {
     pub total_bytes: Option<u64>,
     #[serde(rename = "transferKind")]
     pub transfer_kind: Option<TransferKind>,
+    #[serde(rename = "handoffAuth")]
+    pub handoff_auth: Option<HandoffAuth>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -65,6 +67,21 @@ pub struct PromptDownloadPayload {
     pub total_bytes: Option<u64>,
     #[serde(rename = "transferKind")]
     pub transfer_kind: Option<TransferKind>,
+    #[serde(rename = "handoffAuth")]
+    pub handoff_auth: Option<HandoffAuth>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffAuthHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffAuth {
+    pub headers: Vec<HandoffAuthHeader>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -588,7 +605,12 @@ mod tests {
                 },
                 "suggestedFilename": "guide.pdf",
                 "totalBytes": 4096,
-                "transferKind": "torrent"
+                "transferKind": "torrent",
+                "handoffAuth": {
+                    "headers": [
+                        { "name": "Cookie", "value": "canvas_session=abc" }
+                    ]
+                }
             }),
         );
 
@@ -597,6 +619,14 @@ mod tests {
         assert_eq!(payload.suggested_filename.as_deref(), Some("guide.pdf"));
         assert_eq!(payload.total_bytes, Some(4096));
         assert_eq!(payload.transfer_kind, Some(TransferKind::Torrent));
+        assert_eq!(
+            payload
+                .handoff_auth
+                .as_ref()
+                .and_then(|auth| auth.headers.first())
+                .map(|header| (header.name.as_str(), header.value.as_str())),
+            Some(("Cookie", "canvas_session=abc"))
+        );
     }
 
     #[test]

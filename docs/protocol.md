@@ -87,9 +87,8 @@ Supported request types:
 `prompt_download` uses the same metadata fields as `enqueue_download`, but the
 desktop app asks the user to confirm, rename, replace, or cancel before enqueue.
 
-`adopt_browser_download` is used for automatic browser capture. The extension
-lets the original browser download complete, then sends the completed local path
-so the app can add a completed queue entry without replaying the browser request:
+`adopt_browser_download` is retained for compatibility with older extension
+builds that let the browser complete a file before adding it to the queue:
 
 ```json
 {
@@ -126,10 +125,10 @@ so the app can add a completed queue entry without replaying the browser request
 URL handling is intentionally narrow:
 
 - Manual/context-menu/popup requests accept `http:`, `https:`, and `magnet:` URLs.
-- Automatic browser download interception uses `http:`/`https:` download items, configurable captured file extensions, and completed-file adoption.
+- Automatic browser download interception uses `http:`/`https:` download items, configurable captured file extensions, browser request-header snapshots, and redirect-source tracking so CDN responses can be handed off by their original download URL.
 - Manual/context-menu/popup torrent handoffs include optional `transferKind: "torrent"` metadata so magnet links and explicit torrent URLs use the torrent path.
-- Legacy browser stream messages, `browserFallback`, and `handoffAuth` are no longer part of the extension-facing protocol.
-- Protected-download auth remains a desktop/internal HTTP hoster capability. The extension does not name, configure, or send that auth path for browser-download adoption.
+- Legacy browser stream messages and `browserFallback` are no longer part of the extension-facing protocol.
+- `handoffAuth` is memory-only browser request context used for captured browser downloads.
 
 Torrent lifecycle behavior:
 
@@ -142,9 +141,10 @@ Torrent lifecycle behavior:
 default extension stops automatic capture for that filename extension. Manual
 sends, popup sends, and context-menu sends are still allowed. `ignoredFileExtensions`
 is retained only for backward compatibility with older settings.
-Automatic capture always lets the browser own the transfer, then adopts the
-completed local file into the app queue. Replaying only the URL and selected
-headers is not equivalent to preserving the original browser request.
+Automatic capture cancels eligible browser transfers and hands them to the
+desktop app. For Canvas/Instructure-style redirects, the extension preserves the
+original `/files/.../download?download_frd=1` URL before the signed CDN redirect
+and sends that original URL to the app.
 `listenPort` defaults to `1420` and is normalized to a valid TCP port from `1` to `65535`.
 `appearanceSettings` is returned with status responses so the popup and options UI can mirror the desktop theme and accent color. It is display-only for the extension and is not part of `save_extension_settings`.
 
@@ -169,8 +169,8 @@ If the URL is already in the desktop queue, the host still returns `accepted` wi
 `status: "duplicate_existing_job"` and the existing `jobId`.
 
 `status: "dismissed"` means the user canceled the prompt. Automatic browser
-capture no longer cancels the browser's original download; it only adopts a
-completed browser-owned file.
+capture cancels the browser download before handoff, so dismissed captures do
+not continue in the browser.
 Torrent cancel/remove requests stop app tracking but do not delete downloaded torrent data.
 
 Error:

@@ -475,11 +475,13 @@ impl RuntimeState {
                     });
                 if let Some(index) = index {
                     let job = &self.jobs[index];
-                    if job_blocks_removal(job, self.active_workers.contains(&job.id)) {
+                    let active = self.active_workers.contains(&job.id);
+                    if active || job_blocks_removal(job, active) {
                         return Err(BackendError {
                             code: "DUPLICATE_ACTIVE",
-                            message: "Pause or cancel the existing duplicate before replacing it."
-                                .into(),
+                            message:
+                                "Wait for the existing duplicate to stop before replacing it."
+                                    .into(),
                         });
                     }
                 }
