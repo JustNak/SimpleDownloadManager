@@ -268,7 +268,6 @@ fn scheduler_admission_index_computes_acceleration_caps_by_hoster_key() {
     let fuckingfast = fuckingfast_bulk_job("job_fuckingfast_fast", archive);
     let mut runtime = runtime_state_with_jobs(vec![datanodes, fuckingfast]);
     runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
-    runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
 
     let datanodes_key = protected_bulk_hoster_fairness_key(
         runtime
@@ -285,9 +284,9 @@ fn scheduler_admission_index_computes_acceleration_caps_by_hoster_key() {
 
     let index = SchedulerAdmissionIndex::new(&runtime);
 
-    assert_eq!(index.accelerated_bulk_slot_floor(), 8);
-    assert_eq!(index.max_adaptive_concurrency_for_key(&datanodes_key), 8);
-    assert_eq!(index.max_adaptive_concurrency_for_key(&fuckingfast_key), 8);
+    assert_eq!(index.accelerated_bulk_slot_floor(), 4);
+    assert_eq!(index.max_adaptive_concurrency_for_key(&datanodes_key), 4);
+    assert_eq!(index.max_adaptive_concurrency_for_key(&fuckingfast_key), 4);
     assert_eq!(
         index.max_adaptive_concurrency_for_key("https://missing.example:443"),
         BULK_HOSTER_MAX_ADAPTIVE_CONCURRENCY
@@ -597,15 +596,13 @@ async fn scheduler_claims_normal_and_bulk_jobs_in_same_pass() {
 }
 
 #[tokio::test]
-async fn bulk_runtime_tuning_uses_bulk_settings_without_changing_normal_downloads() {
+async fn bulk_runtime_tuning_uses_bulk_speed_limit_without_profile_settings() {
     let download_dir = test_runtime_dir("bulk-runtime-tuning");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.speed_limit_kib_per_second = 128;
-        runtime.settings.download_performance_mode = DownloadPerformanceMode::Stable;
         runtime.settings.bulk.speed_limit_kib_per_second = 512;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
     }
 
     assert_eq!(
@@ -618,11 +615,11 @@ async fn bulk_runtime_tuning_uses_bulk_settings_without_changing_normal_download
     );
     assert_eq!(
         state.download_performance_mode_for_task(false).await,
-        DownloadPerformanceMode::Stable
+        DownloadPerformanceMode::Balanced
     );
     assert_eq!(
         state.download_performance_mode_for_task(true).await,
-        DownloadPerformanceMode::Fast
+        DownloadPerformanceMode::Balanced
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -1085,9 +1082,9 @@ async fn adaptive_bulk_hoster_fairness_ramps_to_four_after_healthy_progress() {
 }
 
 #[tokio::test]
-async fn accelerated_datanodes_fairness_expands_fast_window_after_recent_healthy_progress() {
-    let download_dir = test_runtime_dir("bulk-datanodes-fast-ramp");
-    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_ramp");
+async fn accelerated_datanodes_fairness_expands_automatic_window_after_recent_healthy_progress() {
+    let download_dir = test_runtime_dir("bulk-datanodes-auto-ramp");
+    let archive = bulk_archive_info(&download_dir, "bulk_datanodes_auto_ramp");
     let jobs = (1..=8)
         .map(|index| datanodes_bulk_job(&format!("job_datanodes_{index}"), archive.clone()))
         .collect::<Vec<_>>();
@@ -1095,7 +1092,6 @@ async fn accelerated_datanodes_fairness_expands_fast_window_after_recent_healthy
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 8;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
     }
@@ -1113,7 +1109,7 @@ async fn accelerated_datanodes_fairness_expands_fast_window_after_recent_healthy
             &mut runtime,
             "job_datanodes_1",
             512 * 1024,
-            Duration::from_secs(5),
+            Duration::from_secs(8),
             3,
         );
     }
@@ -1132,12 +1128,8 @@ async fn accelerated_datanodes_fairness_expands_fast_window_after_recent_healthy
             "job_datanodes_2",
             "job_datanodes_3",
             "job_datanodes_4",
-            "job_datanodes_5",
-            "job_datanodes_6",
-            "job_datanodes_7",
-            "job_datanodes_8",
         ],
-        "fast protected hoster batches should expand the contiguous archive window once the active worker is healthy but aggregate speed is low"
+        "automatic protected hoster batches should expand the contiguous archive window once the active worker is healthy but aggregate speed is low"
     );
 
     let _ = std::fs::remove_dir_all(download_dir);
@@ -1156,7 +1148,6 @@ async fn accelerated_datanodes_balanced_requires_priority_runway_before_next_cla
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1208,7 +1199,6 @@ async fn accelerated_datanodes_balanced_ramps_after_slow_positive_progress_sampl
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1245,7 +1235,6 @@ async fn accelerated_datanodes_balanced_stalled_progress_blocks_next_claim() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1295,7 +1284,6 @@ async fn accelerated_fuckingfast_balanced_ramps_after_slow_positive_progress_sam
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_fuckingfast_1".into());
@@ -1354,7 +1342,6 @@ async fn accelerated_fuckingfast_throughput_rescue_expands_same_archive_window()
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 2;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_fuckingfast_17".into());
@@ -1424,7 +1411,6 @@ async fn archive_window_schedules_earliest_unfinished_part_before_later_parts() 
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 6;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_fuckingfast_17".into());
@@ -1464,7 +1450,6 @@ async fn accelerated_fuckingfast_balanced_stalled_progress_blocks_next_claim() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_fuckingfast_1".into());
@@ -1494,7 +1479,7 @@ async fn accelerated_fuckingfast_balanced_stalled_progress_blocks_next_claim() {
 }
 
 #[tokio::test]
-async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next_claim() {
+async fn accelerated_datanodes_automatic_requires_priority_runway_before_next_claim() {
     let download_dir = test_runtime_dir("bulk-datanodes-fast-priority-runway");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_fast_runway");
     let mut active = datanodes_bulk_job("job_datanodes_1", archive.clone());
@@ -1506,7 +1491,6 @@ async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 8;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1514,7 +1498,7 @@ async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next
             &mut runtime,
             "job_datanodes_1",
             512 * 1024,
-            Duration::from_secs(4),
+            Duration::from_secs(7),
             3,
         );
     }
@@ -1522,7 +1506,7 @@ async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next
     let (_, early_tasks) = state
         .claim_schedulable_jobs()
         .await
-        .expect("claiming during fast runway should work");
+        .expect("claiming during automatic runway should work");
     assert!(early_tasks.is_empty());
 
     {
@@ -1531,14 +1515,14 @@ async fn accelerated_datanodes_fast_requires_shorter_priority_runway_before_next
             &mut runtime,
             "job_datanodes_1",
             512 * 1024,
-            Duration::from_secs(5),
+            Duration::from_secs(8),
             3,
         );
     }
     let (_, ready_tasks) = state
         .claim_schedulable_jobs()
         .await
-        .expect("claiming after fast runway should work");
+        .expect("claiming after automatic runway should work");
     assert_eq!(ready_tasks.len(), 1);
     assert_eq!(ready_tasks[0].id, "job_datanodes_2");
 
@@ -1554,7 +1538,6 @@ async fn datanodes_priority_defer_cooldown_skips_then_releases_queued_job() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.defer_datanodes_priority_job_until(
             "job_datanodes_deferred",
@@ -1595,7 +1578,6 @@ async fn datanodes_priority_defer_cooldown_does_not_let_later_same_host_leapfrog
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.defer_datanodes_priority_job_until(
@@ -1645,7 +1627,6 @@ async fn datanodes_oldest_priority_pressure_blocks_new_hoster_but_allows_direct_
         let mut runtime = state.inner.write().await;
         runtime.settings.max_concurrent_downloads = 1;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1696,7 +1677,6 @@ async fn datanodes_priority_pressure_allows_other_hoster_but_blocks_same_hoster(
         let mut runtime = state.inner.write().await;
         runtime.settings.max_concurrent_downloads = 1;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1725,7 +1705,7 @@ async fn datanodes_priority_pressure_allows_other_hoster_but_blocks_same_hoster(
 }
 
 #[tokio::test]
-async fn accelerated_datanodes_claims_only_one_same_key_worker_per_scheduler_pass() {
+async fn accelerated_datanodes_do_not_expand_past_automatic_window() {
     let download_dir = test_runtime_dir("bulk-datanodes-one-per-pass");
     let archive = bulk_archive_info(&download_dir, "bulk_datanodes_one_per_pass");
     let mut jobs = Vec::new();
@@ -1742,25 +1722,24 @@ async fn accelerated_datanodes_claims_only_one_same_key_worker_per_scheduler_pas
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 8;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
-        for index in 1..=4 {
+        for index in 1..=3 {
             let id = format!("job_datanodes_{index}");
             runtime.active_workers.insert(id.clone());
             seed_accelerated_datanodes_health(
                 &mut runtime,
                 &id,
                 512 * 1024,
-                Duration::from_secs(5),
+                Duration::from_secs(8),
                 3,
             );
         }
         runtime.bulk_hoster_fairness.insert(
             "https://datanodes.to:443".into(),
             BulkHosterFairnessController {
-                target_active: 8,
-                aggregate_baseline_speed: Some(4 * 512 * 1024),
+                target_active: 4,
+                aggregate_baseline_speed: Some(3 * 512 * 1024),
                 degraded_since: None,
                 cooldown_until: None,
                 last_freeze_reported_at: None,
@@ -1771,12 +1750,12 @@ async fn accelerated_datanodes_claims_only_one_same_key_worker_per_scheduler_pas
     let (_, tasks) = state
         .claim_schedulable_jobs()
         .await
-        .expect("claiming with high adaptive target should work");
+        .expect("claiming at the automatic adaptive target should work");
     let task_ids = tasks
         .iter()
         .map(|task| task.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(task_ids, vec!["job_datanodes_5"]);
+    assert!(task_ids.is_empty());
 
     let _ = std::fs::remove_dir_all(download_dir);
 }
@@ -1798,7 +1777,6 @@ async fn datanodes_priority_pressure_blocks_same_key_warmup_candidates() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.active_workers.insert("job_datanodes_1".into());
         runtime.active_workers.insert("job_datanodes_2".into());
@@ -1836,7 +1814,6 @@ async fn accelerated_datanodes_workers_are_not_cascade_throttled() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -1886,7 +1863,6 @@ async fn accelerated_fuckingfast_workers_are_not_cascade_throttled() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_fuckingfast_1".into());
@@ -2180,7 +2156,6 @@ async fn accelerated_datanodes_without_baseline_are_not_cascade_throttled() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.active_workers.insert("job_datanodes_1".into());
         runtime.active_workers.insert("job_datanodes_2".into());
@@ -2227,7 +2202,6 @@ async fn accelerated_datanodes_stay_uncapped_after_older_worker_recovers() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.active_workers.insert("job_datanodes_1".into());
         runtime.active_workers.insert("job_datanodes_2".into());
@@ -2309,7 +2283,6 @@ async fn accelerated_datanodes_transient_zero_sample_does_not_freeze_claims() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -2348,7 +2321,6 @@ async fn accelerated_datanodes_transient_zero_before_runway_still_blocks_claims(
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 4;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Balanced;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
         runtime.settings.bulk.hoster_fairness_mode = BulkHosterFairnessMode::Adaptive;
         runtime.active_workers.insert("job_datanodes_1".into());
@@ -2384,12 +2356,11 @@ async fn datanodes_warmup_candidates_follow_acceleration_mode_and_horizon() {
     {
         let mut runtime = state.inner.write().await;
         runtime.settings.bulk.max_concurrent_downloads = 12;
-        runtime.settings.bulk.download_performance_mode = DownloadPerformanceMode::Fast;
         runtime.settings.bulk.hoster_acceleration_mode = BulkHosterAccelerationMode::Safe;
     }
 
     let candidates = state.datanodes_hoster_warmup_candidates().await;
-    assert_eq!(candidates.len(), 8);
+    assert_eq!(candidates.len(), 4);
     assert_eq!(candidates[0].job_id, "job_datanodes_1");
 
     {

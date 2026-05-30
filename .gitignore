@@ -4,7 +4,10 @@ target/
 release/
 test-runtime/
 .tmp/
+.tmp-build/
 .codex-tmp/
+.codex-temp/
+.superpowers/
 docs/superpowers/
 .cargo-temp/
 .codex-*.log

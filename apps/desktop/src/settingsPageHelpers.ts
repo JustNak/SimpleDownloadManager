@@ -2,7 +2,6 @@ import type { AppUpdateState, AppUpdateVersionTone } from './appUpdates.ts';
 import { DEFAULT_EXTENSION_LISTEN_PORT, defaultBulkDownloadDirectory } from './defaultSettings.ts';
 import type { DiagnosticsSnapshot, Settings } from './types.ts';
 
-const downloadPerformanceModes = new Set(['stable', 'balanced', 'fast']);
 const bulkHosterFairnessModes = new Set(['adaptive', 'safe', 'off']);
 const bulkHosterAccelerationModes = new Set(['safe', 'off']);
 
@@ -26,7 +25,6 @@ export function normalizeBulkSettings(
     outputDirectory: settings.outputDirectory.trim() || defaultBulkDownloadDirectory(downloadDirectory),
     maxConcurrentDownloads: Math.max(1, Math.min(24, Math.trunc(settings.maxConcurrentDownloads) || 4)),
     speedLimitKibPerSecond: Math.max(0, Math.min(1048576, Math.trunc(settings.speedLimitKibPerSecond) || 0)),
-    downloadPerformanceMode: downloadPerformanceModes.has(settings.downloadPerformanceMode) ? settings.downloadPerformanceMode : 'fast',
     hosterFairnessMode: bulkHosterFairnessModes.has(settings.hosterFairnessMode) ? settings.hosterFairnessMode : 'adaptive',
     hosterAccelerationMode: bulkHosterAccelerationModes.has(settings.hosterAccelerationMode) ? settings.hosterAccelerationMode : 'safe',
     autoRetryAttempts: Math.max(0, Math.min(10, Math.trunc(settings.autoRetryAttempts) || 0)),

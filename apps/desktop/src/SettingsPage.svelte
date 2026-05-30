@@ -384,7 +384,6 @@
     {@render FieldRow('Max Concurrent Downloads', 'Active job limit.', maxConcurrentControl)}
     {@render FieldRow('Auto Retry Attempts', 'Failure retries.', autoRetryControl)}
     {@render FieldRow('Per-Download Speed Limit', 'Transfer cap.', speedLimitControl)}
-    {@render FieldRow('Download Performance', 'Connection strategy.', performanceControl)}
   </div>
 {/snippet}
 
@@ -436,7 +435,6 @@
     {@render FieldRow('Output Folder', 'Grouped Bulk output path.', bulkDirectoryControl)}
     {@render FieldRow('Max Active Bulk Files', 'Concurrent member file limit.', bulkMaxConcurrentControl)}
     {@render FieldRow('Bulk Speed Limit', 'Per-file Bulk download cap.', bulkSpeedLimitControl)}
-    {@render FieldRow('Bulk Performance Mode', 'Bulk direct-link connection strategy.', bulkPerformanceControl)}
     {@render FieldRow('Hoster Fairness', 'Protected hoster Bulk scheduling policy.', bulkHosterFairnessControl)}
     {@render FieldRow('Hoster Acceleration', 'Supported hoster connection strategy.', bulkHosterAccelerationControl)}
     {@render SwitchFieldRow(RotateCw, 'Retry override', 'Use Bulk-specific retry attempts.', bulkRetryOverrideControl)}
@@ -695,14 +693,6 @@
   </div>
 {/snippet}
 
-{#snippet performanceControl()}
-  <select id="downloadPerformanceMode" name="downloadPerformanceMode" bind:value={formData.downloadPerformanceMode} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
-    <option value="stable">Stable</option>
-    <option value="balanced">Balanced</option>
-    <option value="fast">Fast</option>
-  </select>
-{/snippet}
-
 {#snippet torrentEnabledControl()}
   {@render ToggleSwitch('torrentEnabled', formData.torrent.enabled, (checked) => updateTorrentSettings({ enabled: checked }))}
 {/snippet}
@@ -736,14 +726,6 @@
     <input type="number" min="0" max="1048576" bind:value={formData.bulk.speedLimitKibPerSecond} onchange={() => updateBulkSettings({ speedLimitKibPerSecond: formData.bulk.speedLimitKibPerSecond })} class="h-9 w-32 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20" />
     <span class="text-sm text-muted-foreground">KB/s</span>
   </div>
-{/snippet}
-
-{#snippet bulkPerformanceControl()}
-  <select bind:value={formData.bulk.downloadPerformanceMode} onchange={() => updateBulkSettings({ downloadPerformanceMode: formData.bulk.downloadPerformanceMode })} class="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20">
-    <option value="stable">Stable</option>
-    <option value="balanced">Balanced</option>
-    <option value="fast">Fast</option>
-  </select>
 {/snippet}
 
 {#snippet bulkHosterFairnessControl()}

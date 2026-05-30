@@ -536,8 +536,6 @@ pub struct BulkDownloadSettings {
     #[serde(default)]
     pub speed_limit_kib_per_second: u32,
     #[serde(default)]
-    pub download_performance_mode: DownloadPerformanceMode,
-    #[serde(default)]
     pub hoster_fairness_mode: BulkHosterFairnessMode,
     #[serde(default)]
     pub hoster_acceleration_mode: BulkHosterAccelerationMode,
@@ -557,7 +555,6 @@ struct BulkDownloadSettingsWire {
     output_directory: Option<String>,
     max_concurrent_downloads: Option<u32>,
     speed_limit_kib_per_second: Option<u32>,
-    download_performance_mode: Option<DownloadPerformanceMode>,
     hoster_fairness_mode: Option<BulkHosterFairnessMode>,
     hoster_acceleration_mode: Option<BulkHosterAccelerationMode>,
     auto_retry_override_enabled: Option<bool>,
@@ -571,7 +568,6 @@ impl BulkDownloadSettingsWire {
         self,
         download_directory: &str,
         fallback_speed_limit_kib_per_second: u32,
-        fallback_download_performance_mode: DownloadPerformanceMode,
     ) -> BulkDownloadSettings {
         let defaults = BulkDownloadSettings::for_download_directory(download_directory);
         BulkDownloadSettings {
@@ -582,9 +578,6 @@ impl BulkDownloadSettingsWire {
             speed_limit_kib_per_second: self
                 .speed_limit_kib_per_second
                 .unwrap_or(fallback_speed_limit_kib_per_second),
-            download_performance_mode: self
-                .download_performance_mode
-                .unwrap_or(fallback_download_performance_mode),
             hoster_fairness_mode: self
                 .hoster_fairness_mode
                 .unwrap_or(defaults.hoster_fairness_mode),
@@ -667,7 +660,6 @@ pub struct Settings {
     pub max_concurrent_downloads: u32,
     pub auto_retry_attempts: u32,
     pub speed_limit_kib_per_second: u32,
-    pub download_performance_mode: DownloadPerformanceMode,
     pub torrent: TorrentSettings,
     pub bulk: BulkDownloadSettings,
     pub notifications_enabled: bool,
@@ -688,7 +680,6 @@ struct SettingsWire {
     max_concurrent_downloads: u32,
     auto_retry_attempts: u32,
     speed_limit_kib_per_second: u32,
-    download_performance_mode: DownloadPerformanceMode,
     torrent: TorrentSettings,
     bulk: BulkDownloadSettingsWire,
     notifications_enabled: bool,
@@ -710,7 +701,6 @@ impl Default for SettingsWire {
             max_concurrent_downloads: settings.max_concurrent_downloads,
             auto_retry_attempts: settings.auto_retry_attempts,
             speed_limit_kib_per_second: settings.speed_limit_kib_per_second,
-            download_performance_mode: settings.download_performance_mode,
             torrent: settings.torrent,
             bulk: BulkDownloadSettingsWire::default(),
             notifications_enabled: settings.notifications_enabled,
@@ -732,11 +722,9 @@ impl<'de> Deserialize<'de> for Settings {
         D: serde::Deserializer<'de>,
     {
         let wire = SettingsWire::deserialize(deserializer)?;
-        let mut bulk = wire.bulk.into_settings(
-            &wire.download_directory,
-            wire.speed_limit_kib_per_second,
-            wire.download_performance_mode,
-        );
+        let mut bulk = wire
+            .bulk
+            .into_settings(&wire.download_directory, wire.speed_limit_kib_per_second);
         normalize_bulk_settings_for_download_directory(&mut bulk, &wire.download_directory);
 
         Ok(Self {
@@ -744,7 +732,6 @@ impl<'de> Deserialize<'de> for Settings {
             max_concurrent_downloads: wire.max_concurrent_downloads,
             auto_retry_attempts: wire.auto_retry_attempts,
             speed_limit_kib_per_second: wire.speed_limit_kib_per_second,
-            download_performance_mode: wire.download_performance_mode,
             torrent: wire.torrent,
             bulk,
             notifications_enabled: wire.notifications_enabled,
@@ -932,7 +919,6 @@ impl Default for Settings {
             max_concurrent_downloads: 3,
             auto_retry_attempts: default_auto_retry_attempts(),
             speed_limit_kib_per_second: 0,
-            download_performance_mode: DownloadPerformanceMode::Fast,
             torrent: TorrentSettings::default(),
             notifications_enabled: true,
             notification_sounds_enabled: true,
@@ -962,7 +948,6 @@ impl Default for BulkDownloadSettings {
             output_directory: String::new(),
             max_concurrent_downloads: default_bulk_max_concurrent_downloads(),
             speed_limit_kib_per_second: 0,
-            download_performance_mode: DownloadPerformanceMode::Fast,
             hoster_fairness_mode: BulkHosterFairnessMode::Adaptive,
             hoster_acceleration_mode: BulkHosterAccelerationMode::Safe,
             auto_retry_override_enabled: false,
@@ -1813,10 +1798,6 @@ mod tests {
 
         assert_eq!(state.settings.auto_retry_attempts, 3);
         assert_eq!(state.settings.speed_limit_kib_per_second, 0);
-        assert_eq!(
-            state.settings.download_performance_mode,
-            DownloadPerformanceMode::Fast
-        );
         assert_eq!(state.settings.accent_color, "#3b82f6");
         assert_eq!(state.jobs[0].resume_support, ResumeSupport::Unknown);
         assert_eq!(state.jobs[0].failure_category, None);
@@ -2137,10 +2118,6 @@ mod tests {
         assert_eq!(settings.bulk.max_concurrent_downloads, 4);
         assert_eq!(settings.bulk.speed_limit_kib_per_second, 0);
         assert_eq!(
-            settings.bulk.download_performance_mode,
-            DownloadPerformanceMode::Fast
-        );
-        assert_eq!(
             settings.bulk.hoster_fairness_mode,
             BulkHosterFairnessMode::Adaptive
         );
@@ -2161,10 +2138,6 @@ mod tests {
             "bulk output directory should default below the main download directory"
         );
         assert_eq!(settings.speed_limit_kib_per_second, 0);
-        assert_eq!(
-            settings.download_performance_mode,
-            DownloadPerformanceMode::Fast
-        );
         assert_eq!(settings.accent_color, "#3b82f6");
         assert!(settings.show_details_on_click);
         assert_eq!(settings.queue_row_size, QueueRowSize::Medium);
@@ -2185,9 +2158,9 @@ mod tests {
 
         assert_eq!(value["startOnStartup"], true);
         assert_eq!(value["startupLaunchMode"], "tray");
-        assert_eq!(value["downloadPerformanceMode"], "fast");
+        assert!(value.get("downloadPerformanceMode").is_none());
         assert_eq!(value["bulk"]["speedLimitKibPerSecond"], 0);
-        assert_eq!(value["bulk"]["downloadPerformanceMode"], "fast");
+        assert!(value["bulk"].get("downloadPerformanceMode").is_none());
         assert_eq!(value["bulk"]["hosterFairnessMode"], "adaptive");
         assert_eq!(value["bulk"]["hosterAccelerationMode"], "safe");
         assert_eq!(value["showDetailsOnClick"], true);
@@ -2219,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bulk_settings_copy_global_runtime_tuning() {
+    fn legacy_bulk_settings_copy_global_speed_limit_only() {
         let settings = serde_json::from_str::<Settings>(
             r#"{
               "downloadDirectory": "C:/Downloads",
@@ -2242,15 +2215,7 @@ mod tests {
         .expect("legacy settings should parse");
 
         assert_eq!(settings.speed_limit_kib_per_second, 512);
-        assert_eq!(
-            settings.download_performance_mode,
-            DownloadPerformanceMode::Fast
-        );
         assert_eq!(settings.bulk.speed_limit_kib_per_second, 512);
-        assert_eq!(
-            settings.bulk.download_performance_mode,
-            DownloadPerformanceMode::Fast
-        );
         assert_eq!(
             settings.bulk.hoster_fairness_mode,
             BulkHosterFairnessMode::Adaptive

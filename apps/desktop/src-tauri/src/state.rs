@@ -741,11 +741,8 @@ fn accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Opt
         return None;
     }
 
-    match settings.bulk.download_performance_mode {
-        DownloadPerformanceMode::Stable => None,
-        DownloadPerformanceMode::Balanced => Some(4),
-        DownloadPerformanceMode::Fast => Some(8),
-    }
+    let _ = settings;
+    Some(4)
 }
 
 fn datanodes_accelerated_hoster_concurrency(settings: &Settings, job: &DownloadJob) -> Option<u32> {
@@ -782,11 +779,7 @@ fn datanodes_hoster_warmup_horizon(settings: &Settings) -> Option<usize> {
         return None;
     }
 
-    let mode_limit = match settings.bulk.download_performance_mode {
-        DownloadPerformanceMode::Stable => return None,
-        DownloadPerformanceMode::Balanced => 4,
-        DownloadPerformanceMode::Fast => 8,
-    };
+    let mode_limit = 4;
     Some(
         (settings.bulk.max_concurrent_downloads.max(1) as usize)
             .min(mode_limit)

@@ -64,7 +64,6 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
     maxConcurrentDownloads: 3,
     autoRetryAttempts: 3,
     speedLimitKibPerSecond: 0,
-    downloadPerformanceMode: 'fast',
     torrent: {
       enabled: true,
       downloadDirectory: `${downloadDirectory}\\Torrent`,
@@ -81,7 +80,6 @@ export function createDefaultSettings(downloadDirectory = DEFAULT_DOWNLOAD_DIREC
       outputDirectory: defaultBulkDownloadDirectory(downloadDirectory),
       maxConcurrentDownloads: 4,
       speedLimitKibPerSecond: 0,
-      downloadPerformanceMode: 'fast',
       hosterFairnessMode: 'adaptive',
       hosterAccelerationMode: 'safe',
       autoRetryOverrideEnabled: false,

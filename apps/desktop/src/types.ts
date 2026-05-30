@@ -44,7 +44,6 @@ export type BulkStartBehavior = 'review_then_start' | 'start_immediately';
 export type BulkHosterFairnessMode = 'adaptive' | 'safe' | 'off';
 export type BulkHosterAccelerationMode = 'safe' | 'off';
 export type HosterPreflightStatus = 'unchecked' | 'checking' | 'ready' | 'failed';
-export type DownloadPerformanceMode = 'stable' | 'balanced' | 'fast';
 export type TorrentSeedMode = 'forever' | 'ratio' | 'time' | 'ratio_or_time';
 export type TorrentPeerConnectionWatchdogMode = 'assist' | 'diagnose' | 'recover';
 export type QueueRowSize = 'compact' | 'small' | 'medium' | 'large' | 'damn';
@@ -168,7 +167,6 @@ export interface BulkDownloadSettings {
   outputDirectory: string;
   maxConcurrentDownloads: number;
   speedLimitKibPerSecond: number;
-  downloadPerformanceMode: DownloadPerformanceMode;
   hosterFairnessMode: BulkHosterFairnessMode;
   hosterAccelerationMode: BulkHosterAccelerationMode;
   autoRetryOverrideEnabled: boolean;
@@ -188,7 +186,6 @@ export interface Settings {
   maxConcurrentDownloads: number;
   autoRetryAttempts: number;
   speedLimitKibPerSecond: number;
-  downloadPerformanceMode: DownloadPerformanceMode;
   torrent: TorrentSettings;
   bulk: BulkDownloadSettings;
   notificationsEnabled: boolean;

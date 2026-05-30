@@ -17,7 +17,6 @@ const bulkSettings: Settings['bulk'] = {
   outputDirectory: '',
   maxConcurrentDownloads: 99,
   speedLimitKibPerSecond: -10,
-  downloadPerformanceMode: 'unknown' as Settings['bulk']['downloadPerformanceMode'],
   hosterFairnessMode: 'unknown' as Settings['bulk']['hosterFairnessMode'],
   hosterAccelerationMode: 'unknown' as Settings['bulk']['hosterAccelerationMode'],
   autoRetryOverrideEnabled: true,
@@ -38,12 +37,11 @@ assert.deepEqual(
     outputDirectory: 'D:\\Downloads\\Bulk',
     maxConcurrentDownloads: 24,
     speedLimitKibPerSecond: 0,
-    downloadPerformanceMode: 'fast',
     hosterFairnessMode: 'adaptive',
     hosterAccelerationMode: 'safe',
     autoRetryAttempts: 10,
   },
-  'bulk settings normalization should clamp numeric values and default invalid modes',
+  'bulk settings normalization should clamp numeric values and default invalid hoster modes',
 );
 
 assert.equal(usesTorrentRatioLimit('ratio_or_time'), true, 'ratio-or-time seeding should expose the ratio limit');

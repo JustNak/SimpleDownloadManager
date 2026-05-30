@@ -7,7 +7,7 @@ import {
   parseDownloadUrlLines,
 } from '../src/downloadInput.ts';
 
-const longSignedUrl = 'https://store-044.wnam.tb-cdn.io/zip/067d34b2-b6b8-4324-b795-3b45544d9dfb?token=ea24bba1-eba0-4a5d-92cd-bbe07d59b864';
+const longSignedUrl = 'https://downloads.example.test/zip/067d34b2-b6b8-4324-b795-3b45544d9dfb?token=example-signed-download-token';
 
 assert.deepEqual(
   parseDownloadUrlLines(longSignedUrl),

@@ -33,7 +33,8 @@ assert.match(source, /CategorySettingsCard\('Bulk Downloads'/, 'bulk download se
 assert.match(source, /bind:value=\{formData\.bulk\.outputDirectory\}/, 'bulk settings should expose the bulk output directory field');
 assert.match(source, /bind:value=\{formData\.bulk\.maxConcurrentDownloads\}/, 'bulk settings should expose the max active bulk files field');
 assert.match(source, /bind:value=\{formData\.bulk\.speedLimitKibPerSecond\}/, 'bulk settings should expose an independent speed limit field');
-assert.match(source, /bind:value=\{formData\.bulk\.downloadPerformanceMode\}/, 'bulk settings should expose an independent performance mode field');
+assert.doesNotMatch(source, /downloadPerformanceMode/, 'settings should not expose download performance profile controls');
+assert.doesNotMatch(helpersSource, /downloadPerformanceMode/, 'settings helpers should not normalize removed performance profiles');
 assert.match(source, /bind:value=\{formData\.bulk\.hosterFairnessMode\}/, 'bulk settings should expose a hoster fairness mode field');
 assert.match(source, /bind:value=\{formData\.bulk\.hosterAccelerationMode\}/, 'bulk settings should expose a hoster acceleration mode field');
 assert.match(source, /formData\.bulk\.autoRetryOverrideEnabled[\s\S]*formData\.bulk\.autoRetryOverrideEnabled = checked/, 'bulk retry override setting should be wired to the settings draft');

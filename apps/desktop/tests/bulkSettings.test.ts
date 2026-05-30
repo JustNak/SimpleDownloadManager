@@ -11,6 +11,12 @@ assert.match(
 
 assert.match(
   defaultsSource,
-  /bulk:\s*\{[\s\S]*outputDirectory:\s*defaultBulkDownloadDirectory\(downloadDirectory\)[\s\S]*maxConcurrentDownloads:\s*4[\s\S]*speedLimitKibPerSecond:\s*0[\s\S]*downloadPerformanceMode:\s*'fast'[\s\S]*hosterFairnessMode:\s*'adaptive'[\s\S]*hosterAccelerationMode:\s*'safe'[\s\S]*autoRetryOverrideEnabled:\s*false[\s\S]*autoRetryAttempts:\s*3[\s\S]*startBehavior:\s*'review_then_start'[\s\S]*expandActiveRowsByDefault:\s*false/,
+  /bulk:\s*\{[\s\S]*outputDirectory:\s*defaultBulkDownloadDirectory\(downloadDirectory\)[\s\S]*maxConcurrentDownloads:\s*4[\s\S]*speedLimitKibPerSecond:\s*0[\s\S]*hosterFairnessMode:\s*'adaptive'[\s\S]*hosterAccelerationMode:\s*'safe'[\s\S]*autoRetryOverrideEnabled:\s*false[\s\S]*autoRetryAttempts:\s*3[\s\S]*startBehavior:\s*'review_then_start'[\s\S]*expandActiveRowsByDefault:\s*false/,
   'default settings should expose the bulk download section with independent runtime controls and review-first behavior',
+);
+
+assert.doesNotMatch(
+  defaultsSource,
+  /downloadPerformanceMode/,
+  'default settings should not expose user-selectable download performance profiles',
 );
