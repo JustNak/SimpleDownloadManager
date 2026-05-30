@@ -1,10 +1,16 @@
-# Simple Download Manager
+<p align="center">
+  <img src="apps/desktop/src-tauri/icons/icon.svg" width="96" height="96" alt="Simple Download Manager logo">
+</p>
+
+<h1 align="center">Simple Download Manager</h1>
 
 Simple Download Manager is a local-first Windows download manager with browser handoff, torrent support, bulk downloads, and a native desktop queue.
 
 **Latest beta:** [download from the beta release page](https://github.com/JustNak/SimpleDownloadManager/releases/tag/updater-beta)
 
-It is built around a Tauri desktop app, a Rust download backend, a native messaging host, and WebExtension packages for browser integration. The project is currently beta software and is Windows-first; the installer, native-host registration, release pipeline, and updater artifacts target Windows x64 and Windows ARM64.
+It is built around a Tauri desktop app, a Rust download backend, a native messaging host, and WebExtension packages for browser integration. For the complete browser handoff experience, install both the desktop app and the matching browser WebExtension.
+
+The project is currently beta software and is Windows-first; the installer, native-host registration, release pipeline, and updater artifacts target Windows x64 and Windows ARM64.
 
 ## Installation
 
@@ -23,10 +29,19 @@ Installer notes:
 
 - The Windows installer includes the desktop app and native messaging host.
 - Native-host registration is handled for Chrome, Edge, and Firefox during install.
-- The browser extension still needs to be installed or loaded for browser download capture.
+- The browser WebExtension still needs to be installed or loaded for browser download capture.
 - The app can check the beta updater feed for newer desktop builds after installation.
 
 GitHub release asset filenames include the app version, so the beta release page is the most reliable always-current link. The direct links above are convenience links for the current beta build.
+
+### Browser WebExtension
+
+Browser integration needs the companion WebExtension in addition to the desktop installer.
+
+- Firefox: install from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/sdm-simple-download-manager/).
+- Chromium / Edge: download `simple-download-manager-chromium-extension.zip` from the [beta release assets](https://github.com/JustNak/SimpleDownloadManager/releases/tag/updater-beta) when published, then load it as an unpacked extension for local testing.
+
+Chrome Web Store release is planned, but there is no public timeline yet.
 
 ## What It Does
 
