@@ -9,23 +9,7 @@ pub(super) enum RetryDecision {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct HttpTransferPolicy {
-    pub(super) mode: DownloadPerformanceMode,
     pub(super) profile: DownloadPerformanceProfile,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct HttpPerformanceModeConfig {
-    mode: DownloadPerformanceMode,
-    profile: DownloadPerformanceProfile,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct SegmentHostScoreSnapshot {
-    pub(super) best_cap: usize,
-    pub(super) rate_limited_cap: Option<usize>,
-    pub(super) recent_reconnects: u32,
-    pub(super) recent_rate_limits: u32,
-    pub(super) last_failure_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,136 +36,40 @@ pub(super) struct SegmentPressureDecision {
     pub(super) reduced_target: Option<usize>,
 }
 
-const HTTP_PERFORMANCE_PROFILES: [HttpPerformanceModeConfig; 3] = [
-    HttpPerformanceModeConfig {
-        mode: DownloadPerformanceMode::Stable,
-        profile: DownloadPerformanceProfile {
-            initial_segments: 1,
-            soft_max_segments: 1,
-            max_segments: 1,
-            min_segmented_size: u64::MAX,
-            target_segment_size: u64::MAX,
-            low_speed_threshold_bytes_per_second: 4 * 1024,
-            low_speed_window: Duration::from_secs(30),
-            bulk_hoster_stall_timeout: Duration::from_secs(90),
-            max_low_speed_retries: 2,
-            speed_smoothing_alpha: 0.25,
-            adaptive_ramp_step: 0,
-            adaptive_ramp_interval: Duration::from_millis(1500),
-        },
-    },
-    HttpPerformanceModeConfig {
-        mode: DownloadPerformanceMode::Balanced,
-        profile: DownloadPerformanceProfile {
-            initial_segments: 6,
-            soft_max_segments: 6,
-            max_segments: 6,
-            min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
-            target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
-            low_speed_threshold_bytes_per_second: 8 * 1024,
-            low_speed_window: Duration::from_secs(20),
-            bulk_hoster_stall_timeout: Duration::from_secs(25),
-            max_low_speed_retries: 2,
-            speed_smoothing_alpha: 0.25,
-            adaptive_ramp_step: 0,
-            adaptive_ramp_interval: Duration::from_millis(1500),
-        },
-    },
-    HttpPerformanceModeConfig {
-        mode: DownloadPerformanceMode::Fast,
-        profile: DownloadPerformanceProfile {
-            initial_segments: 16,
-            soft_max_segments: 32,
-            max_segments: 64,
-            min_segmented_size: FAST_MIN_SEGMENTED_SIZE,
-            target_segment_size: FAST_TARGET_SEGMENT_SIZE,
-            low_speed_threshold_bytes_per_second: 16 * 1024,
-            low_speed_window: Duration::from_secs(15),
-            bulk_hoster_stall_timeout: Duration::from_secs(15),
-            max_low_speed_retries: 3,
-            speed_smoothing_alpha: 0.75,
-            adaptive_ramp_step: 4,
-            adaptive_ramp_interval: Duration::from_secs(2),
-        },
-    },
-];
+const GENERAL_HTTP_PROFILE: DownloadPerformanceProfile = DownloadPerformanceProfile {
+    initial_segments: 6,
+    soft_max_segments: 6,
+    max_segments: 6,
+    min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
+    target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
+    low_speed_threshold_bytes_per_second: 8 * 1024,
+    low_speed_window: Duration::from_secs(20),
+    bulk_hoster_stall_timeout: Duration::from_secs(25),
+    max_low_speed_retries: 2,
+    speed_smoothing_alpha: 0.25,
+    adaptive_ramp_step: 0,
+    adaptive_ramp_interval: Duration::from_millis(1500),
+};
 
 impl HttpTransferPolicy {
-    pub(super) fn for_mode(mode: DownloadPerformanceMode) -> Self {
-        let profile = HTTP_PERFORMANCE_PROFILES
-            .iter()
-            .find(|config| config.mode == mode)
-            .map(|config| config.profile)
-            .unwrap_or_else(|| {
-                HTTP_PERFORMANCE_PROFILES
-                    .iter()
-                    .find(|config| config.mode == DownloadPerformanceMode::Balanced)
-                    .expect("balanced HTTP transfer policy should exist")
-                    .profile
-            });
-
-        Self { mode, profile }
+    pub(super) fn general() -> Self {
+        Self {
+            profile: GENERAL_HTTP_PROFILE,
+        }
     }
 }
 
 #[cfg(test)]
-pub(super) fn performance_profile(mode: DownloadPerformanceMode) -> DownloadPerformanceProfile {
-    HttpTransferPolicy::for_mode(mode).profile
-}
-
-#[cfg(test)]
-pub(super) fn profile_for_effective_http_url(
-    mode: DownloadPerformanceMode,
-    effective_url: &str,
-) -> DownloadPerformanceProfile {
-    profile_for_effective_http_url_with_pressure_key_at(mode, effective_url, None, Instant::now())
-}
-
-#[cfg(test)]
-pub(super) fn profile_for_effective_http_url_at(
-    mode: DownloadPerformanceMode,
-    effective_url: &str,
-    now: Instant,
-) -> DownloadPerformanceProfile {
-    profile_for_effective_http_url_with_pressure_key_at(mode, effective_url, None, now)
+pub(super) fn performance_profile() -> DownloadPerformanceProfile {
+    HttpTransferPolicy::general().profile
 }
 
 pub(super) fn profile_for_effective_http_url_with_pressure_key_at(
-    mode: DownloadPerformanceMode,
-    effective_url: &str,
-    pressure_key: Option<&str>,
-    now: Instant,
+    _effective_url: &str,
+    _pressure_key: Option<&str>,
+    _now: Instant,
 ) -> DownloadPerformanceProfile {
-    let mut profile = HttpTransferPolicy::for_mode(mode).profile;
-    if mode == DownloadPerformanceMode::Fast && is_gofile_direct_http_url(effective_url) {
-        profile.initial_segments = profile.initial_segments.min(8);
-        profile.soft_max_segments = profile.soft_max_segments.min(16);
-        profile.max_segments = profile.max_segments.min(16);
-        profile.adaptive_ramp_step = profile.adaptive_ramp_step.min(4);
-    }
-    if mode == DownloadPerformanceMode::Fast {
-        let score = pressure_key
-            .and_then(|key| segment_host_score_snapshot(key, now))
-            .or_else(|| segment_host_score_snapshot(effective_url, now));
-        if let Some(score) = score {
-            let _has_recent_failure = score.recent_reconnects > 0
-                || score.recent_rate_limits > 0
-                || score.last_failure_reason.is_some();
-            if let Some(rate_limited_cap) = score.rate_limited_cap {
-                let cap = rate_limited_cap
-                    .max(SEGMENT_PRESSURE_MIN_TARGET)
-                    .min(profile.max_segments);
-                profile.initial_segments = profile.initial_segments.min(cap).max(1);
-                profile.soft_max_segments = profile.soft_max_segments.min(cap).max(1);
-                profile.max_segments = profile.max_segments.min(cap).max(1);
-            } else if score.best_cap != usize::MAX {
-                let scored_cap = score.best_cap.max(profile.initial_segments).max(1);
-                profile.max_segments = profile.max_segments.min(scored_cap);
-                profile.soft_max_segments = profile.soft_max_segments.min(profile.max_segments);
-            }
-        }
-    }
-    profile
+    HttpTransferPolicy::general().profile
 }
 
 pub(super) fn is_gofile_direct_http_url(raw_url: &str) -> bool {
@@ -325,31 +213,6 @@ fn record_segment_rate_limit_pressure(
         recent_rate_limits: entry.recent_rate_limits,
         reduced_target,
     }
-}
-
-pub(super) fn segment_host_score_snapshot(
-    raw_url: &str,
-    now: Instant,
-) -> Option<SegmentHostScoreSnapshot> {
-    let key = segment_host_score_key(raw_url)?;
-    let scores = segment_host_scores();
-    let Ok(mut scores) = scores.lock() else {
-        return None;
-    };
-    expire_segment_host_scores_locked(&mut scores, now);
-    let score = scores.get(&key)?;
-    Some(SegmentHostScoreSnapshot {
-        best_cap: score
-            .best_cap
-            .into_iter()
-            .chain(score.rate_limited_cap)
-            .min()
-            .unwrap_or(usize::MAX),
-        rate_limited_cap: score.rate_limited_cap,
-        recent_reconnects: score.recent_reconnects,
-        recent_rate_limits: score.recent_rate_limits,
-        last_failure_reason: score.last_failure_reason.clone(),
-    })
 }
 
 #[cfg(test)]

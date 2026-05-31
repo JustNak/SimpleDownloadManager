@@ -5,9 +5,8 @@ use crate::state::{
 };
 use crate::storage::{
     default_torrent_download_directory_for, BulkArchiveStatus, BulkFinalizeMode,
-    BulkHosterAccelerationMode, DiagnosticLevel, DownloadPerformanceMode, FailureCategory,
-    HandoffAuth, JobState, ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode,
-    TransferKind,
+    BulkHosterAccelerationMode, DiagnosticLevel, FailureCategory, HandoffAuth, JobState,
+    ResumeSupport, Settings, TorrentInfo, TorrentPeerConnectionWatchdogMode, TransferKind,
 };
 use crate::torrent::{
     cached_torrent_metadata_source, pending_torrent_cleanup_info_hash, PreparedTorrentSource,
@@ -165,13 +164,9 @@ pub const EXTERNAL_USE_AUTO_RESEED_RETRY_SECONDS: u64 = 60;
 const DOWNLOAD_BUFFER_SIZE: usize = 512 * 1024;
 const BALANCED_MIN_SEGMENTED_SIZE: u64 = 32 * 1024 * 1024;
 const BALANCED_TARGET_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
-const FAST_MIN_SEGMENTED_SIZE: u64 = 16 * 1024 * 1024;
-const FAST_TARGET_SEGMENT_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_BACKOFF_DURATION: Duration = Duration::from_secs(10 * 60);
 const HOSTER_BULK_BALANCED_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 24;
 const HOSTER_BULK_BALANCED_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 16;
-const HOSTER_BULK_FAST_TOTAL_SEGMENT_CONNECTION_BUDGET: usize = 48;
-const HOSTER_BULK_FAST_ORIGIN_SEGMENT_CONNECTION_BUDGET: usize = 24;
 const MAX_RETRY_AFTER_DELAY: Duration = Duration::from_secs(60);
 const MAX_RETRY_JITTER: Duration = Duration::from_millis(250);
 const SEGMENT_WORKER_STOP_GRACE: Duration = Duration::from_millis(100);
@@ -831,8 +826,6 @@ async fn run_download(
 }
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
-static SEGMENTED_CLIENT: OnceLock<Client> = OnceLock::new();
-static SEGMENTED_NATIVE_TLS_CLIENT: OnceLock<Client> = OnceLock::new();
 static TORRENT_ENGINE_MANAGER: OnceLock<TorrentEngineManager> = OnceLock::new();
 static RANGE_BACKOFFS: OnceLock<RangeBackoffRegistry> = OnceLock::new();
 

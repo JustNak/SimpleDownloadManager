@@ -4,8 +4,8 @@ use crate::state::{
     TorrentRuntimeSnapshot,
 };
 use crate::storage::{
-    BulkArchiveStatus, BulkFinalizeMode, DesktopSnapshot, DownloadJob, DownloadPerformanceMode,
-    DownloadSource, FailureCategory, HandoffAuth, HandoffAuthHeader, IntegrityStatus, JobState,
+    BulkArchiveStatus, BulkFinalizeMode, DesktopSnapshot, DownloadJob, DownloadSource,
+    FailureCategory, HandoffAuth, HandoffAuthHeader, IntegrityStatus, JobState,
     ProtectedDownloadAuthScope, Settings, TransferKind,
 };
 use std::collections::HashSet;
@@ -1118,7 +1118,7 @@ fn segment_context(
         handoff_auth: None,
         temp_path: task.temp_path.clone(),
         total_bytes: 12,
-        profile: performance_profile(DownloadPerformanceMode::Balanced),
+        profile: performance_profile(),
         validators: EntityValidators::default(),
         progress: Arc::new(SegmentedProgressCounters::new(vec![0])),
         metadata: Arc::new(Mutex::new(new_segment_state_for_test(

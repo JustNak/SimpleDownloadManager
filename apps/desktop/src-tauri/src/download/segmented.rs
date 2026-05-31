@@ -5,12 +5,12 @@ static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>
 static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DYNAMIC_SEGMENT_FAST_SPILL_WORKERS: usize = 16;
 const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
-const FAST_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 256 * 1024 * 1024;
-const FAST_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
-const FAST_TAIL_SMALL_LEASE_SIZE: u64 = 1024 * 1024;
-const FAST_TAIL_MEDIUM_LEASE_SIZE: u64 = 8 * 1024 * 1024;
-const FAST_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
-const FAST_TAIL_MIN_SEGMENTS: usize = 24;
+const GENERAL_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 256 * 1024 * 1024;
+const GENERAL_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
+const GENERAL_TAIL_SMALL_LEASE_SIZE: u64 = 1024 * 1024;
+const GENERAL_TAIL_MEDIUM_LEASE_SIZE: u64 = 8 * 1024 * 1024;
+const GENERAL_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
+const GENERAL_TAIL_MIN_SEGMENTS: usize = 2;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
 const ADAPTIVE_STABLE_WARMUP_SAMPLE_TARGET: usize = 1;
@@ -30,7 +30,7 @@ const ADAPTIVE_RETRY_COOLDOWN_MAX_WINDOWS: usize = 32;
 const ADAPTIVE_POST_ACCEPT_GUARD_HEALTHY_WINDOWS: usize = 4;
 const ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT: usize = 2;
 const ADAPTIVE_POST_ACCEPT_ACCEPTED_RETENTION_PERCENT: u64 = 95;
-const FAST_TRIAL_TAIL_LEASE_CAP: u64 = FAST_TAIL_MEDIUM_LEASE_SIZE;
+const ADAPTIVE_TRIAL_TAIL_LEASE_CAP: u64 = GENERAL_TAIL_MEDIUM_LEASE_SIZE;
 const SEGMENT_RECONNECT_MAX_ATTEMPTS: u32 = 12;
 const SEGMENTED_FINALIZATION_SLOW_DIAGNOSTIC_THRESHOLD: Duration = Duration::from_secs(2);
 const SEGMENTED_RESUME_METADATA_REQUIRED_MESSAGE: &str =
@@ -298,25 +298,37 @@ fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
         .max(1)
 }
 
-fn profile_uses_fast_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
-    profile.adaptive_ramp_step > 0 && profile.max_segments >= FAST_TAIL_MIN_SEGMENTS
+fn profile_uses_general_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
+    profile.adaptive_ramp_step == 0
+        && profile.max_segments >= GENERAL_TAIL_MIN_SEGMENTS
+        && profile.target_segment_size == BALANCED_TARGET_SEGMENT_SIZE
+}
+
+fn dynamic_segment_tail_leasing_label(profile: DownloadPerformanceProfile) -> Option<&'static str> {
+    if profile_uses_general_tail_leasing(profile) {
+        Some("General")
+    } else {
+        None
+    }
 }
 
 pub(super) fn dynamic_segment_tail_lease_size(
     remaining_bytes: u64,
     profile: DownloadPerformanceProfile,
 ) -> Option<u64> {
-    if !profile_uses_fast_tail_leasing(profile) {
-        return None;
+    if profile_uses_general_tail_leasing(profile) {
+        return Some(
+            if remaining_bytes > GENERAL_TAIL_LARGE_REMAINING_THRESHOLD {
+                GENERAL_TAIL_LARGE_LEASE_SIZE
+            } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
+                GENERAL_TAIL_MEDIUM_LEASE_SIZE
+            } else {
+                GENERAL_TAIL_SMALL_LEASE_SIZE
+            },
+        );
     }
 
-    Some(if remaining_bytes > FAST_TAIL_LARGE_REMAINING_THRESHOLD {
-        FAST_TAIL_LARGE_LEASE_SIZE
-    } else if remaining_bytes >= FAST_TAIL_SMALL_REMAINING_THRESHOLD {
-        FAST_TAIL_MEDIUM_LEASE_SIZE
-    } else {
-        FAST_TAIL_SMALL_LEASE_SIZE
-    })
+    None
 }
 
 pub(super) fn dynamic_segment_tail_lease_size_with_probe_cap(
@@ -664,27 +676,6 @@ pub(super) fn fill_dynamic_segment_queue_for_profile_tests(
     )
 }
 
-#[cfg(test)]
-pub(super) async fn claim_dynamic_segment_work(
-    temp_path: &Path,
-    metadata: &Arc<Mutex<SegmentedDownloadState>>,
-    active: &Arc<Mutex<HashSet<usize>>>,
-    target_depth: usize,
-    min_split_size: u64,
-    lease_profile: Option<DownloadPerformanceProfile>,
-) -> Result<Option<SegmentProgress>, DownloadError> {
-    claim_dynamic_segment_work_with_probe_cap(
-        temp_path,
-        metadata,
-        active,
-        target_depth,
-        min_split_size,
-        lease_profile,
-        None,
-    )
-    .await
-}
-
 async fn claim_dynamic_segment_work_with_probe_cap(
     temp_path: &Path,
     metadata: &Arc<Mutex<SegmentedDownloadState>>,
@@ -732,10 +723,11 @@ fn segment_tail_leasing_diagnostic(
     planned_workers: usize,
 ) -> Option<String> {
     let lease_size = dynamic_segment_tail_lease_size(state_remaining_bytes(state), profile)?;
+    let label = dynamic_segment_tail_leasing_label(profile)?;
     let remaining_bytes = state_remaining_bytes(state);
-    let bucket = if remaining_bytes > FAST_TAIL_LARGE_REMAINING_THRESHOLD {
+    let bucket = if remaining_bytes > GENERAL_TAIL_LARGE_REMAINING_THRESHOLD {
         ">1GiB"
-    } else if remaining_bytes >= FAST_TAIL_SMALL_REMAINING_THRESHOLD {
+    } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
         "256MiB-1GiB"
     } else {
         "<256MiB"
@@ -758,7 +750,7 @@ fn segment_tail_leasing_diagnostic(
     };
 
     Some(format!(
-        "Fast tail leasing {reason}; lease={}MiB bucket={} remaining={}MiB active/planned={}/{} pending_lease_count={} tail_active_floor={}.",
+        "{label} tail leasing {reason}; lease={}MiB bucket={} remaining={}MiB active/planned={}/{} pending_lease_count={} tail_active_floor={}.",
         lease_size / (1024 * 1024),
         bucket,
         remaining_bytes / (1024 * 1024),
@@ -1936,7 +1928,7 @@ impl AdaptiveSegmentAdmission {
                         &self.context,
                         DiagnosticLevel::Info,
                         format!(
-                            "Adaptive Fast reduced target workers to {reduced} after sustained throughput regression (sample {} B/s, previous {} B/s).",
+                            "Adaptive segmented reduced target workers to {reduced} after sustained throughput regression (sample {} B/s, previous {} B/s).",
                             sample_bps, previous_bps
                         ),
                     )
@@ -2006,7 +1998,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast ignored warmup sample at {admitted} workers before baseline: sample {}.",
+                    "Adaptive segmented ignored warmup sample at {admitted} workers before baseline: sample {}.",
                     format_bps_as_mib(sample_bps)
                 ),
             )
@@ -2025,12 +2017,12 @@ impl AdaptiveSegmentAdmission {
             let baseline_bps = self.stable_sample_total_bps.load(Ordering::Relaxed);
             let message = if new_count >= ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET {
                 format!(
-                    "Adaptive Fast stable baseline established at {admitted} workers: baseline {} from {ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} stable samples after warmup.",
+                    "Adaptive segmented stable baseline established at {admitted} workers: baseline {} from {ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} stable samples after warmup.",
                     format_bps_as_mib(baseline_bps)
                 )
             } else {
                 format!(
-                    "Adaptive Fast stable baseline sample {new_count}/{ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} at {admitted} workers: sample {}.",
+                    "Adaptive segmented stable baseline sample {new_count}/{ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET} at {admitted} workers: sample {}.",
                     format_bps_as_mib(sample_bps)
                 )
             };
@@ -2055,7 +2047,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast blocked {desired}-worker retry after rollback; cooldown {remaining_windows} windows remaining (sample {}, baseline {}, rejected baseline {}).",
+                    "Adaptive segmented blocked {desired}-worker retry after rollback; cooldown {remaining_windows} windows remaining (sample {}, baseline {}, rejected baseline {}).",
                     format_bps_as_mib(sample_bps),
                     format_bps_as_mib(baseline_bps),
                     format_bps_as_mib(rejected_baseline_bps)
@@ -2085,7 +2077,7 @@ impl AdaptiveSegmentAdmission {
                     &self.context,
                     DiagnosticLevel::Info,
                     format!(
-                        "Adaptive Fast stricter retry trigger for {desired} workers not met (sample {}, required {}, baseline {}, rejected baseline {}).",
+                        "Adaptive segmented stricter retry trigger for {desired} workers not met (sample {}, required {}, baseline {}, rejected baseline {}).",
                         format_bps_as_mib(sample_bps),
                         format_bps_as_mib(required_bps),
                         format_bps_as_mib(baseline_bps),
@@ -2107,7 +2099,7 @@ impl AdaptiveSegmentAdmission {
             &self.context,
             DiagnosticLevel::Info,
             format!(
-                "Adaptive Fast {trigger_kind} sample {trigger_count}/{ADAPTIVE_TRIGGER_SAMPLE_TARGET} for {admitted}->{desired} workers (sample {}, required {}, baseline {}).",
+                "Adaptive segmented {trigger_kind} sample {trigger_count}/{ADAPTIVE_TRIGGER_SAMPLE_TARGET} for {admitted}->{desired} workers (sample {}, required {}, baseline {}).",
                 format_bps_as_mib(sample_bps),
                 format_bps_as_mib(required_bps),
                 format_bps_as_mib(baseline_bps)
@@ -2141,7 +2133,7 @@ impl AdaptiveSegmentAdmission {
             &self.context,
             DiagnosticLevel::Info,
             format!(
-                "Adaptive Fast startup sample at {admitted} workers: sample {}; probing {desired} workers immediately.",
+                "Adaptive segmented startup sample at {admitted} workers: sample {}; probing {desired} workers immediately.",
                 format_bps_as_mib(sample_bps)
             ),
         )
@@ -2244,7 +2236,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast post-accept guard sample {bad_samples}/{ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT} below threshold at {admitted} workers (sample {}, accepted average {}, previous baseline {}).",
+                    "Adaptive segmented post-accept guard sample {bad_samples}/{ADAPTIVE_POST_ACCEPT_BAD_SAMPLE_LIMIT} below threshold at {admitted} workers (sample {}, accepted average {}, previous baseline {}).",
                     format_bps_as_mib(sample_bps),
                     format_bps_as_mib(accepted_average_bps),
                     format_bps_as_mib(previous_baseline_bps)
@@ -2265,7 +2257,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast accepted {admitted}-worker cap after sustained post-accept guard samples (accepted average {}, previous baseline {}).",
+                    "Adaptive segmented accepted {admitted}-worker cap after sustained post-accept guard samples (accepted average {}, previous baseline {}).",
                     format_bps_as_mib(accepted_average_bps),
                     format_bps_as_mib(previous_baseline_bps)
                 ),
@@ -2307,7 +2299,7 @@ impl AdaptiveSegmentAdmission {
             &self.context,
             DiagnosticLevel::Info,
             format!(
-                "Adaptive Fast rolled back accepted {admitted}-worker cap to {stable} workers (sample {}, accepted average {}, previous baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                "Adaptive segmented rolled back accepted {admitted}-worker cap to {stable} workers (sample {}, accepted average {}, previous baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
                 format_bps_as_mib(sample_bps),
                 format_bps_as_mib(accepted_average_bps),
                 format_bps_as_mib(previous_baseline_bps)
@@ -2462,7 +2454,7 @@ impl AdaptiveSegmentAdmission {
         self.trial_sample_total_bps.store(0, Ordering::Relaxed);
         self.context
             .tail_lease_probe_cap
-            .store(FAST_TRIAL_TAIL_LEASE_CAP, Ordering::Relaxed);
+            .store(ADAPTIVE_TRIAL_TAIL_LEASE_CAP, Ordering::Relaxed);
         let trial_label = if startup_probe {
             "startup throughput probe"
         } else {
@@ -2472,7 +2464,7 @@ impl AdaptiveSegmentAdmission {
             &self.context,
             DiagnosticLevel::Info,
             format!(
-                "Adaptive Fast starting {trial_label} from {current} to {admitted} workers (baseline {}, trigger sample {}).",
+                "Adaptive segmented starting {trial_label} from {current} to {admitted} workers (baseline {}, trigger sample {}).",
                 format_bps_as_mib(baseline_bps),
                 format_bps_as_mib(trigger_bps)
             ),
@@ -2501,13 +2493,13 @@ impl AdaptiveSegmentAdmission {
             DiagnosticLevel::Info,
             if startup_probe {
                 format!(
-                    "Adaptive Fast accepted {admitted}-worker startup probe (trial average {}, baseline {}).",
+                    "Adaptive segmented accepted {admitted}-worker startup probe (trial average {}, baseline {}).",
                     format_bps_as_mib(average_bps),
                     format_bps_as_mib(baseline_bps)
                 )
             } else {
                 format!(
-                    "Adaptive Fast accepted {admitted}-worker trial (trial average {}, baseline {}).",
+                    "Adaptive segmented accepted {admitted}-worker trial (trial average {}, baseline {}).",
                 format_bps_as_mib(average_bps),
                 format_bps_as_mib(baseline_bps)
                 )
@@ -2540,13 +2532,13 @@ impl AdaptiveSegmentAdmission {
             DiagnosticLevel::Info,
             if startup_probe {
                 format!(
-                    "Adaptive Fast rolled back startup throughput probe from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                    "Adaptive segmented rolled back startup throughput probe from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
                     format_bps_as_mib(sample_bps),
                     format_bps_as_mib(baseline_bps)
                 )
             } else {
                 format!(
-                    "Adaptive Fast rolled back throughput trial from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
+                    "Adaptive segmented rolled back throughput trial from {admitted} to {stable} workers (sample {}, baseline {}; reason: {reason}; retry cooldown {cooldown_windows} windows).",
                 format_bps_as_mib(sample_bps),
                 format_bps_as_mib(baseline_bps)
                 )
@@ -2661,7 +2653,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast expanded segmented workers from {current} to {admitted} (requested {desired})."
+                    "Adaptive segmented expanded segmented workers from {current} to {admitted} (requested {desired})."
                 ),
             )
             .await;
@@ -2671,7 +2663,7 @@ impl AdaptiveSegmentAdmission {
                 &self.context,
                 DiagnosticLevel::Info,
                 format!(
-                    "Adaptive Fast segment ramp deferred by connection budget (requested {desired}, admitted {admitted})."
+                    "Adaptive segmented segment ramp deferred by connection budget (requested {desired}, admitted {admitted})."
                 ),
             )
             .await;
