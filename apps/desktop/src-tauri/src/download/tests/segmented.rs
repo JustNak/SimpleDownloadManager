@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
-    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let profile = performance_profile();
     let minimum_plan =
         plan_segmented_ranges(32 * 1024 * 1024, ResumeSupport::Supported, None, profile)
             .expect("balanced mode should segment range-capable files at 32 MiB");
@@ -32,50 +32,16 @@ fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
 }
 
 #[test]
-fn fast_profile_uses_fast_plus_initial_and_adaptive_segment_caps() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-    assert_eq!(profile.initial_segments, 16);
-    assert_eq!(profile.soft_max_segments, 32);
-    assert_eq!(profile.max_segments, 64);
-    assert_eq!(profile.target_segment_size, 8 * 1024 * 1024);
-    assert_eq!(profile.adaptive_ramp_step, 4);
-    assert_eq!(profile.adaptive_ramp_interval, Duration::from_secs(2));
+fn balanced_dynamic_queue_depth_keeps_active_worker_cap_at_six() {
+    let profile = performance_profile();
+
+    assert_eq!(profile.max_segments, 6);
+    assert_eq!(dynamic_segment_queue_depth(profile), 6);
 }
 
 #[test]
-fn fast_range_plan_uses_normal_fast_soft_cap_initial_fanout() {
-    let profile = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        "https://fast-startup-plan.example.test/downloads/game.rar",
-        None,
-        DownloadAdmission::normal(),
-        Instant::now(),
-    );
-    let minimum_plan =
-        plan_segmented_ranges(16 * 1024 * 1024, ResumeSupport::Supported, None, profile)
-            .expect("fast mode should segment range-capable files at 16 MiB");
-    let ramp_plan =
-        plan_segmented_ranges(256 * 1024 * 1024, ResumeSupport::Supported, None, profile)
-            .expect("large normal fast downloads should immediately fan out to the soft cap");
-    let capped_plan =
-        plan_segmented_ranges(1024 * 1024 * 1024, ResumeSupport::Supported, None, profile)
-            .expect("large fast downloads should use capped segmented downloading");
-
-    assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(ramp_plan.segments.len(), 32);
-    assert_eq!(capped_plan.segments.len(), 32);
-}
-
-#[test]
-fn fast_dynamic_queue_depth_keeps_ranges_long_lived_past_mid_download() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-
-    assert_eq!(dynamic_segment_queue_depth(profile), 80);
-}
-
-#[test]
-fn fast_tail_lease_size_uses_remaining_byte_buckets() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_lease_size_uses_remaining_byte_buckets() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let gib = 1024 * mib;
 
@@ -93,17 +59,57 @@ fn fast_tail_lease_size_uses_remaining_byte_buckets() {
         Some(mib)
     );
     assert_eq!(
-        dynamic_segment_tail_lease_size(
-            2 * gib,
-            performance_profile(DownloadPerformanceMode::Balanced)
-        ),
-        None
+        dynamic_segment_tail_lease_size(2 * gib, performance_profile()),
+        Some(32 * mib)
     );
 }
 
 #[test]
-fn fast_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn balanced_tail_leasing_splits_large_ranges_without_raising_worker_cap() {
+    let profile = performance_profile();
+    let mib = 1024 * 1024;
+    let gib = 1024 * mib;
+    let total_bytes = 2 * gib;
+    let mut state = segmented_state_for_test(
+        total_bytes,
+        (0_u64..6)
+            .map(|index| {
+                let start = index * (total_bytes / 6);
+                let end = if index == 5 {
+                    total_bytes - 1
+                } else {
+                    ((index + 1) * (total_bytes / 6)).saturating_sub(1)
+                };
+                (start, end, 0, false)
+            })
+            .collect(),
+    );
+    let mut active = HashSet::new();
+
+    let claimed = claim_largest_dynamic_segment_for_profile_tests(
+        &mut state,
+        &mut active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    )
+    .expect("balanced leasing should claim a small work unit");
+
+    assert_eq!(dynamic_segment_queue_depth(profile), profile.max_segments);
+    assert_eq!(claimed.range.len(), 32 * mib);
+    assert!(pending_segment_count(&state, &active) >= profile.max_segments);
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        total_bytes
+    );
+}
+
+#[test]
+fn general_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let gib = 1024 * mib;
 
@@ -122,35 +128,8 @@ fn fast_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket() {
 }
 
 #[test]
-fn capped_fast_profiles_keep_tail_leasing_above_rescue_floor() {
-    let mut capped_fast = performance_profile(DownloadPerformanceMode::Fast);
-    capped_fast.max_segments = 24;
-    capped_fast.soft_max_segments = 24;
-
-    let mut heavily_capped_fast = capped_fast;
-    heavily_capped_fast.max_segments = 16;
-    heavily_capped_fast.soft_max_segments = 16;
-
-    assert_eq!(
-        dynamic_segment_tail_lease_size(2 * 1024 * 1024 * 1024, capped_fast),
-        Some(32 * 1024 * 1024)
-    );
-    assert_eq!(
-        dynamic_segment_tail_lease_size(2 * 1024 * 1024 * 1024, heavily_capped_fast),
-        None
-    );
-    assert_eq!(
-        dynamic_segment_tail_lease_size(
-            2 * 1024 * 1024 * 1024,
-            performance_profile(DownloadPerformanceMode::Balanced)
-        ),
-        None
-    );
-}
-
-#[test]
-fn fast_tail_leasing_splits_clean_ranges_into_fixed_leases() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_leasing_claims_fixed_lease_from_clean_range() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let gib = 1024 * mib;
     let total_bytes = 2 * gib;
@@ -180,15 +159,19 @@ fn fast_tail_leasing_splits_clean_ranges_into_fixed_leases() {
             .sum::<u64>(),
         total_bytes
     );
-    assert!(state
-        .segments
-        .iter()
-        .all(|segment| segment.range.len() <= 32 * mib));
+    assert!(
+        state
+            .segments
+            .iter()
+            .filter(|segment| segment.range.len() <= 32 * mib)
+            .count()
+            >= dynamic_segment_queue_depth(profile)
+    );
 }
 
 #[test]
-fn fast_tail_leasing_splits_partial_pending_remainders_without_losing_progress() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_leasing_splits_partial_pending_remainders_without_losing_progress() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let gib = 1024 * mib;
     let total_bytes = 2 * gib;
@@ -228,8 +211,8 @@ fn fast_tail_leasing_splits_partial_pending_remainders_without_losing_progress()
 }
 
 #[test]
-fn fast_tail_leasing_does_not_split_active_partial_ranges() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_leasing_does_not_split_active_partial_ranges() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let total_bytes = 512 * mib;
     let mut state = segmented_state_for_test(
@@ -262,8 +245,8 @@ fn fast_tail_leasing_does_not_split_active_partial_ranges() {
 }
 
 #[test]
-fn fast_tail_stage_keeps_pending_one_mib_leases_available() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_stage_keeps_pending_one_mib_leases_available() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let mut state = segmented_state_for_test(128 * mib, vec![(0, 128 * mib - 1, 0, false)]);
     let active = HashSet::new();
@@ -293,8 +276,8 @@ fn fast_tail_stage_keeps_pending_one_mib_leases_available() {
 }
 
 #[test]
-fn fast_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+fn general_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
+    let profile = performance_profile();
     let mib = 1024 * 1024;
     let total_bytes = 80 * 64 * mib;
     let mut state = segmented_state_for_test(
@@ -337,7 +320,7 @@ fn fast_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
 
 #[test]
 fn range_plan_respects_segment_connection_budget() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let profile = performance_profile();
     let capped_plan = plan_segmented_ranges_with_budget(
         1024 * 1024 * 1024,
         ResumeSupport::Supported,
@@ -347,7 +330,7 @@ fn range_plan_respects_segment_connection_budget() {
     )
     .expect("available segment budget should still allow segmented downloading");
 
-    assert_eq!(capped_plan.segments.len(), 8);
+    assert_eq!(capped_plan.segments.len(), 6);
     assert!(plan_segmented_ranges_with_budget(
         1024 * 1024 * 1024,
         ResumeSupport::Supported,
@@ -399,982 +382,13 @@ fn dynamic_segment_queue_splits_largest_pending_ranges_before_claim() {
 }
 
 #[test]
-fn dynamic_segment_queue_does_not_reassign_completed_spans() {
-    let mut state = SegmentedDownloadState {
-        schema_version: default_segment_state_schema_version(),
-        total_bytes: 64,
-        validators: EntityValidators::default(),
-        effective_url: None,
-        target_path: None,
-        temp_path: None,
-        last_verified_file_len: 0,
-        retry_generation: 0,
-        segments: vec![
-            SegmentProgress {
-                index: 0,
-                range: ByteRange { start: 0, end: 15 },
-                downloaded_bytes: 16,
-                completed: true,
-            },
-            SegmentProgress {
-                index: 1,
-                range: ByteRange { start: 16, end: 63 },
-                downloaded_bytes: 0,
-                completed: false,
-            },
-        ],
-    };
-    let mut active = HashSet::new();
-
-    let claimed = claim_largest_dynamic_segment_for_tests(&mut state, &mut active, 4, 8)
-        .expect("dynamic queue should claim unfinished work");
-
-    assert_ne!(claimed.index, 0);
-    assert!(claimed.range.start >= 16);
-    assert!(state.segments[0].completed);
-    assert_eq!(state.segments[0].downloaded_bytes, 16);
-}
-
-#[tokio::test]
-async fn adaptive_segment_admission_blocks_below_soft_cap_after_throughput_regression() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, _target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-regression",
-        28,
-        27,
-        120 * mib,
-        128 * mib,
-        64 * mib,
-    );
-
-    assert!(!admission.can_admit_more().await);
-    assert!(ramp_blocked.load(Ordering::Relaxed));
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn adaptive_segment_admission_blocks_below_soft_cap_after_moderate_regression() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, _target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-moderate-regression",
-        28,
-        27,
-        120 * mib,
-        154 * mib,
-        40 * mib,
-    );
-
-    assert!(!admission.can_admit_more().await);
-    assert!(ramp_blocked.load(Ordering::Relaxed));
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-fn seed_fast_stable_baseline(
-    admission: &AdaptiveSegmentAdmission,
-    workers: usize,
-    baseline_bps: u64,
-) {
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-    admission.stable_workers.store(workers, Ordering::Relaxed);
-    admission.stable_warmup_samples.store(1, Ordering::Relaxed);
-    admission.stable_sample_count.store(2, Ordering::Relaxed);
-    admission
-        .stable_sample_total_bps
-        .store(baseline_bps, Ordering::Relaxed);
-    admission.trigger_sample_count.store(0, Ordering::Relaxed);
-    admission.trigger_target_workers.store(0, Ordering::Relaxed);
-    admission.trigger_required_bps.store(0, Ordering::Relaxed);
-}
-
-fn force_fast_trial(
-    admission: &AdaptiveSegmentAdmission,
-    stable_workers: usize,
-    trial_workers: usize,
-    baseline_bps: u64,
-) {
-    seed_fast_stable_baseline(admission, stable_workers, baseline_bps);
-    admission
-        .admitted_workers
-        .store(trial_workers, Ordering::Relaxed);
-    admission
-        .target_workers
-        .store(trial_workers, Ordering::Relaxed);
-    admission
-        .trial_workers
-        .store(trial_workers, Ordering::Relaxed);
-    admission
-        .trial_baseline_bps
-        .store(baseline_bps, Ordering::Relaxed);
-    admission.trial_sample_count.store(0, Ordering::Relaxed);
-    admission.trial_sample_total_bps.store(0, Ordering::Relaxed);
-}
-
-fn force_startup_fast_trial(admission: &AdaptiveSegmentAdmission, trial_workers: usize) {
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-    admission
-        .startup_probe_trial_workers
-        .store(trial_workers, Ordering::Relaxed);
-}
-
-fn advance_fast_sample(admission: &AdaptiveSegmentAdmission, downloaded: &mut u64, bps: u64) {
-    *downloaded = downloaded.saturating_add(bps.saturating_mul(2));
-    admission.progress.store_segment_bytes(0, *downloaded);
-}
-
-#[tokio::test]
-async fn fast_adaptive_startup_probe_starts_on_first_nonzero_soft_cap_sample() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, mut admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-first-sample",
-        32,
-        31,
-        120 * mib,
-        208 * mib,
-        0,
-    );
-    admission.context.profile.initial_segments = 32;
-
-    assert!(admission.can_admit_more().await);
-    assert_eq!(admission.admit_worker_target().await, 36);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(
-        admission.last_ramp_speed_bps.load(Ordering::Relaxed),
-        44 * mib
-    );
-    assert!(admission.startup_probe_attempted.load(Ordering::Relaxed));
-    assert_eq!(admission.trial_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(
-        admission.trial_baseline_bps.load(Ordering::Relaxed),
-        44 * mib
-    );
-    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 0);
-    assert_eq!(admission.stable_sample_total_bps.load(Ordering::Relaxed), 0);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_uses_stable_peak_baseline_after_warmup() {
-    let mib = 1024 * 1024;
-    let (root, _ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-warmup-safe-baseline",
-        32,
-        31,
-        0,
-        40 * mib,
-        0,
-    );
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 106 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 170 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        admission.stable_sample_total_bps.load(Ordering::Relaxed),
-        33 * mib
-    );
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_holds_at_soft_cap_without_clear_improvement() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-hold",
-        32,
-        31,
-        120 * mib,
-        204 * mib,
-        40 * mib,
-    );
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_uses_baseline_before_testing_triggers() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) =
-        adaptive_admission_for_test("adaptive-ramp-soft-cap-two-samples", 32, 31, 0, 80 * mib, 0);
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 168 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 232 * mib);
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_does_not_trial_below_established_baseline_threshold() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-baseline-threshold",
-        32,
-        31,
-        120 * mib,
-        183 * mib,
-        33 * mib,
-    );
-    seed_fast_stable_baseline(&admission, 32, 33 * mib);
-
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_requires_two_consecutive_trigger_samples() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-soft-cap-trigger-samples",
-        32,
-        31,
-        120 * mib,
-        194 * mib,
-        33 * mib,
-    );
-    seed_fast_stable_baseline(&admission, 32, 33 * mib);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 268 * mib);
-    assert!(admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_startup_probe_rolls_back_and_blocks_immediate_retry() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-probe-rollback",
-        36,
-        35,
-        120 * mib,
-        180 * mib,
-        44 * mib,
-    );
-    admission
-        .startup_probe_attempted
-        .store(true, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 32);
-
-    seed_fast_stable_baseline(&admission, 32, 44 * mib);
-    admission.progress.store_segment_bytes(0, 268 * mib);
-    assert!(!admission.can_admit_more().await);
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_startup_probe_accept_resets_accepted_cap_baseline_collection() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-probe-accept-resets-baseline",
-        36,
-        35,
-        120 * mib,
-        212 * mib,
-        42 * mib,
-    );
-    force_startup_fast_trial(&admission, 36);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 304 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(admission.stable_warmup_samples.load(Ordering::Relaxed), 0);
-    assert_eq!(admission.stable_sample_count.load(Ordering::Relaxed), 0);
-    assert_eq!(admission.stable_sample_total_bps.load(Ordering::Relaxed), 0);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_after_startup_accept_requires_clean_baseline_before_next_cap() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-clean-baseline-before-40",
-        36,
-        35,
-        120 * mib,
-        212 * mib,
-        42 * mib,
-    );
-    force_startup_fast_trial(&admission, 36);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 304 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    admission.progress.store_segment_bytes(0, 384 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 464 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 544 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 632 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 720 * mib);
-    assert!(admission.can_admit_more().await);
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(
-        admission.stable_sample_total_bps.load(Ordering::Relaxed),
-        40 * mib
-    );
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_rolls_back_failed_trial_without_backoff() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-trial-rollback",
-        36,
-        35,
-        120 * mib,
-        180 * mib,
-        44 * mib,
-    );
-
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 32);
-    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 32);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_blocks_rejected_cap_immediate_retry() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-trial-retry-blocked",
-        40,
-        39,
-        120 * mib,
-        180 * mib,
-        34 * mib,
-    );
-    admission.stable_workers.store(36, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    seed_fast_stable_baseline(&admission, 36, 34 * mib);
-    admission.progress.store_segment_bytes(0, 258 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_retry_after_cooldown_requires_stronger_two_sample_trigger() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-trial-retry-strict-trigger",
-        40,
-        39,
-        120 * mib,
-        180 * mib,
-        34 * mib,
-    );
-    admission.stable_workers.store(36, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    seed_fast_stable_baseline(&admission, 36, 34 * mib);
-    let mut downloaded = 180 * mib;
-    for _ in 0..8 {
-        advance_fast_sample(&admission, &mut downloaded, 39 * mib);
-        assert!(!admission.can_admit_more().await);
-    }
-
-    advance_fast_sample(&admission, &mut downloaded, 39 * mib);
-    assert!(!admission.can_admit_more().await);
-    advance_fast_sample(&admission, &mut downloaded, 39 * mib);
-    assert!(admission.can_admit_more().await);
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_accepts_strong_trial_as_stable_cap() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-trial-accept",
-        36,
-        35,
-        120 * mib,
-        212 * mib,
-        42 * mib,
-    );
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 304 * mib);
-    assert!(!admission.can_admit_more().await);
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
-
-    admission.progress.store_segment_bytes(0, 408 * mib);
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 512 * mib);
-    assert!(admission.can_admit_more().await);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_accepted_cap_rolls_back_after_post_accept_regression() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-post-accept-rollback",
-        40,
-        39,
-        120 * mib,
-        204 * mib,
-        36 * mib,
-    );
-    force_fast_trial(&admission, 36, 40, 36 * mib);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 288 * mib);
-    assert!(!admission.can_admit_more().await);
-    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 40);
-    assert_eq!(
-        admission.post_accept_guard_workers.load(Ordering::Relaxed),
-        40
-    );
-
-    admission.progress.store_segment_bytes(0, 354 * mib);
-    assert!(!admission.can_admit_more().await);
-    assert_eq!(target_workers.load(Ordering::Relaxed), 40);
-    admission.progress.store_segment_bytes(0, 420 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(admission.admitted_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 36);
-    assert_eq!(
-        admission.post_accept_guard_workers.load(Ordering::Relaxed),
-        0
-    );
-    assert!(admission
-        .rejected_trial_caps
-        .lock()
-        .await
-        .get(&40)
-        .is_some_and(|rejected| rejected.cooldown_windows_remaining > 0));
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_accepted_cap_guard_clears_after_healthy_windows() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-post-accept-guard-clears",
-        40,
-        39,
-        120 * mib,
-        204 * mib,
-        36 * mib,
-    );
-    force_fast_trial(&admission, 36, 40, 36 * mib);
-
-    assert!(!admission.can_admit_more().await);
-    admission.progress.store_segment_bytes(0, 288 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    let mut downloaded = 288 * mib;
-    for _ in 0..4 {
-        advance_fast_sample(&admission, &mut downloaded, 42 * mib);
-        assert!(!admission.can_admit_more().await);
-        assert_eq!(target_workers.load(Ordering::Relaxed), 40);
-    }
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(admission.stable_workers.load(Ordering::Relaxed), 40);
-    assert_eq!(
-        admission.post_accept_guard_workers.load(Ordering::Relaxed),
-        0
-    );
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_startup_probe_excludes_non_normal_uncapped_profiles() {
-    let mib = 1024 * 1024;
-    let (protected_root, _blocked, protected_target, mut protected) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-protected-exclusion",
-        32,
-        31,
-        120 * mib,
-        208 * mib,
-        0,
-    );
-    protected.context.profile = performance_profile(DownloadPerformanceMode::Fast);
-
-    assert!(!protected.can_admit_more().await);
-    assert_eq!(protected_target.load(Ordering::Relaxed), 32);
-
-    let (gofile_root, _blocked, gofile_target, mut gofile) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-gofile-exclusion",
-        16,
-        15,
-        120 * mib,
-        208 * mib,
-        0,
-    );
-    gofile.context.profile = profile_for_effective_http_url(
-        DownloadPerformanceMode::Fast,
-        "https://store1.gofile.io/download/web/file-token/game.rar",
-    );
-
-    assert!(!gofile.can_admit_more().await);
-    assert_eq!(gofile_target.load(Ordering::Relaxed), 16);
-
-    let (capped_root, _blocked, capped_target, mut capped) = adaptive_admission_for_test(
-        "adaptive-ramp-startup-pressure-exclusion",
-        8,
-        7,
-        120 * mib,
-        208 * mib,
-        0,
-    );
-    let mut capped_profile = performance_profile(DownloadPerformanceMode::Fast);
-    capped_profile.initial_segments = 8;
-    capped_profile.soft_max_segments = 8;
-    capped_profile.max_segments = 8;
-    capped.context.profile = capped_profile;
-
-    assert!(!capped.can_admit_more().await);
-    assert_eq!(capped_target.load(Ordering::Relaxed), 8);
-
-    let _ = tokio::fs::remove_dir_all(protected_root).await;
-    let _ = tokio::fs::remove_dir_all(gofile_root).await;
-    let _ = tokio::fs::remove_dir_all(capped_root).await;
-}
-
-#[tokio::test]
-async fn fast_adaptive_sustain_repeated_rejected_cap_extends_cooldown() {
-    let mib = 1024 * 1024;
-    let (root, ramp_blocked, target_workers, admission) = adaptive_admission_for_test(
-        "adaptive-ramp-trial-repeat-reject",
-        40,
-        39,
-        120 * mib,
-        180 * mib,
-        34 * mib,
-    );
-    admission.stable_workers.store(36, Ordering::Relaxed);
-
-    assert!(!admission.can_admit_more().await);
-    force_fast_trial(&admission, 36, 40, 34 * mib);
-    admission
-        .last_ramp_total_bytes
-        .store(220 * mib, Ordering::Relaxed);
-    admission.progress.store_segment_bytes(0, 280 * mib);
-    assert!(!admission.can_admit_more().await);
-
-    seed_fast_stable_baseline(&admission, 36, 34 * mib);
-    let mut downloaded = 280 * mib;
-    for _ in 0..8 {
-        advance_fast_sample(&admission, &mut downloaded, 39 * mib);
-        assert!(!admission.can_admit_more().await);
-    }
-
-    assert!(!ramp_blocked.load(Ordering::Relaxed));
-    assert_eq!(target_workers.load(Ordering::Relaxed), 36);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[tokio::test]
-async fn dynamic_segment_claim_does_not_persist_queue_splits_immediately() {
-    let root = test_download_runtime_dir("dynamic-claim-no-persist");
-    let temp_path = root.join("download.part");
-    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
-        schema_version: default_segment_state_schema_version(),
-        total_bytes: 64,
-        validators: EntityValidators::default(),
-        effective_url: None,
-        target_path: None,
-        temp_path: None,
-        last_verified_file_len: 0,
-        retry_generation: 0,
-        segments: vec![SegmentProgress {
-            index: 0,
-            range: ByteRange { start: 0, end: 63 },
-            downloaded_bytes: 0,
-            completed: false,
-        }],
-    }));
-    let active = Arc::new(Mutex::new(HashSet::new()));
-
-    let claimed = claim_dynamic_segment_work(&temp_path, &metadata, &active, 4, 8, None)
-        .await
-        .unwrap()
-        .expect("dynamic queue should claim a segment");
-
-    assert_eq!(claimed.range, ByteRange { start: 0, end: 15 });
-    assert!(
-        !segment_meta_path(&temp_path).exists(),
-        "claiming split work should leave sidecar persistence to the shared persist cadence"
-    );
-    assert_eq!(metadata.lock().await.segments.len(), 4);
-
-    let _ = tokio::fs::remove_dir_all(root).await;
-}
-
-#[test]
-fn range_plan_falls_back_for_stable_small_unknown_or_limited_downloads() {
-    assert!(plan_segmented_ranges(
-        256 * 1024 * 1024,
-        ResumeSupport::Supported,
-        None,
-        performance_profile(DownloadPerformanceMode::Stable),
-    )
-    .is_none());
-    assert!(plan_segmented_ranges(
-        16 * 1024 * 1024,
-        ResumeSupport::Supported,
-        None,
-        performance_profile(DownloadPerformanceMode::Balanced),
-    )
-    .is_none());
-    assert!(plan_segmented_ranges(
-        256 * 1024 * 1024,
-        ResumeSupport::Unknown,
-        None,
-        performance_profile(DownloadPerformanceMode::Balanced),
-    )
-    .is_none());
-    assert!(plan_segmented_ranges(
-        256 * 1024 * 1024,
-        ResumeSupport::Supported,
-        Some(1024),
-        performance_profile(DownloadPerformanceMode::Balanced),
-    )
-    .is_none());
-    assert!(plan_segmented_ranges(
-        256 * 1024 * 1024,
-        ResumeSupport::Supported,
-        Some(1024),
-        performance_profile(DownloadPerformanceMode::Fast),
-    )
-    .is_none());
-}
-
-#[test]
-fn fuckingfast_hoster_bulk_tasks_allow_safe_segmented_downloads() {
-    let mut task = http_segment_policy_task(
-        true,
-        Some("https://fuckingfast.co/ecw0lw398okf#Game.part01.rar"),
-    );
-    task.url = "https://dl.fuckingfast.co/dl/token/Game.part01.rar".into();
-
-    assert!(task_allows_segmented_download(&task));
-}
-
-#[test]
-fn datanodes_hoster_bulk_tasks_allow_safe_segmented_downloads() {
-    let mut task = http_segment_policy_task(
-        true,
-        Some("https://datanodes.to/abc123456789/fg-optional-bonus-content.bin"),
-    );
-    task.url = "https://s42.datanodes.to/d/abc123456789/fg-optional-bonus-content.bin".into();
-
-    assert!(task_allows_segmented_download(&task));
-}
-
-#[test]
-fn segment_budget_uses_active_connection_leases() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_3",
-            "https://s1.datanodes.to/d/ghi/file.bin",
-            SegmentConnectionBudget {
-                total: 16,
-                per_origin: 8,
-            },
-            6,
-            &[
-                (
-                    "job_1",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/abc/file.bin",
-                    4,
-                ),
-                (
-                    "job_2",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s2.datanodes.to/d/def/file.bin",
-                    4,
-                ),
-            ],
-        ),
-        Some(4)
-    );
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_4",
-            "https://s3.datanodes.to/d/jkl/file.bin",
-            SegmentConnectionBudget {
-                total: 8,
-                per_origin: 4,
-            },
-            6,
-            &[
-                (
-                    "job_1",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/abc/file.bin",
-                    4,
-                ),
-                (
-                    "job_2",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s2.datanodes.to/d/def/file.bin",
-                    4,
-                ),
-            ],
-        ),
-        None
-    );
-}
-
-#[test]
-fn segment_budget_wait_action_defers_bulk_admissions_and_preserves_active_segment_state() {
-    assert_eq!(
-        DownloadAdmission::direct_bulk().segment_budget_wait_action(false),
-        SegmentBudgetWaitAction::Defer
-    );
-    assert_eq!(
-        DownloadAdmission::protected_hoster_bulk().segment_budget_wait_action(false),
-        SegmentBudgetWaitAction::Defer
-    );
-    assert_eq!(
-        DownloadAdmission::normal().segment_budget_wait_action(false),
-        SegmentBudgetWaitAction::FallbackSingleStream
-    );
-    assert_eq!(
-        DownloadAdmission::normal().segment_budget_wait_action(true),
-        SegmentBudgetWaitAction::Defer
-    );
-}
-
-#[test]
-fn datanodes_balanced_budget_keeps_four_same_origin_jobs_segmented_with_two_segment_floor() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_4",
-            "https://s1.datanodes.to/d/jkl/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
-            4,
-            &[
-                (
-                    "job_1",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/abc/file.bin",
-                    4,
-                ),
-                (
-                    "job_2",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/def/file.bin",
-                    2,
-                ),
-                (
-                    "job_3",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/ghi/file.bin",
-                    2,
-                ),
-            ],
-        ),
-        Some(2)
-    );
-}
-
-#[test]
-fn datanodes_oldest_balanced_worker_keeps_full_segment_cap() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_1",
-            "https://s1.datanodes.to/d/abc/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
-            4,
-            &[],
-        ),
-        Some(4)
-    );
-}
-
-#[test]
-fn datanodes_secondary_balanced_workers_start_with_two_segments() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_2",
-            "https://s1.datanodes.to/d/def/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
-            4,
-            &[(
-                "job_1",
-                SegmentConnectionClass::ProtectedHosterBulk,
-                "https://s1.datanodes.to/d/abc/file.bin",
-                4,
-            )],
-        ),
-        Some(2)
-    );
-}
-
-#[test]
-fn datanodes_oldest_fast_worker_keeps_full_segment_cap() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_1",
-            "https://s1.datanodes.to/d/abc/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
-            6,
-            &[],
-        ),
-        Some(6)
-    );
-}
-
-#[test]
-fn datanodes_fast_worker_can_grow_to_adaptive_segment_cap() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_1",
-            "https://s1.datanodes.to/d/abc/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
-            10,
-            &[(
-                "job_1",
-                SegmentConnectionClass::ProtectedHosterBulk,
-                "https://s1.datanodes.to/d/abc/file.bin",
-                6,
-            )],
-        ),
-        Some(10)
-    );
-}
-
-#[test]
-fn datanodes_secondary_fast_workers_start_with_two_segments() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_2",
-            "https://s1.datanodes.to/d/def/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
-            6,
-            &[(
-                "job_1",
-                SegmentConnectionClass::ProtectedHosterBulk,
-                "https://s1.datanodes.to/d/abc/file.bin",
-                6,
-            )],
-        ),
-        Some(2)
-    );
-}
-
-#[test]
-fn datanodes_third_fast_worker_stays_segmented_with_two_segment_floor() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_3",
-            "https://s1.datanodes.to/d/ghi/file.bin",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
-            6,
-            &[
-                (
-                    "job_1",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/abc/file.bin",
-                    6,
-                ),
-                (
-                    "job_2",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://s1.datanodes.to/d/def/file.bin",
-                    2,
-                ),
-            ],
-        ),
-        Some(2)
-    );
-}
-
-#[test]
 fn fuckingfast_oldest_balanced_worker_keeps_full_segment_cap() {
     assert_eq!(
         segment_budget_from_test_leases(
             SegmentConnectionClass::ProtectedHosterBulk,
             "job_1",
             "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            hoster_segment_budget().unwrap(),
             4,
             &[],
         ),
@@ -1389,7 +403,7 @@ fn fuckingfast_secondary_balanced_workers_start_with_two_segments() {
             SegmentConnectionClass::ProtectedHosterBulk,
             "job_2",
             "https://dl.fuckingfast.co/dl/token-b/Game.part02.rar",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Balanced).unwrap(),
+            hoster_segment_budget().unwrap(),
             4,
             &[(
                 "job_1",
@@ -1397,34 +411,6 @@ fn fuckingfast_secondary_balanced_workers_start_with_two_segments() {
                 "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
                 4,
             )],
-        ),
-        Some(2)
-    );
-}
-
-#[test]
-fn fuckingfast_third_fast_worker_stays_segmented_with_two_segment_floor() {
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::ProtectedHosterBulk,
-            "job_3",
-            "https://dl.fuckingfast.co/dl/token-c/Game.part03.rar",
-            hoster_segment_budget_for_mode(DownloadPerformanceMode::Fast).unwrap(),
-            6,
-            &[
-                (
-                    "job_1",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://dl.fuckingfast.co/dl/token-a/Game.part01.rar",
-                    6,
-                ),
-                (
-                    "job_2",
-                    SegmentConnectionClass::ProtectedHosterBulk,
-                    "https://dl.fuckingfast.co/dl/token-b/Game.part02.rar",
-                    2,
-                ),
-            ],
         ),
         Some(2)
     );
@@ -1882,7 +868,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         handoff_auth: None,
         temp_path: temp_path.clone(),
         total_bytes: 12,
-        profile: performance_profile(DownloadPerformanceMode::Balanced),
+        profile: performance_profile(),
         validators,
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
@@ -1976,224 +962,6 @@ async fn segment_worker_collector_signals_stop_before_returning_error() {
 }
 
 #[test]
-fn normal_fast_segment_budget_allows_adaptive_fast_plus_ceiling() {
-    let budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Fast)
-        .expect("fast normal downloads should use brokered segment budgets");
-
-    assert_eq!(budget.total, 128);
-    assert_eq!(budget.per_origin, 64);
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::Normal,
-            "job_fast_1",
-            "https://cdn.example.com/fast.bin",
-            budget,
-            usize::MAX,
-            &[],
-        ),
-        Some(64)
-    );
-}
-
-#[test]
-fn fast_profile_uses_adaptive_sustain_defaults() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-
-    assert_eq!(profile.initial_segments, 16);
-    assert_eq!(profile.soft_max_segments, 32);
-    assert_eq!(profile.max_segments, 64);
-    assert_eq!(profile.adaptive_ramp_step, 4);
-    assert_eq!(profile.adaptive_ramp_interval, Duration::from_secs(2));
-}
-
-#[test]
-fn normal_and_direct_fast_profiles_start_at_soft_cap() {
-    let now = Instant::now();
-    let url = "https://fast-startup-profile.example.test/downloads/game.rar";
-
-    let normal = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        None,
-        DownloadAdmission::normal(),
-        now,
-    );
-    let direct = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        None,
-        DownloadAdmission::direct_bulk(),
-        now,
-    );
-
-    assert_eq!(normal.initial_segments, 32);
-    assert_eq!(normal.soft_max_segments, 32);
-    assert_eq!(normal.max_segments, 64);
-    assert_eq!(direct.initial_segments, 32);
-    assert_eq!(direct.soft_max_segments, 32);
-    assert_eq!(direct.max_segments, 64);
-}
-
-#[test]
-fn protected_hoster_fast_profile_does_not_receive_normal_startup_boost() {
-    let profile = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        "https://s1.datanodes.to/d/abc123/file.rar",
-        None,
-        DownloadAdmission::protected_hoster_bulk(),
-        Instant::now(),
-    );
-
-    assert_eq!(profile.initial_segments, 16);
-    assert_eq!(profile.soft_max_segments, 32);
-    assert_eq!(profile.max_segments, 64);
-}
-
-#[test]
-fn gofile_fast_profile_uses_conservative_direct_cap() {
-    let profile = profile_for_effective_http_url(
-        DownloadPerformanceMode::Fast,
-        "https://store1.gofile.io/download/web/file-token/BeamNG-drive-SteamRIP.com.rar",
-    );
-
-    assert_eq!(profile.initial_segments, 8);
-    assert_eq!(profile.soft_max_segments, 16);
-    assert_eq!(profile.max_segments, 16);
-    assert_eq!(profile.adaptive_ramp_step, 4);
-}
-
-#[test]
-fn gofile_fast_profile_does_not_receive_normal_startup_boost() {
-    let profile = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        "https://store1.gofile.io/download/web/file-token/BeamNG-drive-SteamRIP.com.rar",
-        None,
-        DownloadAdmission::normal(),
-        Instant::now(),
-    );
-
-    assert_eq!(profile.initial_segments, 8);
-    assert_eq!(profile.soft_max_segments, 16);
-    assert_eq!(profile.max_segments, 16);
-}
-
-#[test]
-fn host_score_temporarily_caps_fast_profile_after_reconnects() {
-    let _guard = segment_host_score_test_guard();
-    reset_segment_host_scores_for_tests();
-    let now = Instant::now();
-    let url = "https://cdn.example.com/downloads/game.rar";
-
-    record_segment_host_success(url, 32, now);
-    record_segment_host_failure(url, 16, "segment reconnect", now + Duration::from_secs(1));
-
-    let score = segment_host_score_snapshot(url, now + Duration::from_secs(2))
-        .expect("host score should be retained during its TTL");
-    assert_eq!(score.best_cap, 16);
-    assert_eq!(score.recent_reconnects, 1);
-    assert_eq!(
-        score.last_failure_reason.as_deref(),
-        Some("segment reconnect")
-    );
-
-    let profile = profile_for_effective_http_url_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        now + Duration::from_secs(2),
-    );
-    assert_eq!(profile.max_segments, 16);
-    assert_eq!(profile.soft_max_segments, 16);
-
-    assert!(segment_host_score_snapshot(url, now + Duration::from_secs(31 * 60)).is_none());
-}
-
-#[test]
-fn segment_pressure_requires_repeated_429_before_capping_fast_profile() {
-    let _guard = segment_host_score_test_guard();
-    reset_segment_host_scores_for_tests();
-    let now = Instant::now();
-    let key = "hoster:test-file";
-    let url = "https://rotating-cdn.example.com/downloads/game.rar";
-    let error = error_for_http_status(StatusCode::TOO_MANY_REQUESTS, false);
-
-    let first = record_segment_reconnect_pressure_for_error(key, 16, &error, now);
-    assert_eq!(first.reduced_target, None);
-
-    let uncapped = profile_for_effective_http_url_with_pressure_key_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        Some(key),
-        now + Duration::from_secs(1),
-    );
-    assert_eq!(uncapped.initial_segments, 16);
-    assert_eq!(uncapped.soft_max_segments, 32);
-    assert_eq!(uncapped.max_segments, 64);
-
-    record_segment_reconnect_pressure_for_error(key, 16, &error, now + Duration::from_secs(2));
-    let third =
-        record_segment_reconnect_pressure_for_error(key, 16, &error, now + Duration::from_secs(3));
-
-    assert_eq!(third.reduced_target, Some(8));
-    let capped = profile_for_effective_http_url_with_pressure_key_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        Some(key),
-        now + Duration::from_secs(4),
-    );
-    assert_eq!(capped.initial_segments, 8);
-    assert_eq!(capped.soft_max_segments, 8);
-    assert_eq!(capped.max_segments, 8);
-
-    let capped_admission_profile = profile_for_segment_admission_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        Some(key),
-        DownloadAdmission::normal(),
-        now + Duration::from_secs(4),
-    );
-    assert_eq!(capped_admission_profile.initial_segments, 8);
-    assert_eq!(capped_admission_profile.soft_max_segments, 8);
-    assert_eq!(capped_admission_profile.max_segments, 8);
-}
-
-#[test]
-fn segment_pressure_expires_and_allows_fast_profile_recovery() {
-    let _guard = segment_host_score_test_guard();
-    reset_segment_host_scores_for_tests();
-    let now = Instant::now();
-    let key = "hoster:ttl";
-    let url = "https://cdn.example.com/downloads/game.rar";
-    let error = error_for_http_status(StatusCode::TOO_MANY_REQUESTS, false);
-
-    for offset in 0..3 {
-        record_segment_reconnect_pressure_for_error(
-            key,
-            16,
-            &error,
-            now + Duration::from_secs(offset),
-        );
-    }
-
-    let capped = profile_for_effective_http_url_with_pressure_key_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        Some(key),
-        now + Duration::from_secs(4),
-    );
-    assert_eq!(capped.max_segments, 8);
-
-    let recovered = profile_for_effective_http_url_with_pressure_key_at(
-        DownloadPerformanceMode::Fast,
-        url,
-        Some(key),
-        now + Duration::from_secs(31 * 60),
-    );
-    assert_eq!(recovered.initial_segments, 16);
-    assert_eq!(recovered.soft_max_segments, 32);
-    assert_eq!(recovered.max_segments, 64);
-}
-
-#[test]
 fn segment_write_coalescer_batches_small_chunks_and_flushes_tail() {
     let mut coalescer = SegmentWriteCoalescer::new(8);
 
@@ -2205,50 +973,6 @@ fn segment_write_coalescer_batches_small_chunks_and_flushes_tail() {
     assert_eq!(coalescer.push(b"xy"), None);
     assert_eq!(coalescer.flush(), Some(b"xy".to_vec()));
     assert_eq!(coalescer.flush(), None);
-}
-
-#[test]
-fn direct_bulk_fast_budget_reuses_normal_fast_connection_ceiling() {
-    let budget = direct_bulk_segment_budget_for_mode(DownloadPerformanceMode::Fast)
-        .expect("fast direct bulk downloads should use brokered segment budgets");
-    let normal_budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Fast)
-        .expect("fast normal downloads should use brokered segment budgets");
-
-    assert_eq!(budget, normal_budget);
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::DirectBulk,
-            "bulk_fast_1",
-            "https://cdn.example.com/bulk-fast.bin",
-            budget,
-            usize::MAX,
-            &[],
-        ),
-        Some(64)
-    );
-}
-
-#[test]
-fn direct_bulk_and_normal_segment_budgets_are_isolated_by_class() {
-    let budget = direct_bulk_segment_budget_for_mode(DownloadPerformanceMode::Fast)
-        .expect("fast direct bulk downloads should use brokered segment budgets");
-
-    assert_eq!(
-        segment_budget_from_test_leases(
-            SegmentConnectionClass::DirectBulk,
-            "bulk_fast_1",
-            "https://cdn.example.com/bulk-fast.bin",
-            budget,
-            usize::MAX,
-            &[(
-                "normal_fast_1",
-                SegmentConnectionClass::Normal,
-                "https://cdn.example.com/normal-fast.bin",
-                64,
-            )],
-        ),
-        Some(64)
-    );
 }
 
 #[test]

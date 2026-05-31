@@ -412,15 +412,6 @@ pub enum StartupLaunchMode {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DownloadPerformanceMode {
-    Stable,
-    Balanced,
-    #[default]
-    Fast,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ProtectedDownloadAuthScope {
     Off,
     Allowlist,

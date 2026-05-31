@@ -613,14 +613,6 @@ async fn bulk_runtime_tuning_uses_bulk_speed_limit_without_profile_settings() {
         state.speed_limit_bytes_per_second_for_task(true).await,
         Some(512 * 1024)
     );
-    assert_eq!(
-        state.download_performance_mode_for_task(false).await,
-        DownloadPerformanceMode::Balanced
-    );
-    assert_eq!(
-        state.download_performance_mode_for_task(true).await,
-        DownloadPerformanceMode::Balanced
-    );
 
     let _ = std::fs::remove_dir_all(download_dir);
 }

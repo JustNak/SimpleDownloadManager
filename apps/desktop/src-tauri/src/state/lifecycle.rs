@@ -253,18 +253,6 @@ impl SharedState {
         }
     }
 
-    pub async fn download_performance_mode(&self) -> DownloadPerformanceMode {
-        self.download_performance_mode_for_task(false).await
-    }
-
-    pub async fn download_performance_mode_for_task(
-        &self,
-        is_bulk_member: bool,
-    ) -> DownloadPerformanceMode {
-        let _ = is_bulk_member;
-        DownloadPerformanceMode::Balanced
-    }
-
     pub async fn bulk_hoster_acceleration_mode(&self) -> BulkHosterAccelerationMode {
         let state = self.inner.read().await;
         state.settings.bulk.hoster_acceleration_mode

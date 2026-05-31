@@ -316,7 +316,7 @@ fn hoster_acceleration_off_disallows_verified_hoster_bulk_segmentation() {
 }
 
 #[test]
-fn hoster_acceleration_caps_segments_by_performance_mode() {
+fn hoster_acceleration_uses_general_segment_caps() {
     let policy = crate::hosters::HosterAccelerationPolicy {
         backoff_key: "hoster:datanodes:abc123456789".into(),
         balanced_initial_segments: 4,
@@ -325,27 +325,13 @@ fn hoster_acceleration_caps_segments_by_performance_mode() {
         fast_max_segments: 10,
     };
 
-    assert_eq!(
-        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Stable),
-        1
-    );
-    assert_eq!(
-        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Balanced),
-        4
-    );
-    assert_eq!(
-        hoster_initial_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
-        6
-    );
-    assert_eq!(
-        hoster_adaptive_segment_cap_for_mode(&policy, DownloadPerformanceMode::Fast),
-        10
-    );
+    assert_eq!(hoster_initial_segment_cap(&policy), 4);
+    assert_eq!(hoster_adaptive_segment_cap(&policy), 4);
 }
 
 #[test]
 fn normal_download_segment_budget_limits_same_origin_connections() {
-    let budget = normal_segment_budget_for_mode(DownloadPerformanceMode::Balanced)
+    let budget = normal_segment_budget()
         .expect("balanced normal downloads should use brokered segment budgets");
 
     assert_eq!(
@@ -421,36 +407,16 @@ fn healthy_hoster_bulk_progress_releases_fairness_scheduler() {
 }
 
 #[test]
-fn protected_bulk_hoster_stall_timeout_is_mode_specific() {
+fn protected_bulk_hoster_stall_timeout_uses_general_policy() {
     let hoster_bulk = http_segment_policy_task(true, Some("https://datanodes.to/source"));
     let direct_bulk = http_segment_policy_task(true, None);
 
     assert_eq!(
-        protected_bulk_hoster_stall_timeout(
-            &hoster_bulk,
-            performance_profile(DownloadPerformanceMode::Balanced),
-        ),
+        protected_bulk_hoster_stall_timeout(&hoster_bulk, performance_profile(),),
         Some(Duration::from_secs(25))
     );
     assert_eq!(
-        protected_bulk_hoster_stall_timeout(
-            &hoster_bulk,
-            performance_profile(DownloadPerformanceMode::Fast),
-        ),
-        Some(Duration::from_secs(15))
-    );
-    assert_eq!(
-        protected_bulk_hoster_stall_timeout(
-            &hoster_bulk,
-            performance_profile(DownloadPerformanceMode::Stable),
-        ),
-        Some(Duration::from_secs(90))
-    );
-    assert_eq!(
-        protected_bulk_hoster_stall_timeout(
-            &direct_bulk,
-            performance_profile(DownloadPerformanceMode::Balanced),
-        ),
+        protected_bulk_hoster_stall_timeout(&direct_bulk, performance_profile(),),
         None
     );
 }
@@ -482,7 +448,7 @@ fn http_attempt_defers_segment_budget_waits_without_deferring_priority_throttle(
 
 #[test]
 fn low_speed_recovery_retries_only_after_sustained_unlimited_slowdown() {
-    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let profile = performance_profile();
     let mut monitor = LowSpeedMonitor::new(profile);
 
     assert_eq!(
@@ -543,7 +509,7 @@ fn range_backoff_supports_source_keyed_hoster_policies() {
 
 #[test]
 fn large_bulk_member_at_seventeen_kib_per_second_retries_without_partial_reset() {
-    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let profile = performance_profile();
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 0,
         max_retry_attempts: 3,
@@ -565,7 +531,7 @@ fn large_bulk_member_at_seventeen_kib_per_second_retries_without_partial_reset()
 
 #[test]
 fn bulk_slow_recovery_ignores_non_bulk_and_speed_limited_downloads() {
-    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let profile = performance_profile();
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 0,
         max_retry_attempts: 3,
@@ -599,7 +565,7 @@ fn bulk_slow_recovery_ignores_non_bulk_and_speed_limited_downloads() {
 
 #[test]
 fn near_complete_bulk_slow_recovery_preserves_partial_file() {
-    let profile = performance_profile(DownloadPerformanceMode::Balanced);
+    let profile = performance_profile();
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 1,
         max_retry_attempts: 3,
@@ -621,7 +587,7 @@ fn near_complete_bulk_slow_recovery_preserves_partial_file() {
 
 #[test]
 fn exhausted_bulk_slow_recovery_recycles_stream_and_preserves_partial() {
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
+    let profile = performance_profile();
     let recovery_state = crate::state::BulkMemberSlowRecoveryState {
         retry_attempts: 3,
         max_retry_attempts: 3,
@@ -630,7 +596,7 @@ fn exhausted_bulk_slow_recovery_recycles_stream_and_preserves_partial() {
     assert_eq!(
         bulk_slow_stream_recovery_action(
             64 * 1024 * 15,
-            Duration::from_secs(15),
+            Duration::from_secs(20),
             Some(500 * 1024 * 1024),
             2 * 1024 * 1024,
             None,

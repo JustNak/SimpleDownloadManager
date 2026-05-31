@@ -7,13 +7,13 @@ use crate::storage::{
     persist_state, persist_state_blocking, BulkArchiveInfo, BulkArchiveOutputKind,
     BulkArchiveStatus, BulkFinalizeMode, BulkHosterAccelerationMode, BulkHosterFairnessMode,
     ConnectionState, DesktopSnapshot, DiagnosticEvent, DiagnosticLevel, DiagnosticsExport,
-    DiagnosticsSnapshot, DownloadJob, DownloadPerformanceMode, DownloadPrompt, DownloadSource,
-    ExtensionIntegrationSettings, FailureCategory, HandoffAuth, HandoffAuthHeader,
-    HostRegistrationDiagnostics, HosterPreflightInfo, HosterPreflightStatus, IntegrityAlgorithm,
-    IntegrityCheck, IntegrityStatus, JobState, LocalRecoveryCandidate, LocalRecoveryPreview,
-    MainWindowState, PersistedState, ProtectedDownloadAuthScope, QueueSummary, RemovalState,
-    ResumeSupport, Settings, StartupRecoverySummary, TorrentInfo, TorrentJobDiagnostics,
-    TorrentSeedMode, TorrentSettings, TransferKind,
+    DiagnosticsSnapshot, DownloadJob, DownloadPrompt, DownloadSource, ExtensionIntegrationSettings,
+    FailureCategory, HandoffAuth, HandoffAuthHeader, HostRegistrationDiagnostics,
+    HosterPreflightInfo, HosterPreflightStatus, IntegrityAlgorithm, IntegrityCheck,
+    IntegrityStatus, JobState, LocalRecoveryCandidate, LocalRecoveryPreview, MainWindowState,
+    PersistedState, ProtectedDownloadAuthScope, QueueSummary, RemovalState, ResumeSupport,
+    Settings, StartupRecoverySummary, TorrentInfo, TorrentJobDiagnostics, TorrentSeedMode,
+    TorrentSettings, TransferKind,
 };
 use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};

@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 const REPORT_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_DURATION: Duration = Duration::from_secs(30);
-const SEGMENT_VARIANTS: [usize; 7] = [8, 12, 16, 24, 32, 48, 64];
+const SEGMENT_VARIANTS: [usize; 4] = [1, 2, 4, 6];
 const BENCHMARK_MODES: [HttpBenchmarkMode; 2] =
     [HttpBenchmarkMode::NetworkOnly, HttpBenchmarkMode::DiskWrite];
 const BENCHMARK_ADMISSIONS: [HttpBenchmarkAdmission; 3] = [
@@ -18,8 +18,8 @@ const BENCHMARK_ADMISSIONS: [HttpBenchmarkAdmission; 3] = [
     HttpBenchmarkAdmission::DirectBulk,
     HttpBenchmarkAdmission::ProtectedHosterBulk,
 ];
-const BENCHMARK_NORMAL_FAST_ORIGIN_SEGMENT_CAP: usize = 64;
-const BENCHMARK_PROTECTED_HOSTER_FAST_ADAPTIVE_SEGMENT_CAP: usize = 10;
+const BENCHMARK_NORMAL_ORIGIN_SEGMENT_CAP: usize = 8;
+const BENCHMARK_PROTECTED_HOSTER_SEGMENT_CAP: usize = 4;
 
 #[derive(Debug, Serialize)]
 pub struct HttpBenchmarkReport {
@@ -70,10 +70,10 @@ impl HttpBenchmarkAdmission {
     fn admit_segments(self, requested_segments: usize) -> usize {
         match self {
             Self::Normal | Self::DirectBulk => {
-                requested_segments.min(BENCHMARK_NORMAL_FAST_ORIGIN_SEGMENT_CAP)
+                requested_segments.min(BENCHMARK_NORMAL_ORIGIN_SEGMENT_CAP)
             }
             Self::ProtectedHosterBulk => {
-                requested_segments.min(BENCHMARK_PROTECTED_HOSTER_FAST_ADAPTIVE_SEGMENT_CAP)
+                requested_segments.min(BENCHMARK_PROTECTED_HOSTER_SEGMENT_CAP)
             }
         }
         .max(1)
@@ -428,8 +428,8 @@ mod tests {
     }
 
     #[test]
-    fn live_http_benchmark_covers_adaptive_sustain_variants() {
-        assert_eq!(SEGMENT_VARIANTS, [8, 12, 16, 24, 32, 48, 64]);
+    fn live_http_benchmark_covers_general_policy_variants() {
+        assert_eq!(SEGMENT_VARIANTS, [1, 2, 4, 6]);
     }
 
     #[test]
@@ -438,16 +438,16 @@ mod tests {
 
         let variant = benchmark_error(
             HttpBenchmarkAdmission::DirectBulk,
-            64,
-            64,
+            6,
+            6,
             HttpBenchmarkMode::NetworkOnly,
             "expected error".into(),
         );
 
         assert_eq!(variant.admission_class, "direct_bulk");
-        assert_eq!(variant.requested_segments, 64);
-        assert_eq!(variant.admitted_segments, 64);
-        assert_eq!(variant.segments, 64);
+        assert_eq!(variant.requested_segments, 6);
+        assert_eq!(variant.admitted_segments, 6);
+        assert_eq!(variant.segments, 6);
     }
 
     #[tokio::test]

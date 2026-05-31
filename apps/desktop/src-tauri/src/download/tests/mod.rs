@@ -265,147 +265,6 @@ async fn stream_wait_observes_canceled_control_before_next_chunk_arrives() {
     ));
 }
 
-fn adaptive_admission_for_test(
-    name: &str,
-    admitted_workers: usize,
-    active_count: usize,
-    previous_downloaded: u64,
-    current_downloaded: u64,
-    previous_bps: u64,
-) -> (
-    PathBuf,
-    Arc<AtomicBool>,
-    Arc<AtomicUsize>,
-    AdaptiveSegmentAdmission,
-) {
-    let root = test_download_runtime_dir(name);
-    let temp_path = root.join("download.part");
-    let mut job = torrent_job(name, JobState::Downloading);
-    job.transfer_kind = TransferKind::Http;
-    job.torrent = None;
-    job.temp_path = temp_path.display().to_string();
-    job.target_path = root.join("download.bin").display().to_string();
-    let state = SharedState::for_tests(test_storage_path(name), vec![job]);
-    let profile = performance_profile(DownloadPerformanceMode::Fast);
-    let stable_workers = if admitted_workers > profile.soft_max_segments {
-        profile.soft_max_segments
-    } else {
-        admitted_workers
-    }
-    .max(1);
-    let seeded_stable_samples = if admitted_workers >= profile.soft_max_segments && previous_bps > 0
-    {
-        2
-    } else {
-        0
-    };
-    let progress = Arc::new(SegmentedProgressCounters::new(vec![0; 96]));
-    progress.store_segment_bytes(0, current_downloaded);
-    let host = name.replace('_', "-");
-    let url = format!("https://{host}.example.test/file.bin");
-    let pressure_key = format!("https://{host}.example.test:443");
-    let active_segments = Arc::new(Mutex::new((0_usize..active_count).collect::<HashSet<_>>()));
-    let ramp_blocked = Arc::new(AtomicBool::new(false));
-    let target_workers = Arc::new(AtomicUsize::new(admitted_workers));
-    let metadata = Arc::new(Mutex::new(SegmentedDownloadState {
-        schema_version: default_segment_state_schema_version(),
-        total_bytes: 1024 * 1024 * 1024,
-        validators: EntityValidators::default(),
-        effective_url: None,
-        target_path: None,
-        temp_path: None,
-        last_verified_file_len: 0,
-        retry_generation: 0,
-        segments: (0_u64..96)
-            .map(|index| SegmentProgress {
-                index: index as usize,
-                range: ByteRange {
-                    start: index * 8 * 1024 * 1024,
-                    end: ((index + 1) * 8 * 1024 * 1024).saturating_sub(1),
-                },
-                downloaded_bytes: 0,
-                completed: false,
-            })
-            .collect(),
-    }));
-    let context = SegmentWorkerContext {
-        state,
-        client: download_client().unwrap(),
-        job_id: name.into(),
-        url,
-        segment_pressure_key: pressure_key,
-        handoff_auth: None,
-        temp_path,
-        total_bytes: 1024 * 1024 * 1024,
-        profile,
-        validators: EntityValidators::default(),
-        progress: progress.clone(),
-        metadata: metadata.clone(),
-        metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
-        stop: Arc::new(AtomicBool::new(false)),
-        control_signal: WorkerControlSignal::default(),
-        ramp_blocked: ramp_blocked.clone(),
-        priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
-        priority_throttle_enabled: false,
-        stall_timeout: None,
-        reconnects: Arc::new(SegmentReconnectTracker::default()),
-        target_workers: target_workers.clone(),
-        active_workers: Arc::new(AtomicUsize::new(admitted_workers)),
-        tail_lease_probe_cap: Arc::new(AtomicU64::new(0)),
-    };
-    let admission = AdaptiveSegmentAdmission {
-        context,
-        active_segments,
-        metadata,
-        progress,
-        admitted_workers: Arc::new(AtomicUsize::new(admitted_workers)),
-        target_workers: target_workers.clone(),
-        segment_lease: None,
-        queue_depth: 128,
-        min_split_size: 1024 * 1024,
-        last_ramp_total_bytes: AtomicU64::new(previous_downloaded),
-        last_ramp_speed_bps: AtomicU64::new(previous_bps),
-        regression_windows: AtomicUsize::new(0),
-        stable_workers: AtomicUsize::new(stable_workers),
-        stable_warmup_samples: AtomicUsize::new((seeded_stable_samples > 0) as usize),
-        stable_sample_count: AtomicUsize::new(seeded_stable_samples),
-        stable_sample_total_bps: AtomicU64::new(if seeded_stable_samples > 0 {
-            previous_bps
-        } else {
-            0
-        }),
-        startup_probe_attempted: AtomicBool::new(false),
-        pending_startup_probe: AtomicBool::new(false),
-        startup_probe_trial_workers: AtomicUsize::new(0),
-        post_accept_guard_workers: AtomicUsize::new(0),
-        post_accept_guard_previous_workers: AtomicUsize::new(0),
-        post_accept_guard_previous_baseline_bps: AtomicU64::new(0),
-        post_accept_guard_accepted_average_bps: AtomicU64::new(0),
-        post_accept_guard_healthy_windows_remaining: AtomicUsize::new(0),
-        post_accept_guard_bad_sample_count: AtomicUsize::new(0),
-        trigger_sample_count: AtomicUsize::new(0),
-        trigger_target_workers: AtomicUsize::new(0),
-        trigger_required_bps: AtomicU64::new(0),
-        trial_workers: AtomicUsize::new(if admitted_workers > stable_workers {
-            admitted_workers
-        } else {
-            0
-        }),
-        trial_baseline_bps: AtomicU64::new(if admitted_workers > stable_workers {
-            previous_bps
-        } else {
-            0
-        }),
-        trial_sample_count: AtomicUsize::new(0),
-        trial_sample_total_bps: AtomicU64::new(0),
-        pending_trial_baseline_bps: AtomicU64::new(0),
-        pending_trial_trigger_bps: AtomicU64::new(0),
-        rejected_trial_caps: Mutex::new(HashMap::new()),
-    };
-
-    (root, ramp_blocked, target_workers, admission)
-}
-
 #[test]
 fn stale_inflight_hoster_warmups_can_be_replaced() {
     clear_hoster_warmup_cache_for_tests();
@@ -1042,7 +901,7 @@ async fn direct_segment_buffered_writer_appends_chunks_after_initial_seek() {
 }
 
 #[test]
-fn non_rate_limit_segment_errors_do_not_reduce_future_fast_caps() {
+fn non_rate_limit_segment_errors_do_not_reduce_future_segment_caps() {
     let _guard = segment_host_score_test_guard();
     reset_segment_host_scores_for_tests();
     let now = Instant::now();
@@ -1064,14 +923,13 @@ fn non_rate_limit_segment_errors_do_not_reduce_future_fast_caps() {
     }
 
     let profile = profile_for_effective_http_url_with_pressure_key_at(
-        DownloadPerformanceMode::Fast,
         "https://cdn.example.com/downloads/game.rar",
         Some(key),
         now + Duration::from_secs(5),
     );
-    assert_eq!(profile.initial_segments, 16);
-    assert_eq!(profile.soft_max_segments, 32);
-    assert_eq!(profile.max_segments, 64);
+    assert_eq!(profile.initial_segments, 6);
+    assert_eq!(profile.soft_max_segments, 6);
+    assert_eq!(profile.max_segments, 6);
 }
 
 async fn spawn_one_response_server(
