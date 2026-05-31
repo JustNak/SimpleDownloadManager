@@ -219,7 +219,7 @@ impl SharedState {
 
     pub async fn notification_sounds_enabled(&self) -> bool {
         let state = self.inner.read().await;
-        state.settings.notifications_enabled && state.settings.notification_sounds_enabled
+        state.settings.notification_sounds_enabled
     }
 
     pub async fn auto_retry_attempts(&self) -> u32 {

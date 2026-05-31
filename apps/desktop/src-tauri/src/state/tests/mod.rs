@@ -22,6 +22,42 @@ mod scheduler;
 mod torrent;
 
 #[tokio::test]
+async fn notification_sounds_do_not_require_desktop_notifications() {
+    let download_dir = test_runtime_dir("notification-sound-gate");
+    let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
+
+    state
+        .save_settings(Settings {
+            notifications_enabled: false,
+            notification_sounds_enabled: true,
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        state.notification_sounds_enabled().await,
+        "sound events should remain enabled when desktop notifications are disabled"
+    );
+
+    state
+        .save_settings(Settings {
+            notifications_enabled: true,
+            notification_sounds_enabled: false,
+            ..Settings::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !state.notification_sounds_enabled().await,
+        "the notification sound toggle should still disable sound events"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn reveal_completed_job_errors_when_file_is_missing_even_if_parent_exists() {
     let download_dir = test_runtime_dir("reveal-missing-completed");
     let target_path = download_dir.join("missing.zip");
