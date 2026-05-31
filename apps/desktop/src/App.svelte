@@ -39,6 +39,7 @@
   import ToastArea from './ToastArea.svelte';
   import Titlebar from './Titlebar.svelte';
   import { compareDownloadsForSort, readStoredSortMode, writeStoredSortMode, type SortMode } from './downloadSorting';
+  import { readStoredSidebarSectionState, writeStoredSidebarSectionState, type SidebarSectionKey } from './sidebarUiState';
   import { applyAppearance } from './appearance';
   import { DOWNLOAD_CATEGORIES, type DownloadCategory } from './downloadCategories';
   import {
@@ -143,6 +144,7 @@
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
 
   const activeStates = [JobState.Starting, JobState.Downloading, JobState.Seeding, JobState.Paused];
+  const initialSidebarSectionState = readStoredSidebarSectionState();
 
   let connectionState = $state<ConnectionState>(ConnectionState.Checking);
   let jobs = $state<DownloadJob[]>([]);
@@ -151,9 +153,9 @@
   let view = $state<ViewState>('all');
   let searchQuery = $state('');
   let sortMode = $state<SortMode>(readStoredSortMode());
-  let isDownloadSectionExpanded = $state(true);
-  let isBulkSectionExpanded = $state(true);
-  let isTorrentSectionExpanded = $state(true);
+  let isDownloadSectionExpanded = $state(initialSidebarSectionState.downloads);
+  let isBulkSectionExpanded = $state(initialSidebarSectionState.bulk);
+  let isTorrentSectionExpanded = $state(initialSidebarSectionState.torrents);
   let selectedJobId = $state<string | null>(initialSelectedJobIdFromSearch(window.location.search));
   let pendingQueueActionIds = $state<Set<string>>(new Set());
   let isAddModalOpen = $state(false);
@@ -1323,6 +1325,22 @@
     writeStoredSortMode(nextSortMode);
   }
 
+  function handleSidebarSectionToggle(section: SidebarSectionKey) {
+    if (section === 'downloads') {
+      isDownloadSectionExpanded = !isDownloadSectionExpanded;
+    } else if (section === 'bulk') {
+      isBulkSectionExpanded = !isBulkSectionExpanded;
+    } else {
+      isTorrentSectionExpanded = !isTorrentSectionExpanded;
+    }
+
+    writeStoredSidebarSectionState({
+      downloads: isDownloadSectionExpanded,
+      bulk: isBulkSectionExpanded,
+      torrents: isTorrentSectionExpanded,
+    });
+  }
+
   function runCommandMenuAction(action: () => void) {
     commandMenuOpen = false;
     action();
@@ -1486,7 +1504,7 @@
               isDownloadSectionExpanded,
               'Collapse downloads section',
               'Expand downloads section',
-              () => isDownloadSectionExpanded = !isDownloadSectionExpanded,
+              () => handleSidebarSectionToggle('downloads'),
             )}
             <div class="min-w-0 flex-1">
               {@render NavItem(Download, 'All Downloads', view === 'all', () => requestViewChange('all'), counts.all)}
@@ -1516,7 +1534,7 @@
                 isBulkSectionExpanded,
                 'Collapse bulk downloads section',
                 'Expand bulk downloads section',
-                () => isBulkSectionExpanded = !isBulkSectionExpanded,
+                () => handleSidebarSectionToggle('bulk'),
               )}
               <div class="min-w-0 flex-1">
                 {@render NavItem(FileArchive, 'Bulk Downloads', view === 'bulk', () => requestViewChange('bulk'), counts.bulk.all)}
@@ -1536,7 +1554,7 @@
                 isTorrentSectionExpanded,
                 'Collapse torrents section',
                 'Expand torrents section',
-                () => isTorrentSectionExpanded = !isTorrentSectionExpanded,
+                () => handleSidebarSectionToggle('torrents'),
               )}
               <div class="min-w-0 flex-1">
                 {@render NavItem(Magnet, 'All Torrents', view === 'torrents', () => requestViewChange('torrents'), counts.torrents.all)}
