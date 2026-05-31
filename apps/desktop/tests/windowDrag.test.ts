@@ -35,6 +35,11 @@ const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'u
 
 assert.doesNotMatch(mainTitlebarSource, /<div class="min-w-0 flex-1" data-no-window-drag>/, 'main titlebar should not blanket-disable dragging for the entire slotted command bar');
 assert.match(mainTitlebarSource, /<div class="min-w-0 flex-1 cursor-grab active:cursor-grabbing">\{@render children\(\)\}<\/div>/, 'empty slotted titlebar gaps should remain draggable and advertise grab states');
+assert.match(mainTitlebarSource, /title = 'SDM'/, 'the main titlebar should use the compact SDM brand text by default');
+assert.doesNotMatch(mainTitlebarSource, /title = 'Download Manager'/, 'the main titlebar should not spell out Download Manager next to the logo');
+assert.match(mainTitlebarSource, /import appIconUrl from '\.\.\/src-tauri\/icons\/icon\.svg'/, 'the main titlebar should use the packaged app icon asset as its logo');
+assert.match(mainTitlebarSource, /<img\s+src=\{appIconUrl\}/, 'the main titlebar should render the real app icon image next to SDM');
+assert.doesNotMatch(mainTitlebarSource, /<svg aria-hidden="true" viewBox="0 0 24 24"/, 'the main titlebar should not use the simplified inline download glyph as the app logo');
 assert.match(appSource, /<label class="relative w-full min-w-0" data-no-window-drag>/, 'the search field composite should opt out of titlebar dragging without blocking adjacent empty titlebar gaps');
 
 assert.match(popupTitlebarSource, /function startDrag\(event: PointerEvent\)/, 'popup titlebars should start dragging from the pointer-down event');

@@ -3,13 +3,14 @@
   import { Copy, Minus, Square, X } from '@lucide/svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { shouldStartWindowDrag } from './windowDrag';
+  import appIconUrl from '../src-tauri/icons/icon.svg';
 
   interface Props {
     title?: string;
     children?: Snippet;
   }
 
-  let { title = 'Download Manager', children }: Props = $props();
+  let { title = 'SDM', children }: Props = $props();
   let isMaximized = $state(false);
   const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
@@ -59,10 +60,7 @@
     onpointerdown={startDrag}
     ondblclick={toggleMaximize}
   >
-    <svg aria-hidden="true" viewBox="0 0 24 24" class="pointer-events-none h-5 w-5 text-primary" fill="none">
-      <path d="M12 3V15M12 15L7.5 10.5M12 15L16.5 10.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
-      <path d="M5 20C5 20 8 20 12 20C16 20 19 20 19 20" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />
-    </svg>
+    <img src={appIconUrl} alt="" aria-hidden="true" class="pointer-events-none h-5 w-5 rounded-[5px]" />
     <span class="pointer-events-none text-sm font-semibold text-foreground">{title}</span>
   </div>
 

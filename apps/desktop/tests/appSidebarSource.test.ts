@@ -6,6 +6,11 @@ const source = await readFile(new URL('../src/App.svelte', import.meta.url), 'ut
 assert.match(source, /isDownloadSectionExpanded/, 'the regular download sidebar section should track expanded/collapsed state');
 assert.match(source, /isBulkSectionExpanded/, 'the bulk sidebar section should track expanded/collapsed state');
 assert.match(source, /isTorrentSectionExpanded/, 'the torrent sidebar section should track expanded/collapsed state');
+assert.match(source, /readStoredSidebarSectionState/, 'sidebar sections should restore expanded/collapsed state from frontend storage');
+assert.match(source, /writeStoredSidebarSectionState/, 'sidebar section toggles should persist expanded/collapsed state to frontend storage');
+assert.match(source, /handleSidebarSectionToggle\('downloads'\)/, 'the regular download sidebar toggle should use the shared persistence helper');
+assert.match(source, /handleSidebarSectionToggle\('bulk'\)/, 'the bulk sidebar toggle should use the shared persistence helper');
+assert.match(source, /handleSidebarSectionToggle\('torrents'\)/, 'the torrent sidebar toggle should use the shared persistence helper');
 assert.match(source, /Collapse downloads section/, 'the all-downloads section should expose an accessible collapse action');
 assert.match(source, /Collapse bulk downloads section/, 'the bulk-downloads section should expose an accessible collapse action');
 assert.match(source, /Collapse torrents section/, 'the torrent section should expose an accessible collapse action');
