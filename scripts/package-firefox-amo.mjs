@@ -89,9 +89,9 @@ export function createFirefoxAmoListingMetadata() {
 
 export function createFirefoxAmoReleaseNotes() {
   return [
-    '- Tightened Firefox auto-capture to ignore site session/API probes such as YouTube Music verify_session.',
-    '- Reworked automatic capture so redirected Canvas/Instructure downloads hand off the original source URL instead of the signed CDN URL.',
-    '- Preserved Canvas/Instructure and attachment download capture while reducing false prompts.',
+    '- Kept downloads initiated from excluded sites in the browser even when the final file URL is hosted elsewhere.',
+    '- Improved Telegram Web handling so CDN-hosted downloads started from web.telegram.org are not intercepted by automatic capture.',
+    '- Preserved existing direct-download, attachment, and Canvas/Instructure capture behavior for non-excluded sites.',
   ].join('\n');
 }
 
@@ -165,9 +165,11 @@ Users can disable browser download interception, choose prompt or automatic hand
 export function createFirefoxAmoReviewerNotes() {
   return `# AMO Reviewer Notes
 
-- Firefox auto-capture now separates download intent from browser-session handling. Generic app/session traffic such as YouTube Music verify_session, youtubei payloads, json.txt, player, version, and zero-byte probes is ignored before prompting.
-- Real downloads still capture when Firefox exposes strong evidence: Content-Disposition attachment, strong file extensions, or known explicit download URLs such as Canvas/Instructure file downloads.
-- Redirected Canvas/Instructure downloads preserve the original download endpoint before the signed CDN redirect and hand that source URL to the local native desktop app.
+- Automatic browser download capture now applies excluded-site rules to both the final file URL and source page metadata exposed by the browser.
+- This fixes cases where a site such as Telegram Web initiates a file download but the browser reports the final download URL as a separate CDN host. If web.telegram.org is excluded, those CDN-hosted downloads stay in Firefox.
+- Firefox webRequest handling now considers originUrl, documentUrl, and initiator in addition to the download URL before deciding whether to cancel a browser download for handoff.
+- Chromium download handling now considers DownloadItem referrer in addition to the download URL/finalUrl before deciding whether to cancel a browser download for handoff.
+- Real downloads still capture when the initiating site is not excluded and the browser exposes strong evidence: Content-Disposition attachment, strong file extensions, or known explicit download URLs such as Canvas/Instructure file downloads.
 - Eligible browser downloads are canceled in Firefox and handed to the local native desktop app instead of relying on completed-file adoption.
 - Manual context-menu and popup sends still hand explicit URLs to the local native desktop app through Firefox native messaging.
 `;

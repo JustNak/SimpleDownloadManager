@@ -79,9 +79,9 @@ assert.equal('support_url' in listingMetadata, false, 'metadata should only use 
 assert.equal(listingMetadata.requires_payment, false);
 assert.equal(listingMetadata.slug, 'simple-download-manager');
 assert.equal(listingMetadata.version.license, 'all-rights-reserved');
-assert.match(listingMetadata.version.release_notes['en-US'], /site session\/API probes/);
-assert.match(listingMetadata.version.release_notes['en-US'], /source URL/);
-assert.match(listingMetadata.version.approval_notes, /download intent/);
+assert.match(listingMetadata.version.release_notes['en-US'], /excluded sites/);
+assert.match(listingMetadata.version.release_notes['en-US'], /web\.telegram\.org/);
+assert.match(listingMetadata.version.approval_notes, /source page metadata/);
 assert.match(listingMetadata.version.approval_notes, /local native desktop app/);
 
 const privacyPolicy = createFirefoxAmoPrivacyPolicy();
@@ -90,15 +90,15 @@ assert.match(privacyPolicy, /local native desktop app/);
 assert.match(privacyPolicy, /does not transmit data to a remote server/);
 
 const reviewerNotes = createFirefoxAmoReviewerNotes();
-assert.match(reviewerNotes, /download intent/);
-assert.match(reviewerNotes, /YouTube Music verify_session/);
+assert.match(reviewerNotes, /source page metadata/);
+assert.match(reviewerNotes, /Telegram Web/);
 assert.match(reviewerNotes, /local native desktop app/);
-assert.match(reviewerNotes, /original download endpoint/);
+assert.match(reviewerNotes, /originUrl, documentUrl, and initiator/);
 
 const releaseNotes = createFirefoxAmoReleaseNotes();
-assert.match(releaseNotes, /^- Tightened Firefox auto-capture/m);
-assert.match(releaseNotes, /^- Reworked automatic capture/m);
-assert.match(releaseNotes, /^- Preserved Canvas\/Instructure/m);
+assert.match(releaseNotes, /^- Kept downloads initiated from excluded sites/m);
+assert.match(releaseNotes, /^- Improved Telegram Web handling/m);
+assert.match(releaseNotes, /^- Preserved existing direct-download/m);
 
 const sourceReadme = createFirefoxAmoSourceReadme();
 assert.match(sourceReadme, /npm ci/);
