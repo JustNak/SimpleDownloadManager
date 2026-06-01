@@ -4,15 +4,16 @@ use crate::state::{
     TorrentRuntimeSnapshot,
 };
 use crate::storage::{
-    BulkArchiveStatus, BulkFinalizeMode, DesktopSnapshot, DownloadJob, DownloadSource,
-    FailureCategory, HandoffAuth, HandoffAuthHeader, IntegrityStatus, JobState,
+    BulkArchiveOutputKind, BulkArchiveStatus, BulkFinalizeMode, DesktopSnapshot, DownloadJob,
+    DownloadSource, FailureCategory, HandoffAuth, HandoffAuthHeader, IntegrityStatus, JobState,
     ProtectedDownloadAuthScope, Settings, TransferKind,
 };
 use std::collections::HashSet;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -688,6 +689,158 @@ async fn scenario_bulk_download_retry_finalize_and_cleanup_flow() {
             .unwrap(),
         b"part-b"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires SDM_BULK_BENCH_URLS with legal/user-authorized URLs"]
+async fn live_bulk_download_rounds_from_env_cleanup_each_round() {
+    let value = env::var("SDM_BULK_BENCH_URLS")
+        .expect("set SDM_BULK_BENCH_URLS to legal/user-authorized labeled URL rounds");
+    let rounds = crate::bulk_bench::parse_bulk_benchmark_rounds(&value)
+        .expect("bulk benchmark rounds should parse");
+    let duration = env::var("SDM_BULK_BENCH_DURATION_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(120));
+
+    for round in rounds {
+        let root = test_download_runtime_dir(&format!(
+            "live-bulk-{}",
+            sanitize_live_bulk_label(&round.label)
+        ));
+        let result = run_live_bulk_round(&round, &root, duration).await;
+        let cleanup_result = tokio::fs::remove_dir_all(&root).await;
+        assert!(
+            cleanup_result.is_ok() || !root.exists(),
+            "live bulk round cleanup should remove {}",
+            root.display()
+        );
+        result.expect("live bulk round should run");
+    }
+}
+
+async fn run_live_bulk_round(
+    round: &crate::bulk_bench::BulkBenchmarkRound,
+    root: &Path,
+    duration: Duration,
+) -> Result<(), String> {
+    let state = SharedState::for_tests(root.join("state.json"), Vec::new());
+    state
+        .save_settings(Settings {
+            download_directory: root.join("downloads").display().to_string(),
+            ..Settings::default()
+        })
+        .await?;
+
+    let entries = round
+        .urls
+        .iter()
+        .map(|url| {
+            let source_url = url.trim().to_string();
+            let is_hoster = crate::hosters::is_supported_hoster_url(&source_url);
+            BatchDownloadEntry {
+                url: source_url.clone(),
+                filename_hint: crate::hosters::source_filename_hint_for_url(&source_url),
+                resolved_from_url: is_hoster.then_some(source_url),
+                hoster_preflight: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let results = state
+        .enqueue_download_entries_with_bulk_options(
+            entries,
+            None,
+            Some(format!("live-{}", round.label)),
+            false,
+            BulkArchiveOutputKind::Folder,
+        )
+        .await
+        .map_err(|error| error.message)?;
+    let job_ids = results
+        .iter()
+        .map(|result| result.job_id.clone())
+        .collect::<Vec<_>>();
+
+    println!(
+        "Starting live bulk round '{}' with {} jobs for {} seconds",
+        round.label,
+        job_ids.len(),
+        duration.as_secs()
+    );
+    schedule_downloads(NoopDownloadUi, state.clone());
+    tokio::time::sleep(duration).await;
+
+    let before_cancel = state.snapshot().await;
+    print_live_bulk_round_summary(&round.label, "before-cancel", &before_cancel, &job_ids);
+    let _ = state.cancel_jobs(&job_ids).await;
+    wait_for_live_bulk_round_to_stop(&state, &job_ids).await;
+    let after_cancel = state.snapshot().await;
+    print_live_bulk_round_summary(&round.label, "after-cancel", &after_cancel, &job_ids);
+
+    Ok(())
+}
+
+async fn wait_for_live_bulk_round_to_stop(state: &SharedState, job_ids: &[String]) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let snapshot = state.snapshot().await;
+        let any_active = snapshot.jobs.iter().any(|job| {
+            job_ids.iter().any(|id| id == &job.id)
+                && matches!(job.state, JobState::Starting | JobState::Downloading)
+        });
+        if !any_active {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn print_live_bulk_round_summary(
+    label: &str,
+    phase: &str,
+    snapshot: &DesktopSnapshot,
+    job_ids: &[String],
+) {
+    let jobs = snapshot
+        .jobs
+        .iter()
+        .filter(|job| job_ids.iter().any(|id| id == &job.id))
+        .collect::<Vec<_>>();
+    let downloaded_bytes = jobs.iter().fold(0_u64, |total, job| {
+        total.saturating_add(job.downloaded_bytes)
+    });
+    let speed = jobs
+        .iter()
+        .fold(0_u64, |total, job| total.saturating_add(job.speed));
+    let states = jobs
+        .iter()
+        .map(|job| format!("{}:{:?}:{}B/s", job.filename, job.state, job.speed))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    println!(
+        "Live bulk round '{label}' {phase}: jobs={}, downloaded={} bytes, speed={} B/s [{}]",
+        jobs.len(),
+        downloaded_bytes,
+        speed,
+        states
+    );
+}
+
+fn sanitize_live_bulk_label(label: &str) -> String {
+    let sanitized = label
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    sanitized.trim_matches('-').to_string()
 }
 
 #[tokio::test]

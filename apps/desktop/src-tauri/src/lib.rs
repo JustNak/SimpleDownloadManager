@@ -1,4 +1,6 @@
 pub(crate) mod archive_parts;
+#[cfg(any(test, debug_assertions))]
+pub mod bulk_bench;
 pub mod commands;
 pub mod download;
 pub mod hosters;

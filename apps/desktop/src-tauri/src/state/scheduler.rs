@@ -315,6 +315,11 @@ impl SharedState {
                                 .and_then(|key| protected_bulk_archive_windows.get(&key));
                             let accelerated_hoster =
                                 is_accelerated_hoster_bulk_job(&state.settings, job);
+                            if active_finish_protected_bulk_hoster_blocks_claim(
+                                &state, job_index, job,
+                            ) {
+                                continue;
+                            }
                             if archive_window
                                 .is_some_and(|window| !window.allowed_job_ids.contains(&job.id))
                             {
@@ -845,6 +850,50 @@ fn protected_bulk_archive_scheduling_windows(
     }
 
     (windows, diagnostics)
+}
+
+fn active_finish_protected_bulk_hoster_blocks_claim(
+    state: &RuntimeState,
+    candidate_index: usize,
+    candidate: &DownloadJob,
+) -> bool {
+    let Some(candidate_key) = protected_bulk_hoster_priority_group_key(candidate) else {
+        return false;
+    };
+
+    state.active_workers.iter().any(|active_id| {
+        let Some(active_index) = state.job_index(active_id) else {
+            return false;
+        };
+        if active_index >= candidate_index {
+            return false;
+        }
+        let Some(active_job) = state.jobs.get(active_index) else {
+            return false;
+        };
+        matches!(active_job.state, JobState::Starting | JobState::Downloading)
+            && protected_bulk_hoster_priority_group_key(active_job).as_ref() == Some(&candidate_key)
+            && bulk_member_is_close_to_finish(active_job)
+    })
+}
+
+fn bulk_member_is_close_to_finish(job: &DownloadJob) -> bool {
+    if job.total_bytes < BULK_HOSTER_FINISH_PROTECTION_MIN_TOTAL_BYTES
+        || job.downloaded_bytes >= job.total_bytes
+    {
+        return false;
+    }
+
+    let remaining_bytes = job.total_bytes.saturating_sub(job.downloaded_bytes);
+    if remaining_bytes <= BULK_HOSTER_FINISH_PROTECTION_REMAINING_BYTES {
+        return true;
+    }
+
+    job.speed > 0
+        && remaining_bytes
+            .saturating_add(job.speed.saturating_sub(1))
+            .saturating_div(job.speed)
+            <= BULK_HOSTER_FINISH_PROTECTION_ETA
 }
 
 fn sort_protected_bulk_archive_members(members: &mut [ProtectedBulkArchiveMember]) {

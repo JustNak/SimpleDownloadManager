@@ -685,6 +685,43 @@ async fn protected_bulk_hoster_claim_holds_back_next_hoster_but_allows_direct_bu
 }
 
 #[tokio::test]
+async fn protected_bulk_hoster_near_finish_defers_newer_same_origin_claim() {
+    let download_dir = test_runtime_dir("bulk-hoster-finish-protection");
+    let archive = bulk_archive_info(&download_dir, "bulk_hoster_finish_protection");
+    let mut active = protected_hoster_bulk_job("job_hoster_active", archive.clone());
+    active.url = "https://fuckingfast.co/active#Game.part1.rar".into();
+    active.resolved_from_url = Some(active.url.clone());
+    active.state = JobState::Downloading;
+    active.total_bytes = 2_600 * 1024 * 1024;
+    active.downloaded_bytes = active.total_bytes - (32 * 1024 * 1024);
+    active.speed = 4 * 1024 * 1024;
+    let mut queued = protected_hoster_bulk_job("job_hoster_queued", archive);
+    queued.url = "https://fuckingfast.co/queued#Game.part2.rar".into();
+    queued.resolved_from_url = Some(queued.url.clone());
+    queued.total_bytes = 2_600 * 1024 * 1024;
+
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![active, queued]);
+    {
+        let mut runtime = state.inner.write().await;
+        runtime.settings.bulk.max_concurrent_downloads = 4;
+        runtime.active_workers.insert("job_hoster_active".into());
+        seed_healthy_bulk_hoster_health(&mut runtime, "job_hoster_active", 4 * 1024 * 1024);
+    }
+
+    let (_, tasks) = state
+        .claim_schedulable_jobs()
+        .await
+        .expect("claiming jobs should work");
+
+    assert!(
+        tasks.is_empty(),
+        "newer same-origin protected hoster members should wait while an older active member is close to finishing"
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn adaptive_hoster_fairness_isolated_by_origin_and_allows_direct_bulk() {
     let download_dir = test_runtime_dir("bulk-hoster-fairness-per-origin");
     let archive = bulk_archive_info(&download_dir, "bulk_hoster_per_origin");

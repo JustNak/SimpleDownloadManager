@@ -479,9 +479,8 @@ impl RuntimeState {
                     if active || job_blocks_removal(job, active) {
                         return Err(BackendError {
                             code: "DUPLICATE_ACTIVE",
-                            message:
-                                "Wait for the existing duplicate to stop before replacing it."
-                                    .into(),
+                            message: "Wait for the existing duplicate to stop before replacing it."
+                                .into(),
                         });
                     }
                 }

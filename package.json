@@ -12,6 +12,7 @@
     "build:desktop": "npm run build --workspace @myapp/desktop",
     "test": "npm run test:ts && npm run test:rust",
     "test:extension": "node ./scripts/run-extension-tests.mjs",
+    "test:live:bulk": "node ./scripts/run-live-bulk-test.mjs",
     "test:live:http": "node ./scripts/run-live-http-test.mjs",
     "test:live:torrent": "node ./scripts/run-live-torrent-test.mjs",
     "test:scenarios": "node ./scripts/run-scenario-tests.mjs",

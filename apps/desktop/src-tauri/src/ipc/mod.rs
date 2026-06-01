@@ -1740,7 +1740,10 @@ mod tests {
         .await;
 
         assert!(matches!(decision, PromptDecision::Cancel));
-        assert_eq!(next_prompt.map(|prompt| prompt.id), Some("prompt_next".into()));
+        assert_eq!(
+            next_prompt.map(|prompt| prompt.id),
+            Some("prompt_next".into())
+        );
         assert_eq!(
             prompts.active_prompt().await.map(|prompt| prompt.id),
             Some("prompt_next".into())
@@ -1942,10 +1945,7 @@ mod tests {
         .expect("enqueue payload should parse handoff auth");
 
         assert_eq!(
-            enqueue
-                .handoff_auth
-                .as_ref()
-                .map(|auth| auth.headers.len()),
+            enqueue.handoff_auth.as_ref().map(|auth| auth.headers.len()),
             Some(2)
         );
 
