@@ -69,6 +69,38 @@ assert.equal(
 );
 assert.deepEqual(playedSources, [NOTIFICATION_SOUND_ASSETS.failed], 'disabled playback should not call Audio.play');
 
+let flakyFirstAttempt = true;
+const retryCreatedSources: string[] = [];
+const retryPlayedSources: string[] = [];
+const retryingPlayer = createNotificationSoundPlayer((src) => {
+  retryCreatedSources.push(src);
+  return {
+    currentTime: 0,
+    preload: '',
+    play: () => {
+      retryPlayedSources.push(src);
+      if (flakyFirstAttempt) {
+        flakyFirstAttempt = false;
+        return Promise.reject(new Error('stale audio element'));
+      }
+      return Promise.resolve();
+    },
+  };
+});
+
+assert.equal(retryingPlayer.play('success', settings), true, 'initial playback attempt should be accepted');
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(
+  retryCreatedSources,
+  [NOTIFICATION_SOUND_ASSETS.success, NOTIFICATION_SOUND_ASSETS.success],
+  'failed async playback should recreate the audio element for one retry',
+);
+assert.deepEqual(
+  retryPlayedSources,
+  [NOTIFICATION_SOUND_ASSETS.success, NOTIFICATION_SOUND_ASSETS.success],
+  'failed async playback should retry the requested sound once',
+);
+
 const updateGate = createUpdateNotificationSoundGate();
 assert.equal(updateGate.play('0.8.0-beta', settings, player), true, 'first update version should play once');
 assert.equal(updateGate.play('0.8.0-beta', settings, player), false, 'same update version should not replay');
@@ -85,8 +117,15 @@ assert.deepEqual(
 
 const backendSource = await import('node:fs/promises')
   .then(({ readFile }) => readFile(new URL('../src/backend.ts', import.meta.url), 'utf8'));
+const mainSource = await import('node:fs/promises')
+  .then(({ readFile }) => readFile(new URL('../src/main.ts', import.meta.url), 'utf8'));
+const appSource = await import('node:fs/promises')
+  .then(({ readFile }) => readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'));
 const rustEventsSource = await import('node:fs/promises')
   .then(({ readFile }) => readFile(new URL('../src-tauri/src/commands/events.rs', import.meta.url), 'utf8'));
 
 assert.match(backendSource, /kind:\s*'success' \| 'failed' \| 'update'/, 'frontend notification sound event type should include the update sound kind');
 assert.match(rustEventsSource, /enum NotificationSoundKind \{[\s\S]*Success,[\s\S]*Failed,[\s\S]*Update,[\s\S]*\}/, 'Rust notification sound kind should stay in parity with frontend sound assets');
+assert.match(mainSource, /startNotificationSoundBridge\(\)/, 'notification sound listener should be installed for every window route, including progress popups');
+assert.doesNotMatch(appSource, /subscribeToNotificationSound/, 'main App should not duplicate the route-level notification sound listener');
+assert.match(rustEventsSource, /notification_sound_target_label/, 'backend sound events should pick a live webview target instead of assuming the main window exists');

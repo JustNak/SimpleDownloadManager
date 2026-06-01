@@ -1,5 +1,6 @@
 import { mount, type Component } from 'svelte';
 import './app.css';
+import { startNotificationSoundBridge } from './notificationSoundBridge';
 import { revealPopupWhenReady } from './popupReady';
 
 type RootComponent = Component;
@@ -30,6 +31,7 @@ async function resolveRootComponent(): Promise<RootComponent> {
 }
 
 void start();
+startNotificationSoundBridge();
 
 async function start() {
   const target = document.getElementById('root');
