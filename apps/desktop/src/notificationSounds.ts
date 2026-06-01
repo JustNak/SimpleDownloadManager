@@ -40,6 +40,20 @@ export function createNotificationSoundPlayer(
     return audio;
   }
 
+  function retryPlayWithFreshAudio(kind: NotificationSoundKind): void {
+    try {
+      audioByKind.delete(kind);
+      const audio = audioFor(kind);
+      audio.currentTime = 0;
+      const result = audio.play();
+      if (result && typeof result.catch === 'function') {
+        result.catch(() => undefined);
+      }
+    } catch {
+      // Notification sounds are best-effort and should never interrupt downloads.
+    }
+  }
+
   return {
     preload(): void {
       for (const kind of Object.keys(NOTIFICATION_SOUND_ASSETS) as NotificationSoundKind[]) {
@@ -55,7 +69,7 @@ export function createNotificationSoundPlayer(
         audio.currentTime = 0;
         const result = audio.play();
         if (result && typeof result.catch === 'function') {
-          result.catch(() => undefined);
+          result.catch(() => retryPlayWithFreshAudio(kind));
         }
         return true;
       } catch {

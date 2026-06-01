@@ -97,7 +97,6 @@
     runHostRegistrationFix,
     saveSettings,
     subscribeToDownloadUpdateBatch,
-    subscribeToNotificationSound,
     subscribeToSelectedJobRequested,
     subscribeToStateChanged,
     subscribeToUpdateInstallProgress,
@@ -284,15 +283,6 @@
           return;
         }
         disposers.push(downloadBatchDispose);
-
-        const notificationSoundDispose = await subscribeToNotificationSound((event) => {
-          notificationSoundPlayer.play(event.kind, settings);
-        });
-        if (!isMounted) {
-          void notificationSoundDispose();
-          return;
-        }
-        disposers.push(notificationSoundDispose);
 
         const startupBlocker = bulkUpdateBlockerForJobs(initialData.snapshot.jobs);
         if (shouldRunStartupUpdateCheck(startupUpdateCheckStarted, startupBlocker)) {

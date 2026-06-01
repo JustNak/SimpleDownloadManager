@@ -107,13 +107,26 @@ pub fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot)
 }
 
 pub fn emit_notification_sound<R: Runtime>(app: &AppHandle<R>, kind: NotificationSoundKind) {
+    let Some(target_label) = notification_sound_target_label(app) else {
+        eprintln!("failed to emit notification sound event: no webview window is available");
+        return;
+    };
+
     if let Err(error) = app.emit_to(
-        "main",
+        &target_label,
         NOTIFICATION_SOUND_EVENT,
         NotificationSoundEvent { kind },
     ) {
         eprintln!("failed to emit notification sound event: {error}");
     }
+}
+
+fn notification_sound_target_label<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    if app.get_webview_window("main").is_some() {
+        return Some("main".into());
+    }
+
+    app.webview_windows().keys().next().cloned()
 }
 
 pub fn emit_download_update<R: Runtime>(
