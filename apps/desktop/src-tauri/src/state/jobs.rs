@@ -140,6 +140,7 @@ impl SharedState {
                 };
                 state.external_reseed_jobs.remove(id);
                 let active = state.active_workers.contains(id);
+                mark_finalizing_bulk_archive_canceled_for_job_index(&mut state, job_index);
                 let (event_message, should_push_event, clear_hoster_health, cleanup_job) = {
                     let job = &mut state.jobs[job_index];
                     let paths =
@@ -631,6 +632,7 @@ impl SharedState {
             let mut state = self.inner.write().await;
             state.retain_jobs(|job| {
                 job.removal_state.is_some()
+                    || job_has_finalizing_bulk_archive(job)
                     || !matches!(job.state, JobState::Completed | JobState::Canceled)
             });
             (state.snapshot(), state.persisted())
@@ -651,10 +653,14 @@ impl SharedState {
             let job = &state.jobs[job_index];
             ensure_not_removing(job)?;
 
-            if job_blocks_removal(job, is_active_worker) {
+            if let Some(message) = job_removal_block_reason(
+                job,
+                is_active_worker,
+                "Pause or cancel the active transfer before removing it.",
+            ) {
                 return Err(BackendError {
                     code: "INTERNAL_ERROR",
-                    message: "Pause or cancel the active transfer before removing it.".into(),
+                    message: message.into(),
                 });
             }
 
@@ -715,12 +721,14 @@ impl SharedState {
                             message: "Job not found.".into(),
                         })?;
 
-                if job_blocks_removal(job, state.active_workers.contains(id)) {
+                if let Some(message) = job_removal_block_reason(
+                    job,
+                    state.active_workers.contains(id),
+                    "Pause or cancel the active transfer before deleting files from disk.",
+                ) {
                     return Err(BackendError {
                         code: "INTERNAL_ERROR",
-                        message:
-                            "Pause or cancel the active transfer before deleting files from disk."
-                                .into(),
+                        message: message.into(),
                     });
                 }
 
@@ -776,13 +784,16 @@ impl SharedState {
                     continue;
                 };
                 let active = state.active_workers.contains(id);
+                mark_finalizing_bulk_archive_canceled_for_job_index(&mut state, job_index);
                 let job = &state.jobs[job_index];
-                if job_blocks_removal(job, active) {
+                if let Some(message) = job_removal_block_reason(
+                    job,
+                    active,
+                    "Pause or cancel the active transfer before deleting files from disk.",
+                ) {
                     return Err(BackendError {
                         code: "INTERNAL_ERROR",
-                        message:
-                            "Pause or cancel the active transfer before deleting files from disk."
-                                .into(),
+                        message: message.into(),
                     });
                 }
 
@@ -922,6 +933,8 @@ impl SharedState {
     ) -> Result<DesktopSnapshot, BackendError> {
         let (snapshot, persisted, diagnostic_events) = {
             let mut state = self.inner.write().await;
+            state.remove_active_worker(&job.id);
+            state.clear_bulk_hoster_worker_health(&job.id);
             if let Some(existing) = state.job_mut(&job.id) {
                 existing.removal_state = Some(RemovalState::CleanupFailed);
                 mark_job_canceled(existing);
@@ -1362,6 +1375,30 @@ fn destructive_cleanup_paths_for_job(
     paths
 }
 
+fn mark_finalizing_bulk_archive_canceled_for_job_index(state: &mut RuntimeState, job_index: usize) {
+    let Some(archive_id) = state
+        .jobs
+        .get(job_index)
+        .and_then(|job| job.bulk_archive.as_ref())
+        .filter(|archive| archive.archive_status.is_finalizing())
+        .map(|archive| archive.id.clone())
+    else {
+        return;
+    };
+
+    for job in &mut state.jobs {
+        let Some(archive) = &mut job.bulk_archive else {
+            continue;
+        };
+        if archive.id != archive_id {
+            continue;
+        }
+
+        archive.archive_status = BulkArchiveStatus::Failed;
+        archive.error = Some("Bulk archive finalization was canceled by the user.".into());
+    }
+}
+
 fn destructive_partial_artifact_roots_for_job(job: &DownloadJob) -> Vec<PathBuf> {
     if job.transfer_kind != TransferKind::Http || job.temp_path.trim().is_empty() {
         return Vec::new();
@@ -1456,13 +1493,43 @@ fn ensure_not_removing(job: &DownloadJob) -> Result<(), BackendError> {
 }
 
 pub(super) fn job_blocks_removal(job: &DownloadJob, is_active_worker: bool) -> bool {
-    if job.state == JobState::Canceled {
-        return false;
+    job_removal_block_reason(
+        job,
+        is_active_worker,
+        "Pause or cancel the active transfer before removing it.",
+    )
+    .is_some()
+}
+
+fn job_removal_block_reason(
+    job: &DownloadJob,
+    is_active_worker: bool,
+    active_transfer_message: &'static str,
+) -> Option<&'static str> {
+    if let Some(message) = finalizing_bulk_archive_removal_block_reason(job) {
+        return Some(message);
     }
 
-    is_active_worker
+    if job.state == JobState::Canceled {
+        return None;
+    }
+
+    (is_active_worker
         || matches!(
             job.state,
             JobState::Starting | JobState::Downloading | JobState::Seeding
-        )
+        ))
+    .then_some(active_transfer_message)
+}
+
+fn job_has_finalizing_bulk_archive(job: &DownloadJob) -> bool {
+    job.bulk_archive
+        .as_ref()
+        .is_some_and(|archive| archive.archive_status.is_finalizing())
+}
+
+fn finalizing_bulk_archive_removal_block_reason(job: &DownloadJob) -> Option<&'static str> {
+    job_has_finalizing_bulk_archive(job).then_some(
+        "Bulk archive finalization is still running. Wait for it to finish before removing or deleting its member files.",
+    )
 }

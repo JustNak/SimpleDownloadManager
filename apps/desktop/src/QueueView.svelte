@@ -763,7 +763,8 @@
   }
 
   function isFailedBulkAggregate(job: DownloadJob): boolean {
-    return isBulkAggregateJob(job) && job.bulkArchive?.archiveStatus === 'failed';
+    return isBulkAggregateJob(job)
+      && (job.state === JobState.Failed || job.bulkArchive?.archiveStatus === 'failed');
   }
 
   function canRetryBulkMembers(job: DownloadJob): boolean {
@@ -777,7 +778,7 @@
 
   function canOpenSelectedDeletePrompt(job: QueueDisplayJob): boolean {
     if (isRemoving(job)) return false;
-    return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job);
+    return !isBulkAggregateJob(job) || isCanceledBulkAggregate(job) || isFailedBulkAggregate(job);
   }
 
   function showsEtaMetrics(job: DownloadJob): boolean {

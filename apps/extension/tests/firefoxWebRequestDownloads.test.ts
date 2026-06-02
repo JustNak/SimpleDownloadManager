@@ -133,6 +133,22 @@ assert.equal(
 );
 
 assert.equal(
+  firefoxWebRequestDownloadCandidate(
+    details({
+      url: 'https://cdn.telegram-cdn.example/files/archive.zip',
+      originUrl: 'https://web.telegram.org/k/',
+      documentUrl: 'https://web.telegram.org/k/',
+      responseHeaders: [
+        { name: 'Content-Disposition', value: 'attachment; filename="archive.zip"' },
+      ],
+    }),
+    { ...defaultSettings, excludedHosts: ['web.telegram.org'] },
+  ),
+  null,
+  'Firefox should bypass download interception when an excluded site initiated a CDN-hosted download',
+);
+
+assert.equal(
   firefoxWebRequestDownloadCandidate(details({}), {
     ...defaultSettings,
     excludedHosts: ['*.example.com'],

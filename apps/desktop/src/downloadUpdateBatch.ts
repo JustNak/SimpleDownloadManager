@@ -39,3 +39,37 @@ export function applyDownloadUpdateBatch(
 
   return nextJobs;
 }
+
+export function mergeDownloadUpdateBatches(
+  pendingBatch: DownloadUpdateBatch | null,
+  nextBatch: DownloadUpdateBatch,
+): DownloadUpdateBatch {
+  if (!pendingBatch) {
+    return {
+      jobs: [...nextBatch.jobs],
+      removedJobIds: [...nextBatch.removedJobIds],
+    };
+  }
+
+  const jobsById = new Map(pendingBatch.jobs.map((job) => [job.id, job]));
+  const removedIds = new Set(pendingBatch.removedJobIds);
+  const nextRemovedIds = new Set(nextBatch.removedJobIds);
+
+  for (const removedJobId of nextRemovedIds) {
+    jobsById.delete(removedJobId);
+    removedIds.add(removedJobId);
+  }
+
+  for (const job of nextBatch.jobs) {
+    if (nextRemovedIds.has(job.id)) continue;
+    if (removedIds.has(job.id)) {
+      removedIds.delete(job.id);
+    }
+    jobsById.set(job.id, job);
+  }
+
+  return {
+    jobs: [...jobsById.values()],
+    removedJobIds: [...removedIds],
+  };
+}

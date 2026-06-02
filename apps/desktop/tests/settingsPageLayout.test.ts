@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../src/SettingsPage.svelte', import.meta.url), 'utf8');
+const styleSource = readFileSync(new URL('../src/app.css', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../src/App.svelte', import.meta.url), 'utf8');
 const backendSource = readFileSync(new URL('../src/backend.ts', import.meta.url), 'utf8');
 const helpersSource = readFileSync(new URL('../src/settingsPageHelpers.ts', import.meta.url), 'utf8');
@@ -20,8 +21,10 @@ for (const [sectionId, label] of [
   ['settings-native-host', 'Native Host'],
 ]) {
   assert.match(sectionsSource, new RegExp(`id: '${sectionId}'[\\s\\S]*label: '${label}'`), `settings section metadata for ${sectionId} should exist`);
-  assert.match(source, new RegExp(`<section id="${sectionId}" class="scroll-mt-4"`), `settings section ${sectionId} should render as a scroll anchor`);
+  assert.match(source, new RegExp(`<section id="${sectionId}" class="settings-content-section scroll-mt-4"`), `settings section ${sectionId} should render as a contained scroll anchor`);
 }
+
+assert.match(styleSource, /\.settings-content-section[\s\S]*content-visibility: auto;[\s\S]*contain-intrinsic-size: auto 220px;/, 'settings sections should let the WebView skip offscreen section rendering');
 
 assert.match(source, /sticky top-0 z-30[\s\S]*bg-surface\/95[\s\S]*backdrop-blur/, 'settings header should keep the Svelte sticky translucent header');
 assert.match(source, /Configure downloads, appearance, notifications, and native host diagnostics\./, 'settings subtitle should match Svelte');

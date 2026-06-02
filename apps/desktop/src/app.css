@@ -184,6 +184,11 @@
   .file-badge {
     box-shadow: 0 1px 1px color-mix(in oklch, var(--color-foreground) 8%, transparent);
   }
+
+  .settings-content-section {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 220px;
+  }
 }
 
 @keyframes popup-window-enter {
