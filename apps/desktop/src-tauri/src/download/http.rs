@@ -326,7 +326,6 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
     }
     let can_try_segmented = segment_attempt.is_some()
         && (existing_bytes == 0 || has_segment_state)
-        && speed_limit.is_none()
         && profile.max_segments >= 2
         && !segment_attempt
             .as_ref()
@@ -501,16 +500,6 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                                     SEGMENT_BUDGET_ADMISSION_DEFER,
                                 ));
                             }
-                            SegmentBudgetWaitAction::FallbackSingleStream => {
-                                record_download_diagnostic(
-                                    state,
-                                    DiagnosticLevel::Info,
-                                    task,
-                                    "Segment connection budget is full; using single-stream fallback for this normal download."
-                                        .into(),
-                                )
-                                .await;
-                            }
                         }
                     }
                 }
@@ -548,8 +537,6 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
     } else if segment_attempt.is_some() {
         let fallback_reason = if existing_bytes > 0 && !has_segment_state {
             "partial file has no segmented metadata"
-        } else if speed_limit.is_some() {
-            "speed limit is enabled"
         } else if profile.max_segments < 2 {
             "selected policy uses a single stream"
         } else if segment_attempt
@@ -742,29 +729,32 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                 WorkerControl::Continue => {}
             }
         }
-        if let Some(decision) = state.hoster_priority_throttle_decision(&task.id).await {
-            priority_throttle_limited = true;
-            match throttle_download_with_dynamic_limit(
-                state,
-                &task.id,
-                &priority_throttle,
-                decision.cap_bytes_per_second,
-                chunk_len,
-            )
-            .await
-            {
-                WorkerControl::Paused => {
-                    file.flush().await.ok();
-                    return Ok(DownloadOutcome::Paused);
+        let priority_throttle_enabled = task.is_bulk_member && task.resolved_from_url.is_some();
+        if priority_throttle_enabled {
+            if let Some(decision) = state.hoster_priority_throttle_decision(&task.id).await {
+                priority_throttle_limited = true;
+                match throttle_download_with_dynamic_limit(
+                    state,
+                    &task.id,
+                    &priority_throttle,
+                    decision.cap_bytes_per_second,
+                    chunk_len,
+                )
+                .await
+                {
+                    WorkerControl::Paused => {
+                        file.flush().await.ok();
+                        return Ok(DownloadOutcome::Paused);
+                    }
+                    WorkerControl::Canceled | WorkerControl::Missing => {
+                        file.flush().await.ok();
+                        return Ok(DownloadOutcome::Canceled);
+                    }
+                    WorkerControl::Continue => {}
                 }
-                WorkerControl::Canceled | WorkerControl::Missing => {
-                    file.flush().await.ok();
-                    return Ok(DownloadOutcome::Canceled);
-                }
-                WorkerControl::Continue => {}
+            } else {
+                clear_dynamic_throttle(&priority_throttle).await;
             }
-        } else {
-            clear_dynamic_throttle(&priority_throttle).await;
         }
 
         let elapsed = sample_started.elapsed();
@@ -900,7 +890,6 @@ fn request_auth_for_task_url(task: &crate::state::DownloadTask, url: &str) -> Op
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SegmentBudgetWaitAction {
     Defer,
-    FallbackSingleStream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -944,13 +933,9 @@ impl DownloadAdmission {
 
     pub(super) fn segment_budget_wait_action(
         self,
-        has_segment_state: bool,
+        _has_segment_state: bool,
     ) -> SegmentBudgetWaitAction {
-        if has_segment_state || self.kind != DownloadAdmissionKind::Normal {
-            SegmentBudgetWaitAction::Defer
-        } else {
-            SegmentBudgetWaitAction::FallbackSingleStream
-        }
+        SegmentBudgetWaitAction::Defer
     }
 }
 

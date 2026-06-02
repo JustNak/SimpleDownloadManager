@@ -37,9 +37,9 @@ pub(super) struct SegmentPressureDecision {
 }
 
 const GENERAL_HTTP_PROFILE: DownloadPerformanceProfile = DownloadPerformanceProfile {
-    initial_segments: 6,
-    soft_max_segments: 6,
-    max_segments: 6,
+    initial_segments: 8,
+    soft_max_segments: 8,
+    max_segments: 8,
     min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
     target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
     low_speed_threshold_bytes_per_second: 8 * 1024,

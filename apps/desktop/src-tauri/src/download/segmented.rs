@@ -179,7 +179,7 @@ pub(super) fn plan_segmented_ranges(
 pub(super) fn plan_segmented_ranges_with_budget(
     total_bytes: u64,
     resume_support: ResumeSupport,
-    speed_limit: Option<u64>,
+    _speed_limit: Option<u64>,
     profile: DownloadPerformanceProfile,
     segment_budget: Option<usize>,
 ) -> Option<RangePlan> {
@@ -187,8 +187,7 @@ pub(super) fn plan_segmented_ranges_with_budget(
     let max_segments = segment_budget
         .map(|budget| initial_cap.min(budget))
         .unwrap_or(initial_cap);
-    if speed_limit.is_some()
-        || resume_support != ResumeSupport::Supported
+    if resume_support != ResumeSupport::Supported
         || total_bytes < profile.min_segmented_size
         || max_segments < 2
     {
@@ -865,6 +864,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
     let ramp_blocked = Arc::new(AtomicBool::new(false));
     let active_segments = Arc::new(Mutex::new(HashSet::new()));
     let priority_throttle = Arc::new(Mutex::new(DynamicThrottleState::default()));
+    let speed_throttle = Arc::new(Mutex::new(DynamicThrottleState::default()));
     let reporter_handle = tauri::async_runtime::spawn(report_segmented_progress(
         app.clone(),
         state.clone(),
@@ -887,6 +887,9 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         total_bytes: plan.total_bytes,
         profile,
         validators: validators.clone(),
+        speed_limit: state
+            .speed_limit_bytes_per_second_for_task(task.is_bulk_member)
+            .await,
         progress: progress.clone(),
         metadata: metadata.clone(),
         metadata_persisted_at,
@@ -894,6 +897,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         control_signal,
         ramp_blocked: ramp_blocked.clone(),
         priority_throttle,
+        speed_throttle,
         priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: protected_bulk_hoster_stall_timeout(task, profile),
         reconnects: reconnects.clone(),
@@ -1548,6 +1552,45 @@ pub(super) async fn download_segment_worker(
                     .store_segment_bytes(segment.index, current_len);
                 context.progress.add_sample_bytes(batch.len() as u64);
             }
+            if let Some(limit) = context.speed_limit {
+                match throttle_download_with_dynamic_limit(
+                    &context.state,
+                    &context.job_id,
+                    &context.speed_throttle,
+                    limit,
+                    chunk_len,
+                )
+                .await
+                {
+                    WorkerControl::Paused => {
+                        flush_coalesced_and_record_segment_progress(
+                            &context,
+                            &mut writer,
+                            &mut coalescer,
+                            segment.index,
+                            current_len,
+                            false,
+                            true,
+                        )
+                        .await?;
+                        return Ok(DownloadOutcome::Paused);
+                    }
+                    WorkerControl::Canceled | WorkerControl::Missing => {
+                        flush_coalesced_and_record_segment_progress(
+                            &context,
+                            &mut writer,
+                            &mut coalescer,
+                            segment.index,
+                            current_len,
+                            false,
+                            true,
+                        )
+                        .await?;
+                        return Ok(DownloadOutcome::Canceled);
+                    }
+                    WorkerControl::Continue => {}
+                }
+            }
             if context.priority_throttle_enabled {
                 if let Some(decision) = context
                     .state
@@ -1619,7 +1662,7 @@ pub(super) async fn download_segment_worker(
                 if low_speed_monitor.observe(
                     low_speed_bytes,
                     low_speed_started.elapsed(),
-                    priority_throttle_limited,
+                    context.speed_limit.is_some() || priority_throttle_limited,
                 ) == LowSpeedDecision::Retry
                 {
                     context.ramp_blocked.store(true, Ordering::Relaxed);

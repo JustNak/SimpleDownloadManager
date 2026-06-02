@@ -385,6 +385,14 @@ fn normal_download_segment_budget_limits_same_origin_connections() {
 }
 
 #[test]
+fn normal_downloads_defer_when_segment_budget_is_full() {
+    assert_eq!(
+        DownloadAdmission::normal().segment_budget_wait_action(false),
+        SegmentBudgetWaitAction::Defer
+    );
+}
+
+#[test]
 fn direct_bulk_and_non_bulk_hoster_tasks_still_allow_segmented_downloads() {
     let direct_bulk = http_segment_policy_task(true, None);
     let non_bulk_hoster = http_segment_policy_task(false, Some("https://fuckingfast.co/source"));
@@ -442,6 +450,10 @@ fn http_attempt_defers_segment_budget_waits_without_deferring_priority_throttle(
     assert!(attempt.contains("throttle_download_with_dynamic_limit"));
     assert!(attempt.contains("priority_throttle_limited"));
     assert!(attempt.contains("speed_limit.is_some() || priority_throttle_limited"));
+    assert!(
+        !attempt.contains("&& speed_limit.is_none()"),
+        "speed limits should throttle segmented downloads instead of disabling segmentation"
+    );
     assert!(attempt.contains("segment_budget_wait_action"));
     assert!(attempt.contains("DownloadOutcome::Deferred"));
 }
