@@ -24,6 +24,10 @@ export type AsyncFilenameInterceptionHandler<TItem> = (
 export type BrowserDownloadPolicyItem = {
   url?: string;
   finalUrl?: string;
+  referrer?: string;
+  originUrl?: string;
+  documentUrl?: string;
+  initiator?: string;
   filename?: string;
   mime?: string;
   totalBytes?: number;
@@ -81,6 +85,9 @@ export type FirefoxWebRequestHeader = {
 export type FirefoxWebRequestDownloadDetails = {
   requestId?: string;
   url: string;
+  originUrl?: string;
+  documentUrl?: string;
+  initiator?: string;
   method?: string;
   type?: string;
   statusCode?: number;
@@ -92,6 +99,8 @@ export type FirefoxWebRequestDownloadDetails = {
 export type FirefoxWebRequestDownloadCandidate = {
   requestId?: string;
   url: string;
+  pageUrl?: string;
+  referrer?: string;
   filename?: string;
   totalBytes?: number;
   reason: BrowserDownloadIntentDecision['reason'];
@@ -201,7 +210,7 @@ export function shouldAllowBrowserDownloadBySettings(
 
   return settings.enabled
     && settings.downloadHandoffMode !== 'off'
-    && !isHostExcluded(url, settings.excludedHosts)
+    && !isAnyHostExcluded(browserDownloadExclusionUrls(item, url), settings.excludedHosts)
     && !isBrowserExtensionPackage(url, item.filename);
 }
 
@@ -283,7 +292,13 @@ export function firefoxWebRequestDownloadCandidate(
   const responseTotalBytes = nonNegativeIntegerHeader(details.responseHeaders, 'content-length');
   const totalBytes = positiveFiniteNumber(responseTotalBytes);
 
-  if (!shouldAllowBrowserDownloadBySettings({ url, filename }, settings)) {
+  if (!shouldAllowBrowserDownloadBySettings({
+    url,
+    filename,
+    originUrl: details.originUrl,
+    documentUrl: details.documentUrl,
+    initiator: details.initiator,
+  }, settings)) {
     return null;
   }
 
@@ -302,6 +317,8 @@ export function firefoxWebRequestDownloadCandidate(
   return {
     ...(details.requestId ? { requestId: details.requestId } : {}),
     url,
+    ...(details.documentUrl ? { pageUrl: details.documentUrl } : {}),
+    ...(details.originUrl ? { referrer: details.originUrl } : {}),
     filename,
     totalBytes,
     reason: decision.reason,
@@ -626,6 +643,38 @@ function isHttpUrl(url: string | undefined): url is string {
 
 function isHostExcluded(url: string, excludedHosts: string[]): boolean {
   return isUrlHostExcludedByPatterns(url, excludedHosts);
+}
+
+function isAnyHostExcluded(urls: string[], excludedHosts: string[]): boolean {
+  return urls.some((url) => isHostExcluded(url, excludedHosts));
+}
+
+function browserDownloadExclusionUrls(item: BrowserDownloadPolicyItem, url: string): string[] {
+  return uniqueHttpUrls([
+    url,
+    item.finalUrl,
+    item.url,
+    item.referrer,
+    item.originUrl,
+    item.documentUrl,
+    item.initiator,
+  ]);
+}
+
+function uniqueHttpUrls(values: Array<string | undefined>): string[] {
+  const urls: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    if (!isHttpUrl(value) || seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    urls.push(value);
+  }
+
+  return urls;
 }
 
 function normalizeFileExtension(value: string): string {

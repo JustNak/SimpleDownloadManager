@@ -47,6 +47,10 @@ assert.doesNotMatch(appSource, /^import\s+.*\.\/AddDownloadModal\.svelte/m, 'mai
 assert.match(appSource, /import\('\.\/SettingsPage\.svelte'\)/, 'main app should dynamically import SettingsPage when needed');
 assert.match(appSource, /import\('\.\/AddDownloadModal\.svelte'\)/, 'main app should dynamically import AddDownloadModal when needed');
 assert.match(appSource, /subscribeToDownloadUpdateBatch\(\(batch\) => \{\s*applyDownloadUpdateBatchWhenVisible\(batch\);\s*\}\)/, 'progress-only download batches should update rows without refreshing diagnostics');
+assert.match(appSource, /loadInitialAppData\(getAppSnapshot\)/, 'main startup should only load the desktop snapshot');
+assert.doesNotMatch(appSource, /loadInitialAppData\(getAppSnapshot,\s*getDiagnostics\)/, 'main startup should defer diagnostics until settings or diagnostics actions need them');
+assert.match(appSource, /if \(!shouldRefreshDiagnostics\(now,\s*lastDiagnosticsRefreshAt,\s*options,\s*diagnosticsLoaded\)\)/, 'background diagnostics refresh should stay disabled until diagnostics have been loaded');
+assert.match(appSource, /if \(nextView === 'settings'\) \{[\s\S]*void loadSettingsPageComponent\(\);[\s\S]*void refreshDiagnostics\(\{ silent: true, force: diagnostics === null \}\);[\s\S]*\}/, 'settings navigation should lazy-load the first diagnostics snapshot');
 
 assert.match(backendSource, /app:\/\/downloads-update-batch/, 'backend should define a batched download update event');
 assert.match(backendSource, /export interface DownloadUpdateBatch/, 'backend should expose the download update batch payload type');
@@ -110,6 +114,11 @@ for (const command of ['pause_jobs', 'resume_jobs', 'cancel_jobs', 'delete_jobs'
 }
 
 assert.match(commandsRuntimeSource, /emit_to\("main",\s*STATE_CHANGED_EVENT/, 'full desktop snapshots should only be emitted to the main webview');
+assert.match(commandsRuntimeSource, /main_window_snapshot\(snapshot\)/, 'main state events should trim non-queue payload before entering the main webview');
+assert.match(commandsRuntimeSource, /pub fn main_window_snapshot[\s\S]*map\(main_window_download_job\)/, 'commands should expose a reusable main-window snapshot sanitizer');
+assert.match(commandsRuntimeSource, /fn main_window_download_job[\s\S]*job\.source = None;[\s\S]*torrent\.diagnostics = None;/, 'main queue payloads should drop browser source metadata and live torrent diagnostics');
+assert.match(commandsSource, /get_app_snapshot[\s\S]*main_window_snapshot\(&state\.snapshot\(\)\.await\)/, 'initial main snapshot command should return the trimmed main-window payload');
+assert.match(commandsSource, /import_local_recovery[\s\S]*emit_snapshot\(&app, &snapshot\);[\s\S]*Ok\(main_window_snapshot\(&snapshot\)\)/, 'direct local recovery returns should match the trimmed main-window payload');
 assert.match(commandsRuntimeSource, /DOWNLOADS_UPDATE_BATCH_EVENT/, 'commands should define a batched download update event');
 assert.match(commandsRuntimeSource, /emit_progress_delta/, 'commands should define a lightweight progress delta emitter');
 assert.match(commandsRuntimeSource, /emit_popup_snapshots\(app,\s*snapshot\)/, 'snapshot emission should fan out targeted popup payloads');

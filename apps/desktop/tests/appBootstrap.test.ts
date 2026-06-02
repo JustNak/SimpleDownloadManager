@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { loadInitialAppData } from '../src/appBootstrap.ts';
 import type { DesktopSnapshot } from '../src/backend.ts';
-import type { DiagnosticsSnapshot } from '../src/types.ts';
 
 const snapshot: DesktopSnapshot = {
   connectionState: 'connected' as DesktopSnapshot['connectionState'],
@@ -70,15 +69,8 @@ const snapshot: DesktopSnapshot = {
   },
 };
 
-const result = await loadInitialAppData(
-  async () => snapshot,
-  async (): Promise<DiagnosticsSnapshot> => {
-    throw new Error('diagnostics failed');
-  },
-);
+const result = await loadInitialAppData(async () => snapshot);
 
 assert.equal(result.snapshot?.jobs.length, 1);
 assert.equal(result.snapshot?.jobs[0].id, 'job_1');
-assert.equal(result.diagnostics, null);
 assert.equal(result.snapshotError, null);
-assert.match(String(result.diagnosticsError), /diagnostics failed/);

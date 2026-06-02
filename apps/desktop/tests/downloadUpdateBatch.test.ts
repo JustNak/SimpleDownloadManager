@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { applyDownloadUpdateBatch } from '../src/downloadUpdateBatch.ts';
+import { applyDownloadUpdateBatch, mergeDownloadUpdateBatches } from '../src/downloadUpdateBatch.ts';
 import type { DownloadJob } from '../src/types.ts';
 
 function job(id: string, filename = `${id}.bin`): DownloadJob {
@@ -67,3 +67,73 @@ const unchangedJobs = applyDownloadUpdateBatch(
 
 assert.equal(unchangedJobs[0], originalFirst, 'unchanged rows should preserve object identity');
 assert.equal(unchangedJobs[1], originalSecond, 'unchanged rows should preserve object identity');
+
+const coalescedBatch = mergeDownloadUpdateBatches(
+  {
+    jobs: [
+      { ...originalFirst, progress: 20, downloadedBytes: 20 },
+      { ...originalSecond, progress: 30, downloadedBytes: 30 },
+    ],
+    removedJobIds: ['job_removed_first'],
+  },
+  {
+    jobs: [
+      { ...originalFirst, progress: 60, downloadedBytes: 60 },
+      insertedThird,
+      job('job_removed_first'),
+    ],
+    removedJobIds: ['job_2'],
+  },
+);
+
+assert.deepEqual(
+  coalescedBatch,
+  {
+    jobs: [
+      { ...originalFirst, progress: 60, downloadedBytes: 60 },
+      insertedThird,
+      job('job_removed_first'),
+    ],
+    removedJobIds: ['job_2'],
+  },
+  'merged hidden batches should keep only the latest update/removal per job while preserving sequential semantics',
+);
+
+const sequentialBatchResult = applyDownloadUpdateBatch(
+  applyDownloadUpdateBatch(
+    [originalFirst, originalSecond],
+    {
+      jobs: [
+        { ...originalFirst, progress: 20, downloadedBytes: 20 },
+        { ...originalSecond, progress: 30, downloadedBytes: 30 },
+      ],
+      removedJobIds: ['job_removed_first'],
+    },
+  ),
+  {
+    jobs: [
+      { ...originalFirst, progress: 60, downloadedBytes: 60 },
+      insertedThird,
+      job('job_removed_first'),
+    ],
+    removedJobIds: ['job_2'],
+  },
+);
+
+assert.deepEqual(
+  applyDownloadUpdateBatch([originalFirst, originalSecond], coalescedBatch),
+  sequentialBatchResult,
+  'applying a merged hidden batch should match applying each hidden batch in order',
+);
+
+assert.deepEqual(
+  mergeDownloadUpdateBatches(
+    { jobs: [{ ...originalFirst, progress: 20, downloadedBytes: 20 }], removedJobIds: [] },
+    { jobs: [{ ...originalFirst, progress: 80, downloadedBytes: 80 }], removedJobIds: ['job_1'] },
+  ),
+  {
+    jobs: [],
+    removedJobIds: ['job_1'],
+  },
+  'merged batches should preserve removal precedence when an event payload includes the same id in updates and removals',
+);

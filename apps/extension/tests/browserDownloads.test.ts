@@ -54,6 +54,18 @@ async function main() {
   );
   assert.equal(
     shouldHandleBrowserDownload(
+      {
+        url: 'https://cdn.telegram-cdn.example/files/archive.zip',
+        filename: 'archive.zip',
+        referrer: 'https://web.telegram.org/k/',
+      },
+      { ...defaultSettings, excludedHosts: ['web.telegram.org'] },
+    ),
+    false,
+    'downloads initiated by an excluded site should stay in the browser even when the file URL is hosted elsewhere',
+  );
+  assert.equal(
+    shouldHandleBrowserDownload(
       { url: 'https://downloads.example.com/file.zip' },
       { ...defaultSettings, excludedHosts: ['*.example.com'] },
     ),

@@ -104,7 +104,7 @@
     testExtensionHandoff,
   } from './backend';
   import type { AddJobsResult, DesktopSnapshot, LocalRecoveryPreview, StartupRecoverySummary } from './backend';
-  import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
+  import { applyDownloadUpdateBatch, mergeDownloadUpdateBatches, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
   import {
     groupBulkMembersByArchiveId,
@@ -137,7 +137,8 @@
   import type { DiagnosticsSnapshot } from './types';
   import { formatBytes } from './popupShared';
   import { createDefaultSettings } from './defaultSettings';
-  import { createNotificationSoundPlayer, createUpdateNotificationSoundGate } from './notificationSounds';
+  import { createUpdateNotificationSoundGate } from './notificationSounds';
+  import { getNotificationSoundPlayer } from './notificationSoundBridge';
   type AddDownloadOutcome = import('./AddDownloadModal.svelte').AddDownloadOutcome;
 
   type IconComponent = Component<{ size?: number; class?: string; strokeWidth?: number }>;
@@ -185,17 +186,18 @@
   let startupUpdateCheckStarted = false;
   let deferredStartupUpdateCheck = false;
   let pendingVisibleSnapshot: DesktopSnapshot | null = null;
+  let pendingHiddenDownloadBatch: DownloadUpdateBatch | null = null;
   let startupRecoveryToastKey: string | null = null;
   let dismissedStartupRecoveryKey: string | null = null;
   let lastDiagnosticsRefreshAt = 0;
   let settingsPageLoad: Promise<void> | null = null;
   let addDownloadModalLoad: Promise<void> | null = null;
-  const notificationSoundPlayer = createNotificationSoundPlayer();
+  const notificationSoundPlayer = getNotificationSoundPlayer();
   const updateNotificationSoundGate = createUpdateNotificationSoundGate();
-  let notificationSoundsPreloaded = false;
 
   const mainWindow = isTauriRuntime() ? getCurrentWindow() : null;
   const liveSettings = $derived(settingsDraft ?? settings);
+  const diagnosticsLoaded = $derived(diagnostics !== null);
   const activeSettingsSection = $derived(SETTINGS_SECTIONS.find((section) => section.id === activeSettingsSectionId) ?? SETTINGS_SECTIONS[0]);
   const bulkMembersByArchiveId = $derived(groupBulkMembersByArchiveId(jobs));
   const queueRows = $derived(groupBulkQueueRows(jobs));
@@ -228,17 +230,10 @@
   $effect(() => {
     let isMounted = true;
     const disposers: Array<() => void | Promise<void>> = [];
-    const preloadOnInteraction = () => preloadNotificationSounds();
-    window.addEventListener('pointerdown', preloadOnInteraction, { once: true, passive: true });
-    window.addEventListener('keydown', preloadOnInteraction, { once: true });
-    disposers.push(() => {
-      window.removeEventListener('pointerdown', preloadOnInteraction);
-      window.removeEventListener('keydown', preloadOnInteraction);
-    });
 
     async function initialize() {
       try {
-        const initialData = await loadInitialAppData(getAppSnapshot, getDiagnostics);
+        const initialData = await loadInitialAppData(getAppSnapshot);
         if (!isMounted) return;
 
         if (!initialData.snapshot) {
@@ -246,17 +241,6 @@
         }
 
         applyDesktopSnapshot(initialData.snapshot);
-        preloadNotificationSounds();
-        if (initialData.diagnostics) {
-          lastDiagnosticsRefreshAt = Date.now();
-          diagnostics = initialData.diagnostics;
-        } else if (initialData.diagnosticsError) {
-          addToast({
-            type: 'warning',
-            title: 'Diagnostics Unavailable',
-            message: getErrorMessage(initialData.diagnosticsError, 'Download state loaded, but diagnostics could not be refreshed.'),
-          });
-        }
 
         void getInstalledVersion()
           .then((version) => {
@@ -313,12 +297,6 @@
       }
     };
   });
-
-  function preloadNotificationSounds() {
-    if (notificationSoundsPreloaded) return;
-    notificationSoundsPreloaded = true;
-    notificationSoundPlayer.preload();
-  }
 
   $effect(() => {
     if (!deferredStartupUpdateCheck || startupUpdateCheckStarted || bulkUpdateBlocker) return;
@@ -537,6 +515,7 @@
     view = nextView;
     if (nextView === 'settings') {
       void loadSettingsPageComponent();
+      void refreshDiagnostics({ silent: true, force: diagnostics === null });
     }
   }
 
@@ -576,6 +555,7 @@
   function applyDesktopSnapshotWhenVisible(snapshot: DesktopSnapshot): boolean {
     if (document.visibilityState !== 'visible') {
       pendingVisibleSnapshot = snapshot;
+      pendingHiddenDownloadBatch = null;
       return false;
     }
 
@@ -585,11 +565,7 @@
 
   function applyDownloadUpdateBatchWhenVisible(batch: DownloadUpdateBatch): boolean {
     if (document.visibilityState !== 'visible') {
-      const baseSnapshot = pendingVisibleSnapshot ?? { connectionState, jobs, settings, startupRecovery: startupRecovery ?? undefined };
-      pendingVisibleSnapshot = {
-        ...baseSnapshot,
-        jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, batch),
-      };
+      pendingHiddenDownloadBatch = mergeDownloadUpdateBatches(pendingHiddenDownloadBatch, batch);
       return false;
     }
 
@@ -598,9 +574,21 @@
   }
 
   function flushPendingVisibleSnapshot(): boolean {
-    if (!pendingVisibleSnapshot) return false;
-    const snapshot = pendingVisibleSnapshot;
+    if (!pendingVisibleSnapshot && !pendingHiddenDownloadBatch) return false;
+    const baseSnapshot = pendingVisibleSnapshot ?? {
+      connectionState,
+      jobs,
+      settings,
+      startupRecovery: startupRecovery ?? undefined,
+    };
+    const snapshot = pendingHiddenDownloadBatch
+      ? {
+        ...baseSnapshot,
+        jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, pendingHiddenDownloadBatch),
+      }
+      : baseSnapshot;
     pendingVisibleSnapshot = null;
+    pendingHiddenDownloadBatch = null;
     applyDesktopSnapshot(snapshot);
     return true;
   }
@@ -681,7 +669,7 @@
 
   async function refreshDiagnostics(options: DiagnosticsRefreshOptions = {}) {
     const now = Date.now();
-    if (!shouldRefreshDiagnostics(now, lastDiagnosticsRefreshAt, options)) {
+    if (!shouldRefreshDiagnostics(now, lastDiagnosticsRefreshAt, options, diagnosticsLoaded)) {
       return;
     }
 

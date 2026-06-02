@@ -1273,6 +1273,7 @@ fn segment_context(
         total_bytes: 12,
         profile: performance_profile(),
         validators: EntityValidators::default(),
+        speed_limit: None,
         progress: Arc::new(SegmentedProgressCounters::new(vec![0])),
         metadata: Arc::new(Mutex::new(new_segment_state_for_test(
             &three_segment_test_plan(),
@@ -1283,6 +1284,7 @@ fn segment_context(
         control_signal: WorkerControlSignal::default(),
         ramp_blocked: Arc::new(AtomicBool::new(false)),
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        speed_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: task.is_bulk_member && task.resolved_from_url.is_some(),
         stall_timeout: None,
         reconnects: Arc::new(SegmentReconnectTracker::default()),

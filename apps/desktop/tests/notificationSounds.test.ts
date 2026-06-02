@@ -123,9 +123,14 @@ const appSource = await import('node:fs/promises')
   .then(({ readFile }) => readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'));
 const rustEventsSource = await import('node:fs/promises')
   .then(({ readFile }) => readFile(new URL('../src-tauri/src/commands/events.rs', import.meta.url), 'utf8'));
+const bridgeSource = await import('node:fs/promises')
+  .then(({ readFile }) => readFile(new URL('../src/notificationSoundBridge.ts', import.meta.url), 'utf8'));
 
 assert.match(backendSource, /kind:\s*'success' \| 'failed' \| 'update'/, 'frontend notification sound event type should include the update sound kind');
 assert.match(rustEventsSource, /enum NotificationSoundKind \{[\s\S]*Success,[\s\S]*Failed,[\s\S]*Update,[\s\S]*\}/, 'Rust notification sound kind should stay in parity with frontend sound assets');
 assert.match(mainSource, /startNotificationSoundBridge\(\)/, 'notification sound listener should be installed for every window route, including progress popups');
 assert.doesNotMatch(appSource, /subscribeToNotificationSound/, 'main App should not duplicate the route-level notification sound listener');
+assert.doesNotMatch(appSource, /createNotificationSoundPlayer\(\)/, 'main App should reuse the route-level notification sound player instead of creating a duplicate audio cache');
+assert.match(bridgeSource, /const notificationSoundPlayer = createNotificationSoundPlayer\(\)/, 'route sound bridge should own one shared player per webview route');
+assert.doesNotMatch(bridgeSource, /preload\(\);/, 'route sound bridge should not eagerly preload bundled audio assets');
 assert.match(rustEventsSource, /notification_sound_target_label/, 'backend sound events should pick a live webview target instead of assuming the main window exists');

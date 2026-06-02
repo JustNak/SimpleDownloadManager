@@ -440,6 +440,97 @@ async fn delete_completed_bulk_member_from_disk_removes_archive_output() {
 }
 
 #[tokio::test]
+async fn cancel_delete_finalizing_bulk_member_marks_archive_failed_and_prepares_cleanup() {
+    let download_dir = test_runtime_dir("cancel-delete-finalizing-bulk");
+    let part_path = download_dir.join("Game.part01.rar");
+    std::fs::write(&part_path, b"part").unwrap();
+    let mut job = download_job("job_1", JobState::Downloading, ResumeSupport::Supported, 50);
+    job.target_path = part_path.display().to_string();
+    job.temp_path = part_path.with_extension("rar.part").display().to_string();
+    job.bulk_archive = Some(finalizing_bulk_archive("bulk_1", &download_dir));
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let prepared = state
+        .cancel_jobs_for_delete(&["job_1".to_string()])
+        .await
+        .expect("explicit cancel/delete should interrupt finalizing bulk cleanup");
+
+    let job = prepared
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_1")
+        .unwrap();
+    let archive = job.bulk_archive.as_ref().unwrap();
+    assert_eq!(job.state, JobState::Canceled);
+    assert_eq!(job.removal_state, Some(RemovalState::Removing));
+    assert_eq!(archive.archive_status, BulkArchiveStatus::Failed);
+    assert!(archive
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("canceled")));
+    assert_eq!(prepared.jobs.len(), 1);
+    assert!(prepared.jobs[0].paths.iter().any(|path| path == &part_path));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn delete_finalizing_bulk_member_from_disk_marks_archive_failed_and_prepares_cleanup() {
+    let download_dir = test_runtime_dir("delete-finalizing-bulk");
+    let part_path = download_dir.join("Game.part01.rar");
+    std::fs::write(&part_path, b"part").unwrap();
+    let mut job = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    job.target_path = part_path.display().to_string();
+    job.temp_path = part_path.with_extension("rar.part").display().to_string();
+    job.bulk_archive = Some(finalizing_bulk_archive("bulk_1", &download_dir));
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    let prepared = state
+        .delete_jobs_for_disk_cleanup(&["job_1".to_string()])
+        .await
+        .expect("explicit delete should interrupt finalizing bulk cleanup");
+
+    let job = prepared
+        .snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_1")
+        .unwrap();
+    let archive = job.bulk_archive.as_ref().unwrap();
+    assert_eq!(job.removal_state, Some(RemovalState::Removing));
+    assert_eq!(archive.archive_status, BulkArchiveStatus::Failed);
+    assert!(archive
+        .error
+        .as_deref()
+        .is_some_and(|message| message.contains("canceled")));
+    assert_eq!(prepared.jobs.len(), 1);
+    assert!(prepared.jobs[0].paths.iter().any(|path| path == &part_path));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn clear_completed_jobs_preserves_finalizing_bulk_members() {
+    let download_dir = test_runtime_dir("clear-completed-preserves-finalizing-bulk");
+    let mut finalizing = download_job("job_1", JobState::Completed, ResumeSupport::Supported, 100);
+    finalizing.bulk_archive = Some(finalizing_bulk_archive("bulk_1", &download_dir));
+    let completed = download_job("job_2", JobState::Completed, ResumeSupport::Supported, 100);
+    let state =
+        shared_state_with_jobs(download_dir.join("state.json"), vec![finalizing, completed]);
+
+    let snapshot = state
+        .clear_completed_jobs()
+        .await
+        .expect("clear completed should leave finalizing bulk rows visible");
+
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].id, "job_1");
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn bulk_member_auto_restart_candidate_accepts_transient_pending_http_members() {
     let download_dir = test_runtime_dir("bulk-auto-restart-candidate");
     let mut job = download_job(
@@ -1870,6 +1961,73 @@ async fn cancel_delete_cleanup_failure_keeps_canceled_row_with_diagnostic() {
 }
 
 #[tokio::test]
+async fn cleanup_failure_releases_active_worker_marker_for_retry_delete() {
+    let download_dir = test_runtime_dir("cleanup-failure-releases-active-worker");
+    let job = download_job(
+        "job_active_cleanup",
+        JobState::Canceled,
+        ResumeSupport::Unknown,
+        0,
+    );
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+    {
+        state
+            .inner
+            .write()
+            .await
+            .active_workers
+            .insert("job_active_cleanup".into());
+    }
+    let cleanup_job = DestructiveCleanupJob {
+        id: "job_active_cleanup".into(),
+        filename: "active.bin".into(),
+        paths: vec![PathBuf::from("\0")],
+        partial_artifact_roots: Vec::new(),
+        wait_for_worker_release: false,
+    };
+
+    let snapshot = state
+        .run_destructive_cleanup(vec![cleanup_job])
+        .await
+        .expect("cleanup failure should be recorded");
+
+    let remaining = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.id == "job_active_cleanup")
+        .unwrap();
+    assert_eq!(remaining.removal_state, Some(RemovalState::CleanupFailed));
+    assert!(!state
+        .inner
+        .read()
+        .await
+        .active_workers
+        .contains("job_active_cleanup"));
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
+async fn worker_control_cancels_jobs_waiting_for_disk_cleanup() {
+    let download_dir = test_runtime_dir("worker-control-removing-canceled");
+    let mut job = download_job(
+        "job_removing",
+        JobState::Downloading,
+        ResumeSupport::Supported,
+        50,
+    );
+    job.removal_state = Some(RemovalState::Removing);
+    let state = shared_state_with_jobs(download_dir.join("state.json"), vec![job]);
+
+    assert_eq!(
+        state.worker_control("job_removing").await,
+        WorkerControl::Canceled
+    );
+
+    let _ = std::fs::remove_dir_all(download_dir);
+}
+
+#[tokio::test]
 async fn delete_job_missing_ids_are_idempotent() {
     let download_dir = test_runtime_dir("delete-missing-idempotent");
     let state = shared_state_with_jobs(download_dir.join("state.json"), Vec::new());
@@ -1963,5 +2121,21 @@ fn assert_partial_artifacts_removed(temp_path: &Path, sidecars: &[PathBuf]) {
             "partial sidecar should be removed: {}",
             path.display()
         );
+    }
+}
+
+fn finalizing_bulk_archive(id: &str, download_dir: &Path) -> BulkArchiveInfo {
+    BulkArchiveInfo {
+        id: id.into(),
+        name: "Game.zip".into(),
+        output_kind: BulkArchiveOutputKind::Folder,
+        archive_status: BulkArchiveStatus::Combining,
+        requires_extraction: Some(false),
+        output_path: Some(download_dir.join("Bulk").join("Game").display().to_string()),
+        error: None,
+        warning: None,
+        finalize_total_bytes: Some(100),
+        finalize_processed_bytes: Some(10),
+        finalize_mode: Some(BulkFinalizeMode::Move),
     }
 }

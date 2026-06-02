@@ -34,9 +34,9 @@ mod shell;
 
 pub use self::events::{
     emit_download_update, emit_notification_sound, emit_progress_delta, emit_snapshot,
-    BatchProgressSnapshot, DownloadUpdateBatch, ExternalUseResult, NotificationSoundEvent,
-    NotificationSoundKind, ProgressBatchContext, ProgressBatchKind, ProgressBatchRegistry,
-    ProgressJobSnapshot, SettingsSnapshot,
+    main_window_snapshot, BatchProgressSnapshot, DownloadUpdateBatch, ExternalUseResult,
+    NotificationSoundEvent, NotificationSoundKind, ProgressBatchContext, ProgressBatchKind,
+    ProgressBatchRegistry, ProgressJobSnapshot, SettingsSnapshot,
 };
 #[cfg(windows)]
 use self::native_host::ensure_native_host_registration;
@@ -127,7 +127,7 @@ async fn complete_prompt_action(
 
 #[tauri::command]
 pub async fn get_app_snapshot(state: State<'_, SharedState>) -> Result<DesktopSnapshot, String> {
-    Ok(state.snapshot().await)
+    Ok(main_window_snapshot(&state.snapshot().await))
 }
 
 #[tauri::command]
@@ -152,7 +152,7 @@ pub async fn import_local_recovery(
         .await
         .map_err(|error| error.message)?;
     emit_snapshot(&app, &snapshot);
-    Ok(snapshot)
+    Ok(main_window_snapshot(&snapshot))
 }
 
 #[tauri::command]
