@@ -13,7 +13,9 @@ export function shouldRefreshDiagnostics(
   now: number,
   lastRefreshedAt: number,
   options: DiagnosticsRefreshOptions = {},
+  diagnosticsLoaded = true,
 ): boolean {
   if (options.force || options.silent !== true) return true;
+  if (!diagnosticsLoaded) return false;
   return now - lastRefreshedAt >= DIAGNOSTICS_REFRESH_INTERVAL_MS;
 }

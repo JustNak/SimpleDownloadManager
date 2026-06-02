@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-0}" = "0" ]; then
+  if [ -x /usr/share/simple-download-manager/install/unregister-native-host-linux.sh ]; then
+    /usr/share/simple-download-manager/install/unregister-native-host-linux.sh
+  else
+    rm -f /etc/opt/chrome/native-messaging-hosts/com.myapp.download_manager.json
+    rm -f /etc/chromium/native-messaging-hosts/com.myapp.download_manager.json
+    rm -f /etc/opt/edge/native-messaging-hosts/com.myapp.download_manager.json
+    rm -f /usr/lib/mozilla/native-messaging-hosts/com.myapp.download_manager.json
+    rm -f /usr/lib64/mozilla/native-messaging-hosts/com.myapp.download_manager.json
+  fi
+fi
+
+exit 0

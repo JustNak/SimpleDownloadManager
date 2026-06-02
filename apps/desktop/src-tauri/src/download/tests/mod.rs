@@ -927,9 +927,9 @@ fn non_rate_limit_segment_errors_do_not_reduce_future_segment_caps() {
         Some(key),
         now + Duration::from_secs(5),
     );
-    assert_eq!(profile.initial_segments, 6);
-    assert_eq!(profile.soft_max_segments, 6);
-    assert_eq!(profile.max_segments, 6);
+    assert_eq!(profile.initial_segments, 8);
+    assert_eq!(profile.soft_max_segments, 8);
+    assert_eq!(profile.max_segments, 8);
 }
 
 async fn spawn_one_response_server(

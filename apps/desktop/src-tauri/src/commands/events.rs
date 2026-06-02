@@ -100,7 +100,7 @@ impl ProgressBatchRegistry {
 }
 
 pub fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
-    if let Err(error) = app.emit_to("main", STATE_CHANGED_EVENT, snapshot.clone()) {
+    if let Err(error) = app.emit_to("main", STATE_CHANGED_EVENT, main_window_snapshot(snapshot)) {
         eprintln!("failed to emit state snapshot: {error}");
     }
     emit_popup_snapshots(app, snapshot);
@@ -156,6 +156,7 @@ fn queue_download_update<R: Runtime>(
             .expect("download update batch lock poisoned");
 
         if let Some(job) = job {
+            let job = main_window_download_job(job);
             pending.removed_job_ids.remove(&job.id);
             pending.jobs.insert(job.id.clone(), job);
         } else if let Some(job_id) = removed_job_id {
@@ -178,6 +179,24 @@ fn queue_download_update<R: Runtime>(
             flush_download_update_batch(&app);
         });
     }
+}
+
+pub fn main_window_snapshot(snapshot: &DesktopSnapshot) -> DesktopSnapshot {
+    let mut snapshot = snapshot.clone();
+    snapshot.jobs = snapshot
+        .jobs
+        .into_iter()
+        .map(main_window_download_job)
+        .collect();
+    snapshot
+}
+
+fn main_window_download_job(mut job: DownloadJob) -> DownloadJob {
+    job.source = None;
+    if let Some(torrent) = job.torrent.as_mut() {
+        torrent.diagnostics = None;
+    }
+    job
 }
 
 fn pending_download_update_batch() -> &'static Mutex<PendingDownloadUpdateBatch> {

@@ -1,21 +1,18 @@
 import { subscribeToNotificationSound } from './backend';
 import { createNotificationSoundPlayer } from './notificationSounds';
 
+const notificationSoundPlayer = createNotificationSoundPlayer();
+let bridgeStarted = false;
+
+export function getNotificationSoundPlayer() {
+  return notificationSoundPlayer;
+}
+
 export function startNotificationSoundBridge(): void {
-  const player = createNotificationSoundPlayer();
-  let preloaded = false;
-
-  function preload(): void {
-    if (preloaded) return;
-    preloaded = true;
-    player.preload();
-  }
-
-  window.addEventListener('pointerdown', preload, { once: true, passive: true });
-  window.addEventListener('keydown', preload, { once: true });
-  preload();
+  if (bridgeStarted) return;
+  bridgeStarted = true;
 
   void subscribeToNotificationSound((event) => {
-    player.play(event.kind, { notificationSoundsEnabled: true });
+    notificationSoundPlayer.play(event.kind, { notificationSoundsEnabled: true });
   });
 }

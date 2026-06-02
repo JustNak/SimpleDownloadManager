@@ -6,6 +6,10 @@ import {
   nativeHostTargetDir,
   windowsReleaseTargetForRustTarget,
 } from './windows-release-targets.mjs';
+import {
+  linuxReleaseTargetForRustTarget,
+  nativeHostLinuxTargetDir,
+} from './linux-release-targets.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,8 +27,12 @@ if (!hostTuple) {
   throw new Error('Could not determine Rust host tuple.');
 }
 
-const releaseTarget = windowsReleaseTargetForRustTarget(hostTuple);
-const hostBinaryName = 'simple-download-manager-native-host.exe';
+const releaseTarget = releaseTargetForRustTarget(hostTuple);
+const isWindowsTarget = releaseTarget.platform === 'windows';
+const isLinuxTarget = releaseTarget.platform === 'linux';
+const hostBinaryName = isWindowsTarget
+  ? 'simple-download-manager-native-host.exe'
+  : 'simple-download-manager-native-host';
 const hostBinarySource = await resolveHostBinarySource({
   root,
   releaseTarget,
@@ -34,7 +42,9 @@ const hostBinarySource = await resolveHostBinarySource({
 const sidecarDir = path.join(root, 'apps', 'desktop', 'src-tauri', 'binaries');
 const sidecarTarget = path.join(
   sidecarDir,
-  `simple-download-manager-native-host-${hostTuple}.exe`,
+  isWindowsTarget
+    ? `simple-download-manager-native-host-${hostTuple}.exe`
+    : `simple-download-manager-native-host-${hostTuple}`,
 );
 
 const installerResourceDir = path.join(root, 'apps', 'desktop', 'src-tauri', 'resources', 'install');
@@ -51,6 +61,16 @@ const sevenZipResources = releaseTarget.sevenZipResources.map((resource) => ({
   source: path.join('apps/desktop/src-tauri', resource.source),
   destination: resource.destination,
 }));
+const linuxPackageFiles = [
+  {
+    source: 'scripts/register-native-host-linux.sh',
+    destination: '/usr/share/simple-download-manager/install/register-native-host-linux.sh',
+  },
+  {
+    source: 'scripts/unregister-native-host-linux.sh',
+    destination: '/usr/share/simple-download-manager/install/unregister-native-host-linux.sh',
+  },
+];
 
 await rm(sidecarDir, { recursive: true, force: true });
 await rm(installerResourceDir, { recursive: true, force: true });
@@ -67,10 +87,12 @@ for (const resource of sevenZipResources) {
 await copyFile(hostBinarySource, sidecarTarget);
 
 for (const { source, destination } of installerResources) {
-  await copyFile(
-    path.join(root, source),
-    path.join(desktopTauriRoot, destination),
-  );
+  if (isWindowsTarget) {
+    await copyFile(
+      path.join(root, source),
+      path.join(desktopTauriRoot, destination),
+    );
+  }
 }
 
 await writeFile(
@@ -91,10 +113,12 @@ if (args.configOut) {
   await writeTauriConfigOverride({
     configPath: path.resolve(root, args.configOut),
     resources: [
-      ...installerResources,
+      ...(isWindowsTarget ? installerResources : []),
       { source: path.relative(root, path.join(installerResourceDir, 'release.json')), destination: 'resources/install/release.json' },
       ...sevenZipResources,
     ],
+    linuxPackageFiles: isLinuxTarget ? linuxPackageFiles : [],
+    isLinuxTarget,
   });
 }
 
@@ -102,6 +126,7 @@ console.log(
   JSON.stringify(
     {
       target: releaseTarget.name,
+      platform: releaseTarget.platform,
       hostTuple,
       sidecarTarget,
       installerResourceDir,
@@ -133,12 +158,38 @@ function parseArgs(argv) {
   return parsed;
 }
 
-async function writeTauriConfigOverride({ configPath, resources }) {
+function releaseTargetForRustTarget(rustTarget) {
+  try {
+    return {
+      ...windowsReleaseTargetForRustTarget(rustTarget),
+      platform: 'windows',
+    };
+  } catch {
+    return {
+      ...linuxReleaseTargetForRustTarget(rustTarget),
+      platform: 'linux',
+      sevenZipResources: [],
+    };
+  }
+}
+
+async function writeTauriConfigOverride({
+  configPath,
+  resources,
+  linuxPackageFiles,
+  isLinuxTarget,
+}) {
   await mkdir(path.dirname(configPath), { recursive: true });
   const resourceMap = Object.fromEntries(
     resources.map((resource) => [
       path.resolve(root, resource.source),
       resource.destination,
+    ]),
+  );
+  const linuxPackageFileMap = Object.fromEntries(
+    linuxPackageFiles.map((resource) => [
+      resource.destination,
+      path.resolve(root, resource.source),
     ]),
   );
   await writeFile(
@@ -149,6 +200,22 @@ async function writeTauriConfigOverride({ configPath, resources }) {
       },
       bundle: {
         resources: resourceMap,
+        ...(isLinuxTarget
+          ? {
+              linux: {
+                deb: {
+                  files: linuxPackageFileMap,
+                  postInstallScript: 'linux/deb/postinst',
+                  postRemoveScript: 'linux/deb/postrm',
+                },
+                rpm: {
+                  files: linuxPackageFileMap,
+                  postInstallScript: 'linux/rpm/postinstall',
+                  postRemoveScript: 'linux/rpm/postremove',
+                },
+              },
+            }
+          : {}),
       },
     }, null, 2)}\n`,
     'utf8',
@@ -161,7 +228,12 @@ async function resolveHostBinarySource({
   hostBinaryName,
   explicitTarget,
 }) {
-  const targetPath = path.join(nativeHostTargetDir(root, releaseTarget), hostBinaryName);
+  const targetPath = path.join(
+    releaseTarget.platform === 'linux'
+      ? nativeHostLinuxTargetDir(root, releaseTarget)
+      : nativeHostTargetDir(root, releaseTarget),
+    hostBinaryName,
+  );
   if (explicitTarget) {
     return targetPath;
   }

@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
+  linuxBundleArtifactNames,
   releaseChannels,
   updaterReleasePaths,
 } from './updater-release.mjs';
@@ -80,13 +81,35 @@ export async function publishUpdaterBeta(repoRoot = defaultRoot) {
 }
 
 export function updaterBetaUploadPaths(paths) {
+  const uploadPaths = paths.installers.flatMap((installer) => [
+    installer.installerPath,
+    installer.signaturePath,
+  ]);
+
+  for (const installer of paths.installers) {
+    if (!installer.target.updaterPlatform?.startsWith('linux-')) {
+      continue;
+    }
+
+    const packageNames = linuxBundleArtifactNames(versionFromLinuxAppImageName(installer.installerName), installer.target);
+    uploadPaths.push(
+      path.join(paths.releaseRoot, 'bundle', 'deb', packageNames.deb),
+      path.join(paths.releaseRoot, 'bundle', 'rpm', packageNames.rpm),
+    );
+  }
+
   return [
-    ...paths.installers.flatMap((installer) => [
-      installer.installerPath,
-      installer.signaturePath,
-    ]),
+    ...uploadPaths,
     paths.metadataPath,
   ];
+}
+
+function versionFromLinuxAppImageName(installerName) {
+  const match = installerName.match(/^Simple Download Manager_(.+)_amd64\.AppImage$/);
+  if (!match) {
+    throw new Error(`Unsupported Linux AppImage asset name: ${installerName}`);
+  }
+  return match[1];
 }
 
 export function runGh(args, options = {}) {

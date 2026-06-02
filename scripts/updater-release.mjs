@@ -7,9 +7,20 @@ import {
   windowsReleaseTargetList,
   windowsReleaseTargets,
 } from './windows-release-targets.mjs';
+import {
+  linuxAppImageName,
+  linuxBundleArtifactNames,
+  linuxReleaseTargetList,
+  linuxReleaseTargets,
+  resolveLinuxReleaseTargets,
+} from './linux-release-targets.mjs';
 
 export const updaterRepository = 'JustNak/SimpleDownloadManager';
 export {
+  linuxAppImageName,
+  linuxBundleArtifactNames,
+  linuxReleaseTargetList,
+  linuxReleaseTargets,
   windowsInstallerName,
   windowsReleaseTargetList,
   windowsReleaseTargets,
@@ -93,8 +104,12 @@ export function updaterReleasePaths(
 ) {
   const releaseRoot = path.join(root, 'release');
   const installers = targets.map((target) => {
-    const installerName = windowsInstallerName(version, target);
-    const installerPath = path.join(releaseRoot, 'bundle', 'nsis', installerName);
+    const installerName = target.updaterPlatform?.startsWith('linux-')
+      ? linuxAppImageName(version, target)
+      : windowsInstallerName(version, target);
+    const installerPath = target.updaterPlatform?.startsWith('linux-')
+      ? path.join(releaseRoot, 'bundle', 'appimage', installerName)
+      : path.join(releaseRoot, 'bundle', 'nsis', installerName);
     return {
       target,
       installerName,
@@ -216,9 +231,34 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const root = path.resolve(path.dirname(__filename), '..');
   const targetsArgIndex = process.argv.findIndex((arg) => arg === '--targets');
   const targets = targetsArgIndex >= 0
-    ? resolveWindowsReleaseTargets(process.argv[targetsArgIndex + 1])
+    ? resolveReleaseTargets(process.argv[targetsArgIndex + 1])
     : windowsReleaseTargetList;
   const result = await writeAllReleaseUpdaterMetadata({ root, targets });
   console.log(`Beta updater metadata written to ${result.beta.paths.metadataPath}`);
   console.log(`Alpha bridge updater metadata written to ${result.alphaBridge.paths.metadataPath}`);
+}
+
+function resolveReleaseTargets(names) {
+  const values = String(names ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return values.map((value) => {
+    const linuxMatch = value.match(/^linux[:-](.+)$/);
+    if (linuxMatch) {
+      return resolveLinuxReleaseTargets([linuxMatch[1]])[0];
+    }
+
+    const windowsMatch = value.match(/^windows[:-](.+)$/);
+    if (windowsMatch) {
+      return resolveWindowsReleaseTargets([windowsMatch[1]])[0];
+    }
+
+    try {
+      return resolveWindowsReleaseTargets([value])[0];
+    } catch {
+      return resolveLinuxReleaseTargets([value])[0];
+    }
+  });
 }

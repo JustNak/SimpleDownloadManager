@@ -17,19 +17,25 @@ assert.equal(
 );
 
 assert.equal(
-  shouldRefreshDiagnostics(30_000, 0, { silent: true }),
+  shouldRefreshDiagnostics(30_000, 0, { silent: true }, true),
   true,
   'background diagnostics refresh should run once the throttle interval has elapsed',
 );
 
 assert.equal(
-  shouldRefreshDiagnostics(29_999, 0, { silent: true }),
+  shouldRefreshDiagnostics(29_999, 0, { silent: true }, true),
   false,
   'background diagnostics refresh should be throttled before 30 seconds',
 );
 
 assert.equal(
-  shouldRefreshDiagnostics(1_000, 0, { silent: false }),
+  shouldRefreshDiagnostics(30_000, 0, { silent: true }, false),
+  false,
+  'background diagnostics refresh should stay disabled before diagnostics have been loaded',
+);
+
+assert.equal(
+  shouldRefreshDiagnostics(1_000, 0, { silent: false }, false),
   true,
   'user-initiated diagnostics refresh should bypass the background throttle',
 );

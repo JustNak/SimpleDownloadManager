@@ -117,3 +117,35 @@ npm run publish:updater-alpha-bridge
 ```
 
 The bridge uploads only `latest-alpha.json` to the existing `updater-alpha` release. That metadata points at the beta installer asset under `updater-beta`, so alpha users upgrade in place and then follow `latest-beta.json` on future checks.
+
+## Linux Release Build
+
+The Linux release pipeline builds x64 artifacts:
+
+- `.deb` for Debian-based systems.
+- `.rpm` for RPM-based systems.
+- AppImage for portable fallback and Tauri updater delivery.
+
+Build Linux artifacts on an old-enough Linux baseline, such as Ubuntu 22.04 or Debian 12, so the generated binaries do not require a newer `glibc` than supported user systems.
+
+```bash
+npm run release:linux
+```
+
+The `.deb` and `.rpm` package scripts register browser native messaging manifests system-wide:
+
+- Chrome: `/etc/opt/chrome/native-messaging-hosts/com.myapp.download_manager.json`
+- Chromium: `/etc/chromium/native-messaging-hosts/com.myapp.download_manager.json`
+- Edge: `/etc/opt/edge/native-messaging-hosts/com.myapp.download_manager.json`
+- Firefox: `/usr/lib/mozilla/native-messaging-hosts/com.myapp.download_manager.json`
+- Firefox alternate libdir: `/usr/lib64/mozilla/native-messaging-hosts/com.myapp.download_manager.json`
+
+The manifest `path` points at:
+
+```text
+/usr/bin/simple-download-manager-native-host
+```
+
+AppImage does not install native messaging manifests by itself. For browser handoff with AppImage, install a native package instead, or run the packaged registration helper manually after placing the native-host binary at a stable absolute path.
+
+Flatpak is deferred. It is a useful app distribution channel, but this app's core browser handoff relies on host-side native messaging registration that Flatpak sandboxes do not provide cleanly.

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
+fn balanced_range_plan_uses_target_size_and_caps_at_eight_segments() {
     let profile = performance_profile();
     let minimum_plan =
         plan_segmented_ranges(32 * 1024 * 1024, ResumeSupport::Supported, None, profile)
@@ -13,30 +13,45 @@ fn balanced_range_plan_uses_target_size_and_caps_at_six_segments() {
         .expect("large range-capable files should use segmented downloading");
 
     assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(plan.segments.len(), 4);
-    assert_eq!(capped_plan.segments.len(), 6);
+    assert_eq!(plan.segments.len(), 8);
+    assert_eq!(capped_plan.segments.len(), 8);
     assert_eq!(
         plan.segments[0],
         ByteRange {
             start: 0,
-            end: 67_108_863
+            end: 33_554_431
         }
     );
     assert_eq!(
-        plan.segments[3],
+        plan.segments[7],
         ByteRange {
-            start: 201_326_592,
+            start: 234_881_024,
             end: 268_435_455,
         }
     );
 }
 
 #[test]
-fn balanced_dynamic_queue_depth_keeps_active_worker_cap_at_six() {
+fn balanced_dynamic_queue_depth_keeps_active_worker_cap_at_eight() {
     let profile = performance_profile();
 
-    assert_eq!(profile.max_segments, 6);
-    assert_eq!(dynamic_segment_queue_depth(profile), 6);
+    assert_eq!(profile.max_segments, 8);
+    assert_eq!(dynamic_segment_queue_depth(profile), 8);
+}
+
+#[test]
+fn speed_limited_downloads_still_plan_segmented_ranges() {
+    let profile = performance_profile();
+    let plan = plan_segmented_ranges_with_budget(
+        512 * 1024 * 1024,
+        ResumeSupport::Supported,
+        Some(4 * 1024 * 1024),
+        profile,
+        Some(8),
+    )
+    .expect("large speed-limited downloads should keep segmented transport and throttle globally");
+
+    assert_eq!(plan.segments.len(), 8);
 }
 
 #[test]
@@ -72,13 +87,13 @@ fn balanced_tail_leasing_splits_large_ranges_without_raising_worker_cap() {
     let total_bytes = 2 * gib;
     let mut state = segmented_state_for_test(
         total_bytes,
-        (0_u64..6)
+        (0_u64..8)
             .map(|index| {
-                let start = index * (total_bytes / 6);
-                let end = if index == 5 {
+                let start = index * (total_bytes / 8);
+                let end = if index == 7 {
                     total_bytes - 1
                 } else {
-                    ((index + 1) * (total_bytes / 6)).saturating_sub(1)
+                    ((index + 1) * (total_bytes / 8)).saturating_sub(1)
                 };
                 (start, end, 0, false)
             })
@@ -330,7 +345,7 @@ fn range_plan_respects_segment_connection_budget() {
     )
     .expect("available segment budget should still allow segmented downloading");
 
-    assert_eq!(capped_plan.segments.len(), 6);
+    assert_eq!(capped_plan.segments.len(), 8);
     assert!(plan_segmented_ranges_with_budget(
         1024 * 1024 * 1024,
         ResumeSupport::Supported,
@@ -870,6 +885,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         total_bytes: 12,
         profile: performance_profile(),
         validators,
+        speed_limit: None,
         progress: Arc::new(SegmentedProgressCounters::new(vec![4])),
         metadata: Arc::new(Mutex::new(stored)),
         metadata_persisted_at: Arc::new(Mutex::new(Instant::now())),
@@ -877,6 +893,7 @@ async fn segment_worker_resumes_partial_range_into_existing_file() {
         control_signal: WorkerControlSignal::default(),
         ramp_blocked: Arc::new(AtomicBool::new(false)),
         priority_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
+        speed_throttle: Arc::new(Mutex::new(DynamicThrottleState::default())),
         priority_throttle_enabled: false,
         stall_timeout: None,
         reconnects: Arc::new(SegmentReconnectTracker::default()),
