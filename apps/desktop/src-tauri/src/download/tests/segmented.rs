@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn balanced_range_plan_uses_target_size_and_caps_at_eight_segments() {
+fn balanced_range_plan_uses_target_size_and_starts_at_eight_segments() {
     let profile = performance_profile();
     let minimum_plan =
         plan_segmented_ranges(32 * 1024 * 1024, ResumeSupport::Supported, None, profile)
@@ -32,11 +32,21 @@ fn balanced_range_plan_uses_target_size_and_caps_at_eight_segments() {
 }
 
 #[test]
-fn balanced_dynamic_queue_depth_keeps_active_worker_cap_at_eight() {
+fn balanced_profile_keeps_normal_runtime_cap_at_eight_workers() {
+    let profile = performance_profile();
+
+    assert_eq!(profile.initial_segments, 8);
+    assert_eq!(profile.soft_max_segments, 8);
+    assert_eq!(profile.adaptive_ramp_step, 0);
+    assert_eq!(profile.max_segments, 8);
+}
+
+#[test]
+fn balanced_dynamic_queue_depth_keeps_work_ready_for_runtime_workers() {
     let profile = performance_profile();
 
     assert_eq!(profile.max_segments, 8);
-    assert_eq!(dynamic_segment_queue_depth(profile), 8);
+    assert_eq!(dynamic_segment_queue_depth(profile), profile.max_segments);
 }
 
 #[test]
@@ -61,21 +71,29 @@ fn general_tail_lease_size_uses_remaining_byte_buckets() {
     let gib = 1024 * mib;
 
     assert_eq!(
-        dynamic_segment_tail_lease_size(2 * gib, profile),
-        Some(32 * mib)
+        dynamic_segment_tail_lease_size(5 * gib, profile),
+        Some(256 * mib)
     );
-    assert_eq!(dynamic_segment_tail_lease_size(gib, profile), Some(8 * mib));
+    assert_eq!(
+        dynamic_segment_tail_lease_size(2 * gib, profile),
+        Some(128 * mib)
+    );
+    assert_eq!(dynamic_segment_tail_lease_size(gib, profile), Some(32 * mib));
     assert_eq!(
         dynamic_segment_tail_lease_size(256 * mib, profile),
-        Some(8 * mib)
+        Some(32 * mib)
     );
     assert_eq!(
         dynamic_segment_tail_lease_size(255 * mib, profile),
+        Some(8 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(63 * mib, profile),
         Some(mib)
     );
     assert_eq!(
-        dynamic_segment_tail_lease_size(2 * gib, performance_profile()),
-        Some(32 * mib)
+        dynamic_segment_tail_lease_size(5 * gib, performance_profile()),
+        Some(256 * mib)
     );
 }
 
@@ -109,8 +127,8 @@ fn balanced_tail_leasing_splits_large_ranges_without_raising_worker_cap() {
     )
     .expect("balanced leasing should claim a small work unit");
 
-    assert_eq!(dynamic_segment_queue_depth(profile), profile.max_segments);
-    assert_eq!(claimed.range.len(), 32 * mib);
+    assert!(dynamic_segment_queue_depth(profile) >= profile.max_segments);
+    assert_eq!(claimed.range.len(), 128 * mib);
     assert!(pending_segment_count(&state, &active) >= profile.max_segments);
     assert_eq!(
         state
@@ -130,7 +148,7 @@ fn general_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket()
 
     assert_eq!(
         dynamic_segment_tail_lease_size(2 * gib, profile),
-        Some(32 * mib)
+        Some(128 * mib)
     );
     assert_eq!(
         dynamic_segment_tail_lease_size_with_probe_cap(2 * gib, profile, Some(8 * mib)),
@@ -138,7 +156,7 @@ fn general_trial_tail_lease_cap_uses_probe_size_without_changing_normal_bucket()
     );
     assert_eq!(
         dynamic_segment_tail_lease_size_with_probe_cap(255 * mib, profile, Some(8 * mib)),
-        Some(mib)
+        Some(8 * mib)
     );
 }
 
@@ -163,7 +181,7 @@ fn general_tail_leasing_claims_fixed_lease_from_clean_range() {
         claimed.range,
         ByteRange {
             start: 0,
-            end: 32 * mib - 1
+            end: 128 * mib - 1
         }
     );
     assert_eq!(
@@ -178,9 +196,9 @@ fn general_tail_leasing_claims_fixed_lease_from_clean_range() {
         state
             .segments
             .iter()
-            .filter(|segment| segment.range.len() <= 32 * mib)
+            .filter(|segment| segment.range.len() <= 128 * mib)
             .count()
-            >= dynamic_segment_queue_depth(profile)
+            >= profile.max_segments
     );
 }
 
@@ -207,7 +225,7 @@ fn general_tail_leasing_splits_partial_pending_remainders_without_losing_progres
         claimed.range,
         ByteRange {
             start: 0,
-            end: 36 * mib - 1
+            end: 132 * mib - 1
         }
     );
     assert_eq!(
@@ -260,7 +278,7 @@ fn general_tail_leasing_does_not_split_active_partial_ranges() {
 }
 
 #[test]
-fn general_tail_stage_keeps_pending_one_mib_leases_available() {
+fn general_tail_stage_keeps_pending_tiny_leases_available() {
     let profile = performance_profile();
     let mib = 1024 * 1024;
     let mut state = segmented_state_for_test(128 * mib, vec![(0, 128 * mib - 1, 0, false)]);
@@ -273,13 +291,13 @@ fn general_tail_stage_keeps_pending_one_mib_leases_available() {
         profile,
     );
 
-    let pending_one_mib_leases = state
+    let pending_tiny_leases = state
         .segments
         .iter()
-        .filter(|segment| segment.range.len() <= mib)
+        .filter(|segment| segment.range.len() <= 8 * mib)
         .count();
     assert!(pending_segment_count(&state, &active) >= profile.max_segments);
-    assert!(pending_one_mib_leases >= profile.max_segments);
+    assert!(pending_tiny_leases >= profile.max_segments);
     assert_eq!(
         state
             .segments
@@ -294,13 +312,13 @@ fn general_tail_stage_keeps_pending_one_mib_leases_available() {
 fn general_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
     let profile = performance_profile();
     let mib = 1024 * 1024;
-    let total_bytes = 80 * 64 * mib;
+    let total_bytes = 80 * 512 * mib;
     let mut state = segmented_state_for_test(
         total_bytes,
         (0_u64..80)
             .map(|index| {
-                let start = index * 64 * mib;
-                (start, start + 64 * mib - 1, 0, false)
+                let start = index * 512 * mib;
+                (start, start + 512 * mib - 1, 0, false)
             })
             .collect(),
     );
@@ -314,14 +332,14 @@ fn general_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
     )
     .expect("clean resumed ranges should be leased before claim");
 
-    assert_eq!(claimed.range.len(), 32 * mib);
+    assert_eq!(claimed.range.len(), 256 * mib);
     assert!(
         state
             .segments
             .iter()
-            .filter(|segment| segment.range.len() <= 32 * mib)
+            .filter(|segment| segment.range.len() <= 256 * mib)
             .count()
-            >= dynamic_segment_queue_depth(profile)
+            >= profile.max_segments
     );
     assert_eq!(
         state

@@ -5,11 +5,15 @@ static SEGMENT_METADATA_LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>
 static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DYNAMIC_SEGMENT_FAST_SPILL_WORKERS: usize = 16;
 const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
+const GENERAL_TAIL_TINY_REMAINING_THRESHOLD: u64 = 64 * 1024 * 1024;
 const GENERAL_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 256 * 1024 * 1024;
-const GENERAL_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
+const GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
+const GENERAL_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+const GENERAL_TAIL_STEADY_LEASE_SIZE: u64 = 256 * 1024 * 1024;
+const GENERAL_TAIL_LARGE_LEASE_SIZE: u64 = 128 * 1024 * 1024;
+const GENERAL_TAIL_MEDIUM_LEASE_SIZE: u64 = 32 * 1024 * 1024;
 const GENERAL_TAIL_SMALL_LEASE_SIZE: u64 = 1024 * 1024;
-const GENERAL_TAIL_MEDIUM_LEASE_SIZE: u64 = 8 * 1024 * 1024;
-const GENERAL_TAIL_LARGE_LEASE_SIZE: u64 = 32 * 1024 * 1024;
+const GENERAL_TAIL_TINY_LEASE_SIZE: u64 = 8 * 1024 * 1024;
 const GENERAL_TAIL_MIN_SEGMENTS: usize = 2;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
@@ -217,11 +221,11 @@ pub(super) fn plan_segmented_ranges_with_budget(
     })
 }
 
-pub(super) async fn probe_range_metadata(
+pub(super) async fn probe_range_metadata_response(
     client: &Client,
     url: &str,
     handoff_auth: Option<&HandoffAuth>,
-) -> Option<PreflightMetadata> {
+) -> Option<(PreflightMetadata, &'static str)> {
     let response = send_range_request(
         client,
         url,
@@ -235,6 +239,7 @@ pub(super) async fn probe_range_metadata(
     if response.status() != StatusCode::PARTIAL_CONTENT {
         return None;
     }
+    let transport = segmented_transport_label_for_version(response.version());
 
     let (range, total_bytes) = response
         .headers()
@@ -246,13 +251,16 @@ pub(super) async fn probe_range_metadata(
         return None;
     }
 
-    Some(PreflightMetadata {
-        total_bytes: Some(total_bytes),
-        resume_support: ResumeSupport::Supported,
-        filename: extract_filename(&response)
-            .or_else(|| derive_filename_from_url(response.url().as_str())),
-        validators: entity_validators_from_headers(response.headers()),
-    })
+    Some((
+        PreflightMetadata {
+            total_bytes: Some(total_bytes),
+            resume_support: ResumeSupport::Supported,
+            filename: extract_filename(&response)
+                .or_else(|| derive_filename_from_url(response.url().as_str())),
+            validators: entity_validators_from_headers(response.headers()),
+        },
+        transport,
+    ))
 }
 
 pub(super) fn merge_preflight_metadata(
@@ -298,8 +306,7 @@ fn dynamic_segment_min_split_size(profile: DownloadPerformanceProfile) -> u64 {
 }
 
 fn profile_uses_general_tail_leasing(profile: DownloadPerformanceProfile) -> bool {
-    profile.adaptive_ramp_step == 0
-        && profile.max_segments >= GENERAL_TAIL_MIN_SEGMENTS
+    profile.max_segments >= GENERAL_TAIL_MIN_SEGMENTS
         && profile.target_segment_size == BALANCED_TARGET_SEGMENT_SIZE
 }
 
@@ -318,9 +325,13 @@ pub(super) fn dynamic_segment_tail_lease_size(
     if profile_uses_general_tail_leasing(profile) {
         return Some(
             if remaining_bytes > GENERAL_TAIL_LARGE_REMAINING_THRESHOLD {
+                GENERAL_TAIL_STEADY_LEASE_SIZE
+            } else if remaining_bytes > GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD {
                 GENERAL_TAIL_LARGE_LEASE_SIZE
             } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
                 GENERAL_TAIL_MEDIUM_LEASE_SIZE
+            } else if remaining_bytes >= GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
+                GENERAL_TAIL_TINY_LEASE_SIZE
             } else {
                 GENERAL_TAIL_SMALL_LEASE_SIZE
             },
@@ -725,11 +736,15 @@ fn segment_tail_leasing_diagnostic(
     let label = dynamic_segment_tail_leasing_label(profile)?;
     let remaining_bytes = state_remaining_bytes(state);
     let bucket = if remaining_bytes > GENERAL_TAIL_LARGE_REMAINING_THRESHOLD {
-        ">1GiB"
+        ">4GiB"
+    } else if remaining_bytes > GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD {
+        "1GiB-4GiB"
     } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
         "256MiB-1GiB"
+    } else if remaining_bytes >= GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
+        "64MiB-256MiB"
     } else {
-        "<256MiB"
+        "<64MiB"
     };
     let pending_lease_count = pending_lease_sized_segment_count(state, active, lease_size);
     let split_candidates = state

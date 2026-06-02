@@ -294,7 +294,6 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
             )
         });
     let segmented_client = client.clone();
-    let segmented_transport_label = "default";
     record_download_diagnostic(
         state,
         DiagnosticLevel::Info,
@@ -335,12 +334,15 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         let segment_attempt = segment_attempt
             .as_ref()
             .expect("segment attempt context exists when segmented download can start");
-        let probe_metadata =
-            probe_range_metadata(&segmented_client, effective_url, request_auth.as_ref()).await;
+        let probe_response =
+            probe_range_metadata_response(&segmented_client, effective_url, request_auth.as_ref())
+                .await;
         let mut range_probe_supported = false;
-        match probe_metadata {
-            Some(metadata) => {
+        let mut probed_transport_label = "unknown";
+        match probe_response {
+            Some((metadata, segmented_transport_label)) => {
                 range_probe_supported = true;
+                probed_transport_label = segmented_transport_label;
                 preflight_metadata = Some(merge_preflight_metadata(preflight_metadata, metadata));
             }
             None => {
@@ -421,7 +423,7 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
                                 planned_segment_count,
                                 plan.segments.len(),
                                 adaptive_segment_cap,
-                                segmented_transport_label
+                                probed_transport_label
                             ),
                         )
                         .await;
@@ -1103,6 +1105,17 @@ pub(super) fn hoster_adaptive_segment_cap(
     policy: &crate::hosters::HosterAccelerationPolicy,
 ) -> usize {
     policy.balanced_max_segments
+}
+
+pub(super) fn segmented_transport_label_for_version(version: reqwest::Version) -> &'static str {
+    match version {
+        reqwest::Version::HTTP_09 => "http/0.9",
+        reqwest::Version::HTTP_10 => "http/1.0",
+        reqwest::Version::HTTP_11 => "http/1.1",
+        reqwest::Version::HTTP_2 => "h2",
+        reqwest::Version::HTTP_3 => "h3",
+        _ => "unknown",
+    }
 }
 
 pub(super) fn hoster_segment_budget() -> Option<SegmentConnectionBudget> {

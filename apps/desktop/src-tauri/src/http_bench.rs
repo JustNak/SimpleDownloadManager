@@ -10,7 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 const REPORT_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_DURATION: Duration = Duration::from_secs(30);
-const SEGMENT_VARIANTS: [usize; 4] = [1, 2, 4, 6];
+const SEGMENT_VARIANTS: [usize; 8] = [1, 2, 4, 6, 8, 10, 12, 16];
 const BENCHMARK_MODES: [HttpBenchmarkMode; 2] =
     [HttpBenchmarkMode::NetworkOnly, HttpBenchmarkMode::DiskWrite];
 const BENCHMARK_ADMISSIONS: [HttpBenchmarkAdmission; 3] = [
@@ -18,7 +18,7 @@ const BENCHMARK_ADMISSIONS: [HttpBenchmarkAdmission; 3] = [
     HttpBenchmarkAdmission::DirectBulk,
     HttpBenchmarkAdmission::ProtectedHosterBulk,
 ];
-const BENCHMARK_NORMAL_ORIGIN_SEGMENT_CAP: usize = 8;
+const BENCHMARK_NORMAL_ORIGIN_SEGMENT_CAP: usize = 12;
 const BENCHMARK_PROTECTED_HOSTER_SEGMENT_CAP: usize = 4;
 
 #[derive(Debug, Serialize)]
@@ -429,7 +429,8 @@ mod tests {
 
     #[test]
     fn live_http_benchmark_covers_general_policy_variants() {
-        assert_eq!(SEGMENT_VARIANTS, [1, 2, 4, 6]);
+        assert_eq!(SEGMENT_VARIANTS, [1, 2, 4, 6, 8, 10, 12, 16]);
+        assert_eq!(BENCHMARK_NORMAL_ORIGIN_SEGMENT_CAP, 12);
     }
 
     #[test]

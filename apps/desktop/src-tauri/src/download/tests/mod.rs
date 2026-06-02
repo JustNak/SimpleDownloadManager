@@ -562,7 +562,7 @@ async fn range_probe_metadata_uses_partial_content_total_and_identity_header() {
     let (url, request_handle) = spawn_one_response_server(response).await;
     let client = download_client().unwrap();
 
-    let metadata = probe_range_metadata(&client, &url, None)
+    let (metadata, transport) = probe_range_metadata_response(&client, &url, None)
         .await
         .expect("range probe should derive metadata from partial content");
     let request = request_handle.await.unwrap();
@@ -573,6 +573,7 @@ async fn range_probe_metadata_uses_partial_content_total_and_identity_header() {
     assert_eq!(metadata.total_bytes, Some(33_554_432));
     assert_eq!(metadata.resume_support, ResumeSupport::Supported);
     assert_eq!(metadata.filename.as_deref(), Some("probe.bin"));
+    assert_eq!(transport, "http/1.1");
 }
 
 #[tokio::test]

@@ -330,9 +330,27 @@ fn hoster_acceleration_uses_general_segment_caps() {
 }
 
 #[test]
+fn segmented_transport_diagnostics_label_http_versions() {
+    assert_eq!(
+        segmented_transport_label_for_version(reqwest::Version::HTTP_11),
+        "http/1.1"
+    );
+    assert_eq!(
+        segmented_transport_label_for_version(reqwest::Version::HTTP_2),
+        "h2"
+    );
+    assert_eq!(
+        segmented_transport_label_for_version(reqwest::Version::HTTP_3),
+        "h3"
+    );
+}
+
+#[test]
 fn normal_download_segment_budget_limits_same_origin_connections() {
     let budget = normal_segment_budget()
         .expect("balanced normal downloads should use brokered segment budgets");
+
+    assert_eq!(budget.per_origin, 8);
 
     assert_eq!(
         segment_budget_from_test_leases(
@@ -340,7 +358,7 @@ fn normal_download_segment_budget_limits_same_origin_connections() {
             "job_3",
             "https://cdn.example.com/third.bin",
             budget,
-            6,
+            8,
             &[
                 (
                     "job_1",
@@ -364,7 +382,7 @@ fn normal_download_segment_budget_limits_same_origin_connections() {
             "job_4",
             "https://cdn.example.com/fourth.bin",
             budget,
-            6,
+            8,
             &[
                 (
                     "job_1",
