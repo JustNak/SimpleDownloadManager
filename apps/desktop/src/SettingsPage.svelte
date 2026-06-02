@@ -630,31 +630,31 @@
   </header>
 
   <div class="mt-3 min-w-0 space-y-3">
-    <section id="settings-general" class="scroll-mt-4">
+    <section id="settings-general" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('General', Settings2, generalContent)}
     </section>
 
-    <section id="settings-updates" class="scroll-mt-4">
+    <section id="settings-updates" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('App Updates', Download, updateContent)}
     </section>
 
-    <section id="settings-bulk-downloads" class="scroll-mt-4">
+    <section id="settings-bulk-downloads" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('Bulk Downloads', FileArchive, bulkContent)}
     </section>
 
-    <section id="settings-torrenting" class="scroll-mt-4">
+    <section id="settings-torrenting" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('Torrenting', Gauge, torrentingContent)}
     </section>
 
-    <section id="settings-appearance" class="scroll-mt-4">
+    <section id="settings-appearance" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('Appearance', Palette, appearanceContent)}
     </section>
 
-    <section id="settings-extension" class="scroll-mt-4">
+    <section id="settings-extension" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('Web Extension', PlugZap, extensionContent)}
     </section>
 
-    <section id="settings-native-host" class="scroll-mt-4">
+    <section id="settings-native-host" class="settings-content-section scroll-mt-4">
       {@render CategorySettingsCard('Native Host', Wrench, nativeHostContent)}
     </section>
   </div>

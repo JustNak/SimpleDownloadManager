@@ -508,6 +508,10 @@ impl SharedState {
             return WorkerControl::Missing;
         };
 
+        if job.removal_state == Some(RemovalState::Removing) {
+            return WorkerControl::Canceled;
+        }
+
         match job.state {
             JobState::Paused => WorkerControl::Paused,
             JobState::Canceled => WorkerControl::Canceled,

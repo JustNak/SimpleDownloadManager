@@ -26,7 +26,11 @@ export function recordProgressSample(
   timestamp = Date.now(),
 ): ProgressSample[] {
   if (job.state !== 'downloading' || isTorrentMetadataPendingForProgress(job)) {
-    return samples.filter((sample) => sample.jobId !== job.id);
+    return compactProgressSamples(
+      samples.filter((sample) => sample.jobId !== job.id),
+      timestamp - SAMPLE_WINDOW_MS,
+      new Set(),
+    );
   }
 
   const currentSample = {
@@ -35,10 +39,11 @@ export function recordProgressSample(
     downloadedBytes: Math.max(0, job.downloadedBytes || 0),
   };
   const cutoff = timestamp - SAMPLE_WINDOW_MS;
-  const retainedSamples = samples.filter((sample) => {
-    if (sample.jobId !== job.id) return true;
-    return sample.timestamp >= cutoff && sample.timestamp !== timestamp;
-  });
+  const retainedSamples = compactProgressSamples(
+    samples.filter((sample) => sample.jobId !== job.id || sample.timestamp !== timestamp),
+    cutoff,
+    new Set([job.id]),
+  );
 
   return [...retainedSamples, currentSample];
 }
@@ -58,11 +63,11 @@ export function recordProgressSamples(
   if (activeJobs.size === 0) return [];
 
   const cutoff = timestamp - SAMPLE_WINDOW_MS;
-  const retainedSamples = samples.filter((sample) => (
-    activeJobs.has(sample.jobId)
-    && sample.timestamp >= cutoff
-    && sample.timestamp !== timestamp
-  ));
+  const retainedSamples = compactProgressSamples(
+    samples.filter((sample) => activeJobs.has(sample.jobId) && sample.timestamp !== timestamp),
+    cutoff,
+    new Set(activeJobs.keys()),
+  );
 
   for (const job of jobs) {
     if (!activeJobs.has(job.id)) continue;
@@ -74,6 +79,28 @@ export function recordProgressSamples(
   }
 
   return retainedSamples;
+}
+
+function compactProgressSamples(
+  samples: readonly ProgressSample[],
+  cutoff: number,
+  updatedJobIds: ReadonlySet<string>,
+): ProgressSample[] {
+  const ranges = new Map<string, ProgressSampleRange>();
+  for (const sample of samples) {
+    if (sample.timestamp < cutoff) continue;
+    ranges.set(sample.jobId, mergeProgressSampleRange(ranges.get(sample.jobId), sample));
+  }
+
+  const compactedSamples: ProgressSample[] = [];
+  for (const range of ranges.values()) {
+    compactedSamples.push(range.first);
+    if (!updatedJobIds.has(range.first.jobId) && range.last !== range.first) {
+      compactedSamples.push(range.last);
+    }
+  }
+
+  return compactedSamples;
 }
 
 export function calculateDownloadProgressMetrics(

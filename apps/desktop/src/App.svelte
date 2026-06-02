@@ -104,7 +104,7 @@
     testExtensionHandoff,
   } from './backend';
   import type { AddJobsResult, DesktopSnapshot, LocalRecoveryPreview, StartupRecoverySummary } from './backend';
-  import { applyDownloadUpdateBatch, type DownloadUpdateBatch } from './downloadUpdateBatch';
+  import { applyDownloadUpdateBatch, mergeDownloadUpdateBatches, type DownloadUpdateBatch } from './downloadUpdateBatch';
   import { canRetryFailedDownloads } from './queueCommands';
   import {
     groupBulkMembersByArchiveId,
@@ -185,6 +185,7 @@
   let startupUpdateCheckStarted = false;
   let deferredStartupUpdateCheck = false;
   let pendingVisibleSnapshot: DesktopSnapshot | null = null;
+  let pendingHiddenDownloadBatch: DownloadUpdateBatch | null = null;
   let startupRecoveryToastKey: string | null = null;
   let dismissedStartupRecoveryKey: string | null = null;
   let lastDiagnosticsRefreshAt = 0;
@@ -576,6 +577,7 @@
   function applyDesktopSnapshotWhenVisible(snapshot: DesktopSnapshot): boolean {
     if (document.visibilityState !== 'visible') {
       pendingVisibleSnapshot = snapshot;
+      pendingHiddenDownloadBatch = null;
       return false;
     }
 
@@ -585,11 +587,7 @@
 
   function applyDownloadUpdateBatchWhenVisible(batch: DownloadUpdateBatch): boolean {
     if (document.visibilityState !== 'visible') {
-      const baseSnapshot = pendingVisibleSnapshot ?? { connectionState, jobs, settings, startupRecovery: startupRecovery ?? undefined };
-      pendingVisibleSnapshot = {
-        ...baseSnapshot,
-        jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, batch),
-      };
+      pendingHiddenDownloadBatch = mergeDownloadUpdateBatches(pendingHiddenDownloadBatch, batch);
       return false;
     }
 
@@ -598,9 +596,21 @@
   }
 
   function flushPendingVisibleSnapshot(): boolean {
-    if (!pendingVisibleSnapshot) return false;
-    const snapshot = pendingVisibleSnapshot;
+    if (!pendingVisibleSnapshot && !pendingHiddenDownloadBatch) return false;
+    const baseSnapshot = pendingVisibleSnapshot ?? {
+      connectionState,
+      jobs,
+      settings,
+      startupRecovery: startupRecovery ?? undefined,
+    };
+    const snapshot = pendingHiddenDownloadBatch
+      ? {
+        ...baseSnapshot,
+        jobs: applyDownloadUpdateBatch(baseSnapshot.jobs, pendingHiddenDownloadBatch),
+      }
+      : baseSnapshot;
     pendingVisibleSnapshot = null;
+    pendingHiddenDownloadBatch = null;
     applyDesktopSnapshot(snapshot);
     return true;
   }

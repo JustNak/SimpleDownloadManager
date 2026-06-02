@@ -53,6 +53,20 @@ const startupSamples = recordProgressSample(
   3_000,
 );
 
+assert.equal(
+  recordProgressSample(
+    recordProgressSample(
+      averageSamples,
+      { ...baseJob, downloadedBytes: 12_000, speed: 80_000 },
+      12_000,
+    ),
+    { ...baseJob, downloadedBytes: 13_000, speed: 80_000 },
+    13_000,
+  ).filter((sample) => sample.jobId === baseJob.id).length,
+  2,
+  'progress samples should retain only the oldest and latest in-window sample per active job',
+);
+
 assert.deepEqual(
   recordProgressSamples(
     [
@@ -74,6 +88,29 @@ assert.deepEqual(
   ],
   'recordProgressSamples should update active jobs and clear inactive or missing job samples in one pass',
 );
+
+{
+  const compactedSamples = recordProgressSamples(
+    [
+      { jobId: 'job_1', timestamp: 1_000, downloadedBytes: 1_000 },
+      { jobId: 'job_1', timestamp: 5_000, downloadedBytes: 5_000 },
+      { jobId: 'job_1', timestamp: 9_000, downloadedBytes: 9_000 },
+      { jobId: 'job_2', timestamp: 4_000, downloadedBytes: 4_000 },
+      { jobId: 'job_2', timestamp: 8_000, downloadedBytes: 8_000 },
+    ],
+    [
+      { ...baseJob, id: 'job_1', downloadedBytes: 11_000 },
+      { ...baseJob, id: 'job_2', downloadedBytes: 12_000 },
+    ],
+    11_000,
+  );
+
+  assert.deepEqual(
+    compactedSamples.map((sample) => `${sample.jobId}:${sample.timestamp}`),
+    ['job_1:1000', 'job_2:4000', 'job_1:11000', 'job_2:11000'],
+    'batch sample recording should compact retained samples to first/latest pairs',
+  );
+}
 
 assert.deepEqual(
   calculateDownloadProgressMetrics({ ...baseJob, downloadedBytes: 3_000, speed: 80_000 }, startupSamples, 3_000),

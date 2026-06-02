@@ -29,6 +29,12 @@ struct PopupWindowPosition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+struct PopupWindowAnchor {
+    position: PopupWindowPosition,
+    scale_factor: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct PopupWindowGeometry {
     width: f64,
     height: f64,
@@ -112,9 +118,12 @@ pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
     if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
         if remember_position {
             if let Ok(position) = window.outer_position() {
-                remember_download_prompt_position(PopupWindowPosition {
-                    x: position.x as f64,
-                    y: position.y as f64,
+                remember_download_prompt_anchor(PopupWindowAnchor {
+                    position: PopupWindowPosition {
+                        x: position.x as f64,
+                        y: position.y as f64,
+                    },
+                    scale_factor: popup_window_scale_factor(&window),
                 });
             }
         }
@@ -129,8 +138,7 @@ pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), S
     }
 
     let open_progress_windows = open_progress_popup_count(app);
-    let prompt_position =
-        current_download_prompt_position(app).or_else(last_download_prompt_position);
+    let prompt_anchor = current_download_prompt_anchor(app).or_else(last_download_prompt_anchor);
     let appearance = popup_window_appearance_query(app).await;
     let url = popup_window_url(
         "download-progress",
@@ -156,7 +164,7 @@ pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), S
     let builder = apply_popup_native_appearance(builder, appearance.as_ref());
 
     let builder =
-        if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
+        if let Some(position) = progress_window_position(prompt_anchor, open_progress_windows) {
             builder.position(position.x, position.y)
         } else {
             builder.center()
@@ -221,8 +229,7 @@ pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Resu
     }
 
     let open_progress_windows = open_progress_popup_count(app);
-    let prompt_position =
-        current_download_prompt_position(app).or_else(last_download_prompt_position);
+    let prompt_anchor = current_download_prompt_anchor(app).or_else(last_download_prompt_anchor);
     let appearance = popup_window_appearance_query(app).await;
     let url = popup_window_url(
         "batch-progress",
@@ -248,7 +255,7 @@ pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Resu
     let builder = apply_popup_native_appearance(builder, appearance.as_ref());
 
     let builder =
-        if let Some(position) = progress_window_position(prompt_position, open_progress_windows) {
+        if let Some(position) = progress_window_position(prompt_anchor, open_progress_windows) {
             builder.position(position.x, position.y)
         } else {
             builder.center()
@@ -803,42 +810,63 @@ fn open_progress_popup_count(app: &AppHandle) -> usize {
 }
 
 fn progress_window_position(
-    prompt_position: Option<PopupWindowPosition>,
+    prompt_anchor: Option<PopupWindowAnchor>,
     open_progress_windows: usize,
 ) -> Option<PopupWindowPosition> {
-    let prompt_position = prompt_position?;
+    let prompt_anchor = prompt_anchor?;
+    let scale_factor = normalize_popup_scale_factor(prompt_anchor.scale_factor);
+    let prompt_position = prompt_anchor.position;
     let offset = (open_progress_windows.min(8) as f64) * PROGRESS_WINDOW_STACK_OFFSET;
 
     Some(PopupWindowPosition {
-        x: prompt_position.x + offset,
-        y: prompt_position.y + offset,
+        x: (prompt_position.x / scale_factor) + offset,
+        y: (prompt_position.y / scale_factor) + offset,
     })
 }
 
-fn current_download_prompt_position(app: &AppHandle) -> Option<PopupWindowPosition> {
+fn current_download_prompt_anchor(app: &AppHandle) -> Option<PopupWindowAnchor> {
     app.get_webview_window(DOWNLOAD_PROMPT_WINDOW)
-        .and_then(|window| window.outer_position().ok())
-        .map(|position| PopupWindowPosition {
-            x: position.x as f64,
-            y: position.y as f64,
+        .and_then(|window| {
+            window
+                .outer_position()
+                .ok()
+                .map(|position| PopupWindowAnchor {
+                    position: PopupWindowPosition {
+                        x: position.x as f64,
+                        y: position.y as f64,
+                    },
+                    scale_factor: popup_window_scale_factor(&window),
+                })
         })
 }
 
-fn last_download_prompt_position() -> Option<PopupWindowPosition> {
-    remembered_download_prompt_position()
+fn popup_window_scale_factor<R: Runtime>(window: &WebviewWindow<R>) -> f64 {
+    normalize_popup_scale_factor(window.scale_factor().unwrap_or(1.0))
+}
+
+fn normalize_popup_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn last_download_prompt_anchor() -> Option<PopupWindowAnchor> {
+    remembered_download_prompt_anchor()
         .lock()
         .ok()
         .and_then(|position| *position)
 }
 
-fn remember_download_prompt_position(position: PopupWindowPosition) {
-    if let Ok(mut remembered_position) = remembered_download_prompt_position().lock() {
+fn remember_download_prompt_anchor(position: PopupWindowAnchor) {
+    if let Ok(mut remembered_position) = remembered_download_prompt_anchor().lock() {
         *remembered_position = Some(position);
     }
 }
 
-fn remembered_download_prompt_position() -> &'static Mutex<Option<PopupWindowPosition>> {
-    static POSITION: OnceLock<Mutex<Option<PopupWindowPosition>>> = OnceLock::new();
+fn remembered_download_prompt_anchor() -> &'static Mutex<Option<PopupWindowAnchor>> {
+    static POSITION: OnceLock<Mutex<Option<PopupWindowAnchor>>> = OnceLock::new();
     POSITION.get_or_init(|| Mutex::new(None))
 }
 
@@ -881,17 +909,34 @@ mod tests {
     }
 
     #[test]
-    fn progress_window_position_uses_prompt_position_with_stack_offset() {
-        let prompt_position = super::PopupWindowPosition { x: 280.0, y: 221.0 };
+    fn progress_window_position_converts_physical_prompt_position_to_logical_coordinates() {
+        let prompt_anchor = prompt_anchor(700.0, 350.0, 1.25);
 
         assert_eq!(
-            super::progress_window_position(Some(prompt_position), 0),
-            Some(prompt_position)
+            super::progress_window_position(Some(prompt_anchor), 0),
+            Some(super::PopupWindowPosition { x: 560.0, y: 280.0 })
+        );
+    }
+
+    #[test]
+    fn progress_window_position_uses_logical_stack_offset() {
+        let scaled_prompt_anchor = prompt_anchor(700.0, 350.0, 1.25);
+
+        assert_eq!(
+            super::progress_window_position(Some(scaled_prompt_anchor), 2),
+            Some(super::PopupWindowPosition { x: 616.0, y: 336.0 })
         );
         assert_eq!(
-            super::progress_window_position(Some(prompt_position), 2),
-            Some(super::PopupWindowPosition { x: 336.0, y: 277.0 })
+            super::progress_window_position(Some(prompt_anchor(700.0, 350.0, 0.0)), 2),
+            Some(super::PopupWindowPosition { x: 756.0, y: 406.0 })
         );
+    }
+
+    fn prompt_anchor(x: f64, y: f64, scale_factor: f64) -> super::PopupWindowAnchor {
+        super::PopupWindowAnchor {
+            position: super::PopupWindowPosition { x, y },
+            scale_factor,
+        }
     }
 
     #[test]
