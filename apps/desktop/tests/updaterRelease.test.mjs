@@ -11,6 +11,9 @@ try {
 const {
   createUpdaterMetadata,
   githubReleaseAssetName,
+  linuxAppImageName,
+  linuxReleaseTargetList,
+  linuxReleaseTargets,
   requireSigningEnvironment,
   releaseChannels,
   updaterAssetUrl,
@@ -37,6 +40,13 @@ assert.equal(windowsReleaseTargets.x64.rustTarget, 'x86_64-pc-windows-msvc');
 assert.equal(windowsReleaseTargets.x64.updaterPlatform, 'windows-x86_64');
 assert.equal(windowsReleaseTargets.arm64.rustTarget, 'aarch64-pc-windows-msvc');
 assert.equal(windowsReleaseTargets.arm64.updaterPlatform, 'windows-aarch64');
+assert.deepEqual(
+  linuxReleaseTargetList.map((target) => target.name),
+  ['x64'],
+  'release tooling should expose Linux x64 target metadata',
+);
+assert.equal(linuxReleaseTargets.x64.rustTarget, 'x86_64-unknown-linux-gnu');
+assert.equal(linuxReleaseTargets.x64.updaterPlatform, 'linux-x86_64');
 assert.equal(
   windowsInstallerName('0.5.12-beta', windowsReleaseTargets.arm64),
   'Simple Download Manager_0.5.12-beta_arm64-setup.exe',
@@ -142,6 +152,54 @@ assert.deepEqual(
 );
 assert.match(releasePaths.installers[0].installerPath, /_x64-setup\.exe$/);
 assert.match(releasePaths.installers[1].installerPath, /_arm64-setup\.exe$/);
+
+const mixedReleasePaths = updaterReleasePaths(
+  'virtual-root',
+  '0.8.7-beta',
+  releaseChannels.beta,
+  [windowsReleaseTargets.x64, linuxReleaseTargets.x64],
+);
+
+assert.deepEqual(
+  mixedReleasePaths.installers.map((installer) => installer.target.updaterPlatform),
+  ['windows-x86_64', 'linux-x86_64'],
+  'release paths should support mixed Windows and Linux updater platforms',
+);
+assert.match(mixedReleasePaths.installers[1].installerPath, /bundle[/\\]appimage[/\\]Simple Download Manager_0\.8\.7-beta_amd64\.AppImage$/);
+assert.match(mixedReleasePaths.installers[1].signaturePath, /\.AppImage\.sig$/);
+
+const mixedMetadata = createUpdaterMetadata({
+  version: '0.8.7-beta',
+  notes: 'Beta update',
+  pubDate: '2026-06-02T00:00:00.000Z',
+  platformAssets: [
+    {
+      target: windowsReleaseTargets.x64,
+      url: updaterAssetUrl(
+        'JustNak/SimpleDownloadManager',
+        releaseChannels.beta.assetReleaseTag,
+        githubReleaseAssetName(windowsInstallerName('0.8.7-beta', windowsReleaseTargets.x64)),
+      ),
+      signature: 'signed-windows',
+    },
+    {
+      target: linuxReleaseTargets.x64,
+      url: updaterAssetUrl(
+        'JustNak/SimpleDownloadManager',
+        releaseChannels.beta.assetReleaseTag,
+        githubReleaseAssetName(linuxAppImageName('0.8.7-beta', linuxReleaseTargets.x64)),
+      ),
+      signature: 'signed-linux',
+    },
+  ],
+});
+
+assert.deepEqual(Object.keys(mixedMetadata.platforms), ['windows-x86_64', 'linux-x86_64']);
+assert.match(
+  mixedMetadata.platforms['linux-x86_64'].url,
+  /releases\/download\/updater-beta\/Simple\.Download\.Manager_0\.8\.7-beta_amd64\.AppImage$/,
+);
+assert.equal(mixedMetadata.platforms['linux-x86_64'].signature, 'signed-linux');
 
 assert.throws(
   () => requireSigningEnvironment({}),

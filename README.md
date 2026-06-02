@@ -4,13 +4,13 @@
 
 <h1 align="center">Simple Download Manager</h1>
 
-Simple Download Manager is a local-first Windows download manager with browser handoff, torrent support, bulk downloads, and a native desktop queue.
+Simple Download Manager is a local-first download manager with browser handoff, torrent support, bulk downloads, and a native desktop queue.
 
 **Latest beta:** [download from the beta release page](https://github.com/JustNak/SimpleDownloadManager/releases/tag/updater-beta)
 
 It is built around a Tauri desktop app, a Rust download backend, a native messaging host, and WebExtension packages for browser integration. For the complete browser handoff experience, install both the desktop app and the matching browser WebExtension.
 
-The project is currently beta software and is Windows-first; the installer, native-host registration, release pipeline, and updater artifacts target Windows x64 and Windows ARM64.
+The project is currently beta software. Windows is the most mature target; Linux x64 release tooling targets native `.deb` and `.rpm` packages plus AppImage fallback artifacts.
 
 ## Installation
 
@@ -33,6 +33,18 @@ Installer notes:
 - The app can check the beta updater feed for newer desktop builds after installation.
 
 GitHub release asset filenames include the app version, so the beta release page is the most reliable always-current link. The direct links above are convenience links for the current beta build.
+
+### Linux
+
+Linux x64 release assets are published alongside Windows beta builds when available:
+
+- Debian / Ubuntu / Mint / Pop: choose the newest `.deb` package.
+- Fedora / RHEL / openSUSE-style systems: choose the newest `.rpm` package.
+- Other distributions: use the AppImage fallback.
+
+The `.deb` and `.rpm` packages install the desktop app, native messaging host, and system-wide browser native messaging manifests for Chrome, Chromium, Edge, and Firefox. AppImage is portable and works without installation, but browser handoff requires manually running the Linux native-host registration helper with root privileges.
+
+Flatpak is not the primary Linux package because browser native messaging depends on host-side manifest locations and absolute native-host paths. Sandboxed Flatpak browser/app combinations make that integration unreliable without a separate host bridge.
 
 ### Browser WebExtension
 
@@ -61,10 +73,10 @@ This is an active open project. Expect some rough edges, especially around insta
 
 Current practical support:
 
-- Desktop app: Windows via Tauri.
+- Desktop app: Windows via Tauri, with Linux x64 packaging as `.deb`, `.rpm`, and AppImage.
 - Browser extension: Chromium, Microsoft Edge, and Firefox WebExtension builds.
-- Native messaging host: Windows registration helpers and installer integration.
-- Releases: Windows NSIS installers and Tauri updater metadata.
+- Native messaging host: Windows registration helpers and Linux package registration helpers.
+- Releases: Windows NSIS installers, planned Linux x64 packages, and Tauri updater metadata.
 
 ## Repository Layout
 
@@ -189,6 +201,14 @@ npm run release:windows:arm64
 ```
 
 Release artifacts include Windows installers, native-host sidecars, extension packages, and updater feed metadata. Signed updater artifacts require a Tauri updater private key; see `docs/install.md` for the expected environment variables and key path conventions.
+
+The Linux release pipeline is:
+
+```bash
+npm run release:linux
+```
+
+Linux release artifacts include x64 `.deb`, `.rpm`, and AppImage packages. The AppImage is the Linux Tauri updater artifact; native `.deb` and `.rpm` packages are the recommended install path for browser handoff because they can register native messaging manifests system-wide.
 
 ## Contributing
 

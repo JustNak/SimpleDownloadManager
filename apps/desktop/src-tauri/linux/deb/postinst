@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+if [ "$1" = "configure" ]; then
+  /usr/share/simple-download-manager/install/register-native-host-linux.sh /usr/bin/simple-download-manager-native-host
+fi
+
+exit 0

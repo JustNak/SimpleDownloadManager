@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+/usr/share/simple-download-manager/install/register-native-host-linux.sh /usr/bin/simple-download-manager-native-host
+
+exit 0

@@ -27,6 +27,8 @@
     "prepare:release": "node ./scripts/prepare-release.mjs",
     "publish:updater-beta": "node ./scripts/publish-updater-beta.mjs",
     "publish:updater-alpha-bridge": "node ./scripts/publish-updater-alpha-bridge.mjs",
+    "release:linux": "bash ./scripts/build-release-linux.sh",
+    "release:linux:x64": "bash ./scripts/build-release-linux.sh --targets x64",
     "release:windows": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\"",
     "release:windows:x64": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\" -Targets x64",
     "release:windows:arm64": "pwsh -ExecutionPolicy Bypass -File \"./scripts/build-release.ps1\" -Targets arm64",
