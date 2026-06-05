@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn balanced_range_plan_uses_target_size_and_starts_at_eight_segments() {
+fn balanced_range_plan_uses_target_size_and_starts_at_four_segments() {
     let profile = performance_profile();
     let minimum_plan =
         plan_segmented_ranges(32 * 1024 * 1024, ResumeSupport::Supported, None, profile)
@@ -13,31 +13,31 @@ fn balanced_range_plan_uses_target_size_and_starts_at_eight_segments() {
         .expect("large range-capable files should use segmented downloading");
 
     assert_eq!(minimum_plan.segments.len(), 2);
-    assert_eq!(plan.segments.len(), 8);
-    assert_eq!(capped_plan.segments.len(), 8);
+    assert_eq!(plan.segments.len(), 4);
+    assert_eq!(capped_plan.segments.len(), 4);
     assert_eq!(
         plan.segments[0],
         ByteRange {
             start: 0,
-            end: 33_554_431
+            end: 67_108_863
         }
     );
     assert_eq!(
-        plan.segments[7],
+        plan.segments[3],
         ByteRange {
-            start: 234_881_024,
+            start: 201_326_592,
             end: 268_435_455,
         }
     );
 }
 
 #[test]
-fn balanced_profile_keeps_normal_runtime_cap_at_eight_workers() {
+fn balanced_profile_starts_at_four_workers_and_can_ramp_to_eight() {
     let profile = performance_profile();
 
-    assert_eq!(profile.initial_segments, 8);
-    assert_eq!(profile.soft_max_segments, 8);
-    assert_eq!(profile.adaptive_ramp_step, 0);
+    assert_eq!(profile.initial_segments, 4);
+    assert_eq!(profile.soft_max_segments, 4);
+    assert_eq!(profile.adaptive_ramp_step, 2);
     assert_eq!(profile.max_segments, 8);
 }
 
@@ -46,7 +46,7 @@ fn balanced_dynamic_queue_depth_keeps_work_ready_for_runtime_workers() {
     let profile = performance_profile();
 
     assert_eq!(profile.max_segments, 8);
-    assert_eq!(dynamic_segment_queue_depth(profile), profile.max_segments);
+    assert_eq!(dynamic_segment_queue_depth(profile), 16);
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn speed_limited_downloads_still_plan_segmented_ranges() {
     )
     .expect("large speed-limited downloads should keep segmented transport and throttle globally");
 
-    assert_eq!(plan.segments.len(), 8);
+    assert_eq!(plan.segments.len(), 4);
 }
 
 #[test]
@@ -78,14 +78,25 @@ fn general_tail_lease_size_uses_remaining_byte_buckets() {
         dynamic_segment_tail_lease_size(2 * gib, profile),
         Some(128 * mib)
     );
-    assert_eq!(dynamic_segment_tail_lease_size(gib, profile), Some(32 * mib));
     assert_eq!(
-        dynamic_segment_tail_lease_size(256 * mib, profile),
+        dynamic_segment_tail_lease_size(gib, profile),
         Some(32 * mib)
     );
     assert_eq!(
-        dynamic_segment_tail_lease_size(255 * mib, profile),
+        dynamic_segment_tail_lease_size(513 * mib, profile),
+        Some(32 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(512 * mib, profile),
         Some(8 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(256 * mib, profile),
+        Some(8 * mib)
+    );
+    assert_eq!(
+        dynamic_segment_tail_lease_size(64 * mib, profile),
+        Some(mib)
     );
     assert_eq!(
         dynamic_segment_tail_lease_size(63 * mib, profile),
@@ -309,6 +320,51 @@ fn general_tail_stage_keeps_pending_tiny_leases_available() {
 }
 
 #[test]
+fn general_tail_stage_counts_active_workers_when_refilling_tiny_leases() {
+    let profile = performance_profile();
+    let mib = 1024 * 1024;
+    let mut state = segmented_state_for_test(
+        64 * mib,
+        (0_u64..8)
+            .map(|index| {
+                let start = index * 8 * mib;
+                (start, start + 8 * mib - 1, 0, false)
+            })
+            .collect(),
+    );
+    let active = HashSet::from([0_usize, 1, 2, 3, 4, 5]);
+
+    fill_dynamic_segment_queue_for_profile_tests(
+        &mut state,
+        &active,
+        dynamic_segment_queue_depth(profile),
+        profile,
+    );
+
+    let pending_tiny_leases = state
+        .segments
+        .iter()
+        .filter(|segment| {
+            let remaining = segment.range.len().saturating_sub(segment.downloaded_bytes);
+            !active.contains(&segment.index) && remaining > 0 && remaining <= 8 * mib
+        })
+        .count();
+
+    assert!(
+        pending_tiny_leases >= profile.max_segments,
+        "tail refill should leave replacement tiny leases behind active workers, got {pending_tiny_leases}"
+    );
+    assert_eq!(
+        state
+            .segments
+            .iter()
+            .map(|segment| segment.range.len())
+            .sum::<u64>(),
+        64 * mib
+    );
+}
+
+#[test]
 fn general_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
     let profile = performance_profile();
     let mib = 1024 * 1024;
@@ -353,7 +409,12 @@ fn general_tail_leasing_splits_large_clean_ranges_even_when_queue_is_full() {
 
 #[test]
 fn range_plan_respects_segment_connection_budget() {
-    let profile = performance_profile();
+    let profile = DownloadPerformanceProfile {
+        initial_segments: 12,
+        soft_max_segments: 12,
+        max_segments: 12,
+        ..performance_profile()
+    };
     let capped_plan = plan_segmented_ranges_with_budget(
         1024 * 1024 * 1024,
         ResumeSupport::Supported,
@@ -643,12 +704,78 @@ fn segmented_progress_counters_track_totals_without_shared_mutex() {
     let counters = SegmentedProgressCounters::new(vec![10, 20, 0]);
 
     assert_eq!(counters.total_downloaded(), 30);
+    assert_eq!(counters.segment_totals_snapshot(), vec![10, 20, 0]);
     counters.store_segment_bytes(2, 5);
     counters.add_sample_bytes(7);
 
     assert_eq!(counters.total_downloaded(), 35);
+    assert_eq!(counters.segment_totals_snapshot(), vec![10, 20, 5]);
     assert_eq!(counters.drain_sample_bytes(), 7);
     assert_eq!(counters.drain_sample_bytes(), 0);
+}
+
+#[test]
+fn segmented_telemetry_formats_per_segment_deltas_and_worker_counts() {
+    let previous = vec![1024 * 1024, 4 * 1024 * 1024, 0];
+    let current = vec![3 * 1024 * 1024, 4 * 1024 * 1024, 1024 * 1024];
+    let active = HashSet::from([0, 2]);
+
+    let message = format_segmented_telemetry_sample(
+        12 * 1024 * 1024,
+        8 * 1024 * 1024,
+        Duration::from_secs(2),
+        6,
+        8,
+        &active,
+        &previous,
+        &current,
+    );
+
+    assert!(message.contains("app_speed=12.0 MiB/s"));
+    assert!(message.contains("interval_speed=4.0 MiB/s"));
+    assert!(message.contains("active=2"));
+    assert!(message.contains("admitted=6"));
+    assert!(message.contains("target=8"));
+    assert!(message.contains("s0:1.0 MiB/s active"));
+    assert!(message.contains("s1:0.0 MiB/s idle"));
+    assert!(message.contains("s2:0.5 MiB/s active"));
+}
+
+#[test]
+fn startup_probe_uses_remaining_size_tiered_sample_floor() {
+    let profile = performance_profile();
+    let mib = 1024 * 1024;
+
+    assert!(startup_probe_sample_is_meaningful(
+        6 * 1024 * 1024,
+        98 * mib,
+        profile
+    ));
+    assert!(startup_probe_sample_is_meaningful(
+        20 * 1024 * 1024,
+        58 * mib,
+        profile
+    ));
+    assert!(!startup_probe_sample_is_meaningful(
+        3 * 1024 * 1024,
+        98 * mib,
+        profile
+    ));
+    assert!(!startup_probe_sample_is_meaningful(
+        15 * 1024 * 1024,
+        256 * mib,
+        profile
+    ));
+    assert!(startup_probe_sample_is_meaningful(
+        16 * 1024 * 1024,
+        256 * mib,
+        profile
+    ));
+    assert!(!startup_probe_sample_is_meaningful(
+        64 * 1024 * 1024,
+        31 * mib,
+        profile
+    ));
 }
 
 #[test]

@@ -150,6 +150,18 @@ impl SegmentedProgressCounters {
         self.sample_bytes.swap(0, Ordering::Relaxed)
     }
 
+    pub(super) fn segment_totals_snapshot(&self) -> Vec<u64> {
+        self.segment_bytes
+            .lock()
+            .map(|segment_bytes| {
+                segment_bytes
+                    .iter()
+                    .map(|bytes| bytes.load(Ordering::Relaxed))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn total_downloaded(&self) -> u64 {
         self.segment_bytes
             .lock()

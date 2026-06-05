@@ -562,9 +562,11 @@ async fn range_probe_metadata_uses_partial_content_total_and_identity_header() {
     let (url, request_handle) = spawn_one_response_server(response).await;
     let client = download_client().unwrap();
 
-    let (metadata, transport) = probe_range_metadata_response(&client, &url, None)
-        .await
-        .expect("range probe should derive metadata from partial content");
+    let RangeProbeOutcome::PartialContent(metadata, transport) =
+        probe_range_metadata_response(&client, &url, None).await
+    else {
+        panic!("range probe should derive metadata from partial content");
+    };
     let request = request_handle.await.unwrap();
     let request_lower = request.to_ascii_lowercase();
 
@@ -574,6 +576,31 @@ async fn range_probe_metadata_uses_partial_content_total_and_identity_header() {
     assert_eq!(metadata.resume_support, ResumeSupport::Supported);
     assert_eq!(metadata.filename.as_deref(), Some("probe.bin"));
     assert_eq!(transport, "http/1.1");
+}
+
+#[tokio::test]
+async fn range_probe_reuses_full_response_when_server_ignores_range() {
+    let response = concat!(
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Length: 4\r\n",
+        "Accept-Ranges: bytes\r\n",
+        "\r\n",
+        "rust"
+    );
+    let (url, request_handle) = spawn_one_response_server(response).await;
+    let client = download_client().unwrap();
+
+    let RangeProbeOutcome::FullResponse(response) =
+        probe_range_metadata_response(&client, &url, None).await
+    else {
+        panic!("ignored range response should be reusable as the single stream");
+    };
+    let request = request_handle.await.unwrap();
+    let request_lower = request.to_ascii_lowercase();
+    let body = response.bytes().await.unwrap();
+
+    assert!(request_lower.contains("range: bytes=0-0"));
+    assert_eq!(body.as_ref(), b"rust");
 }
 
 #[tokio::test]
@@ -928,8 +955,8 @@ fn non_rate_limit_segment_errors_do_not_reduce_future_segment_caps() {
         Some(key),
         now + Duration::from_secs(5),
     );
-    assert_eq!(profile.initial_segments, 8);
-    assert_eq!(profile.soft_max_segments, 8);
+    assert_eq!(profile.initial_segments, 4);
+    assert_eq!(profile.soft_max_segments, 4);
     assert_eq!(profile.max_segments, 8);
 }
 

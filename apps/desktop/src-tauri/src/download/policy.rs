@@ -37,8 +37,8 @@ pub(super) struct SegmentPressureDecision {
 }
 
 const GENERAL_HTTP_PROFILE: DownloadPerformanceProfile = DownloadPerformanceProfile {
-    initial_segments: 8,
-    soft_max_segments: 8,
+    initial_segments: 4,
+    soft_max_segments: 4,
     max_segments: 8,
     min_segmented_size: BALANCED_MIN_SEGMENTED_SIZE,
     target_segment_size: BALANCED_TARGET_SEGMENT_SIZE,
@@ -47,7 +47,7 @@ const GENERAL_HTTP_PROFILE: DownloadPerformanceProfile = DownloadPerformanceProf
     bulk_hoster_stall_timeout: Duration::from_secs(25),
     max_low_speed_retries: 2,
     speed_smoothing_alpha: 0.25,
-    adaptive_ramp_step: 0,
+    adaptive_ramp_step: 2,
     adaptive_ramp_interval: Duration::from_millis(1500),
 };
 

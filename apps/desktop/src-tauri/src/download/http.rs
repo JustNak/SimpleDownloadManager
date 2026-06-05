@@ -330,6 +330,8 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
             .as_ref()
             .is_some_and(|attempt| attempt.is_backed_off(effective_url, Instant::now()));
 
+    let mut range_probe_full_response = None;
+
     if can_try_segmented {
         let segment_attempt = segment_attempt
             .as_ref()
@@ -340,12 +342,24 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         let mut range_probe_supported = false;
         let mut probed_transport_label = "unknown";
         match probe_response {
-            Some((metadata, segmented_transport_label)) => {
+            RangeProbeOutcome::PartialContent(metadata, segmented_transport_label) => {
                 range_probe_supported = true;
                 probed_transport_label = segmented_transport_label;
                 preflight_metadata = Some(merge_preflight_metadata(preflight_metadata, metadata));
             }
-            None => {
+            RangeProbeOutcome::FullResponse(response) if existing_bytes == 0 => {
+                segment_attempt.record_rejection(effective_url, Instant::now());
+                record_download_diagnostic(
+                    state,
+                    DiagnosticLevel::Info,
+                    task,
+                    "Range probe was ignored by the server; reusing the open response as the single-stream download."
+                        .into(),
+                )
+                .await;
+                range_probe_full_response = Some(response);
+            }
+            RangeProbeOutcome::FullResponse(_) | RangeProbeOutcome::Unsupported => {
                 segment_attempt.record_rejection(effective_url, Instant::now());
                 record_download_diagnostic(
                     state,
@@ -558,16 +572,21 @@ async fn run_http_download_attempt_for_url<A: DownloadUi>(
         .await;
     }
 
-    let response = send_request(
-        &client,
-        effective_url,
-        existing_bytes,
-        request_auth.as_ref(),
-        preflight_metadata
-            .as_ref()
-            .map(|metadata| &metadata.validators),
-    )
-    .await?;
+    let response = match range_probe_full_response {
+        Some(response) => response,
+        None => {
+            send_request(
+                &client,
+                effective_url,
+                existing_bytes,
+                request_auth.as_ref(),
+                preflight_metadata
+                    .as_ref()
+                    .map(|metadata| &metadata.validators),
+            )
+            .await?
+        }
+    };
     reject_hoster_html_response(task, &response)?;
     let supports_resume = response.status() == StatusCode::PARTIAL_CONTENT;
     ensure_single_stream_resume_supported(&task.temp_path, existing_bytes, supports_resume)?;
