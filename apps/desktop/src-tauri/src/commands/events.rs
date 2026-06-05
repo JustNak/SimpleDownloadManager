@@ -51,6 +51,55 @@ struct PendingDownloadUpdateBatch {
 
 static DOWNLOAD_UPDATE_BATCH: OnceLock<Mutex<PendingDownloadUpdateBatch>> = OnceLock::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontendEventTopic {
+    StateChanged,
+    DownloadsUpdateBatch,
+    NotificationSound,
+    ProgressJobSnapshot,
+    BatchProgressSnapshot,
+    SettingsSnapshot,
+}
+
+impl FrontendEventTopic {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StateChanged => STATE_CHANGED_EVENT,
+            Self::DownloadsUpdateBatch => DOWNLOADS_UPDATE_BATCH_EVENT,
+            Self::NotificationSound => NOTIFICATION_SOUND_EVENT,
+            Self::ProgressJobSnapshot => PROGRESS_JOB_SNAPSHOT_EVENT,
+            Self::BatchProgressSnapshot => BATCH_PROGRESS_SNAPSHOT_EVENT,
+            Self::SettingsSnapshot => SETTINGS_SNAPSHOT_EVENT,
+        }
+    }
+}
+
+pub trait FrontendEventEmitter {
+    fn emit_frontend_event<T>(
+        &self,
+        target_label: &str,
+        topic: FrontendEventTopic,
+        payload: T,
+    ) -> Result<(), String>
+    where
+        T: Serialize + Clone;
+}
+
+impl<R: Runtime> FrontendEventEmitter for AppHandle<R> {
+    fn emit_frontend_event<T>(
+        &self,
+        target_label: &str,
+        topic: FrontendEventTopic,
+        payload: T,
+    ) -> Result<(), String>
+    where
+        T: Serialize + Clone,
+    {
+        self.emit_to(target_label, topic.as_str(), payload)
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalUseResult {
@@ -100,7 +149,11 @@ impl ProgressBatchRegistry {
 }
 
 pub fn emit_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnapshot) {
-    if let Err(error) = app.emit_to("main", STATE_CHANGED_EVENT, main_window_snapshot(snapshot)) {
+    if let Err(error) = app.emit_frontend_event(
+        "main",
+        FrontendEventTopic::StateChanged,
+        main_window_snapshot(snapshot),
+    ) {
         eprintln!("failed to emit state snapshot: {error}");
     }
     emit_popup_snapshots(app, snapshot);
@@ -112,9 +165,9 @@ pub fn emit_notification_sound<R: Runtime>(app: &AppHandle<R>, kind: Notificatio
         return;
     };
 
-    if let Err(error) = app.emit_to(
+    if let Err(error) = app.emit_frontend_event(
         &target_label,
-        NOTIFICATION_SOUND_EVENT,
+        FrontendEventTopic::NotificationSound,
         NotificationSoundEvent { kind },
     ) {
         eprintln!("failed to emit notification sound event: {error}");
@@ -174,7 +227,7 @@ fn queue_download_update<R: Runtime>(
 
     if should_schedule {
         let app = app.clone();
-        tauri::async_runtime::spawn(async move {
+        crate::runtime::spawn(async move {
             tokio::time::sleep(DOWNLOAD_UPDATE_BATCH_FLUSH_INTERVAL).await;
             flush_download_update_batch(&app);
         });
@@ -220,7 +273,9 @@ fn flush_download_update_batch<R: Runtime>(app: &AppHandle<R>) {
         }
     };
 
-    if let Err(error) = app.emit_to("main", DOWNLOADS_UPDATE_BATCH_EVENT, payload) {
+    if let Err(error) =
+        app.emit_frontend_event("main", FrontendEventTopic::DownloadsUpdateBatch, payload)
+    {
         eprintln!("failed to emit download update batch: {error}");
     }
 }
@@ -236,9 +291,9 @@ fn emit_settings_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &DesktopSnap
         return;
     }
 
-    if let Err(error) = app.emit_to(
+    if let Err(error) = app.emit_frontend_event(
         DOWNLOAD_PROMPT_WINDOW,
-        SETTINGS_SNAPSHOT_EVENT,
+        FrontendEventTopic::SettingsSnapshot,
         SettingsSnapshot {
             settings: snapshot.settings.clone(),
         },
@@ -258,7 +313,9 @@ fn emit_progress_job_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &Deskto
             job,
             settings: snapshot.settings.clone(),
         };
-        if let Err(error) = app.emit_to(label, PROGRESS_JOB_SNAPSHOT_EVENT, payload) {
+        if let Err(error) =
+            app.emit_frontend_event(label, FrontendEventTopic::ProgressJobSnapshot, payload)
+        {
             eprintln!("failed to emit progress job snapshot: {error}");
         }
     }
@@ -280,7 +337,9 @@ fn emit_batch_progress_snapshots<R: Runtime>(app: &AppHandle<R>, snapshot: &Desk
             jobs,
             settings: snapshot.settings.clone(),
         };
-        if let Err(error) = app.emit_to(label, BATCH_PROGRESS_SNAPSHOT_EVENT, payload) {
+        if let Err(error) =
+            app.emit_frontend_event(label, FrontendEventTopic::BatchProgressSnapshot, payload)
+        {
             eprintln!("failed to emit batch progress snapshot: {error}");
         }
     }
@@ -296,7 +355,9 @@ fn emit_progress_delta_job_snapshots<R: Runtime>(app: &AppHandle<R>, delta: &Pro
             job: Some(delta.job.clone()),
             settings: delta.settings.clone(),
         };
-        if let Err(error) = app.emit_to(label, PROGRESS_JOB_SNAPSHOT_EVENT, payload) {
+        if let Err(error) =
+            app.emit_frontend_event(label, FrontendEventTopic::ProgressJobSnapshot, payload)
+        {
             eprintln!("failed to emit progress job snapshot: {error}");
         }
     }
@@ -330,7 +391,7 @@ fn emit_progress_delta_batch_snapshots<R: Runtime>(app: &AppHandle<R>, delta: Pr
     let app = app.clone();
     let settings = delta.settings;
     let state = state.inner().clone();
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         for (label, context) in targets {
             let jobs = state.batch_progress_jobs(&context.job_ids).await;
             let payload = BatchProgressSnapshot {
@@ -338,7 +399,9 @@ fn emit_progress_delta_batch_snapshots<R: Runtime>(app: &AppHandle<R>, delta: Pr
                 jobs,
                 settings: settings.clone(),
             };
-            if let Err(error) = app.emit_to(&label, BATCH_PROGRESS_SNAPSHOT_EVENT, payload) {
+            if let Err(error) =
+                app.emit_frontend_event(&label, FrontendEventTopic::BatchProgressSnapshot, payload)
+            {
                 eprintln!("failed to emit batch progress snapshot: {error}");
             }
         }
@@ -398,4 +461,59 @@ fn filter_batch_jobs(
         .filter(|job| selected_ids.contains(&job.id))
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingFrontendEventEmitter {
+        events: Mutex<Vec<(String, FrontendEventTopic, serde_json::Value)>>,
+    }
+
+    impl FrontendEventEmitter for RecordingFrontendEventEmitter {
+        fn emit_frontend_event<T>(
+            &self,
+            target_label: &str,
+            topic: FrontendEventTopic,
+            payload: T,
+        ) -> Result<(), String>
+        where
+            T: Serialize + Clone,
+        {
+            let value = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+            self.events
+                .lock()
+                .expect("event recorder lock poisoned")
+                .push((target_label.to_string(), topic, value));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frontend_event_emitter_is_tauri_neutral() {
+        let recorder = RecordingFrontendEventEmitter::default();
+
+        recorder
+            .emit_frontend_event(
+                "main",
+                FrontendEventTopic::StateChanged,
+                json!({ "connectionState": "connected" }),
+            )
+            .expect("recording a frontend event should succeed");
+
+        let events = recorder
+            .events
+            .lock()
+            .expect("event recorder lock poisoned");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "main");
+        assert_eq!(events[0].1, FrontendEventTopic::StateChanged);
+        assert_eq!(events[0].1.as_str(), STATE_CHANGED_EVENT);
+        assert_eq!(events[0].2["connectionState"], "connected");
+    }
 }

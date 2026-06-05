@@ -59,15 +59,92 @@ struct MonitorRect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DownloadPromptWindowPolicy {
+struct PopupWindowPolicy {
     minimizable: bool,
     always_on_top: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProgressWindowPolicy {
-    minimizable: bool,
-    always_on_top: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PopupWindowQueryParam {
+    name: &'static str,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PopupWindowTarget {
+    DownloadPrompt,
+    HttpProgress { job_id: String },
+    TorrentProgress { job_id: String },
+    BatchProgress { batch_id: String },
+}
+
+impl PopupWindowTarget {
+    fn label(&self) -> String {
+        match self {
+            Self::DownloadPrompt => DOWNLOAD_PROMPT_WINDOW.to_string(),
+            Self::HttpProgress { job_id } => progress_window_label(job_id),
+            Self::TorrentProgress { job_id } => torrent_progress_window_label(job_id),
+            Self::BatchProgress { batch_id } => batch_progress_window_label(batch_id),
+        }
+    }
+
+    fn route(&self) -> &'static str {
+        match self {
+            Self::DownloadPrompt => "download-prompt",
+            Self::HttpProgress { .. } => "download-progress",
+            Self::TorrentProgress { .. } => "torrent-progress",
+            Self::BatchProgress { .. } => "batch-progress",
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self {
+            Self::DownloadPrompt => "New download detected",
+            Self::HttpProgress { .. } => "Download progress",
+            Self::TorrentProgress { .. } => "Torrent session",
+            Self::BatchProgress { .. } => "Batch progress",
+        }
+    }
+
+    fn geometry(&self) -> PopupWindowGeometry {
+        match self {
+            Self::DownloadPrompt => download_prompt_window_geometry(),
+            Self::HttpProgress { .. } => progress_window_geometry(),
+            Self::TorrentProgress { .. } => torrent_progress_window_geometry(),
+            Self::BatchProgress { .. } => batch_progress_window_geometry(),
+        }
+    }
+
+    fn policy(&self) -> PopupWindowPolicy {
+        match self {
+            Self::DownloadPrompt => download_prompt_window_policy(),
+            Self::HttpProgress { .. }
+            | Self::TorrentProgress { .. }
+            | Self::BatchProgress { .. } => progress_window_policy(),
+        }
+    }
+
+    fn query_params(&self) -> Vec<PopupWindowQueryParam> {
+        match self {
+            Self::DownloadPrompt => Vec::new(),
+            Self::HttpProgress { job_id } | Self::TorrentProgress { job_id } => {
+                vec![PopupWindowQueryParam {
+                    name: "jobId",
+                    value: job_id.clone(),
+                }]
+            }
+            Self::BatchProgress { batch_id } => {
+                vec![PopupWindowQueryParam {
+                    name: "batchId",
+                    value: batch_id.clone(),
+                }]
+            }
+        }
+    }
+
+    fn focus_when_ready(&self) -> bool {
+        matches!(self, Self::DownloadPrompt)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,33 +161,34 @@ struct PopupAppearanceQuery {
 }
 
 pub async fn show_download_prompt_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(DOWNLOAD_PROMPT_WINDOW) {
-        return show_existing_popup_window(&window, download_prompt_window_geometry());
+    let target = PopupWindowTarget::DownloadPrompt;
+    let label = target.label();
+    let geometry = target.geometry();
+    if let Some(window) = app.get_webview_window(&label) {
+        return show_existing_popup_window(&window, geometry);
     }
 
-    let policy = download_prompt_window_policy();
-    let geometry = download_prompt_window_geometry();
+    let policy = target.policy();
     let appearance = popup_window_appearance_query(app).await;
-    let url = popup_window_url("download-prompt", &[], appearance.as_ref());
+    let url = popup_window_url_for_target(&target, appearance.as_ref());
     let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
 
-    let builder =
-        WebviewWindowBuilder::new(app, DOWNLOAD_PROMPT_WINDOW, WebviewUrl::App(url.into()))
-            .title("New download detected")
-            .inner_size(geometry.width, geometry.height)
-            .min_inner_size(geometry.min_width, geometry.min_height)
-            .max_inner_size(geometry.width, geometry.height)
-            .resizable(false)
-            .minimizable(policy.minimizable)
-            .maximizable(false)
-            .decorations(false)
-            .always_on_top(policy.always_on_top)
-            .center()
-            .initialization_script(popup_init_script.clone())
-            .visible(false);
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+        .title(target.title())
+        .inner_size(geometry.width, geometry.height)
+        .min_inner_size(geometry.min_width, geometry.min_height)
+        .max_inner_size(geometry.width, geometry.height)
+        .resizable(false)
+        .minimizable(policy.minimizable)
+        .maximizable(false)
+        .decorations(false)
+        .always_on_top(policy.always_on_top)
+        .center()
+        .initialization_script(popup_init_script.clone())
+        .visible(false);
     let builder = apply_popup_native_appearance(builder, appearance.as_ref());
     let window = builder.build().map_err(|error| error.to_string())?;
-    schedule_popup_ready_timeout(&window, geometry);
+    schedule_popup_ready_timeout(&window, geometry, target.focus_when_ready());
     Ok(())
 }
 
@@ -132,25 +210,24 @@ pub fn close_download_prompt_window(app: &AppHandle, remember_position: bool) {
 }
 
 pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
-    let label = progress_window_label(job_id);
+    let target = PopupWindowTarget::HttpProgress {
+        job_id: job_id.to_string(),
+    };
+    let label = target.label();
+    let geometry = target.geometry();
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window, progress_window_geometry());
+        return show_existing_popup_window(&window, geometry);
     }
 
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_anchor = current_download_prompt_anchor(app).or_else(last_download_prompt_anchor);
     let appearance = popup_window_appearance_query(app).await;
-    let url = popup_window_url(
-        "download-progress",
-        &[("jobId", job_id)],
-        appearance.as_ref(),
-    );
+    let url = popup_window_url_for_target(&target, appearance.as_ref());
     let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
-    let geometry = progress_window_geometry();
-    let policy = progress_window_policy();
+    let policy = target.policy();
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Download progress")
+        .title(target.title())
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(geometry.min_width, geometry.min_height)
         .max_inner_size(geometry.width, geometry.height)
@@ -171,28 +248,27 @@ pub async fn show_progress_window(app: &AppHandle, job_id: &str) -> Result<(), S
         };
 
     let window = builder.build().map_err(|error| error.to_string())?;
-    schedule_popup_ready_timeout(&window, geometry);
+    schedule_popup_ready_timeout(&window, geometry, target.focus_when_ready());
     Ok(())
 }
 
 pub async fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Result<(), String> {
-    let label = torrent_progress_window_label(job_id);
+    let target = PopupWindowTarget::TorrentProgress {
+        job_id: job_id.to_string(),
+    };
+    let label = target.label();
+    let geometry = target.geometry();
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window, torrent_progress_window_geometry());
+        return show_existing_popup_window(&window, geometry);
     }
 
     let appearance = popup_window_appearance_query(app).await;
-    let url = popup_window_url(
-        "torrent-progress",
-        &[("jobId", job_id)],
-        appearance.as_ref(),
-    );
+    let url = popup_window_url_for_target(&target, appearance.as_ref());
     let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
-    let geometry = torrent_progress_window_geometry();
-    let policy = progress_window_policy();
+    let policy = target.policy();
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Torrent session")
+        .title(target.title())
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(geometry.min_width, geometry.min_height)
         .max_inner_size(geometry.width, geometry.height)
@@ -206,7 +282,7 @@ pub async fn show_torrent_progress_window(app: &AppHandle, job_id: &str) -> Resu
         .visible(false);
     let builder = apply_popup_native_appearance(builder, appearance.as_ref());
     let window = builder.build().map_err(|error| error.to_string())?;
-    schedule_popup_ready_timeout(&window, geometry);
+    schedule_popup_ready_timeout(&window, geometry, target.focus_when_ready());
     Ok(())
 }
 
@@ -223,25 +299,24 @@ pub async fn show_progress_window_for_transfer_kind(
 }
 
 pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Result<(), String> {
-    let label = batch_progress_window_label(batch_id);
+    let target = PopupWindowTarget::BatchProgress {
+        batch_id: batch_id.to_string(),
+    };
+    let label = target.label();
+    let geometry = target.geometry();
     if let Some(window) = app.get_webview_window(&label) {
-        return show_existing_popup_window(&window, batch_progress_window_geometry());
+        return show_existing_popup_window(&window, geometry);
     }
 
     let open_progress_windows = open_progress_popup_count(app);
     let prompt_anchor = current_download_prompt_anchor(app).or_else(last_download_prompt_anchor);
     let appearance = popup_window_appearance_query(app).await;
-    let url = popup_window_url(
-        "batch-progress",
-        &[("batchId", batch_id)],
-        appearance.as_ref(),
-    );
+    let url = popup_window_url_for_target(&target, appearance.as_ref());
     let popup_init_script = popup_initialization_script(appearance.as_ref()).unwrap_or_default();
-    let geometry = batch_progress_window_geometry();
-    let policy = progress_window_policy();
+    let policy = target.policy();
 
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-        .title("Batch progress")
+        .title(target.title())
         .inner_size(geometry.width, geometry.height)
         .min_inner_size(geometry.min_width, geometry.min_height)
         .max_inner_size(geometry.width, geometry.height)
@@ -262,7 +337,7 @@ pub async fn show_batch_progress_window(app: &AppHandle, batch_id: &str) -> Resu
         };
 
     let window = builder.build().map_err(|error| error.to_string())?;
-    schedule_popup_ready_timeout(&window, geometry);
+    schedule_popup_ready_timeout(&window, geometry, target.focus_when_ready());
     Ok(())
 }
 
@@ -331,7 +406,7 @@ pub fn mark_popup_ready<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), Str
         return Ok(());
     };
 
-    reveal_popup_window(window, geometry)
+    reveal_popup_window(window, geometry, should_focus_ready_popup(window.label()))
 }
 
 async fn popup_window_appearance_query(app: &AppHandle) -> Option<PopupAppearanceQuery> {
@@ -501,6 +576,18 @@ fn popup_window_url(
     format!("index.html?{}", query.finish())
 }
 
+fn popup_window_url_for_target(
+    target: &PopupWindowTarget,
+    appearance: Option<&PopupAppearanceQuery>,
+) -> String {
+    let params = target.query_params();
+    let params = params
+        .iter()
+        .map(|param| (param.name, param.value.as_str()))
+        .collect::<Vec<_>>();
+    popup_window_url(target.route(), &params, appearance)
+}
+
 fn append_appearance_query_params(
     query: &mut url::form_urlencoded::Serializer<'_, String>,
     appearance: Option<&PopupAppearanceQuery>,
@@ -585,15 +672,15 @@ fn batch_progress_window_geometry() -> PopupWindowGeometry {
     }
 }
 
-fn download_prompt_window_policy() -> DownloadPromptWindowPolicy {
-    DownloadPromptWindowPolicy {
+fn download_prompt_window_policy() -> PopupWindowPolicy {
+    PopupWindowPolicy {
         minimizable: true,
         always_on_top: true,
     }
 }
 
-fn progress_window_policy() -> ProgressWindowPolicy {
-    ProgressWindowPolicy {
+fn progress_window_policy() -> PopupWindowPolicy {
+    PopupWindowPolicy {
         minimizable: true,
         always_on_top: false,
     }
@@ -612,9 +699,10 @@ fn show_existing_popup_window(
 fn schedule_popup_ready_timeout<R: Runtime>(
     window: &WebviewWindow<R>,
     geometry: PopupWindowGeometry,
+    focus_when_ready: bool,
 ) {
     let window = window.clone();
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         tokio::time::sleep(POPUP_READY_TIMEOUT).await;
         match window.is_visible() {
             Ok(true) => return,
@@ -624,7 +712,7 @@ fn schedule_popup_ready_timeout<R: Runtime>(
             }
         }
 
-        if let Err(error) = reveal_popup_window(&window, geometry) {
+        if let Err(error) = reveal_popup_window(&window, geometry, focus_when_ready) {
             eprintln!("failed to reveal popup window after readiness timeout: {error}");
         }
     });
@@ -633,11 +721,12 @@ fn schedule_popup_ready_timeout<R: Runtime>(
 fn reveal_popup_window<R: Runtime>(
     window: &WebviewWindow<R>,
     geometry: PopupWindowGeometry,
+    focus_when_ready: bool,
 ) -> Result<(), String> {
     let _ = window.unminimize();
     window.show().map_err(|error| error.to_string())?;
     repair_popup_window_bounds(window, geometry);
-    if should_focus_ready_popup(window.label()) {
+    if focus_when_ready {
         window.set_focus().map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -1003,6 +1092,76 @@ mod tests {
             Some(super::batch_progress_window_geometry())
         );
         assert_eq!(super::popup_window_geometry_for_label("main"), None);
+    }
+
+    #[test]
+    fn popup_window_targets_describe_window_specs() {
+        let prompt = super::PopupWindowTarget::DownloadPrompt;
+        assert_eq!(prompt.label(), super::DOWNLOAD_PROMPT_WINDOW);
+        assert_eq!(prompt.route(), "download-prompt");
+        assert_eq!(prompt.title(), "New download detected");
+        assert_eq!(prompt.geometry(), super::download_prompt_window_geometry());
+        assert_eq!(
+            prompt.policy(),
+            super::PopupWindowPolicy {
+                minimizable: true,
+                always_on_top: true,
+            }
+        );
+        assert_eq!(
+            prompt.query_params(),
+            Vec::<super::PopupWindowQueryParam>::new()
+        );
+        assert!(prompt.focus_when_ready());
+
+        let http = super::PopupWindowTarget::HttpProgress {
+            job_id: "job:one/../two?bad".into(),
+        };
+        assert_eq!(http.label(), "download-progress-job:one//twobad");
+        assert_eq!(http.route(), "download-progress");
+        assert_eq!(http.title(), "Download progress");
+        assert_eq!(http.geometry(), super::progress_window_geometry());
+        assert_eq!(
+            http.query_params(),
+            vec![super::PopupWindowQueryParam {
+                name: "jobId",
+                value: "job:one/../two?bad".into(),
+            }]
+        );
+        assert!(!http.focus_when_ready());
+
+        let torrent = super::PopupWindowTarget::TorrentProgress {
+            job_id: "torrent-1".into(),
+        };
+        assert_eq!(torrent.label(), "torrent-progress-torrent-1");
+        assert_eq!(torrent.route(), "torrent-progress");
+        assert_eq!(torrent.title(), "Torrent session");
+        assert_eq!(
+            torrent.geometry(),
+            super::torrent_progress_window_geometry()
+        );
+        assert_eq!(
+            torrent.query_params(),
+            vec![super::PopupWindowQueryParam {
+                name: "jobId",
+                value: "torrent-1".into(),
+            }]
+        );
+
+        let batch = super::PopupWindowTarget::BatchProgress {
+            batch_id: "batch:one/../two?bad".into(),
+        };
+        assert_eq!(batch.label(), "batch-progress-batchonetwobad");
+        assert_eq!(batch.route(), "batch-progress");
+        assert_eq!(batch.title(), "Batch progress");
+        assert_eq!(batch.geometry(), super::batch_progress_window_geometry());
+        assert_eq!(
+            batch.query_params(),
+            vec![super::PopupWindowQueryParam {
+                name: "batchId",
+                value: "batch:one/../two?bad".into(),
+            }]
+        );
     }
 
     #[test]

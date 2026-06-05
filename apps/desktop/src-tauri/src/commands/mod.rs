@@ -28,10 +28,12 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewWindow};
 
+mod dialogs;
 mod events;
 mod native_host;
 mod shell;
 
+use self::dialogs::{pick_directory, pick_torrent_file, save_diagnostics_report_path};
 pub use self::events::{
     emit_download_update, emit_notification_sound, emit_progress_delta, emit_snapshot,
     main_window_snapshot, BatchProgressSnapshot, DownloadUpdateBatch, ExternalUseResult,
@@ -211,13 +213,9 @@ pub async fn export_diagnostics_report(
     let report = serde_json::to_string_pretty(&diagnostics)
         .map_err(|error| format!("Could not serialize diagnostics report: {error}"))?;
 
-    let path = tauri::async_runtime::spawn_blocking(move || {
-        rfd::FileDialog::new()
-            .set_file_name("simple-download-manager-diagnostics.json")
-            .save_file()
-    })
-    .await
-    .map_err(|error| format!("Could not open save dialog: {error}"))?;
+    let path = crate::runtime::spawn_blocking(save_diagnostics_report_path)
+        .await
+        .map_err(|error| format!("Could not open save dialog: {error}"))?;
 
     let Some(path) = path else {
         return Ok(None);
@@ -384,7 +382,7 @@ fn spawn_hoster_preflight_checks(
     state: SharedState,
     targets: Vec<HosterPreflightTarget>,
 ) {
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         stream::iter(targets)
             .for_each_concurrent(HOSTER_PREFLIGHT_CONCURRENCY, |target| {
                 let app = app.clone();
@@ -593,7 +591,7 @@ fn schedule_destructive_cleanup(
         return;
     }
 
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         match state.run_destructive_cleanup(jobs).await {
             Ok(snapshot) => {
                 emit_snapshot(&app, &snapshot);
@@ -839,7 +837,7 @@ pub async fn save_settings(
 
 #[tauri::command]
 pub async fn browse_directory() -> Result<Option<String>, String> {
-    let selected = tauri::async_runtime::spawn_blocking(|| rfd::FileDialog::new().pick_folder())
+    let selected = crate::runtime::spawn_blocking(pick_directory)
         .await
         .map_err(|error| format!("Could not open folder picker: {error}"))?;
 
@@ -887,13 +885,9 @@ pub async fn clear_torrent_session_cache(
 
 #[tauri::command]
 pub async fn browse_torrent_file() -> Result<Option<String>, String> {
-    let selected = tauri::async_runtime::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .add_filter("Torrent or magnet", &["torrent", "magnet", "txt"])
-            .pick_file()
-    })
-    .await
-    .map_err(|error| format!("Could not open torrent picker: {error}"))?;
+    let selected = crate::runtime::spawn_blocking(pick_torrent_file)
+        .await
+        .map_err(|error| format!("Could not open torrent picker: {error}"))?;
 
     selected
         .as_deref()
@@ -1056,7 +1050,7 @@ pub async fn open_job_file(
         None
     };
 
-    tauri::async_runtime::spawn_blocking(move || open_path(&path))
+    crate::runtime::spawn_blocking(move || open_path(&path))
         .await
         .map_err(|error| format!("Could not open file: {error}"))??;
 
@@ -1092,7 +1086,7 @@ pub async fn reveal_job_in_folder(
         None
     };
 
-    tauri::async_runtime::spawn_blocking(move || reveal_path(&path))
+    crate::runtime::spawn_blocking(move || reveal_path(&path))
         .await
         .map_err(|error| format!("Could not reveal file: {error}"))??;
 
@@ -1112,7 +1106,7 @@ pub async fn open_bulk_archive(
         .await
         .map_err(|error| error.message)?;
 
-    tauri::async_runtime::spawn_blocking(move || open_path(&path))
+    crate::runtime::spawn_blocking(move || open_path(&path))
         .await
         .map_err(|error| format!("Could not open archive: {error}"))?
 }
@@ -1127,7 +1121,7 @@ pub async fn reveal_bulk_archive(
         .await
         .map_err(|error| error.message)?;
 
-    tauri::async_runtime::spawn_blocking(move || reveal_path(&path))
+    crate::runtime::spawn_blocking(move || reveal_path(&path))
         .await
         .map_err(|error| format!("Could not reveal archive: {error}"))?
 }
@@ -1185,7 +1179,7 @@ pub async fn retry_bulk_members(
 pub async fn open_install_docs() -> Result<(), String> {
     let docs_path = resolve_install_resource_path("install.md")?;
 
-    tauri::async_runtime::spawn_blocking(move || open_path(&docs_path))
+    crate::runtime::spawn_blocking(move || open_path(&docs_path))
         .await
         .map_err(|error| format!("Could not open install docs: {error}"))??;
 
@@ -1194,7 +1188,7 @@ pub async fn open_install_docs() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn run_host_registration_fix() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(register_native_host)
+    crate::runtime::spawn_blocking(register_native_host)
         .await
         .map_err(|error| format!("Could not start host registration: {error}"))??;
 
@@ -1204,8 +1198,8 @@ pub async fn run_host_registration_fix() -> Result<(), String> {
 pub fn initialize_native_host_registration() {
     #[cfg(windows)]
     {
-        tauri::async_runtime::spawn(async move {
-            let result = tauri::async_runtime::spawn_blocking(ensure_native_host_registration)
+        crate::runtime::spawn(async move {
+            let result = crate::runtime::spawn_blocking(ensure_native_host_registration)
                 .await
                 .map_err(|error| format!("Could not start native host registration: {error}"))
                 .and_then(|result| result);
@@ -1252,7 +1246,7 @@ pub async fn test_extension_handoff(
 
     let worker_app = app.clone();
     let worker_state = state.inner().clone();
-    tauri::async_runtime::spawn(async move {
+    crate::runtime::spawn(async move {
         let decision = receiver.await.unwrap_or(PromptDecision::Cancel);
         match decision {
             PromptDecision::Cancel => {}

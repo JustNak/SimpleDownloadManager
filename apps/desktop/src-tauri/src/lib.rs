@@ -9,6 +9,7 @@ pub mod http_bench;
 pub mod ipc;
 pub mod lifecycle;
 pub mod prompts;
+pub(crate) mod runtime;
 pub mod sidecars;
 pub mod state;
 pub mod storage;
