@@ -6,6 +6,7 @@ pub mod download;
 pub mod hosters;
 #[cfg(any(test, debug_assertions))]
 pub mod http_bench;
+pub mod iced_app;
 pub mod ipc;
 pub mod lifecycle;
 pub mod prompts;
