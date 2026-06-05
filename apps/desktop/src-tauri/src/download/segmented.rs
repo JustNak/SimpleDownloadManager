@@ -6,7 +6,7 @@ static SEGMENT_METADATA_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DYNAMIC_SEGMENT_FAST_SPILL_WORKERS: usize = 16;
 const DYNAMIC_SEGMENT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
 const GENERAL_TAIL_TINY_REMAINING_THRESHOLD: u64 = 64 * 1024 * 1024;
-const GENERAL_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 256 * 1024 * 1024;
+const GENERAL_TAIL_SMALL_REMAINING_THRESHOLD: u64 = 512 * 1024 * 1024;
 const GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD: u64 = 1024 * 1024 * 1024;
 const GENERAL_TAIL_LARGE_REMAINING_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
 const GENERAL_TAIL_STEADY_LEASE_SIZE: u64 = 256 * 1024 * 1024;
@@ -17,6 +17,8 @@ const GENERAL_TAIL_TINY_LEASE_SIZE: u64 = 8 * 1024 * 1024;
 const GENERAL_TAIL_MIN_SEGMENTS: usize = 2;
 const SEGMENT_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const SEGMENT_WRITE_COALESCE_THRESHOLD: usize = 512 * 1024;
+const SEGMENT_TELEMETRY_ENV: &str = "SDM_SEGMENT_TELEMETRY";
+const SEGMENT_TELEMETRY_INTERVAL: Duration = Duration::from_secs(3);
 const ADAPTIVE_STABLE_WARMUP_SAMPLE_TARGET: usize = 1;
 const ADAPTIVE_SOFT_BASELINE_SAMPLE_TARGET: usize = 2;
 const ADAPTIVE_TRIGGER_SAMPLE_TARGET: usize = 2;
@@ -29,6 +31,10 @@ const ADAPTIVE_TRIAL_ACCEPT_IMPROVEMENT_PERCENT: u64 = 105;
 const ADAPTIVE_TRIAL_ROLLBACK_RETENTION_PERCENT: u64 = 95;
 const ADAPTIVE_RAMP_REGRESSION_RETENTION_PERCENT: u64 = 88;
 const ADAPTIVE_RAMP_REGRESSION_WINDOW_LIMIT: usize = 2;
+const ADAPTIVE_STARTUP_PROBE_SMALL_SAMPLE_BPS: u64 = 4 * 1024 * 1024;
+const ADAPTIVE_STARTUP_PROBE_LARGE_SAMPLE_BPS: u64 = 16 * 1024 * 1024;
+const ADAPTIVE_STARTUP_PROBE_MIN_REMAINING_BYTES: u64 = 32 * 1024 * 1024;
+const ADAPTIVE_STARTUP_PROBE_LARGE_REMAINING_BYTES: u64 = 256 * 1024 * 1024;
 const ADAPTIVE_RETRY_COOLDOWN_INITIAL_WINDOWS: usize = 8;
 const ADAPTIVE_RETRY_COOLDOWN_MAX_WINDOWS: usize = 32;
 const ADAPTIVE_POST_ACCEPT_GUARD_HEALTHY_WINDOWS: usize = 4;
@@ -221,11 +227,17 @@ pub(super) fn plan_segmented_ranges_with_budget(
     })
 }
 
+pub(super) enum RangeProbeOutcome {
+    PartialContent(PreflightMetadata, &'static str),
+    FullResponse(reqwest::Response),
+    Unsupported,
+}
+
 pub(super) async fn probe_range_metadata_response(
     client: &Client,
     url: &str,
     handoff_auth: Option<&HandoffAuth>,
-) -> Option<(PreflightMetadata, &'static str)> {
+) -> RangeProbeOutcome {
     let response = send_range_request(
         client,
         url,
@@ -234,24 +246,34 @@ pub(super) async fn probe_range_metadata_response(
         None,
     )
     .await
-    .ok()?;
+    .ok();
+    let Some(response) = response else {
+        return RangeProbeOutcome::Unsupported;
+    };
 
     if response.status() != StatusCode::PARTIAL_CONTENT {
-        return None;
+        return if response.status() == StatusCode::OK {
+            RangeProbeOutcome::FullResponse(response)
+        } else {
+            RangeProbeOutcome::Unsupported
+        };
     }
     let transport = segmented_transport_label_for_version(response.version());
 
-    let (range, total_bytes) = response
+    let Some((range, total_bytes)) = response
         .headers()
         .get(CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
-        .and_then(parse_content_range)?;
+        .and_then(parse_content_range)
+    else {
+        return RangeProbeOutcome::Unsupported;
+    };
 
     if range != (ByteRange { start: 0, end: 0 }) || total_bytes == 0 {
-        return None;
+        return RangeProbeOutcome::Unsupported;
     }
 
-    Some((
+    RangeProbeOutcome::PartialContent(
         PreflightMetadata {
             total_bytes: Some(total_bytes),
             resume_support: ResumeSupport::Supported,
@@ -260,7 +282,7 @@ pub(super) async fn probe_range_metadata_response(
             validators: entity_validators_from_headers(response.headers()),
         },
         transport,
-    ))
+    )
 }
 
 pub(super) fn merge_preflight_metadata(
@@ -328,9 +350,9 @@ pub(super) fn dynamic_segment_tail_lease_size(
                 GENERAL_TAIL_STEADY_LEASE_SIZE
             } else if remaining_bytes > GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD {
                 GENERAL_TAIL_LARGE_LEASE_SIZE
-            } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
+            } else if remaining_bytes > GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
                 GENERAL_TAIL_MEDIUM_LEASE_SIZE
-            } else if remaining_bytes >= GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
+            } else if remaining_bytes > GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
                 GENERAL_TAIL_TINY_LEASE_SIZE
             } else {
                 GENERAL_TAIL_SMALL_LEASE_SIZE
@@ -739,9 +761,9 @@ fn segment_tail_leasing_diagnostic(
         ">4GiB"
     } else if remaining_bytes > GENERAL_TAIL_MEDIUM_REMAINING_THRESHOLD {
         "1GiB-4GiB"
-    } else if remaining_bytes >= GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
+    } else if remaining_bytes > GENERAL_TAIL_SMALL_REMAINING_THRESHOLD {
         "256MiB-1GiB"
-    } else if remaining_bytes >= GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
+    } else if remaining_bytes > GENERAL_TAIL_TINY_REMAINING_THRESHOLD {
         "64MiB-256MiB"
     } else {
         "<64MiB"
@@ -889,6 +911,7 @@ pub(super) async fn run_segmented_download_attempt<A: DownloadUi>(
         progress.clone(),
         active_segments.clone(),
         admitted_workers.clone(),
+        target_workers.clone(),
         reporter_stop.clone(),
     ));
     let worker_context = SegmentWorkerContext {
@@ -1170,6 +1193,75 @@ fn format_bps_as_mib(bytes_per_second: u64) -> String {
     format!("{:.1} MiB/s", bytes_per_second as f64 / 1024.0 / 1024.0)
 }
 
+pub(super) fn startup_probe_sample_is_meaningful(
+    sample_bps: u64,
+    remaining_bytes: u64,
+    _profile: DownloadPerformanceProfile,
+) -> bool {
+    startup_probe_sample_floor_bps(remaining_bytes)
+        .map(|floor_bps| sample_bps >= floor_bps)
+        .unwrap_or(false)
+}
+
+fn startup_probe_sample_floor_bps(remaining_bytes: u64) -> Option<u64> {
+    if remaining_bytes < ADAPTIVE_STARTUP_PROBE_MIN_REMAINING_BYTES {
+        None
+    } else if remaining_bytes < ADAPTIVE_STARTUP_PROBE_LARGE_REMAINING_BYTES {
+        Some(ADAPTIVE_STARTUP_PROBE_SMALL_SAMPLE_BPS)
+    } else {
+        Some(ADAPTIVE_STARTUP_PROBE_LARGE_SAMPLE_BPS)
+    }
+}
+
+fn segment_telemetry_enabled() -> bool {
+    std::env::var(SEGMENT_TELEMETRY_ENV)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn format_segmented_telemetry_sample(
+    app_speed_bps: u64,
+    interval_bytes: u64,
+    elapsed: Duration,
+    admitted_workers: usize,
+    target_workers: usize,
+    active_segments: &HashSet<usize>,
+    previous_segment_totals: &[u64],
+    current_segment_totals: &[u64],
+) -> String {
+    let elapsed_secs = elapsed.as_secs_f64().max(0.001);
+    let interval_bps = (interval_bytes as f64 / elapsed_secs) as u64;
+    let mut segment_parts = Vec::with_capacity(current_segment_totals.len());
+    for (index, current) in current_segment_totals.iter().copied().enumerate() {
+        let previous = previous_segment_totals.get(index).copied().unwrap_or(0);
+        let delta = current.saturating_sub(previous);
+        let segment_bps = (delta as f64 / elapsed_secs) as u64;
+        let state = if active_segments.contains(&index) {
+            "active"
+        } else {
+            "idle"
+        };
+        segment_parts.push(format!(
+            "s{index}:{} {state}",
+            format_bps_as_mib(segment_bps)
+        ));
+    }
+
+    format!(
+        "Segment telemetry: app_speed={} interval_speed={} active={} admitted={} target={} segments=[{}].",
+        format_bps_as_mib(app_speed_bps),
+        format_bps_as_mib(interval_bps),
+        active_segments.len(),
+        admitted_workers,
+        target_workers,
+        segment_parts.join(", ")
+    )
+}
+
 struct ActiveSegmentWorkerGuard {
     active_workers: Arc<AtomicUsize>,
 }
@@ -1253,6 +1345,13 @@ async fn record_segment_worker_diagnostic(
         .state
         .record_diagnostic_event(level, "download", message, Some(context.job_id.clone()))
         .await;
+}
+
+async fn record_segment_telemetry_diagnostic(context: &SegmentWorkerContext, message: String) {
+    if !segment_telemetry_enabled() {
+        return;
+    }
+    record_segment_worker_diagnostic(context, DiagnosticLevel::Info, message).await;
 }
 
 async fn flush_and_record_segment_progress(
@@ -1775,12 +1874,21 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
     progress: Arc<SegmentedProgressCounters>,
     active_segments: Arc<Mutex<HashSet<usize>>>,
     admitted_workers: Arc<AtomicUsize>,
+    target_workers: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), DownloadError> {
     let job_id = task.id.clone();
     let mut rolling_speed = RollingSpeed::with_alpha(profile.speed_smoothing_alpha);
     let mut sample_started = Instant::now();
     let mut last_persisted_at = Instant::now();
+    let telemetry_enabled = segment_telemetry_enabled();
+    let mut telemetry_started = Instant::now();
+    let mut telemetry_bytes = 0_u64;
+    let mut telemetry_segment_totals = if telemetry_enabled {
+        progress.segment_totals_snapshot()
+    } else {
+        Vec::new()
+    };
     let mut interval = tokio::time::interval(PROGRESS_UPDATE_INTERVAL);
 
     loop {
@@ -1788,6 +1896,7 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
 
         let stopping = stop.load(Ordering::Relaxed);
         let sample_bytes = progress.drain_sample_bytes();
+        telemetry_bytes = telemetry_bytes.saturating_add(sample_bytes);
         let Some(speed) = record_segmented_progress_speed_sample(
             &mut rolling_speed,
             &mut sample_started,
@@ -1831,6 +1940,35 @@ pub(super) async fn report_segmented_progress<A: DownloadUi>(
         emit_progress_delta(&app, delta);
         if task_releases_bulk_hoster_fairness(&task, speed) {
             schedule_downloads(app.clone(), state.clone());
+        }
+
+        if telemetry_enabled
+            && (telemetry_started.elapsed() >= SEGMENT_TELEMETRY_INTERVAL || stopping)
+        {
+            let telemetry_elapsed = telemetry_started.elapsed();
+            let current_segment_totals = progress.segment_totals_snapshot();
+            let active_segment_snapshot = active_segments.lock().await.clone();
+            let message = format_segmented_telemetry_sample(
+                speed,
+                telemetry_bytes,
+                telemetry_elapsed,
+                admitted_workers.load(Ordering::Relaxed),
+                target_workers.load(Ordering::Relaxed),
+                &active_segment_snapshot,
+                &telemetry_segment_totals,
+                &current_segment_totals,
+            );
+            let _ = state
+                .record_diagnostic_event(
+                    DiagnosticLevel::Info,
+                    "download",
+                    message,
+                    Some(job_id.clone()),
+                )
+                .await;
+            telemetry_segment_totals = current_segment_totals;
+            telemetry_bytes = 0;
+            telemetry_started = Instant::now();
         }
 
         if stopping {
@@ -1913,16 +2051,57 @@ impl AdaptiveSegmentAdmission {
         let profile = self.context.profile;
         let admitted = self.admitted_workers.load(Ordering::Relaxed);
         let trial_active = self.is_trial_active(admitted);
-        if profile.adaptive_ramp_step == 0
-            || self.context.stop.load(Ordering::Relaxed)
-            || self.context.ramp_blocked.load(Ordering::Relaxed)
-            || (admitted >= profile.max_segments && !trial_active)
-        {
+        if profile.adaptive_ramp_step == 0 {
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!("Adaptive telemetry: ramp skipped at {admitted} workers because adaptive ramping is disabled."),
+            )
+            .await;
+            return false;
+        }
+        if self.context.stop.load(Ordering::Relaxed) {
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because the segmented attempt is stopping."
+                ),
+            )
+            .await;
+            return false;
+        }
+        if self.context.ramp_blocked.load(Ordering::Relaxed) {
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because a reconnect, low-speed retry, or regression blocked this attempt."
+                ),
+            )
+            .await;
+            return false;
+        }
+        if admitted >= profile.max_segments && !trial_active {
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because max_segments={} is already reached.",
+                    profile.max_segments
+                ),
+            )
+            .await;
             return false;
         }
 
         let active = self.active_segments.lock().await;
         if active.len() < admitted.saturating_sub(1) {
+            let active_count = active.len();
+            drop(active);
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because only {active_count} workers have active segment work."
+                ),
+            )
+            .await;
             return false;
         }
 
@@ -1936,6 +2115,16 @@ impl AdaptiveSegmentAdmission {
         let minimum_remaining = dynamic_segment_min_split_size(self.context.profile)
             .saturating_mul(desired_new_workers.max(1) as u64);
         if remaining_bytes < minimum_remaining {
+            drop(active);
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because remaining={} MiB is below ramp minimum {} MiB.",
+                    remaining_bytes / (1024 * 1024),
+                    minimum_remaining / (1024 * 1024)
+                ),
+            )
+            .await;
             return false;
         }
 
@@ -1944,6 +2133,14 @@ impl AdaptiveSegmentAdmission {
             .swap(downloaded, Ordering::Relaxed);
         let sample_bytes = downloaded.saturating_sub(previous_downloaded);
         if sample_bytes == 0 {
+            drop(active);
+            record_segment_telemetry_diagnostic(
+                &self.context,
+                format!(
+                    "Adaptive telemetry: ramp skipped at {admitted} workers because no new bytes were observed in the ramp interval."
+                ),
+            )
+            .await;
             return false;
         }
         let sample_bps = (sample_bytes as f64
@@ -1955,7 +2152,19 @@ impl AdaptiveSegmentAdmission {
                 .max(0.001)) as u64;
         let previous_bps = self.last_ramp_speed_bps.swap(sample_bps, Ordering::Relaxed);
         if admitted >= self.context.profile.soft_max_segments {
-            if !self.evaluate_post_soft_sample(admitted, sample_bps).await {
+            if !self
+                .evaluate_post_soft_sample(admitted, sample_bps, remaining_bytes)
+                .await
+            {
+                drop(active);
+                record_segment_telemetry_diagnostic(
+                    &self.context,
+                    format!(
+                        "Adaptive telemetry: post-soft ramp held at {admitted} workers after sample {}.",
+                        format_bps_as_mib(sample_bps)
+                    ),
+                )
+                .await;
                 return false;
             }
             let metadata = self.metadata.lock().await;
@@ -2017,21 +2226,61 @@ impl AdaptiveSegmentAdmission {
         pending_segment_count(&metadata, &active) > 0
     }
 
-    async fn evaluate_post_soft_sample(&self, admitted: usize, sample_bps: u64) -> bool {
+    async fn evaluate_post_soft_sample(
+        &self,
+        admitted: usize,
+        sample_bps: u64,
+        remaining_bytes: u64,
+    ) -> bool {
         if self.is_trial_active(admitted) {
             self.evaluate_trial_sample(admitted, sample_bps).await;
             return false;
         }
 
-        self.evaluate_stable_sample_for_trial(admitted, sample_bps)
+        self.evaluate_stable_sample_for_trial(admitted, sample_bps, remaining_bytes)
             .await
     }
 
-    async fn evaluate_stable_sample_for_trial(&self, admitted: usize, sample_bps: u64) -> bool {
+    async fn evaluate_stable_sample_for_trial(
+        &self,
+        admitted: usize,
+        sample_bps: u64,
+        remaining_bytes: u64,
+    ) -> bool {
         if self.startup_probe_can_start(admitted) {
-            return self
-                .evaluate_startup_probe_sample(admitted, sample_bps)
+            if let Some(sample_floor_bps) = startup_probe_sample_floor_bps(remaining_bytes) {
+                if startup_probe_sample_is_meaningful(
+                    sample_bps,
+                    remaining_bytes,
+                    self.context.profile,
+                ) {
+                    return self
+                        .evaluate_startup_probe_sample(admitted, sample_bps)
+                        .await;
+                }
+
+                record_segment_worker_diagnostic(
+                    &self.context,
+                    DiagnosticLevel::Info,
+                    format!(
+                        "Adaptive segmented delayed startup probe at {admitted} workers because initial sample {} is below the meaningful startup floor {}.",
+                        format_bps_as_mib(sample_bps),
+                        format_bps_as_mib(sample_floor_bps)
+                    ),
+                )
                 .await;
+            } else {
+                record_segment_worker_diagnostic(
+                    &self.context,
+                    DiagnosticLevel::Info,
+                    format!(
+                        "Adaptive segmented delayed startup probe at {admitted} workers because remaining={} MiB is below the startup probe floor {} MiB.",
+                        remaining_bytes / (1024 * 1024),
+                        ADAPTIVE_STARTUP_PROBE_MIN_REMAINING_BYTES / (1024 * 1024)
+                    ),
+                )
+                .await;
+            }
         }
 
         let post_accept_guard_active = self.post_accept_guard_active_for(admitted);
